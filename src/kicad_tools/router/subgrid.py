@@ -223,13 +223,20 @@ class SubGridRouter:
         grid: RoutingGrid,
         rules: DesignRules,
         grid_tolerance: float | None = None,
-        escape_search_radius: int = 3,
+        escape_search_radius: int | None = None,
         clearance_weight: float = 2.5,
     ):
         self.grid = grid
         self.rules = rules
         self.grid_tolerance = grid_tolerance if grid_tolerance is not None else grid.resolution / 4
-        self.escape_search_radius = escape_search_radius
+        # Adaptive search radius: at fine grids (< 0.1mm), 3 cells may not
+        # reach past neighboring clearance zones for fine-pitch packages.
+        # Scale the radius so the physical search distance is at least 0.3mm.
+        if escape_search_radius is not None:
+            self.escape_search_radius = escape_search_radius
+        else:
+            min_search_mm = 0.3  # minimum physical search distance
+            self.escape_search_radius = max(3, math.ceil(min_search_mm / grid.resolution))
         self.clearance_weight = clearance_weight
 
     def analyze_pads(
@@ -387,17 +394,30 @@ class SubGridRouter:
             for layer_idx in layer_indices:
                 if 0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows:
                     cell = self.grid.grid[layer_idx][gy][gx]
-                    # Only unblock if the cell belongs to our net or is unassigned
-                    if cell.net == pad.net or cell.net == 0:
-                        if cell.blocked and not cell.pad_blocked:
-                            # This is a clearance zone cell, not actual pad copper.
-                            # Unblock it so the router can reach this grid point.
-                            cell.blocked = False
-                            cell.net = pad.net
-                            unblocked += 1
-                        elif not cell.blocked:
-                            # Already unblocked, just ensure net assignment
-                            cell.net = pad.net
+                    # Unblock clearance-zone cells so the router can reach
+                    # this grid point.  Clearance-zone cells (blocked but NOT
+                    # pad_blocked) may belong to a neighboring pad's net at
+                    # fine pitch (e.g. 0.65mm on 0.05mm grid).  The escape
+                    # segment was already validated by
+                    # validate_segment_clearance() in generate_escape_segments,
+                    # so overriding the net assignment here is safe.  Actual
+                    # copper (pad_blocked=True) is never unblocked.
+                    if cell.blocked and not cell.pad_blocked:
+                        # Clearance-zone cell -- safe to claim for our net
+                        prev_net = cell.net
+                        cell.blocked = False
+                        cell.net = pad.net
+                        unblocked += 1
+                        if prev_net != pad.net and prev_net != 0:
+                            logger.debug(
+                                "Overriding clearance cell (%d,%d) net %d -> "
+                                "%d for %s.%s escape",
+                                gx, gy, prev_net, pad.net,
+                                pad.ref, pad.pin,
+                            )
+                    elif not cell.blocked:
+                        # Already unblocked, just ensure net assignment
+                        cell.net = pad.net
 
         result.unblocked_count = unblocked
         logger.info("Sub-grid escape: unblocked %d grid cells", unblocked)
@@ -536,24 +556,32 @@ class SubGridRouter:
                 # Distance from pad center to this grid point
                 dist = math.sqrt((pad.x - snap_x) ** 2 + (pad.y - snap_y) ** 2)
 
-                # Check if this grid point is accessible on any valid layer
+                # Check if this grid point is a valid escape target on any
+                # valid layer.  The escape target must be a cell that
+                # apply_escape_segments() can make routable:
+                #   - Already unblocked (free cell -- no action needed)
+                #   - Clearance-zone cell of ANY net (blocked, not
+                #     pad_blocked) -- apply_escape_segments will unblock it
+                # Cells that are the pad's own copper (pad_blocked, same net)
+                # are NOT useful targets: they are already blocked and
+                # cannot be unblocked (they ARE the pad).  The router needs
+                # an entry point OUTSIDE the pad copper.
+                # Cells that are another net's copper (pad_blocked, different
+                # net) are also rejected -- cannot unblock real copper.
                 accessible = False
                 for layer_idx in check_layers:
                     cell = self.grid.grid[layer_idx][gy][gx]
-                    # Accept cells that are:
-                    # - Unblocked
-                    # - Same-net (our pad's clearance zone)
-                    # - Clearance-only (not actual pad copper from other net)
                     if not cell.blocked:
+                        # Free cell -- router can already reach it
                         accessible = True
                         break
-                    elif cell.net == pad.net:
+                    elif not cell.pad_blocked:
+                        # Clearance-zone cell (any net) -- can be unblocked
+                        # by apply_escape_segments; validate_segment_clearance
+                        # will do the precise DRC check later.
                         accessible = True
                         break
-                    elif not cell.pad_blocked and cell.original_net == pad.net:
-                        # Clearance zone of our own pad
-                        accessible = True
-                        break
+                    # pad_blocked cells (own or other net copper) are skipped
 
                 if not accessible:
                     continue

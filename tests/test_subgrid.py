@@ -1179,3 +1179,245 @@ class TestClearanceWeightedSelection:
                 escape.segment, exclude_net=escape.pad.net,
             )
             assert is_valid
+
+
+class TestFineGridClearanceZoneUnblocking:
+    """Tests for Issue #1703: sub-grid escape at 0.05mm grid with SSOP/QFP pads.
+
+    At fine grids (0.05mm), neighboring pads' clearance zones overlap the
+    nearest grid point to an off-grid pad.  The escape system must:
+    1. Allow escape candidates in clearance-zone cells of other nets.
+    2. Unblock those cells in apply_escape_segments even when the cell's
+       net differs from the pad's net.
+    3. Never unblock actual copper (pad_blocked=True).
+    """
+
+    def test_ssop28_at_005mm_grid(self):
+        """SSOP-28 at 0.65mm pitch on 0.05mm grid should produce escape
+        segments that unblock grid cells.
+
+        This is the primary regression test for the '0 cells unblocked'
+        failure reported in Issue #1703.  The component is placed at an
+        off-grid position (base_y=3.023mm) so that pads fall between
+        grid points -- matching real-world placement where SSOP pads
+        are off-grid by 0.02-0.08mm.
+        """
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.05,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Create SSOP-28: 14 pads per side, 0.65mm pitch
+        # Place component at an off-grid position so pads don't snap to grid
+        pads = []
+        base_x = 5.023
+        base_y = 3.017
+
+        # Left side pads (pin 1-14)
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x,
+                y=base_y + i * 0.65,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3,
+                height=0.45,
+            ))
+
+        # Right side pads (pin 15-28)
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x + 6.0,
+                y=base_y + i * 0.65,
+                net=i + 15,
+                ref="U1",
+                pin=str(i + 15),
+                width=0.3,
+                height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        # Most pads should be off-grid (0.65 / 0.05 = 13, but base_y offset
+        # means many pads land between grid points)
+        assert analysis.has_off_grid_pads
+        assert analysis.off_grid_count > 0
+
+        result = subgrid.generate_escape_segments(analysis)
+        unblocked = subgrid.apply_escape_segments(result)
+
+        # Key assertion: cells must actually be unblocked (was 0 before fix)
+        assert unblocked > 0, (
+            f"Expected >0 cells unblocked, got {unblocked}. "
+            f"{result.success_count}/{result.total_attempted} escapes generated."
+        )
+        # At least half the off-grid pads should escape successfully
+        assert result.success_count >= analysis.off_grid_count * 0.5, (
+            f"Only {result.success_count}/{analysis.off_grid_count} pads escaped"
+        )
+
+    def test_adjacent_pad_clearance_zone_unblocking(self):
+        """Escape endpoint in a different-net clearance zone should be
+        unblocked by apply_escape_segments.
+
+        Two adjacent pads (different nets) at 0.65mm spacing on 0.05mm grid,
+        placed at off-grid positions: the escape endpoint for pad A may land
+        in pad B's clearance zone.  The fix should unblock it since it is
+        clearance-only (not copper).
+        """
+        grid, rules = make_grid_and_rules(
+            width=10.0,
+            height=10.0,
+            resolution=0.05,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Two adjacent pads at 0.65mm apart on different nets, off-grid
+        pad_a = make_pad(
+            x=5.023, y=5.017, net=1, ref="U1", pin="1",
+            width=0.3, height=0.45, net_name="NET_A",
+        )
+        pad_b = make_pad(
+            x=5.023, y=5.667, net=2, ref="U1", pin="2",
+            width=0.3, height=0.45, net_name="NET_B",
+        )
+        # Third pad for component center calculation
+        pad_c = make_pad(
+            x=5.023, y=6.317, net=3, ref="U1", pin="3",
+            width=0.3, height=0.45, net_name="NET_C",
+        )
+
+        for p in [pad_a, pad_b, pad_c]:
+            grid.add_pad(p)
+
+        result = subgrid.route_with_subgrid([pad_a, pad_b, pad_c])
+
+        # Should have unblocked at least some cells
+        assert result.unblocked_count > 0, (
+            f"Expected >0 cells unblocked for adjacent pad clearance-zone "
+            f"test, got {result.unblocked_count}"
+        )
+
+    def test_pad_blocked_cell_never_unblocked(self):
+        """apply_escape_segments must never unblock a cell that is actual
+        copper (pad_blocked=True) from another net."""
+        grid, rules = make_grid_and_rules(
+            width=10.0,
+            height=10.0,
+            resolution=0.05,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Place a pad at an off-grid position
+        pad = make_pad(
+            x=5.023, y=5.017, net=1, ref="U1", pin="1",
+            width=0.3, height=0.45,
+        )
+        # Another pad on a different net nearby (its copper will be pad_blocked)
+        other_pad = make_pad(
+            x=5.023, y=5.667, net=2, ref="U1", pin="2",
+            width=0.3, height=0.45,
+        )
+
+        for p in [pad, other_pad]:
+            grid.add_pad(p)
+
+        # Find the grid cell for the other pad's center -- it should be pad_blocked
+        ogx, ogy = grid.world_to_grid(other_pad.x, other_pad.y)
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        center_cell = grid.grid[layer_idx][ogy][ogx]
+
+        # Verify the other pad's copper cell is pad_blocked before escape
+        assert center_cell.pad_blocked, (
+            "Test setup error: other pad's center cell should be pad_blocked"
+        )
+        was_blocked = center_cell.blocked
+
+        # Run escape routing
+        result = subgrid.route_with_subgrid([pad, other_pad])
+
+        # After escape routing, the other pad's copper must still be blocked
+        center_cell_after = grid.grid[layer_idx][ogy][ogx]
+        assert center_cell_after.pad_blocked, (
+            "pad_blocked cell should remain pad_blocked after escape routing"
+        )
+        # The cell should remain blocked (actual copper must never be unblocked)
+        assert center_cell_after.blocked == was_blocked, (
+            "pad_blocked cell should not be unblocked by escape routing"
+        )
+
+    def test_adaptive_search_radius_fine_grid(self):
+        """SubGridRouter should use a larger search radius on fine grids."""
+        grid_fine, rules_fine = make_grid_and_rules(resolution=0.05)
+        grid_coarse, rules_coarse = make_grid_and_rules(resolution=0.1)
+
+        subgrid_fine = SubGridRouter(grid_fine, rules_fine)
+        subgrid_coarse = SubGridRouter(grid_coarse, rules_coarse)
+
+        # Fine grid (0.05mm) should have radius >= 6 (0.3mm / 0.05mm)
+        assert subgrid_fine.escape_search_radius >= 6, (
+            f"Fine grid radius {subgrid_fine.escape_search_radius} too small"
+        )
+        # Coarse grid (0.1mm) should have radius >= 3 (0.3mm / 0.1mm)
+        assert subgrid_coarse.escape_search_radius >= 3
+
+    def test_explicit_search_radius_overrides_adaptive(self):
+        """Explicit escape_search_radius should override the adaptive default."""
+        grid, rules = make_grid_and_rules(resolution=0.05)
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=2)
+        assert subgrid.escape_search_radius == 2
+
+    def test_escape_segments_valid_clearance_at_005mm(self):
+        """All escape segments generated at 0.05mm grid must pass clearance
+        validation -- no DRC violations from escape routing itself."""
+        grid, rules = make_grid_and_rules(
+            width=15.0,
+            height=15.0,
+            resolution=0.05,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Row of 6 pads at 0.65mm pitch, off-grid placement
+        pads = []
+        for i in range(6):
+            pads.append(make_pad(
+                x=5.023,
+                y=5.017 + i * 0.65,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3,
+                height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        component_pitches = grid.compute_component_pitches()
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+                component_pitches=component_pitches,
+            )
+            assert is_valid, (
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} (net "
+                f"{escape.pad.net}) violates clearance={clearance:.4f}mm "
+                f"at {violation_loc}"
+            )

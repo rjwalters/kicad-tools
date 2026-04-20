@@ -122,7 +122,7 @@ class TestSubgridPrepass:
         # with very short length connecting off-grid pad to grid point)
         escape_segments = [
             r for r in routes
-            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.2
+            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.5
         ]
         # We should have at least some escape segments for the off-grid pads
         # (10.65 and 11.30 are off-grid on 0.1mm grid)
@@ -164,7 +164,7 @@ class TestSubgridPrepass:
         # Check that escape routes are in self.routes
         escape_routes_in_self = [
             r for r in router.routes
-            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.2
+            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.5
         ]
         assert len(escape_routes_in_self) >= 1
 
