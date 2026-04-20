@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kicad_tools.export.bom_enrich import EnrichmentReport, enrich_bom_lcsc
+from kicad_tools.parts.cache import PartsCache
 from kicad_tools.schema.bom import BOMItem
 
 # ---------------------------------------------------------------------------
@@ -28,6 +31,16 @@ def _make_item(
         lcsc=lcsc,
         dnp=dnp,
     )
+
+
+def _make_suggester_mock(mock_instance: MagicMock) -> None:
+    """Configure a mock PartSuggester with no cache (default for tests)."""
+    mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+    mock_instance.__exit__ = MagicMock(return_value=False)
+    # Ensure the cache fallback path finds no cache
+    mock_client = MagicMock()
+    mock_client.cache = None
+    mock_instance._get_client.return_value = mock_client
 
 
 def _mock_suggestion(lcsc_part: str, is_basic: bool = True, confidence: float = 0.8):
@@ -84,8 +97,7 @@ class TestEnrichBomLcsc:
     def test_auto_matches_missing_lcsc(self, MockSuggester):
         """Items without LCSC get populated from PartSuggester."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         mock_instance.suggest_for_component.return_value = _mock_suggestion("C25744")
         MockSuggester.return_value = mock_instance
 
@@ -109,8 +121,7 @@ class TestEnrichBomLcsc:
     def test_preserves_existing_lcsc(self, MockSuggester):
         """Items with existing LCSC are not searched and are left as-is."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         MockSuggester.return_value = mock_instance
 
         items = [
@@ -134,8 +145,7 @@ class TestEnrichBomLcsc:
     def test_reports_unmatched(self, MockSuggester):
         """Unmatched parts appear in the report."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         mock_instance.suggest_for_component.return_value = _mock_no_match()
         MockSuggester.return_value = mock_instance
 
@@ -154,8 +164,7 @@ class TestEnrichBomLcsc:
     def test_skips_dnp_items(self, MockSuggester):
         """DNP items are not searched."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         MockSuggester.return_value = mock_instance
 
         items = [
@@ -172,8 +181,7 @@ class TestEnrichBomLcsc:
     def test_groups_by_value_footprint(self, MockSuggester):
         """Same value+footprint searched only once, result applied to all."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         mock_instance.suggest_for_component.return_value = _mock_suggestion("C25744")
         MockSuggester.return_value = mock_instance
 
@@ -197,8 +205,7 @@ class TestEnrichBomLcsc:
     def test_different_values_searched_separately(self, MockSuggester):
         """Different value+footprint combos are searched independently."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
 
         # Return different parts for different searches
         def side_effect(*, reference, value, footprint, existing_lcsc):
@@ -225,8 +232,7 @@ class TestEnrichBomLcsc:
     def test_mixed_existing_and_missing(self, MockSuggester):
         """Mix of items with and without LCSC numbers."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         mock_instance.suggest_for_component.return_value = _mock_suggestion("C25744")
         MockSuggester.return_value = mock_instance
 
@@ -246,8 +252,7 @@ class TestEnrichBomLcsc:
     def test_suggester_exception_handled(self, MockSuggester):
         """If PartSuggester.suggest_for_component raises, item is unmatched."""
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
         # The suggest_for_component itself doesn't raise; errors are reported
         # via suggestion.error. But the PartSuggester catches exceptions internally.
         # Let's test the case where it returns an error suggestion.
@@ -279,12 +284,11 @@ class TestEnrichBomLcscCircuitBreaker:
 
     @patch("kicad_tools.export.bom_enrich.PartSuggester")
     def test_403_stops_remaining_lookups(self, MockSuggester):
-        """After a 403, remaining groups are marked unmatched without API calls."""
+        """After a 403 with empty cache, remaining groups are unmatched."""
         from kicad_tools.parts.lcsc import LCSCForbiddenError
 
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
 
         # First call raises LCSCForbiddenError
         mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
@@ -315,8 +319,7 @@ class TestEnrichBomLcscCircuitBreaker:
         from kicad_tools.parts.lcsc import LCSCForbiddenError
 
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
 
         # The first group that needs a lookup will get 403
         mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
@@ -349,8 +352,7 @@ class TestEnrichBomLcscCircuitBreaker:
         from kicad_tools.parts.lcsc import LCSCForbiddenError
 
         mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
+        _make_suggester_mock(mock_instance)
 
         call_count = [0]
 
@@ -382,6 +384,177 @@ class TestEnrichBomLcscCircuitBreaker:
         assert mock_instance.suggest_for_component.call_count == 2
 
 
+class TestEnrichBomLcscCacheFallback:
+    """Tests for cache fallback when API returns 403."""
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_falls_back_to_enrichment_cache(self, MockSuggester):
+        """When API is forbidden, cached enrichment matches are used."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        # Create a real PartsCache with pre-populated enrichment matches
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            cache.put_enrichment_match(
+                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
+                confidence=0.85, part_type="Basic",
+            )
+            cache.put_enrichment_match(
+                "100nF", "Capacitor_SMD:C_0402_1005Metric", "C1525",
+                confidence=0.9, part_type="Basic",
+            )
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            # Wire up the real cache
+            mock_instance._get_client.return_value.cache = cache
+
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+                "403 Forbidden"
+            )
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+                _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+            ]
+
+            report = enrich_bom_lcsc(items)
+
+            # Both should be resolved from cache
+            assert items[0].lcsc == "C25744"
+            assert items[1].lcsc == "C1525"
+            assert report.cache_matched == 2
+            assert report.unmatched == 0
+
+            # Verify source is "cache" for both entries
+            for entry in report.entries:
+                assert entry.source == "cache"
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_mixed_cache_hit_and_miss(self, MockSuggester):
+        """When API is forbidden, parts not in cache remain unmatched."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            # Only cache the resistor, not the capacitor
+            cache.put_enrichment_match(
+                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
+                confidence=0.85, part_type="Basic",
+            )
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+                "403 Forbidden"
+            )
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+                _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+            ]
+
+            report = enrich_bom_lcsc(items)
+
+            assert items[0].lcsc == "C25744"
+            assert items[1].lcsc == ""
+            assert report.cache_matched == 1
+            assert report.unmatched == 1
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_auto_match_populates_enrichment_cache(self, MockSuggester):
+        """Successful auto-matches are stored in the enrichment cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+            mock_instance.suggest_for_component.return_value = _mock_suggestion(
+                "C25744", confidence=0.8
+            )
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            ]
+
+            enrich_bom_lcsc(items)
+
+            # Verify the match was stored in the enrichment cache
+            match = cache.get_enrichment_match(
+                "10k", "Resistor_SMD:R_0402_1005Metric"
+            )
+            assert match is not None
+            assert match["lcsc_part"] == "C25744"
+            assert match["confidence"] == 0.8
+            assert match["part_type"] == "Basic"
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_cache_fallback_uses_expired_entries(self, MockSuggester):
+        """Expired enrichment cache entries are still used when API is forbidden."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create cache with very short TTL so entries expire immediately
+            cache = PartsCache(db_path=Path(tmp) / "test.db", ttl_days=0)
+            cache.put_enrichment_match(
+                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
+                confidence=0.85, part_type="Basic",
+            )
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+                "403 Forbidden"
+            )
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            ]
+
+            report = enrich_bom_lcsc(items)
+
+            # Should still resolve from expired cache
+            assert items[0].lcsc == "C25744"
+            assert report.cache_matched == 1
+            assert report.unmatched == 0
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_empty_cache_reports_unmatched(self, MockSuggester):
+        """With empty cache and API forbidden, parts are unmatched (no crash)."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+                "403 Forbidden"
+            )
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            ]
+
+            report = enrich_bom_lcsc(items)
+
+            assert items[0].lcsc == ""
+            assert report.unmatched == 1
+            assert report.cache_matched == 0
+
+
 class TestEnrichmentReport:
     """Tests for the EnrichmentReport dataclass."""
 
@@ -405,6 +578,27 @@ class TestEnrichmentReport:
         lines = report.summary_lines()
         assert "1 auto-matched" in lines[0]
         assert "0 unmatched" in lines[0]
+
+    def test_summary_lines_with_cache(self):
+        """Summary includes cache hit count when present."""
+        from kicad_tools.export.bom_enrich import EnrichmentEntry
+
+        report = EnrichmentReport(
+            entries=[
+                EnrichmentEntry(
+                    value="10k",
+                    footprint="R_0402",
+                    references=["R1"],
+                    lcsc_part="C25744",
+                    source="cache",
+                    confidence=0.85,
+                    part_type="Basic",
+                ),
+            ]
+        )
+        lines = report.summary_lines()
+        assert "1 from cache" in lines[0]
+        assert "0 auto-matched" in lines[0]
 
     def test_summary_lines_with_unmatched(self):
         """Summary includes detail lines for unmatched parts."""
@@ -448,6 +642,13 @@ class TestEnrichmentReport:
                     source="schematic",
                 ),
                 EnrichmentEntry(
+                    value="4.7uH",
+                    footprint="L_0603",
+                    references=["L1"],
+                    lcsc_part="C99999",
+                    source="cache",
+                ),
+                EnrichmentEntry(
                     value="IC1",
                     footprint="QFN-32",
                     references=["U1"],
@@ -456,7 +657,8 @@ class TestEnrichmentReport:
                 ),
             ]
         )
-        assert report.total_groups == 3
+        assert report.total_groups == 4
         assert report.auto_matched == 1
         assert report.already_populated == 1
+        assert report.cache_matched == 1
         assert report.unmatched == 1

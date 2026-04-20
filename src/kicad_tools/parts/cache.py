@@ -57,7 +57,7 @@ class PartsCache:
         print(f"Cached parts: {stats['total']}")
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     DEFAULT_TTL_DAYS = 7
 
     def __init__(
@@ -113,6 +113,16 @@ class PartsCache:
                 CREATE INDEX IF NOT EXISTS idx_parts_mfr ON parts(mfr_part);
                 CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
                 CREATE INDEX IF NOT EXISTS idx_parts_cached ON parts(cached_at);
+
+                CREATE TABLE IF NOT EXISTS enrichment_matches (
+                    component_value TEXT NOT NULL,
+                    footprint TEXT NOT NULL,
+                    lcsc_part TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0.0,
+                    part_type TEXT NOT NULL DEFAULT '',
+                    cached_at TEXT NOT NULL,
+                    PRIMARY KEY (component_value, footprint)
+                );
             """)
 
             # Check schema version
@@ -128,7 +138,18 @@ class PartsCache:
 
     def _migrate(self, conn: sqlite3.Connection, from_version: int) -> None:
         """Migrate database schema."""
-        # Future migrations would go here
+        if from_version < 2:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS enrichment_matches (
+                    component_value TEXT NOT NULL,
+                    footprint TEXT NOT NULL,
+                    lcsc_part TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0.0,
+                    part_type TEXT NOT NULL DEFAULT '',
+                    cached_at TEXT NOT NULL,
+                    PRIMARY KEY (component_value, footprint)
+                );
+            """)
         conn.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(self.SCHEMA_VERSION),),
@@ -343,6 +364,77 @@ class PartsCache:
                 )
                 """,
                 rows,
+            )
+
+    def get_enrichment_match(
+        self,
+        component_value: str,
+        footprint: str,
+        ignore_expiry: bool = False,
+    ) -> dict | None:
+        """
+        Look up a previously auto-matched enrichment result by value+footprint.
+
+        Args:
+            component_value: Component value (e.g., "10k")
+            footprint: KiCad footprint string
+            ignore_expiry: If True, return expired entries
+
+        Returns:
+            Dict with ``lcsc_part``, ``confidence``, and ``part_type`` keys,
+            or None if no cached match exists.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT lcsc_part, confidence, part_type, cached_at "
+                "FROM enrichment_matches "
+                "WHERE component_value = ? AND footprint = ?",
+                (component_value, footprint),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            if not ignore_expiry and self._is_expired(row["cached_at"]):
+                return None
+            return {
+                "lcsc_part": row["lcsc_part"],
+                "confidence": row["confidence"],
+                "part_type": row["part_type"],
+            }
+
+    def put_enrichment_match(
+        self,
+        component_value: str,
+        footprint: str,
+        lcsc_part: str,
+        confidence: float = 0.0,
+        part_type: str = "",
+    ) -> None:
+        """
+        Store an enrichment match mapping value+footprint to an LCSC part.
+
+        Args:
+            component_value: Component value (e.g., "10k")
+            footprint: KiCad footprint string
+            lcsc_part: The matched LCSC part number
+            confidence: Match confidence score
+            part_type: Part type string ("Basic", "Pref", "Ext")
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO enrichment_matches
+                    (component_value, footprint, lcsc_part, confidence, part_type, cached_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    component_value,
+                    footprint,
+                    lcsc_part,
+                    confidence,
+                    part_type,
+                    datetime.now().isoformat(),
+                ),
             )
 
     def delete(self, lcsc_part: str) -> bool:
