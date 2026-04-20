@@ -27,9 +27,10 @@ class PlacementConfig:
     clock_net_stiffness: float = 20.0  # Higher stiffness for clock nets
 
     # Physics parameters
-    damping: float = 0.95  # Linear velocity damping (0-1)
-    angular_damping: float = 0.90  # Angular velocity damping
+    damping: float = 0.85  # Linear velocity damping (0-1, lower = more damping)
+    angular_damping: float = 0.80  # Angular velocity damping
     max_velocity: float = 10.0  # Max velocity in mm/step
+    max_force: float = 0.0  # Max net force per component (0 = auto from board perimeter)
 
     # Rotation potential (torsion spring with 90 deg wells)
     rotation_stiffness: float = 10.0  # Torsion spring constant for 90 deg alignment

@@ -962,8 +962,8 @@ class PlacementOptimizer:
         # Clamp minimum distance to prevent singularity
         distance = max(distance, self.config.min_distance)
 
-        # Force magnitude: lambda * L / r (total charge / distance)
-        force_mag = charge_density * edge_len / distance
+        # Force magnitude: lambda * L / r^2 (1/r^2 falloff prevents divergence)
+        force_mag = charge_density * edge_len / (distance * distance)
 
         # Force direction: away from edge
         return displacement.normalized() * force_mag
@@ -1718,6 +1718,18 @@ class PlacementOptimizer:
 
         return kinetic + potential
 
+    def _compute_max_force(self) -> float:
+        """Compute the max force limit for force clamping.
+
+        If config.max_force > 0, use that value directly.
+        Otherwise auto-compute from board perimeter:
+        max_force = boundary_charge * board_perimeter / 4.
+        """
+        if self.config.max_force > 0:
+            return self.config.max_force
+        perimeter = self.board_outline.perimeter()
+        return self.config.boundary_charge * perimeter / 4
+
     def step(self, dt: float):
         """
         Perform one simulation step.
@@ -1728,6 +1740,9 @@ class PlacementOptimizer:
         # Compute forces and torques together (more efficient)
         forces, torques = self.compute_forces_and_torques()
 
+        # Compute force clamp limit
+        max_force = self._compute_max_force()
+
         # Update velocities and apply forces/torques
         for comp in self.components:
             if comp.fixed:
@@ -1735,6 +1750,11 @@ class PlacementOptimizer:
 
             force = forces[comp.ref]
             torque = torques[comp.ref]
+
+            # Clamp net force magnitude to prevent runaway acceleration
+            force_mag = force.magnitude()
+            if force_mag > max_force:
+                force = force * (max_force / force_mag)
 
             comp.apply_force(force, dt)
             comp.apply_torque(torque, dt)
@@ -1749,6 +1769,15 @@ class PlacementOptimizer:
             # Apply damping
             comp.apply_damping(self.config.damping, self.config.angular_damping)
 
+        # Compute board bounding box for position clamping
+        if self.board_outline.vertices:
+            min_x = min(v.x for v in self.board_outline.vertices)
+            max_x = max(v.x for v in self.board_outline.vertices)
+            min_y = min(v.y for v in self.board_outline.vertices)
+            max_y = max(v.y for v in self.board_outline.vertices)
+        else:
+            min_x = max_x = min_y = max_y = 0.0
+
         # Update positions and rotations
         for comp in self.components:
             if comp.fixed:
@@ -1756,6 +1785,17 @@ class PlacementOptimizer:
 
             # Update position and rotation
             comp.update_position(dt)
+
+            # Hard-clamp position to board bounding box (prevents escape)
+            margin = self.config.boundary_margin
+            comp.x = max(min_x + margin, min(max_x - margin, comp.x))
+            comp.y = max(min_y + margin, min(max_y - margin, comp.y))
+
+            # If component was clamped, kill its outward velocity
+            if comp.x <= min_x + margin or comp.x >= max_x - margin:
+                comp.vx = 0.0
+            if comp.y <= min_y + margin or comp.y >= max_y - margin:
+                comp.vy = 0.0
 
             # Update pin positions based on new position and rotation
             comp.update_pin_positions()

@@ -99,8 +99,8 @@ inline Vec2 compute_edge_to_point_force(
     // Clamp minimum distance
     distance = std::max(distance, min_distance);
 
-    // Force magnitude: lambda * L / r
-    double force_mag = charge_density * edge_len / distance;
+    // Force magnitude: lambda * L / r^2 (1/r^2 falloff prevents divergence)
+    double force_mag = charge_density * edge_len / (distance * distance);
 
     // Force direction: away from edge (normalized displacement)
     double disp_mag = std::sqrt(disp_x * disp_x + disp_y * disp_y);
