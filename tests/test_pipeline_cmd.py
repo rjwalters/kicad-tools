@@ -3789,3 +3789,109 @@ class TestFinalSummaryIntegration:
         msg = _build_commit_message(ctx, results)  # no check_data param
 
         assert "1 DRC errors" in msg
+
+
+class TestBestEffort:
+    """Tests for the --best-effort flag that continues past routing failures."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_best_effort_continues_past_route_failure(self, mock_run, unrouted_pcb: Path):
+        """With --best-effort, pipeline continues to downstream steps after route failure."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: routing failed", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, best_effort=True)
+        results = run_pipeline(
+            ctx,
+            [
+                PipelineStep.ROUTE,
+                PipelineStep.ZONES,
+                PipelineStep.AUDIT,
+                PipelineStep.REPORT,
+                PipelineStep.EXPORT,
+            ],
+        )
+
+        # All steps should have run
+        assert len(results) == 5
+        # Route failed but was reclassified as warning
+        assert results[0].step == PipelineStep.ROUTE
+        assert results[0].success is False
+        assert results[0].warning is True
+        # Downstream steps ran
+        assert results[1].step == PipelineStep.ZONES
+        assert results[2].step == PipelineStep.AUDIT
+        assert results[3].step == PipelineStep.REPORT
+        assert results[4].step == PipelineStep.EXPORT
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_without_best_effort_aborts_on_route_failure(self, mock_run, unrouted_pcb: Path):
+        """Without --best-effort, pipeline still aborts on route failure (default behavior)."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: routing failed", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, best_effort=False)
+        results = run_pipeline(
+            ctx,
+            [
+                PipelineStep.ROUTE,
+                PipelineStep.ZONES,
+                PipelineStep.AUDIT,
+                PipelineStep.REPORT,
+                PipelineStep.EXPORT,
+            ],
+        )
+
+        # Pipeline should stop at route step
+        assert len(results) == 1
+        assert results[0].step == PipelineStep.ROUTE
+        assert results[0].success is False
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_best_effort_exit_code_2_partial_success(self, mock_run, unrouted_pcb: Path):
+        """--best-effort returns exit code 2 when routing fails but downstream steps run."""
+
+        def side_effect(cmd, **kwargs):
+            # Route fails, all other steps succeed
+            if "route" in cmd:
+                return MagicMock(returncode=1, stderr="routing incomplete", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        result = main(["--best-effort", "--quiet", str(unrouted_pcb)])
+        assert result == 2
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_best_effort_exit_code_0_when_route_succeeds(self, mock_run, unrouted_pcb: Path):
+        """--best-effort returns exit code 0 when routing succeeds (identical to normal mode)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(["--best-effort", "--quiet", str(unrouted_pcb)])
+        assert result == 0
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_best_effort_does_not_affect_non_route_failures(self, mock_run, unrouted_pcb: Path):
+        """--best-effort only applies to ROUTE failures; other step failures still abort."""
+        # FIX_DRC fails
+        def side_effect(cmd, **kwargs):
+            if "fix-drc" in cmd:
+                return MagicMock(returncode=1, stderr="fix-drc error", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, best_effort=True)
+        results = run_pipeline(
+            ctx,
+            [PipelineStep.FIX_DRC, PipelineStep.AUDIT, PipelineStep.EXPORT],
+        )
+
+        # Pipeline should stop at FIX_DRC even with best_effort
+        assert len(results) == 1
+        assert results[0].step == PipelineStep.FIX_DRC
+        assert results[0].success is False
+
+    def test_best_effort_cli_flag_parsed(self, unrouted_pcb: Path):
+        """--best-effort flag is accepted by the CLI argument parser."""
+        # Just verify it parses without error (dry-run avoids subprocess calls)
+        result = main(["--best-effort", "--dry-run", "--quiet", str(unrouted_pcb)])
+        assert result == 0

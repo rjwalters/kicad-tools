@@ -102,6 +102,7 @@ class PipelineContext:
     force: bool = False
     is_project: bool = False
     commit: bool = False
+    best_effort: bool = False
     max_displacement: float = 2.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
@@ -1234,6 +1235,9 @@ def run_pipeline(
             )
         )
 
+    # Track whether the route step has failed (used by --best-effort logic)
+    route_failed = False
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1263,14 +1267,34 @@ def run_pipeline(
 
             # Stop on failure unless:
             # - it's the audit, report, or export step (always run informational steps), or
-            # - ERC just failed and FIX_ERC is the next step (auto-remediation path)
+            # - ERC just failed and FIX_ERC is the next step (auto-remediation path), or
+            # - --best-effort is set and route has failed (continue past routing
+            #   failure and any downstream consequences to zone fill, DRC, audit,
+            #   report, and export)
             if not result.success and step not in (
                 PipelineStep.AUDIT,
                 PipelineStep.REPORT,
                 PipelineStep.EXPORT,
             ):
                 next_step = steps[i + 1] if i + 1 < len(steps) else None
-                if not (step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC):
+                if step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC:
+                    pass  # allow ERC -> FIX_ERC auto-remediation
+                elif step == PipelineStep.ROUTE and ctx.best_effort:
+                    # Route failed in best-effort mode -- mark as warning
+                    # and let downstream steps continue.
+                    route_failed = True
+                    result.warning = True
+                    if not ctx.quiet:
+                        console.print(
+                            "  [yellow]--best-effort: continuing past routing failure[/yellow]"
+                        )
+                elif ctx.best_effort and route_failed:
+                    # In best-effort mode after a route failure, downstream
+                    # step failures are expected (incomplete routing causes
+                    # DRC violations, zone fill issues, etc.).  Mark them as
+                    # warnings and continue.
+                    result.warning = True
+                else:
                     break
 
     # Post-loop reclassification: when ERC failed but FIX_ERC resolved the errors,
@@ -1351,6 +1375,7 @@ Examples:
     kct pipeline board.kicad_pcb --force               # Force re-route
     kct pipeline board.kicad_pcb --commit              # Commit changes after success
     kct pipeline board.kicad_pcb --mfr jlcpcb --commit # Pipeline + auto-commit
+    kct pipeline board.kicad_pcb --best-effort         # Continue past routing failures
         """,
     )
 
@@ -1413,6 +1438,15 @@ Examples:
         action="store_true",
         default=False,
         help="Create a git commit with the modified PCB file after a successful pipeline run",
+    )
+    parser.add_argument(
+        "--best-effort",
+        action="store_true",
+        default=False,
+        help=(
+            "Continue past routing failures to zone fill, DRC, audit, report, and export. "
+            "Exit code 2 indicates partial success (routing incomplete but downstream steps ran)"
+        ),
     )
     parser.add_argument(
         "--max-displacement",
@@ -1510,6 +1544,7 @@ Examples:
         force=args.force,
         is_project=is_project,
         commit=args.commit,
+        best_effort=args.best_effort,
         max_displacement=args.max_displacement,
     )
 
@@ -1521,10 +1556,17 @@ Examples:
 
     results = run_pipeline(ctx, steps)
 
-    # Determine exit code: 0 if all succeeded, 1 if any failed
+    # Determine exit code:
+    #   0 = all steps succeeded
+    #   2 = partial success (--best-effort continued past a routing failure)
+    #   1 = hard failure
     all_succeeded = all(r.success for r in results)
+    has_route_warning = any(
+        r.step == PipelineStep.ROUTE and not r.success and r.warning
+        for r in results
+    )
 
-    if not all_succeeded:
+    if not all_succeeded and not has_route_warning:
         return 1
 
     # Handle --commit flag (silently ignored with --dry-run)
@@ -1533,6 +1575,10 @@ Examples:
         commit_rc = _git_commit_result(ctx, results, console)
         if commit_rc != 0:
             return commit_rc
+
+    # Exit code 2 for partial success (routing incomplete in best-effort mode)
+    if has_route_warning:
+        return 2
 
     return 0
 
