@@ -137,7 +137,9 @@ NB_MODULE(router_cpp, m) {
              "end_layers"_a = std::vector<int>{},
              "negotiated_mode"_a = false,
              "present_cost_factor"_a = 0.0f,
-             "weight"_a = 1.0f)
+             "weight"_a = 1.0f,
+             "trace_radius_cells"_a = 0,
+             "via_radius_cells"_a = 0)
         .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);

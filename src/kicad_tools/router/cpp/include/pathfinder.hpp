@@ -33,7 +33,9 @@ public:
         const std::vector<int>& end_layers = {},    // For PTH pads
         bool negotiated_mode = false,
         float present_cost_factor = 0.0f,
-        float weight = 1.0f  // A* weight (1.0 = optimal, >1.0 = faster)
+        float weight = 1.0f,  // A* weight (1.0 = optimal, >1.0 = faster)
+        int trace_radius_cells = 0,  // Per-net trace clearance radius (0 = use default)
+        int via_radius_cells = 0     // Per-net via clearance radius (0 = use default)
     );
 
     // Configure routable layers (skip plane layers)
@@ -45,14 +47,18 @@ public:
 
 private:
     // Check if trace placement is blocked (accounts for trace width)
-    bool is_trace_blocked(int x, int y, int layer, int net, bool allow_sharing) const;
+    // radius_override: if > 0, use this instead of trace_half_width_cells_
+    bool is_trace_blocked(int x, int y, int layer, int net, bool allow_sharing,
+                          int radius_override = 0) const;
 
     // Check if diagonal move cuts through obstacles
     bool is_diagonal_blocked(int x, int y, int dx, int dy, int layer, int net,
                              bool allow_sharing) const;
 
     // Check if via placement is blocked on all layers
-    bool is_via_blocked(int x, int y, int net, bool allow_sharing) const;
+    // radius_override: if > 0, use this instead of via_half_cells_
+    bool is_via_blocked(int x, int y, int net, bool allow_sharing,
+                        int radius_override = 0) const;
 
     // Heuristic: Manhattan distance with layer change cost
     float heuristic(int x, int y, int layer, int goal_x, int goal_y, int goal_layer) const;
