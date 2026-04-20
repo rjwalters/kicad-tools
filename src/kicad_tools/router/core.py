@@ -604,7 +604,16 @@ class Autorouter:
         return layer_widths
 
     def add_component(self, ref: str, pads: list[dict]):
-        """Add a component's pads."""
+        """Add a component's pads.
+
+        Computes the component's minimum pin pitch from pad positions and
+        passes it to the grid so fine-pitch pads get reduced clearance
+        envelopes (Issue #1778).
+        """
+        # Pre-compute minimum pin pitch for this component from pad positions
+        # so the grid can apply reduced clearance for fine-pitch packages.
+        pin_pitch = self._compute_component_pitch(pads)
+
         for pad_info in pads:
             pin = str(pad_info["number"])
             pad = Pad(
@@ -630,7 +639,33 @@ class Autorouter:
                 if pad.net_name:
                     self.net_names[pad.net] = pad.net_name
 
-            self.grid.add_pad(pad)
+            self.grid.add_pad(pad, pin_pitch=pin_pitch)
+
+    @staticmethod
+    def _compute_component_pitch(pads: list[dict]) -> float | None:
+        """Compute minimum pin pitch from a component's pad list.
+
+        Args:
+            pads: List of pad info dicts with 'x' and 'y' keys.
+
+        Returns:
+            Minimum center-to-center distance between adjacent pads in mm,
+            or None if fewer than 2 pads.
+        """
+        if len(pads) < 2:
+            return None
+
+        import math
+
+        min_pitch = float("inf")
+        positions = [(p["x"], p["y"]) for p in pads]
+        for i, (x1, y1) in enumerate(positions):
+            for x2, y2 in positions[i + 1:]:
+                dist = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                if dist > 0.01:  # Ignore overlapping pads
+                    min_pitch = min(min_pitch, dist)
+
+        return min_pitch if min_pitch != float("inf") else None
 
     def add_obstacle(
         self, x: float, y: float, width: float, height: float, layer: Layer = Layer.F_CU
@@ -3035,8 +3070,10 @@ class Autorouter:
             width, height, origin_x, origin_y
         )
 
+        # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
+        pitches = self.component_pitches
         for pad in self.pads.values():
-            self.grid.add_pad(pad)
+            self.grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int]) -> list[int]:
@@ -4560,15 +4597,17 @@ class Autorouter:
             fine_grid.mark_route(route)
 
         # Add pads for the failed nets to the fine grid
+        # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
+        pitches = self.component_pitches
         for pad in all_failed_pads:
-            fine_grid.add_pad(pad)
+            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
 
         # Also add pads from other nets that are in the bounding box region,
         # so the fine grid knows about obstacles from other nets' pads
         for (ref, pin), pad in self.pads.items():
             if pad.net not in failed_net_ids:
                 if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
-                    fine_grid.add_pad(pad)
+                    fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(
