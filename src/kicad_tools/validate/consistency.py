@@ -787,16 +787,33 @@ class SchematicPCBChecker:
     def _extract_schematic_pin_nets(self) -> dict[str, dict[str, str]]:
         """Extract pin-to-net mapping from schematic.
 
-        This is a simplified extraction that uses global labels and local labels
-        connected to component pins.
+        Loads the schematic via the models layer (which provides
+        ``extract_netlist()`` via ``SchematicNetlistMixin``), then pivots the
+        result from ``{net_name: [PinRef]}`` into
+        ``{reference: {pin_number: net_name}}``.
 
         Returns:
-            Mapping of reference -> {pin_number: net_name}
+            Mapping of reference -> {pin_number: net_name}.
+            Returns empty dict if no schematic path is available.
         """
-        # This is a simplified implementation
-        # Full implementation would require netlist extraction from schematic
-        # For now, we return an empty dict and rely on PCB-side checks
-        return {}
+        from kicad_tools.schematic.models import Schematic as ModelsSchematic
+
+        sch_path = self._schematic_path or (
+            str(self.schematic.path) if hasattr(self.schematic, "path") and self.schematic.path else None
+        )
+        if not sch_path:
+            return {}
+
+        models_sch = ModelsSchematic.load(sch_path)
+        netlist = models_sch.extract_netlist()
+
+        pin_nets: dict[str, dict[str, str]] = {}
+        for net_name, pin_refs in netlist.items():
+            for pin_ref in pin_refs:
+                ref_dict = pin_nets.setdefault(pin_ref.symbol_ref, {})
+                ref_dict[pin_ref.pin] = net_name
+
+        return pin_nets
 
     def _check_properties(self) -> list[ConsistencyIssue]:
         """Check component property consistency (value, footprint).

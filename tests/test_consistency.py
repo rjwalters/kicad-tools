@@ -1,9 +1,11 @@
 """Tests for kicad_tools.validate.consistency module."""
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.schematic.models import PinRef
 from kicad_tools.validate.consistency import (
     ConsistencyIssue,
     ConsistencyResult,
@@ -351,13 +353,13 @@ class TestSchematicPCBChecker:
     """Tests for SchematicPCBChecker class."""
 
     def test_consistent_schematic_pcb(self, minimal_schematic: Path, minimal_pcb: Path):
-        """Test that consistent schematic and PCB pass checks."""
+        """Test that consistent schematic and PCB pass component/property checks."""
         checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
         result = checker.check()
 
-        # Should be consistent (R1 is in both)
-        assert result.is_consistent
-        assert result.error_count == 0
+        # R1 is in both -- no component or property issues
+        assert len(result.component_issues) == 0
+        assert len(result.property_issues) == 0
 
     def test_detect_missing_on_pcb(self, schematic_with_extra: Path, pcb_with_extra: Path):
         """Test detection of component in schematic but not on PCB."""
@@ -494,3 +496,130 @@ class TestConsistencyResultOutput:
         ]
         result = ConsistencyResult(issues=issues)
         assert result
+
+
+def _mock_models_schematic(netlist):
+    """Create a mock ModelsSchematic.load that returns a schematic with given netlist."""
+    mock_sch = MagicMock()
+    mock_sch.extract_netlist.return_value = netlist
+    return patch(
+        "kicad_tools.schematic.models.Schematic.load",
+        return_value=mock_sch,
+    )
+
+
+class TestExtractSchematicPinNets:
+    """Tests for _extract_schematic_pin_nets pivot logic."""
+
+    def test_pivots_netlist_to_pin_nets(self, minimal_schematic: Path, minimal_pcb: Path):
+        """extract_netlist {net: [PinRef]} is pivoted to {ref: {pin: net}}."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        mock_netlist = {
+            "VCC": [PinRef("R1", "1"), PinRef("U1", "VDD")],
+            "GND": [PinRef("R1", "2"), PinRef("U1", "GND")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            result = checker._extract_schematic_pin_nets()
+
+        assert result == {
+            "R1": {"1": "VCC", "2": "GND"},
+            "U1": {"VDD": "VCC", "GND": "GND"},
+        }
+
+    def test_empty_netlist_returns_empty(self, minimal_schematic: Path, minimal_pcb: Path):
+        """Empty netlist returns empty pin-nets dict."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        with _mock_models_schematic({}):
+            result = checker._extract_schematic_pin_nets()
+
+        assert result == {}
+
+    def test_single_pin_net(self, minimal_schematic: Path, minimal_pcb: Path):
+        """Net with a single pin is included."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        mock_netlist = {
+            "NET1": [PinRef("R1", "1")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            result = checker._extract_schematic_pin_nets()
+
+        assert result == {"R1": {"1": "NET1"}}
+
+
+class TestCheckNets:
+    """Tests for _check_nets net consistency checking."""
+
+    def test_matching_nets_no_issues(self, minimal_schematic: Path, minimal_pcb: Path):
+        """No issues when schematic and PCB nets match."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        # minimal_pcb has R1 with pad "1" -> "GND", pad "2" -> "+3.3V"
+        mock_netlist = {
+            "GND": [PinRef("R1", "1")],
+            "+3.3V": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+
+        net_issues = [i for i in issues if i.domain == "net"]
+        assert len(net_issues) == 0
+
+    def test_mismatched_net_produces_error(self, minimal_schematic: Path, minimal_pcb: Path):
+        """Mismatched net names produce error issues."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        # PCB has R1 pad "1" -> "GND", but schematic says pin "1" -> "VCC"
+        mock_netlist = {
+            "VCC": [PinRef("R1", "1")],
+            "+3.3V": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+
+        net_issues = [i for i in issues if i.domain == "net"]
+        assert len(net_issues) == 1
+        assert net_issues[0].issue_type == "mismatch"
+        assert net_issues[0].severity == "error"
+        assert net_issues[0].reference == "R1.1"
+        assert net_issues[0].schematic_value == "VCC"
+        assert net_issues[0].pcb_value == "GND"
+
+    def test_component_only_in_schematic_no_crash(
+        self, minimal_schematic: Path, minimal_pcb: Path
+    ):
+        """Component in schematic but not PCB is handled gracefully by _check_nets."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        # U99 does not exist in the PCB
+        mock_netlist = {
+            "NET_X": [PinRef("U99", "1")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+
+        # No net issues -- U99 is not in both, so net comparison is skipped
+        net_issues = [i for i in issues if i.domain == "net"]
+        assert len(net_issues) == 0
+
+    def test_component_only_in_pcb_no_crash(self, minimal_schematic: Path, minimal_pcb: Path):
+        """Component in PCB but not schematic is handled gracefully by _check_nets."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        # Empty schematic netlist -- R1 exists only in PCB
+        with _mock_models_schematic({}):
+            issues = checker._check_nets()
+
+        net_issues = [i for i in issues if i.domain == "net"]
+        assert len(net_issues) == 0
+
+    def test_multiple_mismatches(self, minimal_schematic: Path, minimal_pcb: Path):
+        """Multiple net mismatches on same component are all reported."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        # Both pins mismatch: PCB has R1.1="GND", R1.2="+3.3V"
+        mock_netlist = {
+            "NET_A": [PinRef("R1", "1")],
+            "NET_B": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+
+        net_issues = [i for i in issues if i.domain == "net"]
+        assert len(net_issues) == 2
+        refs = {i.reference for i in net_issues}
+        assert refs == {"R1.1", "R1.2"}
