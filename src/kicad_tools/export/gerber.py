@@ -54,6 +54,10 @@ class GerberConfig:
     merge_pth_npth: bool = False
     minimal_header: bool = False
 
+    # Post-zip cleanup: when True (default), remove individual gerber and
+    # drill files after creating the zip archive so only the zip remains.
+    clean_after_zip: bool = True
+
 
 @dataclass
 class ManufacturerPreset:
@@ -265,6 +269,10 @@ class GerberExporter:
             zip_path = out_dir / config.zip_name
             self._create_zip(out_dir, zip_path)
 
+            # Clean up individual files after zipping when requested
+            if config.clean_after_zip:
+                self._clean_after_zip(out_dir, zip_path)
+
             if progress_callback is not None:
                 progress_callback(1.0, f"Export complete: {zip_path.name}", False)
             return zip_path
@@ -443,6 +451,19 @@ class GerberExporter:
             layers.append("Edge.Cuts")
 
         return layers
+
+    @staticmethod
+    def _clean_after_zip(source_dir: Path, zip_path: Path) -> None:
+        """Remove individual gerber/drill files after creating the zip.
+
+        Removes all files in *source_dir* except the zip archive itself,
+        leaving only the zip in the output directory.
+        """
+        for file in list(source_dir.iterdir()):
+            if file.is_file() and file != zip_path:
+                file.unlink()
+                logger.debug(f"Cleaned up: {file.name}")
+        logger.info(f"Cleaned individual gerber files, kept {zip_path.name}")
 
     def _create_zip(self, source_dir: Path, zip_path: Path) -> None:
         """Create zip file from directory contents."""

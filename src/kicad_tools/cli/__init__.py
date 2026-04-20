@@ -732,14 +732,14 @@ def _run_export_command(args) -> int:
         sub_argv.extend(["--drc-report", args.export_drc_report])
     if hasattr(args, "export_erc_report") and args.export_erc_report:
         sub_argv.extend(["--erc-report", args.export_erc_report])
-    if getattr(args, "export_latest_only", False):
-        sub_argv.append("--latest-only")
+    if getattr(args, "export_keep_versions", False):
+        sub_argv.append("--keep-versions")
+    if getattr(args, "export_keep_gerber_files", False):
+        sub_argv.append("--keep-gerber-files")
     if getattr(args, "export_include_tht", False):
         sub_argv.append("--include-tht")
     if hasattr(args, "export_format") and args.export_format != "text":
         sub_argv.extend(["--format", args.export_format])
-    if getattr(args, "export_latest_only", False):
-        sub_argv.append("--latest-only")
 
     return export_cmd(sub_argv)
 

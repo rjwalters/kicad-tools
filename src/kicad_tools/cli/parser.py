@@ -4236,10 +4236,16 @@ def _add_export_parser(subparsers) -> None:
         help="Path to pre-existing ERC report file",
     )
     export_parser.add_argument(
-        "--latest-only",
-        dest="export_latest_only",
+        "--keep-versions",
+        dest="export_keep_versions",
         action="store_true",
-        help="Include only the latest report version in a flat report/ directory (removes vN/ dirs)",
+        help="Preserve versioned vN/ report directories (default: flat report/ directory)",
+    )
+    export_parser.add_argument(
+        "--keep-gerber-files",
+        dest="export_keep_gerber_files",
+        action="store_true",
+        help="Keep individual gerber/drill files alongside the zip archive",
     )
     export_parser.add_argument(
         "--include-tht",

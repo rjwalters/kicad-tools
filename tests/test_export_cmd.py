@@ -544,3 +544,97 @@ class TestExportCmdDirectoryInput:
         # confirming we got past the directory resolution step
         assert "Dry run" in captured.out
 
+
+class TestExportCmdKeepVersions:
+    """Tests for --keep-versions CLI flag."""
+
+    def test_keep_versions_flag_accepted(self, tmp_path):
+        """--keep-versions should be a recognized flag."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        rc = export_main([str(pcb), "--keep-versions", "--dry-run", "-o", str(tmp_path / "out")])
+        assert rc == 0
+
+    def test_default_is_flat_output(self, tmp_path, monkeypatch):
+        """Without --keep-versions, latest_report_only should be True (flat output)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        captured_config = {}
+
+        original_init = ManufacturingPackage.__init__
+
+        def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+            captured_config["latest_report_only"] = config.latest_report_only if config else None
+            original_init(self, pcb_path, schematic_path, manufacturer, config)
+
+        def fake_export(self, output_dir=None, *, dry_run=False):
+            from kicad_tools.export.manufacturing import ManufacturingResult
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            return ManufacturingResult(output_dir=od)
+
+        monkeypatch.setattr(ManufacturingPackage, "__init__", spy_init)
+        monkeypatch.setattr(ManufacturingPackage, "export", fake_export)
+
+        rc = export_main(
+            [str(pcb), "--no-report", "--skip-preflight", "-o", str(tmp_path / "out")]
+        )
+        assert rc == 0
+        assert captured_config["latest_report_only"] is True
+
+
+class TestExportCmdKeepGerberFiles:
+    """Tests for --keep-gerber-files CLI flag."""
+
+    def test_keep_gerber_files_flag_accepted(self, tmp_path):
+        """--keep-gerber-files should be a recognized flag."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        rc = export_main([str(pcb), "--keep-gerber-files", "--dry-run", "-o", str(tmp_path / "out")])
+        assert rc == 0
+
+    def test_keep_gerber_files_sets_gerber_config(self, tmp_path, monkeypatch):
+        """--keep-gerber-files should set clean_after_zip=False on GerberConfig."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        captured_config = {}
+
+        original_init = ManufacturingPackage.__init__
+
+        def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+            captured_config["gerber_config"] = config.gerber_config if config else None
+            original_init(self, pcb_path, schematic_path, manufacturer, config)
+
+        def fake_export(self, output_dir=None, *, dry_run=False):
+            from kicad_tools.export.manufacturing import ManufacturingResult
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            return ManufacturingResult(output_dir=od)
+
+        monkeypatch.setattr(ManufacturingPackage, "__init__", spy_init)
+        monkeypatch.setattr(ManufacturingPackage, "export", fake_export)
+
+        rc = export_main(
+            [
+                str(pcb),
+                "--keep-gerber-files",
+                "--no-report",
+                "--skip-preflight",
+                "-o",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        assert captured_config["gerber_config"] is not None
+        assert captured_config["gerber_config"].clean_after_zip is False
+

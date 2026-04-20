@@ -102,9 +102,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip KiCad project ZIP creation",
     )
     parser.add_argument(
-        "--latest-only",
+        "--keep-versions",
         action="store_true",
-        help="Include only the latest report version in a flat report/ directory (removes vN/ dirs)",
+        help="Preserve versioned vN/ report directories (default: flat report/ directory)",
+    )
+    parser.add_argument(
+        "--keep-gerber-files",
+        action="store_true",
+        help="Keep individual gerber/drill files alongside the zip archive",
     )
     parser.add_argument(
         "--auto-lcsc",
@@ -239,6 +244,13 @@ def run_export(args: argparse.Namespace) -> int:
 
         pnp_config = PnPExportConfig(exclude_tht=False)
 
+    # Build Gerber configuration when --keep-gerber-files is specified
+    gerber_config = None
+    if getattr(args, "keep_gerber_files", False):
+        from kicad_tools.export.gerber import GerberConfig
+
+        gerber_config = GerberConfig(clean_after_zip=False)
+
     # Build configuration
     auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
     config = ManufacturingConfig(
@@ -255,7 +267,8 @@ def run_export(args: argparse.Namespace) -> int:
         preflight=preflight_cfg,
         strict_preflight=getattr(args, "strict_preflight", False),
         pnp_config=pnp_config,
-        latest_report_only=getattr(args, "latest_only", False),
+        gerber_config=gerber_config,
+        latest_report_only=not getattr(args, "keep_versions", False),
     )
 
     pkg = ManufacturingPackage(
