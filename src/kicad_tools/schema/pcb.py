@@ -703,9 +703,16 @@ class Zone:
             layer="",
         )
 
-        # Basic properties
+        # Basic properties — handles both (net N "name") and (net "name") formats.
+        # KiCad 9 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
-            zone.net_number = net.get_int(0) or 0
+            first_int = net.get_int(0)
+            if first_int is not None:
+                zone.net_number = first_int
+            else:
+                zone.net_number = 0
+                # Name-only format: (net "GND") — store name from net node
+                zone.net_name = net.get_string(0) or ""
         if net_name := sexp.find("net_name"):
             zone.net_name = net_name.get_string(0) or ""
         if layer := sexp.find("layer"):
@@ -1334,6 +1341,11 @@ class PCB:
         for via in self._vias:
             if via.net_number == 0 and via.net_name:
                 via.net_number = name_to_number.get(via.net_name, 0)
+
+        # Fix zones
+        for zone in self._zones:
+            if zone.net_number == 0 and zone.net_name:
+                zone.net_number = name_to_number.get(zone.net_name, 0)
 
     def _parse_setup(self, sexp: SExp):
         """Parse setup/design rules."""

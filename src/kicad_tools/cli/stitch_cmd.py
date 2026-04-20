@@ -155,6 +155,11 @@ def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
             net_name_node = child.find_child("net_name")
             if net_name_node:
                 zone_net_name = net_name_node.get_string(0)
+            else:
+                # KiCad 9 name-only format: (net "GND") without separate net_name node
+                net_node = child.find_child("net")
+                if net_node and net_node.get_int(0) is None:
+                    zone_net_name = net_node.get_string(0)
 
             # Get layer from zone
             layer_node = child.find_child("layer")
@@ -191,6 +196,11 @@ def find_all_plane_nets(sexp: SExp) -> dict[str, str]:
             net_name_node = child.find_child("net_name")
             if net_name_node:
                 zone_net_name = net_name_node.get_string(0)
+            else:
+                # KiCad 9 name-only format: (net "GND") without separate net_name node
+                net_node = child.find_child("net")
+                if net_node and net_node.get_int(0) is None:
+                    zone_net_name = net_node.get_string(0)
 
             # Get layer from zone
             layer_node = child.find_child("layer")

@@ -854,3 +854,81 @@ class TestZoneFillerThermalIntegration:
         reliefs = filler.generate_thermal_reliefs(filled, [pad])
 
         assert len(reliefs) == 0  # No thermal relief for solid
+
+
+class TestZoneFromSexpKiCad9:
+    """Tests for Zone.from_sexp handling KiCad 9 name-only net format."""
+
+    def test_name_only_net_format(self):
+        """Zone.from_sexp should handle (net "GND") without numeric ID."""
+        from kicad_tools.sexp.parser import parse_string
+
+        sexp = parse_string("""(zone (net "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+        )""")
+
+        zone = Zone.from_sexp(sexp)
+        assert zone.net_name == "GND"
+        assert zone.net_number == 0  # No numeric ID available yet
+        assert zone.layer == "In1.Cu"
+
+    def test_traditional_format(self):
+        """Zone.from_sexp should still handle (net N) + (net_name "GND")."""
+        from kicad_tools.sexp.parser import parse_string
+
+        sexp = parse_string("""(zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+        )""")
+
+        zone = Zone.from_sexp(sexp)
+        assert zone.net_name == "GND"
+        assert zone.net_number == 1
+        assert zone.layer == "In1.Cu"
+
+    def test_fixup_net_numbers_for_zones(self, tmp_path):
+        """_fixup_net_numbers should recover net_number for zones."""
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (zone (net "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+          (zone (net "+3.3V") (layer "In2.Cu") (uuid "z2")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+        )"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(pcb_file)
+        zones = pcb.zones
+
+        # After fixup, net numbers should be recovered from header
+        gnd_zones = [z for z in zones if z.net_name == "GND"]
+        v33_zones = [z for z in zones if z.net_name == "+3.3V"]
+
+        assert len(gnd_zones) == 1
+        assert gnd_zones[0].net_number == 1
+
+        assert len(v33_zones) == 1
+        assert v33_zones[0].net_number == 2

@@ -1329,6 +1329,90 @@ class TestFindAllPlaneNets:
         assert "GND" in plane_nets
 
 
+class TestKiCad9NameOnlyZoneFormat:
+    """Tests for KiCad 9 name-only net format in zones (no net_name node)."""
+
+    def test_find_zones_for_net_name_only_format(self, tmp_path: Path):
+        """find_zones_for_net should handle (net "GND") without net_name node."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+          (net 1 "GND")
+          (zone (net "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+        )"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        from kicad_tools.cli.stitch_cmd import find_zones_for_net
+
+        sexp = load_pcb(pcb_file)
+        layers = find_zones_for_net(sexp, "GND")
+        assert layers == ["In1.Cu"]
+
+    def test_find_all_plane_nets_name_only_format(self, tmp_path: Path):
+        """find_all_plane_nets should handle (net "GND") without net_name node."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (zone (net "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+          (zone (net "+3.3V") (layer "In2.Cu") (uuid "z2")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+        )"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        sexp = load_pcb(pcb_file)
+        plane_nets = find_all_plane_nets(sexp)
+        assert plane_nets == {"GND": "In1.Cu", "+3.3V": "In2.Cu"}
+
+    def test_traditional_format_still_works(self, tmp_path: Path):
+        """Traditional (net N) + (net_name "GND") format should still work."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+          (net 1 "GND")
+          (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "z1")
+            (connect_pads (clearance 0.2))
+            (min_thickness 0.2)
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+          )
+        )"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        from kicad_tools.cli.stitch_cmd import find_zones_for_net
+
+        sexp = load_pcb(pcb_file)
+        layers = find_zones_for_net(sexp, "GND")
+        assert layers == ["In1.Cu"]
+
+        plane_nets = find_all_plane_nets(sexp)
+        assert plane_nets == {"GND": "In1.Cu"}
+
+
 class TestAutoDetectPlaneNets:
     """Tests for CLI auto-detection of power plane nets."""
 
