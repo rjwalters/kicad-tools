@@ -541,7 +541,7 @@ class Reconciler:
         Returns:
             List of SyncChange records documenting what was (or would be) changed.
         """
-        from kicad_tools.core.sexp_file import load_pcb, save_pcb
+        from kicad_tools.schema.pcb import PCB
 
         confidence_order = {"high": 0, "medium": 1, "low": 2}
         min_level = confidence_order.get(min_confidence, 0)
@@ -561,16 +561,46 @@ class Reconciler:
         if not actions_to_apply:
             return changes
 
-        # Load PCB s-expression for modification
-        sexp = load_pcb(str(self._pcb_path))
+        # Load PCB as a PCB object for full API access (add_footprint, add_net, etc.)
+        pcb = PCB.load(str(self._pcb_path))
+
+        # Compute placement position for new footprints (below board outline)
+        placement_x, placement_y, placement_col = self._compute_placement_start(pcb)
+        placement_start_x = placement_x
+        placement_spacing = 15.0
+        placement_columns = 10
+
+        has_add_footprint = any(a["type"] == "add_footprint" for a in actions_to_apply)
 
         for action in actions_to_apply:
-            change = self._apply_action(sexp, action, dry_run)
-            if change:
-                changes.append(change)
+            if action["type"] == "add_footprint":
+                change = self._apply_add_footprint(
+                    pcb, action, dry_run,
+                    placement_x, placement_y,
+                )
+                if change:
+                    changes.append(change)
+                    # Advance grid position for next footprint
+                    placement_col += 1
+                    if placement_col >= placement_columns:
+                        placement_col = 0
+                        placement_x = placement_start_x
+                        placement_y += placement_spacing
+                    else:
+                        placement_x += placement_spacing
+            else:
+                change = self._apply_action(pcb._sexp, action, dry_run)
+                if change:
+                    changes.append(change)
+
+        # Assign nets from schematic netlist after all footprints are added
+        if not dry_run and has_add_footprint and any(
+            c.applied and c.change_type == "add_footprint" for c in changes
+        ):
+            self._assign_nets(pcb)
 
         # Save if not dry-run and there were changes
-        if not dry_run and changes:
+        if not dry_run and any(c.applied for c in changes):
             output_path = str(output) if output else str(self._pcb_path)
 
             # Create backup before modifying
@@ -578,9 +608,115 @@ class Reconciler:
                 backup_path = self._pcb_path.with_suffix(".kicad_pcb.bak")
                 shutil.copy2(self._pcb_path, backup_path)
 
-            save_pcb(sexp, output_path)
+            pcb.save(output_path)
 
         return changes
+
+    def _compute_placement_start(self, pcb) -> tuple[float, float, int]:
+        """Compute starting position for placing new footprints.
+
+        Places footprints below the board outline with a margin. If no board
+        outline is detected, starts at a reasonable default position.
+
+        Returns:
+            Tuple of (x, y, col) where col is the starting column index (0).
+        """
+        outline = pcb.get_board_outline()
+        if outline:
+            # Place below the board outline with 10mm margin
+            max_y = max(pt[1] for pt in outline)
+            min_x = min(pt[0] for pt in outline)
+            # Convert from sheet-absolute to board-relative coordinates
+            origin_x, origin_y = pcb.board_origin
+            start_x = min_x - origin_x
+            start_y = (max_y - origin_y) + 10.0
+        else:
+            start_x = 10.0
+            start_y = 10.0
+        return start_x, start_y, 0
+
+    def _apply_add_footprint(
+        self,
+        pcb,
+        action: dict[str, Any],
+        dry_run: bool,
+        x: float,
+        y: float,
+    ) -> SyncChange | None:
+        """Apply an add_footprint action to the PCB.
+
+        Args:
+            pcb: The PCB object.
+            action: Action dict with footprint details.
+            dry_run: If True, don't modify the PCB.
+            x: X position for placement (board-relative).
+            y: Y position for placement (board-relative).
+
+        Returns:
+            SyncChange record, or None if the action failed.
+        """
+        ref = action["reference"]
+        footprint = action.get("footprint", "")
+        value = action.get("value", "")
+
+        if dry_run:
+            return SyncChange(
+                reference=ref,
+                change_type="add_footprint",
+                old_value="",
+                new_value=f"{footprint} ({value})",
+                applied=False,
+            )
+
+        try:
+            pcb.add_footprint(
+                library_id=footprint,
+                reference=ref,
+                x=x,
+                y=y,
+                rotation=0.0,
+                layer="F.Cu",
+                value=value,
+            )
+            return SyncChange(
+                reference=ref,
+                change_type="add_footprint",
+                old_value="",
+                new_value=f"{footprint} ({value})",
+                applied=True,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            # Library not found or footprint not resolvable -- record but continue
+            return SyncChange(
+                reference=ref,
+                change_type="add_footprint",
+                old_value="",
+                new_value=f"{footprint} ({value}) [error: {e}]",
+                applied=False,
+            )
+
+    def _assign_nets(self, pcb) -> None:
+        """Export netlist from schematic and assign nets to PCB pads.
+
+        This wires up pad-to-net mappings for both existing and newly added
+        footprints based on schematic connectivity.
+        """
+        try:
+            from kicad_tools.operations.netlist import export_netlist
+
+            netlist = export_netlist(str(self._schematic_path))
+
+            # Add all nets from the netlist to the PCB
+            for net in netlist.nets:
+                if net.name:
+                    pcb.add_net(net.name)
+
+            # Assign nets to pads
+            pcb.assign_nets_from_netlist(netlist)
+        except Exception:
+            # Net assignment is best-effort; failures are not fatal.
+            # The user can run assign_nets_from_netlist() separately.
+            pass
 
     def _apply_action(
         self, sexp, action: dict[str, Any], dry_run: bool
@@ -657,23 +793,6 @@ class Reconciler:
                 change_type="update_footprint",
                 old_value=old_fp,
                 new_value=new_fp,
-                applied=False,  # Never auto-applied
-            )
-
-        elif action_type == "add_footprint":
-            ref = action["reference"]
-            footprint = action.get("footprint", "")
-            value = action.get("value", "")
-
-            # add_footprint actions are recorded but not applied automatically
-            # because placing a new footprint requires KiCad standard libraries
-            # and net assignment from the schematic netlist. Use PCB.add_footprint()
-            # directly for programmatic placement.
-            return SyncChange(
-                reference=ref,
-                change_type="add_footprint",
-                old_value="",
-                new_value=f"{footprint} ({value})",
                 applied=False,  # Never auto-applied
             )
 

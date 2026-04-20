@@ -263,7 +263,12 @@ def _output_changes_table(changes, dry_run: bool) -> None:
         if change.change_type == "update_footprint":
             status = "(manual - footprint change invalidates routing)"
         elif change.change_type == "add_footprint":
-            status = "(manual - requires KiCad libraries for placement)"
+            if dry_run:
+                status = "(would add)"
+            elif change.applied:
+                status = "(placed)"
+            else:
+                status = "(failed - library not found)"
 
         print(f"\n  {change.change_type}: {change.reference}")
         if change.change_type == "add_footprint":
