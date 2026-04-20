@@ -104,6 +104,7 @@ class RouteConfig:
     """Routing configuration."""
 
     strategy: str = "negotiated"
+    grid_strategy: str = "adaptive"  # "adaptive" or "uniform"
     grid_resolution: float = 0.1
     trace_width: float = 0.2
     clearance: float = 0.2

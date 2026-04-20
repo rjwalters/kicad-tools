@@ -433,6 +433,94 @@ def adjust_grid_for_compliance(
 
 
 @dataclass
+class FineZone:
+    """A local fine-grid zone around a component.
+
+    Attributes:
+        ref: Component reference designator
+        x_min: Bounding box minimum X (mm)
+        y_min: Bounding box minimum Y (mm)
+        x_max: Bounding box maximum X (mm)
+        y_max: Bounding box maximum Y (mm)
+        resolution: Fine grid resolution for this zone (mm)
+    """
+
+    ref: str
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+    resolution: float
+
+    @property
+    def width(self) -> float:
+        """Zone width in mm."""
+        return self.x_max - self.x_min
+
+    @property
+    def height(self) -> float:
+        """Zone height in mm."""
+        return self.y_max - self.y_min
+
+    @property
+    def cell_count(self) -> int:
+        """Estimated cell count for this zone (single layer)."""
+        cols = int(self.width / self.resolution) + 1
+        rows = int(self.height / self.resolution) + 1
+        return cols * rows
+
+
+@dataclass
+class MultiResolutionGridPlan:
+    """Plan for adaptive multi-resolution grid routing.
+
+    When auto_select_grid_resolution determines that a uniform grid would
+    either exceed memory limits at a fine resolution or leave fine-pitch pads
+    off-grid at a coarse resolution, it produces this plan instead.
+
+    The plan specifies:
+    - A coarse global resolution for channel routing
+    - Per-component fine zones with local high-resolution grids
+
+    Attributes:
+        coarse_resolution: Global grid resolution for channel routing (mm)
+        fine_zones: List of per-component fine-grid zones
+        total_cell_estimate: Estimated total cells across all zones + global grid
+        uniform_fallback: The resolution that uniform grid selection would use
+    """
+
+    coarse_resolution: float
+    fine_zones: list[FineZone]
+    total_cell_estimate: int = 0
+    uniform_fallback: float = 0.0
+
+    @property
+    def is_multi_resolution(self) -> bool:
+        """True if fine zones are present (adaptive routing needed)."""
+        return len(self.fine_zones) > 0
+
+    def summary(self) -> str:
+        """Human-readable summary of the multi-resolution plan."""
+        lines = [
+            "Multi-Resolution Grid Plan (adaptive)",
+            f"  Coarse grid: {self.coarse_resolution:.3f}mm",
+            f"  Fine zones: {len(self.fine_zones)}",
+        ]
+        for zone in self.fine_zones:
+            lines.append(
+                f"    {zone.ref}: {zone.resolution:.4f}mm "
+                f"({zone.width:.1f}x{zone.height:.1f}mm, "
+                f"~{zone.cell_count:,} cells)"
+            )
+        lines.append(f"  Total cell estimate: {self.total_cell_estimate:,}")
+        if self.uniform_fallback > 0:
+            lines.append(
+                f"  Uniform fallback would be: {self.uniform_fallback:.3f}mm"
+            )
+        return "\n".join(lines)
+
+
+@dataclass
 class GridAutoSelection:
     """Result of automatic grid resolution selection.
 
@@ -712,6 +800,136 @@ def auto_select_grid_resolution(
     )
 
 
+def compute_multi_resolution_plan(
+    pads: list[Pad] | list[PadPosition] | dict[tuple[str, str], Pad],
+    clearance: float,
+    board_width: float | None = None,
+    board_height: float | None = None,
+    max_cells: int = 2_000_000,
+    zone_padding: float = 2.0,
+    min_fine_resolution: float = 0.05,
+    fine_pitch_threshold: float = 0.8,
+) -> MultiResolutionGridPlan | None:
+    """Compute a multi-resolution grid plan for adaptive routing.
+
+    Analyzes pad positions to determine if a multi-resolution approach is
+    beneficial. Returns a plan with coarse global grid and per-component
+    fine zones when fine-pitch components are detected.
+
+    Returns None if all components are coarse-pitch (uniform grid is optimal).
+
+    Args:
+        pads: Pad objects or positions
+        clearance: Required trace clearance in mm
+        board_width: Board width in mm
+        board_height: Board height in mm
+        max_cells: Maximum total cell budget across all zones
+        zone_padding: Padding around component bbox for fine zones (mm)
+        min_fine_resolution: Minimum fine grid resolution floor (mm)
+        fine_pitch_threshold: Pitch below this triggers fine-grid zone
+
+    Returns:
+        MultiResolutionGridPlan if fine-pitch components detected, else None.
+    """
+    from .adaptive_grid import identify_fine_pitch_components
+    from .subgrid import compute_subgrid_resolution
+
+    # Convert to appropriate format
+    if isinstance(pads, dict):
+        pad_list: list = list(pads.values())
+        pad_dict = pads
+    else:
+        pad_list = list(pads)
+        pad_dict = None
+
+    if not pad_list:
+        return None
+
+    # Run uniform selection first to get coarse resolution
+    uniform_result = auto_select_grid_resolution(
+        pads=pad_list,
+        clearance=clearance,
+        board_width=board_width,
+        board_height=board_height,
+    )
+    coarse_resolution = uniform_result.resolution
+
+    # Check if we have Pad objects (needed for identify_fine_pitch_components)
+    # PadPosition objects don't have ref attribute
+    has_ref = hasattr(pad_list[0], "ref") if pad_list else False
+    if not has_ref:
+        # Can't identify fine-pitch components without ref info
+        return None
+
+    # Identify fine-pitch components
+    fine_components = identify_fine_pitch_components(
+        pad_list,
+        coarse_resolution=coarse_resolution,
+        fine_pitch_threshold=fine_pitch_threshold,
+    )
+
+    if not fine_components:
+        # No fine-pitch components - uniform grid is optimal
+        return None
+
+    # Build fine zones from component bboxes
+    # Group pads by component reference
+    by_ref: dict[str, list] = {}
+    for pad in pad_list:
+        ref = getattr(pad, "ref", None)
+        if ref and ref in fine_components:
+            if ref not in by_ref:
+                by_ref[ref] = []
+            by_ref[ref].append(pad)
+
+    fine_zones: list[FineZone] = []
+    for ref, comp_pads in by_ref.items():
+        if not comp_pads:
+            continue
+
+        # Compute bbox
+        xs = [p.x for p in comp_pads]
+        ys = [p.y for p in comp_pads]
+        x_min = min(xs) - zone_padding
+        y_min = min(ys) - zone_padding
+        x_max = max(xs) + zone_padding
+        y_max = max(ys) + zone_padding
+
+        # Fine resolution for this component
+        fine_res = fine_components[ref]
+        fine_res = max(fine_res, min_fine_resolution)
+
+        fine_zones.append(FineZone(
+            ref=ref,
+            x_min=x_min,
+            y_min=y_min,
+            x_max=x_max,
+            y_max=y_max,
+            resolution=fine_res,
+        ))
+
+    if not fine_zones:
+        return None
+
+    # Estimate total cells
+    total_cells = 0
+    for zone in fine_zones:
+        total_cells += zone.cell_count
+
+    # Add coarse grid cells estimate
+    if board_width and board_height:
+        coarse_cols = int(board_width / coarse_resolution) + 1
+        coarse_rows = int(board_height / coarse_resolution) + 1
+        total_cells += coarse_cols * coarse_rows
+
+    return MultiResolutionGridPlan(
+        coarse_resolution=coarse_resolution,
+        fine_zones=fine_zones,
+        total_cell_estimate=total_cells,
+        uniform_fallback=uniform_result.resolution,
+    )
+
+
 def recommend_grid_for_board_size(
     board_width: float,
     board_height: float,
@@ -895,6 +1113,120 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
             positions.append(PadPosition(x=abs_x, y=abs_y))
 
     return positions
+
+
+def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
+    """Extract pad objects with ref/pin info for grid analysis.
+
+    Unlike extract_pad_positions which only returns (x, y), this returns full
+    Pad objects with component reference and pin information needed for
+    identify_fine_pitch_components() and multi-resolution grid planning.
+
+    Args:
+        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
+
+    Returns:
+        List of Pad objects with x, y, ref, pin, net, and layer info.
+    """
+    from .primitives import Pad as PadObj
+
+    # Read file if path provided
+    if isinstance(pcb_path_or_text, Path):
+        pcb_text = pcb_path_or_text.read_text()
+    elif not pcb_path_or_text.startswith("("):
+        pcb_text = Path(pcb_path_or_text).read_text()
+    else:
+        pcb_text = pcb_path_or_text
+
+    pads: list[Pad] = []
+
+    # Split by footprint for easier parsing
+    footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
+
+    for section in footprint_sections:
+        if not section.startswith("(footprint"):
+            continue
+
+        # Get footprint reference
+        ref_match = re.search(
+            r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section
+        )
+        ref = ref_match.group(1) if ref_match else ""
+
+        # Get footprint position and rotation
+        at_match = re.search(
+            r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section
+        )
+        if not at_match:
+            continue
+
+        fp_x = float(at_match.group(1))
+        fp_y = float(at_match.group(2))
+        fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
+
+        # Precompute rotation values
+        rot_rad = math.radians(fp_rot)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        # Find all pad blocks
+        pad_blocks = _extract_pad_blocks(section)
+
+        for pad_block in pad_blocks:
+            # Extract pad number/pin
+            pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
+            pin = pin_match.group(1) if pin_match else ""
+
+            # Extract pad type for through_hole detection
+            is_thru = "thru_hole" in pad_block
+
+            # Extract at position
+            pad_at = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
+            if not pad_at:
+                continue
+
+            pad_x = float(pad_at.group(1))
+            pad_y = float(pad_at.group(2))
+
+            # Transform to absolute position
+            abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
+            abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
+
+            # Extract pad size
+            size_match = re.search(
+                r"\(size\s+([-\d.]+)\s+([-\d.]+)\)", pad_block
+            )
+            width = float(size_match.group(1)) if size_match else 0.3
+            height = float(size_match.group(2)) if size_match else 0.3
+
+            # Extract net
+            net_match = re.search(r"\(net\s+(\d+)", pad_block)
+            net_num = int(net_match.group(1)) if net_match else 0
+
+            # Extract net name
+            net_name_match = re.search(
+                r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block
+            )
+            net_name = net_name_match.group(1).strip() if net_name_match else ""
+
+            # Determine layer
+            layer = Layer.F_CU
+            if "B.Cu" in pad_block and "F.Cu" not in pad_block:
+                layer = Layer.B_CU
+
+            pads.append(PadObj(
+                x=abs_x,
+                y=abs_y,
+                width=width,
+                height=height,
+                net=net_num,
+                net_name=net_name,
+                ref=ref,
+                pin=pin,
+                layer=layer,
+                through_hole=is_thru,
+            ))
+
+    return pads
 
 
 def _get_pair_clearance(

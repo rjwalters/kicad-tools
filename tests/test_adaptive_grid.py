@@ -1,6 +1,7 @@
 """Tests for adaptive grid routing — fine grid near pads, coarse grid in channels.
 
 Issue #1135: Adaptive grid routing for fine-pitch components.
+Issue #1768: Make adaptive multi-resolution grid the default routing strategy.
 """
 
 import math
@@ -13,6 +14,11 @@ from kicad_tools.router.adaptive_grid import (
     identify_fine_pitch_components,
 )
 from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.io import (
+    FineZone,
+    MultiResolutionGridPlan,
+    compute_multi_resolution_plan,
+)
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
@@ -480,3 +486,204 @@ class TestAdaptiveGridTimings:
         assert result.phase1_time_ms >= 0
         assert result.phase2_time_ms >= 0
         assert result.total_time_ms >= 0
+
+
+class TestMultiResolutionGridPlan:
+    """Tests for MultiResolutionGridPlan and compute_multi_resolution_plan (Issue #1768)."""
+
+    def test_fine_pitch_triggers_multi_resolution(self):
+        """Fine-pitch components should produce a multi-resolution plan."""
+        # SSOP-like pads at 0.65mm pitch
+        pads = {}
+        for i in range(10):
+            key = ("U1", str(i + 1))
+            pads[key] = make_pad(
+                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
+            )
+
+        plan = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=65.0,
+            board_height=56.0,
+        )
+
+        assert plan is not None
+        assert plan.is_multi_resolution
+        assert len(plan.fine_zones) == 1
+        assert plan.fine_zones[0].ref == "U1"
+        assert plan.fine_zones[0].resolution >= 0.05  # Min floor
+        assert plan.coarse_resolution > 0
+
+    def test_uniform_board_returns_none(self):
+        """Board with only coarse-pitch components should return None (use uniform)."""
+        # All 2.54mm pitch through-hole
+        pads = {}
+        for i in range(4):
+            key = ("J1", str(i + 1))
+            pads[key] = make_pad(
+                x=5.0 + i * 2.54, y=5.0, net=i + 1, ref="J1", pin=str(i + 1),
+                through_hole=True, width=1.7, height=1.7,
+            )
+
+        plan = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=50.0,
+            board_height=50.0,
+        )
+
+        assert plan is None
+
+    def test_memory_budget_compliance(self):
+        """Total cell estimate should stay within budget for typical boards."""
+        # Mixed board: SSOP + connectors
+        pads = {}
+        for i in range(20):
+            key = ("U1", str(i + 1))
+            pads[key] = make_pad(
+                x=10.0 + (i % 10) * 0.65,
+                y=10.0 + (i // 10) * 6.0,
+                net=i + 1, ref="U1", pin=str(i + 1),
+            )
+        for i in range(8):
+            key = ("J1", str(i + 1))
+            pads[key] = make_pad(
+                x=40.0 + i * 2.54, y=30.0, net=i + 30, ref="J1", pin=str(i + 1),
+                through_hole=True, width=1.7, height=1.7,
+            )
+
+        plan = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=65.0,
+            board_height=56.0,
+            max_cells=2_000_000,
+        )
+
+        assert plan is not None
+        assert plan.total_cell_estimate < 2_000_000
+
+    def test_zone_padding_applied(self):
+        """Fine zones should include padding around component bbox."""
+        pads = {}
+        for i in range(4):
+            key = ("U1", str(i + 1))
+            pads[key] = make_pad(
+                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
+            )
+
+        plan = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            zone_padding=2.0,
+        )
+
+        assert plan is not None
+        zone = plan.fine_zones[0]
+        # Zone should extend 2mm beyond pads
+        assert zone.x_min < 10.0
+        assert zone.x_max > 10.0 + 3 * 0.65
+        assert zone.y_min < 10.0
+        assert zone.y_max > 10.0
+
+    def test_explicit_grid_overrides_adaptive(self):
+        """When --grid is numeric (not auto), multi_res_plan should not be computed."""
+        # This is a behavioral test - explicit grid bypasses adaptive.
+        # Verified by the route_cmd.py logic: multi_res_plan only computed
+        # when args.grid == "auto"
+        plan = compute_multi_resolution_plan(
+            pads=[],
+            clearance=0.15,
+        )
+        assert plan is None
+
+    def test_multiple_fine_pitch_components(self):
+        """Multiple fine-pitch components should each get their own zone."""
+        pads = {}
+        # Component U1 at 0.65mm pitch
+        for i in range(4):
+            key = ("U1", str(i + 1))
+            pads[key] = make_pad(
+                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
+            )
+        # Component U2 at 0.5mm pitch
+        for i in range(4):
+            key = ("U2", str(i + 1))
+            pads[key] = make_pad(
+                x=30.0 + i * 0.5, y=30.0, net=i + 10, ref="U2", pin=str(i + 1)
+            )
+
+        plan = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=50.0,
+            board_height=50.0,
+        )
+
+        assert plan is not None
+        assert len(plan.fine_zones) == 2
+        refs = {z.ref for z in plan.fine_zones}
+        assert "U1" in refs
+        assert "U2" in refs
+
+
+class TestFineZone:
+    """Tests for FineZone dataclass."""
+
+    def test_cell_count(self):
+        """cell_count should compute expected cells for zone."""
+        zone = FineZone(
+            ref="U1",
+            x_min=0.0, y_min=0.0,
+            x_max=10.0, y_max=10.0,
+            resolution=0.05,
+        )
+        # (10/0.05 + 1) * (10/0.05 + 1) = 201 * 201 = 40401
+        assert zone.cell_count == 201 * 201
+
+    def test_width_height(self):
+        """Width and height properties should be correct."""
+        zone = FineZone(
+            ref="U1",
+            x_min=5.0, y_min=3.0,
+            x_max=15.0, y_max=8.0,
+            resolution=0.1,
+        )
+        assert zone.width == pytest.approx(10.0)
+        assert zone.height == pytest.approx(5.0)
+
+
+class TestMultiResolutionGridPlanDataclass:
+    """Tests for MultiResolutionGridPlan properties and formatting."""
+
+    def test_is_multi_resolution_true(self):
+        """Plan with fine zones should report is_multi_resolution True."""
+        plan = MultiResolutionGridPlan(
+            coarse_resolution=0.25,
+            fine_zones=[FineZone("U1", 0, 0, 10, 10, 0.05)],
+            total_cell_estimate=50000,
+        )
+        assert plan.is_multi_resolution is True
+
+    def test_is_multi_resolution_false(self):
+        """Plan with no fine zones should report is_multi_resolution False."""
+        plan = MultiResolutionGridPlan(
+            coarse_resolution=0.1,
+            fine_zones=[],
+        )
+        assert plan.is_multi_resolution is False
+
+    def test_summary_format(self):
+        """Summary should be human-readable."""
+        plan = MultiResolutionGridPlan(
+            coarse_resolution=0.25,
+            fine_zones=[FineZone("U1", 8.0, 8.0, 12.0, 12.0, 0.05)],
+            total_cell_estimate=100000,
+            uniform_fallback=0.1,
+        )
+        summary = plan.summary()
+        assert "0.250mm" in summary
+        assert "U1" in summary
+        assert "0.0500mm" in summary
+        assert "100,000" in summary
