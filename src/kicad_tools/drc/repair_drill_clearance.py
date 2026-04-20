@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..sexp import SExp, parse_file
+from .net_compat import resolve_net_atom
 from .violation import DRCViolation, ViolationType
 
 
@@ -258,8 +259,11 @@ class DrillClearanceRepairer:
                 continue
 
             net_node = via_node.find("net")
-            net_num = int(net_node.get_first_atom()) if net_node else 0
-            net_name = self.nets.get(net_num, "")
+            net_num, net_name = resolve_net_atom(
+                net_node.get_first_atom() if net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             drill_node = via_node.find("drill")
             drill = float(drill_node.get_first_atom()) if drill_node else 0.3
@@ -431,7 +435,11 @@ class DrillClearanceRepairer:
             net_node = seg_node.find("net")
             if not net_node:
                 continue
-            seg_net = int(net_node.get_first_atom())
+            seg_net, _ = resolve_net_atom(
+                net_node.get_first_atom(),
+                self.nets,
+                self.net_names,
+            )
             if seg_net != net_num:
                 continue
 

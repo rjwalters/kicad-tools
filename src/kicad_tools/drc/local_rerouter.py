@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from ..sexp import SExp
+from .net_compat import resolve_net_atom
 
 
 @dataclass(order=True)
@@ -76,6 +77,7 @@ class LocalRerouter:
         """
         self.doc = doc
         self.nets = nets
+        self.net_names: dict[str, int] = {name: num for num, name in nets.items()}
         self.resolution = resolution
         self.padding = padding
 
@@ -134,7 +136,11 @@ class LocalRerouter:
         seg_layer = layer_node.get_first_atom() if layer_node else "F.Cu"
 
         net_node = seg_node.find("net")
-        seg_net = int(net_node.get_first_atom()) if net_node else 0
+        seg_net, _ = resolve_net_atom(
+            net_node.get_first_atom() if net_node else None,
+            self.nets,
+            self.net_names,
+        )
 
         width_node = seg_node.find("width")
         seg_width = float(width_node.get_first_atom()) if width_node else trace_width
@@ -409,7 +415,11 @@ class LocalRerouter:
 
             # Same-net vias: don't block (our trace can touch our own via)
             via_net_node = via_node.find("net")
-            via_net = int(via_net_node.get_first_atom()) if via_net_node else 0
+            via_net, _ = resolve_net_atom(
+                via_net_node.get_first_atom() if via_net_node else None,
+                self.nets,
+                self.net_names,
+            )
             if via_net == net and net != 0:
                 continue
 
@@ -428,7 +438,11 @@ class LocalRerouter:
                 continue
 
             other_net_node = other_seg.find("net")
-            other_net = int(other_net_node.get_first_atom()) if other_net_node else 0
+            other_net, _ = resolve_net_atom(
+                other_net_node.get_first_atom() if other_net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             # Skip same-net segments unless they are explicitly listed as obstacles
             is_same_net_obstacle = id(other_seg) in same_net_obs_ids

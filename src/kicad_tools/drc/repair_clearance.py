@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..sexp import SExp, parse_file
+from .net_compat import resolve_net_atom
 from .report import DRCReport
 from .violation import DRCViolation, ViolationType
 
@@ -1114,8 +1115,11 @@ class ClearanceRepairer:
                 continue
 
             net_node = seg_node.find("net")
-            net_num = int(net_node.get_first_atom()) if net_node else 0
-            net_name = self.nets.get(net_num, "")
+            net_num, net_name = resolve_net_atom(
+                net_node.get_first_atom() if net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             if nets and net_name not in nets:
                 continue
@@ -1151,8 +1155,11 @@ class ClearanceRepairer:
                 continue
 
             net_node = via_node.find("net")
-            net_num = int(net_node.get_first_atom()) if net_node else 0
-            net_name = self.nets.get(net_num, "")
+            net_num, net_name = resolve_net_atom(
+                net_node.get_first_atom() if net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             # Relax net filter: allow vias with no net (net 0 / empty name)
             # or vias whose net is "<no net>", since these commonly appear
