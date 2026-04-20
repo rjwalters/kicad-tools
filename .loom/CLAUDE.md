@@ -2,7 +2,7 @@
 
 This repository uses **Loom** for AI-powered development orchestration.
 
-**Loom Version**: unknown
+**Loom Version**: 0.6.1
 **Installation Date**: 2026-04-20
 
 ## What is Loom?
