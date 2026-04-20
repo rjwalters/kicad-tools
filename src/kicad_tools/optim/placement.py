@@ -93,6 +93,15 @@ class PlacementOptimizer:
         self._gpu_accelerator: PlacementGPUAccelerator | None = None
         self._gpu_enabled = False
 
+        # C++ force engine acceleration
+        self._cpp_force_available = False
+        try:
+            from kicad_tools.optim.cpp_backend import is_cpp_available
+
+            self._cpp_force_available = is_cpp_available()
+        except ImportError:
+            pass
+
         # Decision recording
         self.record_decisions = record_decisions
         self._decision_store: DecisionStore | None = None
@@ -1435,6 +1444,32 @@ class PlacementOptimizer:
 
         return forces, torques
 
+    def _compute_component_repulsion_cpp(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using C++ backend.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for component repulsion only.
+        """
+        from kicad_tools.optim.cpp_backend import compute_repulsion_cpp
+
+        return compute_repulsion_cpp(self.components, self.config)
+
+    def _compute_boundary_forces_cpp(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute board boundary forces using C++ backend.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for boundary forces only.
+        """
+        from kicad_tools.optim.cpp_backend import compute_boundary_forces_cpp
+
+        return compute_boundary_forces_cpp(
+            self.components, self.board_outline, self.config
+        )
+
     def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
         """
         Compute net forces and torques on all components.
@@ -1453,11 +1488,13 @@ class PlacementOptimizer:
         torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
 
         # 1. Component-component repulsion (edge-to-edge charges)
-        # Use GPU when available, otherwise fall back to CPU
+        # Use GPU when available, then C++ backend, then fall back to Python CPU
         if self._gpu_enabled and self._gpu_accelerator is not None:
             # Update edge positions (components may have moved)
             self._gpu_accelerator.update_edge_positions(self.components)
             repulsion_forces, repulsion_torques = self._compute_component_repulsion_gpu()
+        elif self._cpp_force_available:
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_cpp()
         else:
             repulsion_forces, repulsion_torques = self._compute_component_repulsion_cpu()
 
@@ -1468,30 +1505,37 @@ class PlacementOptimizer:
             torques[ref] += torque
 
         # 2. Board boundary forces (edge-to-edge with board)
-        for comp in self.components:
-            if comp.fixed:
-                continue
-            outline = comp.outline()
-            center = comp.position()
-            inside = self.board_outline.contains_point(center)
-            scale = self.config.boundary_charge / self.config.charge_density
+        if self._cpp_force_available:
+            boundary_forces, boundary_torques = self._compute_boundary_forces_cpp()
+            for ref, force in boundary_forces.items():
+                forces[ref] = forces[ref] + force
+            for ref, torque in boundary_torques.items():
+                torques[ref] += torque
+        else:
+            for comp in self.components:
+                if comp.fixed:
+                    continue
+                outline = comp.outline()
+                center = comp.position()
+                inside = self.board_outline.contains_point(center)
+                scale = self.config.boundary_charge / self.config.charge_density
 
-            for e_start, e_end in outline.edges():
-                for b_start, b_end in self.board_outline.edges():
-                    force, edge_torque = self.compute_edge_to_edge_force(
-                        e_start, e_end, b_start, b_end, num_samples=self.config.edge_samples
-                    )
-                    # Board edges repel to keep components inside
-                    if inside:
-                        force = force * scale
-                    else:
-                        # Strong repulsion to push back inside
-                        force = force * (-scale * 10)
+                for e_start, e_end in outline.edges():
+                    for b_start, b_end in self.board_outline.edges():
+                        force, edge_torque = self.compute_edge_to_edge_force(
+                            e_start, e_end, b_start, b_end, num_samples=self.config.edge_samples
+                        )
+                        # Board edges repel to keep components inside
+                        if inside:
+                            force = force * scale
+                        else:
+                            # Strong repulsion to push back inside
+                            force = force * (-scale * 10)
 
-                    forces[comp.ref] = forces[comp.ref] + force
-                    edge_center = (e_start + e_end) * 0.5
-                    r = edge_center - center
-                    torques[comp.ref] += r.cross(force) + edge_torque * scale
+                        forces[comp.ref] = forces[comp.ref] + force
+                        edge_center = (e_start + e_end) * 0.5
+                        r = edge_center - center
+                        torques[comp.ref] += r.cross(force) + edge_torque * scale
 
         # 3. Keepout zone forces
         for keepout in self.keepouts:

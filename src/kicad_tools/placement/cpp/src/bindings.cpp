@@ -1,12 +1,14 @@
 /*
  * Placement C++ Core - nanobind Python bindings
  *
- * Exposes AABB overlap/clearance operations and the BatchCostEvaluator
- * for high-performance placement cost evaluation.
+ * Exposes AABB overlap/clearance operations, the BatchCostEvaluator,
+ * and the force-directed placement engine for high-performance
+ * placement cost and force evaluation.
  */
 
 #include "aabb.hpp"
 #include "cost_evaluator.hpp"
+#include "force_engine.hpp"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 
@@ -15,7 +17,7 @@ using namespace nb::literals;
 using namespace placement;
 
 NB_MODULE(placement_cpp, m) {
-    m.doc() = "C++ placement core for high-performance AABB cost evaluation";
+    m.doc() = "C++ placement core for high-performance AABB cost and force evaluation";
 
     // AABB struct
     nb::class_<AABB>(m, "AABB")
@@ -65,7 +67,39 @@ NB_MODULE(placement_cpp, m) {
              "xs"_a, "ys"_a, "widths"_a, "heights"_a,
              "Compute only DRC violations.");
 
+    // --- Force engine types and functions ---
+
+    // ForceConfig struct
+    nb::class_<ForceConfig>(m, "ForceConfig")
+        .def(nb::init<>())
+        .def_rw("charge_density", &ForceConfig::charge_density)
+        .def_rw("min_distance", &ForceConfig::min_distance)
+        .def_rw("edge_samples", &ForceConfig::edge_samples)
+        .def_rw("boundary_charge", &ForceConfig::boundary_charge);
+
+    // ForceResult struct
+    nb::class_<ForceResult>(m, "ForceResult")
+        .def(nb::init<>())
+        .def_rw("forces_x", &ForceResult::forces_x)
+        .def_rw("forces_y", &ForceResult::forces_y)
+        .def_rw("torques", &ForceResult::torques);
+
+    // Force computation functions
+    m.def("compute_all_repulsion", &compute_all_repulsion,
+          "positions_x"_a, "positions_y"_a,
+          "edges_flat"_a, "edge_offsets"_a,
+          "n_components"_a, "config"_a, "fixed_mask"_a,
+          "Compute all pairwise component repulsion forces and torques.");
+
+    m.def("compute_boundary_forces", &compute_boundary_forces,
+          "positions_x"_a, "positions_y"_a,
+          "edges_flat"_a, "edge_offsets"_a,
+          "board_edges"_a, "n_board_edges"_a,
+          "n_components"_a, "config"_a,
+          "fixed_mask"_a, "inside_flags"_a,
+          "Compute boundary forces from board edges on all components.");
+
     // Version info
-    m.def("version", []() { return "1.0.0"; });
+    m.def("version", []() { return "2.0.0"; });
     m.def("is_available", []() { return true; });
 }
