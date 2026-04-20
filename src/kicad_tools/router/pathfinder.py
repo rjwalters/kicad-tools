@@ -1397,7 +1397,23 @@ class Router:
                 # This enables THT pads to be entered/exited on any layer
                 cell = self.grid.grid[nlayer][ny][nx]
                 if cell.blocked:
-                    if cell.net == start.net:
+                    # Issue #1764: Pad reachability - if the neighbor cell falls
+                    # within either pad's metal area, allow entry regardless of blocked/net
+                    # state. This ensures start/end pads are always reachable even when
+                    # adjacent net=0 pads have marked their cells as blocked.
+                    is_in_end_metal = (
+                        end_metal_gx1 <= nx <= end_metal_gx2
+                        and end_metal_gy1 <= ny <= end_metal_gy2
+                        and nlayer in end_layers
+                    )
+                    is_in_start_metal = (
+                        start_metal_gx1 <= nx <= start_metal_gx2
+                        and start_metal_gy1 <= ny <= start_metal_gy2
+                        and nlayer in start_layers
+                    )
+                    if is_in_end_metal or is_in_start_metal:
+                        pass
+                    elif cell.net == start.net:
                         # Same-net blocked cell (e.g., our THT pad area)
                         # Allow routing through it - this is key for THT routing
                         pass
@@ -1858,6 +1874,7 @@ class Router:
         route: Route,
         exclude_net: int,
         component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
     ) -> bool:
         """Validate route segments and vias against geometric clearance constraints.
 
@@ -1876,13 +1893,16 @@ class Router:
             route: Route to validate
             exclude_net: Net ID to exclude from clearance checks (the route's own net)
             component_pitches: Optional dict mapping component ref to pin pitch in mm
+            exclude_refs: Optional set of component references whose pads should be
+                         excluded from clearance checks (Issue #1764).
 
         Returns:
             True if route passes clearance validation, False otherwise.
         """
         for seg in route.segments:
             is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=exclude_net, component_pitches=component_pitches
+                seg, exclude_net=exclude_net, component_pitches=component_pitches,
+                exclude_refs=exclude_refs
             )
             if not is_valid:
                 return False
@@ -1938,8 +1958,17 @@ class Router:
         )
 
         # Geometric clearance validation (Issue #1016: per-component clearance support)
+        # Issue #1764: Exclude pads on the same component as start/end pads from
+        # clearance checks. Adjacent pads (especially net=0 unconnected pads) on the
+        # same component should not block routing to their neighbors.
+        exclude_refs: set[str] = set()
+        if start_pad.ref:
+            exclude_refs.add(start_pad.ref)
+        if end_pad.ref:
+            exclude_refs.add(end_pad.ref)
         if not self._validate_route_clearance(
-            route, start_pad.net, component_pitches=self.component_pitches
+            route, start_pad.net, component_pitches=self.component_pitches,
+            exclude_refs=exclude_refs if exclude_refs else None
         ):
             # Route has clearance violations - reject it
             # The caller will report "no path found" which is preferable
@@ -2481,8 +2510,15 @@ class Router:
         )
 
         # Geometric clearance validation (Issue #1016: per-component clearance support)
+        # Issue #1764: Exclude pads on start/end component from clearance checks
+        bidir_exclude_refs: set[str] = set()
+        if start_pad.ref:
+            bidir_exclude_refs.add(start_pad.ref)
+        if end_pad.ref:
+            bidir_exclude_refs.add(end_pad.ref)
         if not self._validate_route_clearance(
-            route, start_pad.net, component_pitches=self.component_pitches
+            route, start_pad.net, component_pitches=self.component_pitches,
+            exclude_refs=bidir_exclude_refs if bidir_exclude_refs else None
         ):
             return None
 

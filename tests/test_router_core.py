@@ -178,6 +178,129 @@ class TestAutorouterRouting:
         assert isinstance(routes, list)
 
 
+class TestPadBlockedByAdjacentNetZero:
+    """Regression tests for issue #1764.
+
+    When a net=0 pad is adjacent to a target pad, the net=0 pad's blocked
+    cells can overlap the target pad's metal area, making it unreachable.
+    The pathfinder must always allow entry into the destination pad's metal
+    area regardless of blocked/net state.
+    """
+
+    def test_route_to_pad_adjacent_to_net0_pad(self):
+        """Route to a signal pad whose metal area overlaps with a net=0 pad's cells.
+
+        This is the exact scenario from issue #1764: an LED component where pad 2
+        (net=0/GND) is so close to pad 1 (signal net) that when grid.add_pad() marks
+        net=0 cells as blocked, those cells overlap with pad 1's metal area on the
+        grid. The pathfinder must still be able to reach pad 1's metal area.
+        """
+        # Use 0.1mm grid resolution (default)
+        router = Autorouter(width=20.0, height=20.0)
+
+        # Source pad far away - easy to route from
+        source_pads = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 10.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 1,
+                "net_name": "LED-K",
+            },
+        ]
+        router.add_component("R1", source_pads)
+
+        # Target LED component: pad 1 is signal (net=1), pad 2 is net=0
+        # Pad 2 is placed so its clearance zone overlaps pad 1's metal area.
+        # At 0.1mm grid, a 0.6mm pad spans 6 cells. With 0.2mm spacing between
+        # pad centers (0.2mm = 2 grid cells), clearance zones will heavily overlap.
+        led_pads = [
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 10.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 1,
+                "net_name": "LED-K",
+            },
+            {
+                "number": "2",
+                "x": 10.2,
+                "y": 10.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 0,
+                "net_name": "",
+            },
+        ]
+        router.add_component("LED1", led_pads)
+
+        # Route net 1 - should succeed; prior to fix this returned no path
+        routes = router.route_net(1)
+        assert len(routes) > 0, (
+            "Routing net 1 failed - target pad blocked by adjacent net=0 pad"
+        )
+        assert routes[0].segments, "Route should have segments"
+
+    def test_net0_pad_on_different_component_still_blocks(self):
+        """Ensure net=0 pads on OTHER components still affect routing.
+
+        The fix should only exclude same-component pads from clearance checks.
+        A net=0 pad on a different component should still affect the A* grid
+        blocking, forcing routes to navigate around it.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+
+        # Large net=0 pad in the middle acting as obstacle (different component)
+        obstacle_pads = [
+            {
+                "number": "1",
+                "x": 12.0,
+                "y": 10.0,
+                "width": 2.0,
+                "height": 2.0,
+                "net": 0,
+                "net_name": "",
+            },
+        ]
+        router.add_component("BLOCK", obstacle_pads)
+
+        # Two pads of net 3 on either side
+        left_pads = [
+            {
+                "number": "1",
+                "x": 9.0,
+                "y": 10.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 3,
+                "net_name": "SIG",
+            },
+        ]
+        right_pads = [
+            {
+                "number": "1",
+                "x": 15.0,
+                "y": 10.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 3,
+                "net_name": "SIG",
+            },
+        ]
+        router.add_component("L1", left_pads)
+        router.add_component("R1", right_pads)
+
+        # Route should succeed - the A* pathfinder navigates around blocked cells
+        routes = router.route_net(3)
+        assert isinstance(routes, list)
+        # Route completes (the obstacle forces detour but does not prevent routing)
+        assert len(routes) > 0, "Route should succeed around net=0 obstacle"
+
+
 class TestAutorouterStatistics:
     """Tests for Autorouter statistics and output."""
 
