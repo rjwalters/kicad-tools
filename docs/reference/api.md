@@ -351,23 +351,6 @@ See [MCP Tool Reference](../mcp/tools.md) for detailed documentation.
 
 ---
 
-## Layout Preservation API
-
-Preserve component placement when regenerating PCB from schematic:
-
-```python
-from kicad_tools.layout import LayoutPreserver
-
-# Create preserver from existing PCB
-preserver = LayoutPreserver.from_pcb("board.kicad_pcb")
-
-# Regenerate PCB from updated schematic
-# (placement is preserved for matching components)
-preserver.apply_to("new_board.kicad_pcb")
-```
-
----
-
 ## Analysis API (v0.7)
 
 ### Congestion Analysis
