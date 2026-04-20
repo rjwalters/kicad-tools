@@ -2777,3 +2777,35 @@ class TestRemoveSegments:
             if not c.is_atom and c.name == "segment"
         ]
         assert len(seg_nodes_after) == 0
+
+
+class TestPCBConstructorGuard:
+    """Tests for PCB constructor type guard (issue #1770)."""
+
+    def test_pcb_constructor_rejects_string_path(self):
+        """PCB('path/to/file.kicad_pcb') raises TypeError with helpful message."""
+        with pytest.raises(TypeError, match=r"PCB\(\) expects a parsed SExp"):
+            PCB("/path/to/board.kicad_pcb")
+
+    def test_pcb_constructor_rejects_path_object(self):
+        """PCB(Path('file.kicad_pcb')) raises TypeError with helpful message."""
+        with pytest.raises(TypeError, match=r"Use PCB\.load\("):
+            PCB(Path("/path/to/board.kicad_pcb"))
+
+    def test_pcb_constructor_accepts_sexp(self, minimal_pcb: Path):
+        """PCB(sexp) works when passed a proper SExp object."""
+        from kicad_tools import load_pcb
+
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        assert len(pcb.layers) > 0
+
+    def test_pcb_load_kicad9_fixture(self):
+        """PCB.load() succeeds on KiCad 9/10 format fixture files."""
+        fixture_path = Path(__file__).parent / "fixtures" / "test_zone_fill.kicad_pcb"
+        if not fixture_path.exists():
+            pytest.skip("test_zone_fill.kicad_pcb fixture not available")
+
+        pcb = PCB.load(fixture_path)
+        assert len(pcb.layers) > 0
+        assert len(pcb.nets) >= 0
