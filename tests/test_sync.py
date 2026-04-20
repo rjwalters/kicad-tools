@@ -1,6 +1,7 @@
 """Tests for kicad_tools.sync.reconciler module."""
 
 import json
+import math
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -904,8 +905,9 @@ class TestReconcilerApplyIntegration:
 
         assert len(changes) == 1
         assert changes[0].applied is True
-        # Verify export_netlist was called for net assignment
-        mock_export.assert_called_once_with(sch_path)
+        # Verify export_netlist was called (for smart placement and net assignment)
+        mock_export.assert_called_with(sch_path)
+        assert mock_export.call_count >= 1
         mock_pcb.assign_nets_from_netlist.assert_called_once_with(mock_netlist)
 
         Path(sch_path).unlink()
@@ -1787,3 +1789,324 @@ class TestReconcilerSaveMapping:
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
         Path(output_path).unlink()
+
+
+class TestSmartPlacement:
+    """Tests for net-adjacency-based proximity placement of new components."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler instance without file validation."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+        return reconciler
+
+    def _make_mock_pcb(self, footprints=None, board_origin=(0.0, 0.0), outline=None):
+        """Create a mock PCB with the given footprints."""
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = board_origin
+
+        if footprints is None:
+            footprints = []
+        mock_fps = []
+        for ref, x, y in footprints:
+            fp = MagicMock()
+            fp.reference = ref
+            fp.position = (x, y)
+            mock_fps.append(fp)
+        mock_pcb.footprints = mock_fps
+        mock_pcb.get_board_outline.return_value = outline or []
+        return mock_pcb
+
+    def test_find_non_overlapping_clear_centroid(self):
+        """When centroid is clear, it should be returned directly."""
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, [], 5.0)
+        assert x == 10.0
+        assert y == 20.0
+
+    def test_find_non_overlapping_occupied_centroid(self):
+        """When centroid is occupied, a nearby clear position should be found."""
+        occupied = [(10.0, 20.0)]
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, occupied, 5.0)
+        dist = math.sqrt((x - 10.0) ** 2 + (y - 20.0) ** 2)
+        # Must be at least min_spacing away from the occupied position
+        assert dist >= 5.0
+        # But should be close -- within the first ring (radius = 5.0)
+        assert dist <= 6.0
+
+    def test_find_non_overlapping_multiple_occupied(self):
+        """Position found should be clear of all occupied positions."""
+        occupied = [(10.0, 20.0), (15.0, 20.0), (10.0, 25.0)]
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, occupied, 5.0)
+        for ox, oy in occupied:
+            dist = math.sqrt((x - ox) ** 2 + (y - oy) ** 2)
+            assert dist >= 5.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_build_net_adjacency_basic(self, mock_export):
+        """Components sharing nets should appear as neighbors."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # U1 and C1 share VCC net, U1 and R1 share SIG net
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="C1", pin="1"),
+                NetNode(reference="C2", pin="1"),
+            ]),
+            NetlistNet(code=2, name="GND", nodes=[
+                NetNode(reference="U1", pin="2"),
+                NetNode(reference="C1", pin="2"),
+                NetNode(reference="C2", pin="2"),
+            ]),
+            NetlistNet(code=3, name="SIG", nodes=[
+                NetNode(reference="U1", pin="3"),
+                NetNode(reference="R1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # C1 and R1 are new; U1 and C2 are existing
+        adjacency = reconciler._build_net_adjacency({"C1", "R1"})
+
+        # C1 should have U1 and C2 as neighbors (shares VCC and GND)
+        assert "U1" in adjacency["C1"]
+        assert "C2" in adjacency["C1"]
+        # R1 should have U1 as neighbor (shares SIG)
+        assert "U1" in adjacency["R1"]
+        # U1 is not new, so should not be in adjacency
+        assert "U1" not in adjacency
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_build_net_adjacency_no_placed_neighbors(self, mock_export):
+        """New components sharing nets only with other new components get no neighbors."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="C1", pin="1"),
+                NetNode(reference="C2", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        adjacency = reconciler._build_net_adjacency({"C1", "C2"})
+
+        # Both are new, so neither has placed neighbors
+        assert adjacency.get("C1", set()) == set()
+        assert adjacency.get("C2", set()) == set()
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_near_neighbor(self, mock_export):
+        """New component should be placed near its net-neighbor."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="C1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 is at sheet-absolute (50, 60), board origin is (0, 0)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 60.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Should be within 10mm of U1's position (the acceptance criterion)
+        dist = math.sqrt((cx - 50.0) ** 2 + (cy - 60.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_centroid_of_multiple_neighbors(self, mock_export):
+        """New component with multiple neighbors should be near their centroid."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="U2", pin="1"),
+                NetNode(reference="C1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 at (20, 30), U2 at (40, 30) -> centroid at (30, 30)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 20.0, 30.0), ("U2", 40.0, 30.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Should be within 10mm of the centroid (30, 30)
+        dist = math.sqrt((cx - 30.0) ** 2 + (cy - 30.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_no_neighbors_returns_empty(self, mock_export):
+        """Component with no net-neighbors should not appear in smart positions."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 60.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        # C1 shares no net with any existing component
+        assert "C1" not in positions
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_with_board_origin(self, mock_export):
+        """Smart placement should account for board origin offset."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="C1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 at sheet-absolute (150, 160), board origin at (100, 100)
+        # -> board-relative position is (50, 60)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 150.0, 160.0)],
+            board_origin=(100.0, 100.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Board-relative centroid should be near (50, 60)
+        dist = math.sqrt((cx - 50.0) ** 2 + (cy - 60.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_smart_placement_no_overlap(self, mock_export):
+        """Multiple new components should not overlap each other."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="C1", pin="1"),
+                NetNode(reference="C2", pin="1"),
+                NetNode(reference="C3", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 50.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1", "C2", "C3"])
+
+        assert len(positions) == 3
+        # Verify no two new positions are too close (min_spacing = 5.0)
+        placed = list(positions.values())
+        for i in range(len(placed)):
+            for j in range(i + 1, len(placed)):
+                dist = math.sqrt(
+                    (placed[i][0] - placed[j][0]) ** 2
+                    + (placed[i][1] - placed[j][1]) ** 2
+                )
+                assert dist >= 5.0, (
+                    f"Components too close: {placed[i]} and {placed[j]}, dist={dist}"
+                )
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_decoupling_cap_placed_near_ic(self, mock_export):
+        """Decoupling capacitor for an IC should be placed adjacent to it."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # IC U1 and decoupling cap C1 share VCC and GND nets
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="14"),
+                NetNode(reference="C1", pin="1"),
+            ]),
+            NetlistNet(code=2, name="GND", nodes=[
+                NetNode(reference="U1", pin="7"),
+                NetNode(reference="C1", pin="2"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 80.0, 80.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        dist = math.sqrt((cx - 80.0) ** 2 + (cy - 80.0) ** 2)
+        # Decoupling cap must be within 10mm of the IC (acceptance criterion)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_grid_fallback_for_orphan_components(self, mock_export):
+        """Components with no net-neighbors should fall back to grid placement."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # C1 shares a net with U1, C2 is isolated (no shared nets)
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(code=1, name="VCC", nodes=[
+                NetNode(reference="U1", pin="1"),
+                NetNode(reference="C1", pin="1"),
+            ]),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 50.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1", "C2"])
+
+        # C1 should get smart placement
+        assert "C1" in positions
+        # C2 has no neighbors, so it should not appear (grid fallback in apply())
+        assert "C2" not in positions
