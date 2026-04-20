@@ -774,8 +774,14 @@ def _run_step_audit(ctx: PipelineContext, console: Console) -> PipelineResult:
 
 
 def _run_step_report(ctx: PipelineContext, console: Console) -> PipelineResult:
-    """Run report generation step (final step after AUDIT)."""
-    reports_dir = ctx.pcb_file.parent / "reports"
+    """Run report generation step (final step after AUDIT).
+
+    Writes output into ``manufacturing/`` (the same directory used by
+    the EXPORT step) so the full pipeline produces a single output
+    directory instead of splitting between ``reports/`` and
+    ``manufacturing/``.
+    """
+    mfr_dir = ctx.pcb_file.parent / "manufacturing"
 
     if ctx.dry_run:
         return PipelineResult(
@@ -783,7 +789,7 @@ def _run_step_report(ctx: PipelineContext, console: Console) -> PipelineResult:
             success=True,
             message=(
                 f"[dry-run] Would run: kct report generate {ctx.pcb_file.name} "
-                f"--mfr {ctx.mfr} --no-figures -o reports/"
+                f"--mfr {ctx.mfr} --no-figures -o manufacturing/"
             ),
         )
 
@@ -801,7 +807,7 @@ def _run_step_report(ctx: PipelineContext, console: Console) -> PipelineResult:
         ctx.mfr,
         "--no-figures",
         "-o",
-        str(reports_dir),
+        str(mfr_dir),
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
@@ -1131,12 +1137,9 @@ def _git_commit_result(
         )
         return 1
 
-    # Stage the PCB file, reports/ and manufacturing/ directories (if present)
-    reports_dir = ctx.pcb_file.parent / "reports"
+    # Stage the PCB file and manufacturing/ directory (if present)
     manufacturing_dir = ctx.pcb_file.parent / "manufacturing"
     files_to_stage = [str(ctx.pcb_file)]
-    if reports_dir.exists():
-        files_to_stage.append(str(reports_dir))
     if manufacturing_dir.exists():
         files_to_stage.append(str(manufacturing_dir))
     add_result = subprocess.run(
