@@ -107,6 +107,329 @@ function mapToObject<T>(arr: T[], keyFn: (item: T) => string) { /* only 1 caller
 // }
 ```
 
+### 6. Parallel Drift
+
+When two or more classes/modules solve the same domain problem with different names and APIs, only one is used at runtime. The other is dead weight referenced only by its own tests.
+
+```python
+# BAD: Two session managers solving the same problem
+# file: src/sessions/session_manager.py
+class SessionManager:
+    def create_session(self, user_id: str) -> Session:
+        return Session(user_id=user_id, token=generate_token())
+    def destroy_session(self, session_id: str) -> None:
+        self._store.delete(session_id)
+
+# file: src/core/session_handler.py
+class SessionHandler:
+    def new_session(self, uid: str) -> dict:
+        return {"uid": uid, "tok": make_token(), "ts": time.time()}
+    def end_session(self, sid: str) -> bool:
+        return self._db.remove(sid)
+
+# GOOD: Single canonical implementation
+# file: src/sessions/session_manager.py
+class SessionManager:
+    def create_session(self, user_id: str) -> Session:
+        return Session(user_id=user_id, token=generate_token())
+    def destroy_session(self, session_id: str) -> None:
+        self._store.delete(session_id)
+```
+
+```typescript
+// BAD: Parallel drift in TypeScript
+// file: src/utils/config-loader.ts
+export class ConfigLoader {
+  load(path: string): Config { /* ... */ }
+}
+// file: src/lib/settings-reader.ts
+export class SettingsReader {
+  read(filepath: string): Settings { /* ... */ }
+}
+
+// GOOD: One config module
+// file: src/config/loader.ts
+export class ConfigLoader {
+  load(path: string): Config { /* ... */ }
+}
+```
+
+**Detection scripts:**
+
+```bash
+# Python: Find classes with semantically similar names
+rg "^class \w*(Session|Manager|Handler|Builder|Parser|Validator|Config|Store|Cache|Client)\w*" --type py -n | \
+  sed 's/.*class \([A-Za-z]*\).*/\1/' | sort | uniq -d
+
+# TypeScript: Same check
+rg "^(export )?(class|interface) \w*(Session|Manager|Handler|Builder|Parser|Validator|Config|Store|Cache|Client)\w*" --type ts -n | \
+  sed 's/.*\(class\|interface\) \([A-Za-z]*\).*/\2/' | sort | uniq -d
+
+# Rust: Find structs with similar domain names
+rg "^pub struct \w*(Session|Manager|Handler|Builder|Parser|Validator|Config|Store|Cache|Client)\w*" --type rust -n | \
+  sed 's/.*struct \([A-Za-z]*\).*/\1/' | sort | uniq -d
+
+# After finding candidates, verify: is one only referenced by its own tests?
+# For each candidate file:
+rg "SessionHandler" --type py --files-with-matches | grep -v test
+# If only test files reference it, it's likely parallel drift
+```
+
+### 7. Stub Theater
+
+Methods with rich interfaces (docstrings, type signatures, multiple parameters) that return hardcoded literal values. The external contract promises complex behavior, but the implementation is inert.
+
+```python
+# BAD: Rich interface, stub implementation
+class ChangeDetector:
+    def _is_component_modified(self, component: Component, baseline: Snapshot) -> bool:
+        """Check if a component has been modified since the baseline snapshot.
+
+        Compares component hash, metadata, and dependency graph against
+        the baseline to detect meaningful changes. Ignores whitespace-only
+        and comment-only changes.
+
+        Args:
+            component: The component to check for modifications.
+            baseline: The reference snapshot to compare against.
+
+        Returns:
+            True if the component has meaningful modifications.
+        """
+        return False  # <-- entire subsystem is inert
+
+    def _can_preserve(self, component: Component) -> bool:
+        """Determine if a component can be safely preserved during rebuild.
+
+        Validates three criteria:
+        1. Component has no circular dependencies
+        2. Component's interface hasn't changed
+        3. All downstream consumers are compatible
+
+        Returns:
+            True if safe to preserve, False if rebuild required.
+        """
+        return True  # <-- validation never actually runs
+
+# GOOD: Either implement it or remove the interface
+class ChangeDetector:
+    def _is_component_modified(self, component: Component, baseline: Snapshot) -> bool:
+        current_hash = component.content_hash()
+        baseline_hash = baseline.get_hash(component.id)
+        return current_hash != baseline_hash
+```
+
+```typescript
+// BAD: Stub theater in TypeScript
+class PermissionChecker {
+  /**
+   * Validates user has required permissions for the operation.
+   * Checks role hierarchy, resource ownership, and temporal constraints.
+   */
+  canAccess(user: User, resource: Resource, operation: Operation): boolean {
+    return true; // Everyone can access everything
+  }
+}
+
+// GOOD: Implement or simplify
+function canAccess(user: User, resource: Resource): boolean {
+  return user.roles.some(role => resource.allowedRoles.includes(role));
+}
+```
+
+**Detection scripts:**
+
+```bash
+# Python: Find methods with docstrings that just return a literal
+rg "def \w+\(self" -A 8 --type py |   awk '/def /{found=1; block=""} found{block=block"
+"$0} /return (False|True|None|""|\[\]|\{\}|0)$/{if(found) print block; found=0}'
+
+# Simpler heuristic: methods whose only non-docstring line is a return literal
+rg "def \w+\(self" -A 5 --type py | grep -B 1 "return (False|True|None)$"
+
+# TypeScript: methods returning hardcoded values
+rg "(public|private|protected)?\s+\w+\(.*\).*\{" -A 3 --type ts |   grep -B 1 "return (false|true|null|\[\]|\{\}|0|"")"
+
+# Rust: functions returning hardcoded values (less common but possible)
+rg "fn \w+\(" -A 5 --type rust | grep -B 2 "^\s*(false|true|None|0|"")"
+```
+
+### 8. Framework Scaffolding
+
+Validation, processing, or transformation pipelines that are structurally complete but operate on empty data. A builder/context/factory method returns empty collections while downstream consumers treat the result as meaningful.
+
+```python
+# BAD: Pipeline processes nothing
+class PCBValidator:
+    def validate(self, design_file: str) -> ValidationResult:
+        """Run full validation pipeline on PCB design."""
+        context = self._build_context(design_file)
+        errors = self._check_design_rules(context)
+        warnings = self._check_manufacturing_constraints(context)
+        return ValidationResult(errors=errors, warnings=warnings)
+
+    def _build_context(self, design_file: str) -> dict:
+        # TODO: Implement actual PCB parsing
+        return {
+            "layers": {},        # empty
+            "components": [],    # empty
+            "nets": [],          # empty
+            "rules": {}          # empty
+        }
+        # _check_design_rules and _check_manufacturing_constraints
+        # iterate over empty collections -- validation always passes
+
+# GOOD: Either implement or mark as not-yet-functional
+class PCBValidator:
+    def validate(self, design_file: str) -> ValidationResult:
+        raise NotImplementedError("PCB validation not yet implemented")
+```
+
+```typescript
+// BAD: Framework scaffolding in TypeScript
+class DataPipeline {
+  async process(input: RawData): Promise<ProcessedData> {
+    const enriched = await this.enrich(input);
+    const validated = this.validate(enriched);
+    const transformed = this.transform(validated);
+    return transformed;
+  }
+
+  private async enrich(data: RawData): Promise<EnrichedData> {
+    // TODO: Connect to enrichment service
+    return { ...data, metadata: {}, annotations: [] };
+  }
+}
+
+// GOOD: Be explicit about what's implemented
+class DataPipeline {
+  async process(input: RawData): Promise<ProcessedData> {
+    // Enrichment not yet implemented - pass through
+    const validated = this.validate(input);
+    return this.transform(validated);
+  }
+}
+```
+
+**Detection scripts:**
+
+```bash
+# Python: Find methods returning empty collections with TODOs nearby
+rg "return \{\}" -B 5 --type py | grep -B 4 "TODO\|FIXME\|NotImplemented"
+rg "return \[\]" -B 5 --type py | grep -B 4 "TODO\|FIXME\|NotImplemented"
+
+# Find factory/builder methods returning empty dicts/lists
+rg "(def (build|create|make|get|load)_\w+)" -A 10 --type py |   grep -B 5 "return \(\{\}\|\[\]\)"
+
+# TypeScript: Same patterns
+rg "return \{\}" -B 5 --type ts | grep -B 4 "TODO\|FIXME"
+rg "return \[\]" -B 5 --type ts | grep -B 4 "TODO\|FIXME"
+
+# Rust: Empty collections in builder methods
+rg "fn (build|create|new|load)_?\w*" -A 10 --type rust |   grep -B 5 "Vec::new()\|HashMap::new()\|BTreeMap::new()"
+```
+
+### 9. Stateless Ceremony
+
+Classes where `__init__` is `pass`/empty/missing and no methods assign to `self.*`. These are functions wearing a class costume -- instantiation is ceremony with no purpose.
+
+```python
+# BAD: Class with no instance state
+class PatternAdapter:
+    def __init__(self):
+        pass  # No state
+
+    @staticmethod
+    def convert_glob_to_regex(pattern: str) -> str:
+        return fnmatch.translate(pattern)
+
+    @staticmethod
+    def match(text: str, pattern: str) -> bool:
+        return fnmatch.fnmatch(text, pattern)
+
+    def adapt(self, patterns: list[str]) -> list[re.Pattern]:
+        return [re.compile(self.convert_glob_to_regex(p)) for p in patterns]
+
+# GOOD: Module-level functions
+def convert_glob_to_regex(pattern: str) -> str:
+    return fnmatch.translate(pattern)
+
+def match(text: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(text, pattern)
+
+def adapt_patterns(patterns: list[str]) -> list[re.Pattern]:
+    return [re.compile(convert_glob_to_regex(p)) for p in patterns]
+```
+
+```typescript
+// BAD: Stateless class in TypeScript
+export class SnapshotBuilder {
+  // No constructor, no properties
+  build(data: RawData): Snapshot {
+    return { timestamp: Date.now(), data: this.normalize(data) };
+  }
+
+  private normalize(data: RawData): NormalizedData {
+    return Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [k.toLowerCase(), v])
+    );
+  }
+}
+
+// GOOD: Export functions directly
+export function buildSnapshot(data: RawData): Snapshot {
+  return { timestamp: Date.now(), data: normalizeData(data) };
+}
+
+function normalizeData(data: RawData): NormalizedData {
+  return Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k.toLowerCase(), v])
+  );
+}
+```
+
+**Detection scripts:**
+
+```bash
+# Python: Find classes with no instance state (AST-based)
+python3 -c "
+import ast, sys, os
+for root, dirs, files in os.walk('.'):
+    dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'node_modules']
+    for f in files:
+        if not f.endswith('.py'): continue
+        path = os.path.join(root, f)
+        try:
+            tree = ast.parse(open(path).read())
+        except: continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef): continue
+            has_self_assign = any(
+                isinstance(n, ast.Assign) and
+                any(isinstance(t, ast.Attribute) and
+                    isinstance(t.value, ast.Name) and t.value.id == 'self'
+                    for t in n.targets)
+                for n in ast.walk(node)
+            )
+            if not has_self_assign:
+                print(f'{path}:{node.lineno}: {node.name} (no instance state)')
+"
+
+# TypeScript: classes with no 'this.' property assignments
+rg "class \w+" --type ts -l | while read file; do
+  class_count=$(rg "class \w+" "$file" --count 2>/dev/null || echo 0)
+  this_count=$(rg "this\.\w+\s*=" "$file" --count 2>/dev/null || echo 0)
+  if [ "$this_count" -eq 0 ] && [ "$class_count" -gt 0 ]; then
+    echo "$file: $class_count classes, 0 instance state assignments"
+  fi
+done
+
+# Rust: structs with no fields (unit structs used as namespaces)
+rg "^pub struct \w+;$" --type rust -n
+rg "^pub struct \w+ \{\}$" --type rust -n
+```
+
+
 ---
 
 ## Analysis Scripts
