@@ -804,6 +804,7 @@ class RoutingGrid:
         exclude_net: int,
         min_clearance: float | None = None,
         component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
         """Validate geometric clearance of a segment against all obstacles.
 
@@ -846,6 +847,13 @@ class RoutingGrid:
         for pad in self._pads:
             # Skip same-net pads (clearance not required within same net)
             if pad.net == exclude_net:
+                continue
+
+            # Issue #1764: Skip pads on the same component as start/end pads.
+            # When routing to a pad, adjacent pads on the same component (e.g.,
+            # net=0 unconnected pads) should not cause clearance violations for
+            # the connecting trace segment.
+            if exclude_refs and pad.ref in exclude_refs:
                 continue
 
             # Skip pads on different layers (unless PTH)
