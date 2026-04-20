@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..sexp import SExp, parse_file
+from .net_compat import resolve_net_atom
 from .report import DRCReport
 from .violation import ViolationType
 
@@ -132,8 +133,11 @@ class DRCFixer:
             if layer and seg_layer != layer:
                 continue
 
-            net_num = int(net_node.get_first_atom()) if net_node else 0
-            seg_net_name = self.nets.get(net_num, "")
+            net_num, seg_net_name = resolve_net_atom(
+                net_node.get_first_atom() if net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             if net_name and seg_net_name != net_name:
                 continue
@@ -183,8 +187,11 @@ class DRCFixer:
                 continue
 
             net_node = via_node.find("net")
-            net_num = int(net_node.get_first_atom()) if net_node else 0
-            via_net_name = self.nets.get(net_num, "")
+            net_num, via_net_name = resolve_net_atom(
+                net_node.get_first_atom() if net_node else None,
+                self.nets,
+                self.net_names,
+            )
 
             if net_name and via_net_name != net_name:
                 continue
@@ -277,8 +284,14 @@ class DRCFixer:
                 continue
             if child.name == "segment" or child.name == "via":
                 net_node = child.find("net")
-                if net_node and int(net_node.get_first_atom()) == net_num:
-                    to_delete.append(child)
+                if net_node:
+                    child_net_num, _ = resolve_net_atom(
+                        net_node.get_first_atom(),
+                        self.nets,
+                        self.net_names,
+                    )
+                    if child_net_num == net_num:
+                        to_delete.append(child)
 
         # Delete collected nodes
         for node in to_delete:

@@ -18,6 +18,7 @@ With fix suggestions:
     ...         print(f"  Fix: {suggestion.description}")
 """
 
+from .net_compat import resolve_net_atom
 from .checker import (
     CheckResult,
     ManufacturerCheck,
@@ -83,4 +84,6 @@ __all__ = [
     "DrillClearanceRepairer",
     "DrillRepairAction",
     "DrillRepairResult",
+    # Net compatibility
+    "resolve_net_atom",
 ]
