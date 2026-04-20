@@ -2405,15 +2405,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.grid.lower() == "auto":
         from kicad_tools.router.io import (
             auto_select_grid_resolution,
+            extract_board_dimensions,
             extract_pad_positions,
         )
 
         if not args.quiet:
             print("\n--- Auto-selecting grid resolution ---")
         pad_positions = extract_pad_positions(pcb_path)
+        board_dims = extract_board_dimensions(pcb_path)
+        board_width = board_dims[0] if board_dims else None
+        board_height = board_dims[1] if board_dims else None
         grid_auto_result = auto_select_grid_resolution(
             pads=pad_positions,
             clearance=args.clearance,
+            board_width=board_width,
+            board_height=board_height,
         )
         # Replace args.grid with resolved float for downstream code
         args.grid = grid_auto_result.resolution

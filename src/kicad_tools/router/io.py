@@ -442,6 +442,9 @@ class GridAutoSelection:
         total_pads: Total number of pads analyzed
         off_grid_percentage: Percentage of pads that are off-grid
         candidates_tried: List of (resolution, off_grid_count) tuples tried
+        memory_capped: True if the resolution was constrained by memory budget
+        uncapped_resolution: The resolution that would have been selected without
+            memory constraints (None if no capping occurred)
     """
 
     resolution: float
@@ -449,14 +452,22 @@ class GridAutoSelection:
     total_pads: int
     off_grid_percentage: float
     candidates_tried: list[tuple[float, int]]
+    memory_capped: bool = False
+    uncapped_resolution: float | None = None
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
         lines = [
             f"Selected grid: {self.resolution}mm",
+        ]
+        if self.memory_capped and self.uncapped_resolution is not None:
+            lines.append(
+                f"  (capped from {self.uncapped_resolution}mm due to memory budget)"
+            )
+        lines.extend([
             f"  Total pads: {self.total_pads}",
             f"  Off-grid pads: {self.off_grid_pads} ({self.off_grid_percentage:.1f}%)",
-        ]
+        ])
         if self.candidates_tried:
             lines.append("  Candidates analyzed:")
             for res, off_grid in self.candidates_tried:
@@ -640,6 +651,8 @@ def auto_select_grid_resolution(
         valid_candidates = [min_resolution]
 
     # Further filter by memory constraint if board dimensions provided
+    memory_capped = False
+    pre_memory_candidates = list(valid_candidates)
     if board_width is not None and board_height is not None:
         board_area = board_width * board_height
         memory_valid = []
@@ -648,9 +661,12 @@ def auto_select_grid_resolution(
             if cells <= max_cells:
                 memory_valid.append(res)
         if memory_valid:
+            if len(memory_valid) < len(valid_candidates):
+                memory_capped = True
             valid_candidates = memory_valid
         # If all are too memory-intensive, keep the coarsest DRC-compliant one
         elif valid_candidates:
+            memory_capped = True
             valid_candidates = [valid_candidates[0]]
 
     # Analyze off-grid pads for each candidate
@@ -678,12 +694,21 @@ def auto_select_grid_resolution(
 
     off_grid_pct = (best_off_grid / total_pads * 100) if total_pads > 0 else 0.0
 
+    # Determine what the uncapped resolution would have been
+    uncapped_resolution: float | None = None
+    if memory_capped:
+        # Find the finest candidate that was filtered out by memory budget
+        # (pre_memory_candidates is sorted coarsest-first)
+        uncapped_resolution = pre_memory_candidates[-1]
+
     return GridAutoSelection(
         resolution=best_resolution,
         off_grid_pads=best_off_grid,
         total_pads=total_pads,
         off_grid_percentage=off_grid_pct,
         candidates_tried=candidates_tried,
+        memory_capped=memory_capped,
+        uncapped_resolution=uncapped_resolution,
     )
 
 
@@ -765,6 +790,43 @@ class PadPosition:
 
     x: float
     y: float
+
+
+def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
+    """Extract board width and height from a KiCad PCB file.
+
+    Parses the Edge.Cuts gr_rect to determine board dimensions. This is a
+    lightweight extraction that avoids full PCB parsing.
+
+    Args:
+        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
+
+    Returns:
+        Tuple of (width_mm, height_mm) or None if no board outline found.
+
+    Example:
+        >>> dims = extract_board_dimensions("board.kicad_pcb")
+        >>> if dims:
+        ...     width, height = dims
+        ...     print(f"Board: {width}mm x {height}mm")
+    """
+    # Read file if path provided
+    if isinstance(pcb_path_or_text, Path):
+        pcb_text = pcb_path_or_text.read_text()
+    elif not pcb_path_or_text.startswith("("):
+        # Looks like a path string
+        pcb_text = Path(pcb_path_or_text).read_text()
+    else:
+        pcb_text = pcb_path_or_text
+
+    edge_match = re.search(
+        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
+        pcb_text,
+    )
+    if edge_match:
+        x1, y1, x2, y2 = map(float, edge_match.groups())
+        return (abs(x2 - x1), abs(y2 - y1))
+    return None
 
 
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:

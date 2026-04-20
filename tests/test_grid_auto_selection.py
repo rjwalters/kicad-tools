@@ -8,6 +8,7 @@ from kicad_tools.router.io import (
     _compute_gcd_grid_candidates,
     _is_on_grid,
     auto_select_grid_resolution,
+    extract_board_dimensions,
     extract_pad_positions,
     recommend_grid_for_board_size,
 )
@@ -284,6 +285,88 @@ class TestAutoSelectGridResolution:
         assert 0.0508 in resolutions_tried, (
             f"0.0508mm should be in candidates, got {resolutions_tried}"
         )
+
+
+class TestMemoryCapping:
+    """Tests for memory budget capping in auto_select_grid_resolution."""
+
+    def test_memory_capping_with_large_board(self):
+        """Fine grids should be filtered when board is large."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+        ]
+        # 65x56mm board with max_cells=500_000
+        # 0.005mm grid would be 65/0.005 * 56/0.005 = 13000 * 11200 = 145.6M cells
+        # So fine candidates should be filtered out
+        result = auto_select_grid_resolution(
+            pads, clearance=0.3, board_width=65.0, board_height=56.0
+        )
+        assert result.memory_capped is True
+        assert result.uncapped_resolution is not None
+        # The selected resolution should produce cells <= 500K
+        cells = (65.0 / result.resolution) * (56.0 / result.resolution)
+        assert cells <= 500_000
+
+    def test_no_capping_without_board_dimensions(self):
+        """Without board dimensions, memory filter is not applied."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=2.54, y=0.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.3)
+        assert result.memory_capped is False
+        assert result.uncapped_resolution is None
+
+    def test_no_capping_when_all_candidates_fit(self):
+        """Small board should not trigger capping."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=2.54, y=0.0)]
+        # 10x10mm board: even 0.05mm grid = 200*200 = 40K cells (well within budget)
+        result = auto_select_grid_resolution(
+            pads, clearance=0.3, board_width=10.0, board_height=10.0
+        )
+        assert result.memory_capped is False
+        assert result.uncapped_resolution is None
+
+    def test_capping_boundary_exact_max_cells(self):
+        """Grid producing exactly max_cells should pass the filter."""
+        pads = [PadPosition(x=0.0, y=0.0)]
+        # For max_cells=500_000 and 0.1mm grid: need board area = 500_000 * 0.01 = 5000 mm^2
+        # e.g. ~70.7 x 70.7mm board: 70.7/0.1 * 70.7/0.1 = 707*707 = ~500K
+        # Use a board where 0.1mm is exactly at boundary
+        result = auto_select_grid_resolution(
+            pads, clearance=0.3, board_width=70.7, board_height=70.7, max_cells=500_000
+        )
+        # 0.1mm should still be in candidates (500K cells approximately)
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        assert 0.1 in resolutions_tried
+
+    def test_summary_shows_capping_info(self):
+        """Summary should mention capping when memory_capped is True."""
+        result = GridAutoSelection(
+            resolution=0.1,
+            off_grid_pads=1,
+            total_pads=3,
+            off_grid_percentage=33.3,
+            candidates_tried=[(0.1, 1)],
+            memory_capped=True,
+            uncapped_resolution=0.005,
+        )
+        summary = result.summary()
+        assert "capped" in summary.lower()
+        assert "0.005" in summary
+
+    def test_summary_no_capping_info_when_not_capped(self):
+        """Summary should not mention capping when memory_capped is False."""
+        result = GridAutoSelection(
+            resolution=0.1,
+            off_grid_pads=0,
+            total_pads=3,
+            off_grid_percentage=0.0,
+            candidates_tried=[(0.1, 0)],
+            memory_capped=False,
+            uncapped_resolution=None,
+        )
+        summary = result.summary()
+        assert "capped" not in summary.lower()
 
 
 class TestGridAutoSelectionSummary:
@@ -646,3 +729,40 @@ class TestGcdBasedGridSelection:
         resolutions_tried = [c[0] for c in result.candidates_tried]
         # Only the user-specified candidates should be tried
         assert 0.65 not in resolutions_tried
+
+
+class TestExtractBoardDimensions:
+    """Tests for extract_board_dimensions function."""
+
+    def test_extract_from_pcb_text(self):
+        """Extract dimensions from PCB text with gr_rect."""
+        pcb_text = """(kicad_pcb (version 20230121) (generator "test")
+  (layers (0 "F.Cu" signal))
+  (gr_rect (start 115 75) (end 180 131) (layer "Edge.Cuts") (stroke (width 0.1)))
+)"""
+        dims = extract_board_dimensions(pcb_text)
+        assert dims is not None
+        width, height = dims
+        assert abs(width - 65.0) < 0.01
+        assert abs(height - 56.0) < 0.01
+
+    def test_extract_from_file(self, tmp_path):
+        """Extract dimensions from a PCB file."""
+        pcb_content = """(kicad_pcb (version 20230121) (generator "test")
+  (layers (0 "F.Cu" signal))
+  (gr_rect (start 10 20) (end 60 70) (layer "Edge.Cuts") (stroke (width 0.1)))
+)"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        dims = extract_board_dimensions(pcb_file)
+        assert dims is not None
+        assert abs(dims[0] - 50.0) < 0.01
+        assert abs(dims[1] - 50.0) < 0.01
+
+    def test_no_outline_returns_none(self):
+        """Returns None when no gr_rect is found."""
+        pcb_text = """(kicad_pcb (version 20230121) (generator "test")
+  (layers (0 "F.Cu" signal))
+)"""
+        dims = extract_board_dimensions(pcb_text)
+        assert dims is None
