@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from zipfile import ZipFile
 
+from kicad_tools.cli.runner import find_kicad_cli
+
 # Seeed Fusion layer naming convention
 SEEED_LAYER_NAMES = {
     "F.Cu": "GTL",  # Top copper
@@ -52,27 +54,6 @@ FOUR_LAYER_STACK = [
     "Edge.Cuts",
 ]
 
-
-def find_kicad_cli() -> Path | None:
-    """Find kicad-cli executable."""
-    locations = [
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-        "/usr/local/bin/kicad-cli",
-        "/opt/homebrew/bin/kicad-cli",
-    ]
-
-    for loc in locations:
-        if Path(loc).exists():
-            return Path(loc)
-
-    try:
-        result = subprocess.run(["which", "kicad-cli"], capture_output=True, text=True)
-        if result.returncode == 0:
-            return Path(result.stdout.strip())
-    except Exception:
-        pass
-
-    return None
 
 
 def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:

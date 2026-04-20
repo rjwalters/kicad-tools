@@ -34,6 +34,7 @@ def find_kicad_cli() -> Path | None:
         "/usr/local/bin/kicad-cli",
         # Windows (common paths)
         "C:/Program Files/KiCad/8.0/bin/kicad-cli.exe",
+        "C:/Program Files/KiCad/7.0/bin/kicad-cli.exe",
         "C:/Program Files/KiCad/bin/kicad-cli.exe",
     ]
 
