@@ -2447,7 +2447,7 @@ def main(argv: list[str] | None = None) -> int:
                     pads=full_pads,
                     clearance=args.clearance,
                 )
-            except (ImportError, Exception):
+            except Exception:
                 # Fall back: try with pad positions (won't have ref info)
                 multi_res_plan = compute_multi_resolution_plan(
                     pads=pad_positions,

@@ -832,7 +832,6 @@ def compute_multi_resolution_plan(
         MultiResolutionGridPlan if fine-pitch components detected, else None.
     """
     from .adaptive_grid import identify_fine_pitch_components
-    from .subgrid import compute_subgrid_resolution
 
     # Convert to appropriate format
     if isinstance(pads, dict):
