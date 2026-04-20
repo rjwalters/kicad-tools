@@ -43,6 +43,14 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint
 
+# Try to import C++ DRC backend for accelerated clearance checking
+from kicad_tools.drc.cpp_backend import (
+    check_pair_clearance_cpp,
+)
+from kicad_tools.drc.cpp_backend import (
+    is_cpp_available as _is_drc_cpp_available,
+)
+
 # Try to import rtree, gracefully handle missing dependency
 try:
     from rtree import index as rtree_index
@@ -658,18 +666,66 @@ class IncrementalDRC:
         return violations
 
     def _check_pair_clearance(self, ref1: str, ref2: str) -> Violation | None:
-        """Check clearance between two components."""
+        """Check clearance between two components.
+
+        Dispatches to C++ backend when available for accelerated computation.
+        Falls back to pure Python implementation otherwise.
+        """
         fp1 = self.pcb.get_footprint(ref1)
         fp2 = self.pcb.get_footprint(ref2)
 
         if fp1 is None or fp2 is None:
             return None
 
+        if _is_drc_cpp_available():
+            return self._check_pair_clearance_cpp(fp1, fp2, ref1, ref2)
+        return self._check_pair_clearance_python(fp1, fp2, ref1, ref2)
+
+    def _check_pair_clearance_cpp(
+        self,
+        fp1: Footprint,
+        fp2: Footprint,
+        ref1: str,
+        ref2: str,
+        fp1_position: tuple[float, float] | None = None,
+    ) -> Violation | None:
+        """Check clearance using C++ backend."""
+        result = check_pair_clearance_cpp(fp1, fp2, ref1, ref2, fp1_position)
+        if result is None:
+            return None
+
+        min_clearance, min_location, min_items, min_nets = result
+
+        if min_clearance < self.rules.min_clearance_mm:
+            return Violation(
+                rule_id="clearance",
+                message=f"Clearance {min_clearance:.3f}mm < minimum {self.rules.min_clearance_mm:.3f}mm",
+                severity="error",
+                location=min_location,
+                items=min_items,
+                nets=min_nets,
+                actual_value=min_clearance,
+                required_value=self.rules.min_clearance_mm,
+            )
+
+        return None
+
+    def _check_pair_clearance_python(
+        self,
+        fp1: Footprint,
+        fp2: Footprint,
+        ref1: str,
+        ref2: str,
+        fp1_position: tuple[float, float] | None = None,
+    ) -> Violation | None:
+        """Check clearance using pure Python (fallback)."""
         # Check pad-to-pad clearances
         min_clearance = float("inf")
         min_location = (0.0, 0.0)
         min_items: tuple[str, ...] = ()
         min_nets: tuple[str, ...] = ()
+
+        pos1 = fp1_position if fp1_position is not None else fp1.position
 
         cos1 = math.cos(math.radians(fp1.rotation))
         sin1 = math.sin(math.radians(fp1.rotation))
@@ -681,8 +737,8 @@ class IncrementalDRC:
             local_x1, local_y1 = pad1.position
             rotated_x1 = local_x1 * cos1 - local_y1 * sin1
             rotated_y1 = local_x1 * sin1 + local_y1 * cos1
-            abs_x1 = fp1.position[0] + rotated_x1
-            abs_y1 = fp1.position[1] + rotated_y1
+            abs_x1 = pos1[0] + rotated_x1
+            abs_y1 = pos1[1] + rotated_y1
             r1 = max(pad1.size[0], pad1.size[1]) / 2
 
             for pad2 in fp2.pads:
@@ -726,7 +782,11 @@ class IncrementalDRC:
     def _check_component_clearances(
         self, ref: str, bounds: Rectangle, nearby_refs: list[str]
     ) -> list[Violation]:
-        """Check clearances for a single component against nearby components."""
+        """Check clearances for a single component against nearby components.
+
+        Dispatches to C++ backend when available for accelerated computation.
+        Falls back to pure Python implementation otherwise.
+        """
         violations: list[Violation] = []
 
         fp = self.pcb.get_footprint(ref)
@@ -744,8 +804,7 @@ class IncrementalDRC:
         # Create a modified position tuple
         new_position = (fp.position[0] + dx, fp.position[1] + dy)
 
-        cos1 = math.cos(math.radians(fp.rotation))
-        sin1 = math.sin(math.radians(fp.rotation))
+        use_cpp = _is_drc_cpp_available()
 
         for other_ref in nearby_refs:
             if other_ref == ref:
@@ -755,59 +814,17 @@ class IncrementalDRC:
             if fp2 is None:
                 continue
 
-            cos2 = math.cos(math.radians(fp2.rotation))
-            sin2 = math.sin(math.radians(fp2.rotation))
-
-            # Check pad clearances
-            min_clearance = float("inf")
-            min_location = (0.0, 0.0)
-            min_items: tuple[str, ...] = ()
-            min_nets: tuple[str, ...] = ()
-
-            for pad1 in fp.pads:
-                # Transform pad1 using NEW position
-                local_x1, local_y1 = pad1.position
-                rotated_x1 = local_x1 * cos1 - local_y1 * sin1
-                rotated_y1 = local_x1 * sin1 + local_y1 * cos1
-                abs_x1 = new_position[0] + rotated_x1
-                abs_y1 = new_position[1] + rotated_y1
-                r1 = max(pad1.size[0], pad1.size[1]) / 2
-
-                for pad2 in fp2.pads:
-                    # Skip if same net
-                    if pad1.net_number == pad2.net_number and pad1.net_number != 0:
-                        continue
-
-                    # Transform pad2 using original position
-                    local_x2, local_y2 = pad2.position
-                    rotated_x2 = local_x2 * cos2 - local_y2 * sin2
-                    rotated_y2 = local_x2 * sin2 + local_y2 * cos2
-                    abs_x2 = fp2.position[0] + rotated_x2
-                    abs_y2 = fp2.position[1] + rotated_y2
-                    r2 = max(pad2.size[0], pad2.size[1]) / 2
-
-                    dist = math.sqrt((abs_x2 - abs_x1) ** 2 + (abs_y2 - abs_y1) ** 2)
-                    clearance = dist - r1 - r2
-
-                    if clearance < min_clearance:
-                        min_clearance = clearance
-                        min_location = ((abs_x1 + abs_x2) / 2, (abs_y1 + abs_y2) / 2)
-                        min_items = (f"{ref}-{pad1.number}", f"{other_ref}-{pad2.number}")
-                        min_nets = (pad1.net_name, pad2.net_name)
-
-            if min_clearance < self.rules.min_clearance_mm:
-                violations.append(
-                    Violation(
-                        rule_id="clearance",
-                        message=f"Clearance {min_clearance:.3f}mm < minimum {self.rules.min_clearance_mm:.3f}mm",
-                        severity="error",
-                        location=min_location,
-                        items=min_items,
-                        nets=min_nets,
-                        actual_value=min_clearance,
-                        required_value=self.rules.min_clearance_mm,
-                    )
+            if use_cpp:
+                violation = self._check_pair_clearance_cpp(
+                    fp, fp2, ref, other_ref, fp1_position=new_position
                 )
+            else:
+                violation = self._check_pair_clearance_python(
+                    fp, fp2, ref, other_ref, fp1_position=new_position
+                )
+
+            if violation:
+                violations.append(violation)
 
         return violations
 
