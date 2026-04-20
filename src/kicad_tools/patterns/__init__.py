@@ -48,8 +48,9 @@ Validation:
     and component values.
 
 Adaptation:
-    Use PatternAdapter to generate pattern parameters for specific components
-    by loading requirements from the component database.
+    Use the adaptation functions (``adapt_pattern``, ``adapt_ldo_pattern``, etc.)
+    to generate pattern parameters for specific components by loading
+    requirements from the component database.
 
 User-Defined Patterns:
     Custom patterns can be defined via YAML files or using the pattern
@@ -64,10 +65,14 @@ from .analog import (
     SensorInterface,
 )
 
-# Validation and adaptation
+# Adaptation
 from kicad_tools.patterns.adaptation import (
     AdaptedPatternParams,
-    PatternAdapter,
+    adapt_buck_pattern,
+    adapt_decoupling_pattern,
+    adapt_from_pcb,
+    adapt_ldo_pattern,
+    adapt_pattern,
 )
 
 # Base classes
@@ -229,7 +234,11 @@ __all__ = [
     "ValidationViolation",
     "ViolationSeverity",
     # Adaptation
-    "PatternAdapter",
+    "adapt_pattern",
+    "adapt_ldo_pattern",
+    "adapt_buck_pattern",
+    "adapt_decoupling_pattern",
+    "adapt_from_pcb",
     "AdaptedPatternParams",
     # Component database
     "ComponentRequirements",

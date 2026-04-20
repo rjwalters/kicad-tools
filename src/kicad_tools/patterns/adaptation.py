@@ -2,6 +2,14 @@
 
 Adapts circuit patterns for specific components by loading component
 requirements from the database and generating appropriate pattern parameters.
+
+Usage::
+
+    from kicad_tools.patterns.adaptation import adapt_pattern, adapt_ldo_pattern
+
+    params = adapt_ldo_pattern("AMS1117-3.3")
+    print(params.parameters)
+    # {'input_cap': '10uF', 'output_caps': ['22uF', '100nF'], ...}
 """
 
 from __future__ import annotations
@@ -47,380 +55,360 @@ class AdaptedPatternParams:
         }
 
 
-class PatternAdapter:
-    """Adapts circuit patterns for specific components.
+def adapt_pattern(
+    pattern_type: str,
+    component_mpn: str,
+    **overrides: Any,
+) -> AdaptedPatternParams:
+    """Adapt a pattern for a specific component.
 
-    The PatternAdapter loads component requirements from the database
-    and generates appropriate pattern parameters for specific parts.
+    Args:
+        pattern_type: Type of pattern (e.g., "LDO", "BuckConverter")
+        component_mpn: Manufacturer part number of the component
+        **overrides: Override specific parameters
+
+    Returns:
+        AdaptedPatternParams with adapted parameters
 
     Example:
-        >>> from kicad_tools.patterns import PatternAdapter
-        >>>
-        >>> adapter = PatternAdapter()
-        >>> params = adapter.adapt_ldo_pattern("AMS1117-3.3")
-        >>> print(params.parameters)
-        {'input_cap': '10uF', 'output_caps': ['22uF', '100nF'], ...}
+        >>> params = adapt_pattern("LDO", "AMS1117-3.3")
+        >>> params = adapt_pattern("LDO", "AMS1117-3.3", input_cap="22uF")
     """
+    if pattern_type.upper() == "LDO":
+        return adapt_ldo_pattern(component_mpn, **overrides)
+    elif pattern_type.upper() in ("BUCK", "BUCKCONVERTER", "BUCK_CONVERTER"):
+        return adapt_buck_pattern(component_mpn, **overrides)
+    elif pattern_type.upper() in ("DECOUPLING", "BYPASS"):
+        return adapt_decoupling_pattern(component_mpn, **overrides)
+    else:
+        raise ValueError(f"Unknown pattern type: {pattern_type}")
 
-    def __init__(self) -> None:
-        """Initialize the pattern adapter."""
-        pass
 
-    def adapt(
-        self,
-        pattern_type: str,
-        component_mpn: str,
-        **overrides: Any,
-    ) -> AdaptedPatternParams:
-        """Adapt a pattern for a specific component.
+def adapt_ldo_pattern(
+    regulator_mpn: str,
+    **overrides: Any,
+) -> AdaptedPatternParams:
+    """Adapt an LDO pattern for a specific regulator.
 
-        Args:
-            pattern_type: Type of pattern (e.g., "LDO", "BuckConverter")
-            component_mpn: Manufacturer part number of the component
-            **overrides: Override specific parameters
+    Loads the regulator's requirements from the component database
+    and generates appropriate capacitor values, thermal requirements,
+    and other parameters.
 
-        Returns:
-            AdaptedPatternParams with adapted parameters
+    Args:
+        regulator_mpn: Manufacturer part number of the LDO
+        **overrides: Override specific parameters
 
-        Example:
-            >>> params = adapter.adapt("LDO", "AMS1117-3.3")
-            >>> params = adapter.adapt("LDO", "AMS1117-3.3", input_cap="22uF")
-        """
-        if pattern_type.upper() == "LDO":
-            return self.adapt_ldo_pattern(component_mpn, **overrides)
-        elif pattern_type.upper() in ("BUCK", "BUCKCONVERTER", "BUCK_CONVERTER"):
-            return self.adapt_buck_pattern(component_mpn, **overrides)
-        elif pattern_type.upper() in ("DECOUPLING", "BYPASS"):
-            return self.adapt_decoupling_pattern(component_mpn, **overrides)
-        else:
-            raise ValueError(f"Unknown pattern type: {pattern_type}")
+    Returns:
+        AdaptedPatternParams with LDO-specific parameters
 
-    def adapt_ldo_pattern(
-        self,
-        regulator_mpn: str,
-        **overrides: Any,
-    ) -> AdaptedPatternParams:
-        """Adapt an LDO pattern for a specific regulator.
+    Example:
+        >>> params = adapt_ldo_pattern("AMS1117-3.3")
+        >>> print(params.parameters["input_cap"])
+        '10uF'
+    """
+    notes: list[str] = []
 
-        Loads the regulator's requirements from the component database
-        and generates appropriate capacitor values, thermal requirements,
-        and other parameters.
+    # Get component requirements from database
+    try:
+        reqs = get_component_requirements(regulator_mpn)
+    except KeyError:
+        # Component not in database, use defaults
+        notes.append(f"Component {regulator_mpn} not in database, using defaults")
+        reqs = _get_default_ldo_requirements()
 
-        Args:
-            regulator_mpn: Manufacturer part number of the LDO
-            **overrides: Override specific parameters
+    # Build parameters
+    params: dict[str, Any] = {}
 
-        Returns:
-            AdaptedPatternParams with LDO-specific parameters
+    # Input capacitor
+    if reqs.input_cap_min_uf is not None:
+        params["input_cap"] = _format_capacitance(reqs.input_cap_min_uf)
+        if reqs.input_cap_max_esr_mohm is not None:
+            notes.append(f"Input cap max ESR: {reqs.input_cap_max_esr_mohm}m\u03a9")
+    else:
+        params["input_cap"] = "10uF"
 
-        Example:
-            >>> params = adapter.adapt_ldo_pattern("AMS1117-3.3")
-            >>> print(params.parameters["input_cap"])
-            '10uF'
-        """
-        notes: list[str] = []
+    # Output capacitors
+    if reqs.output_cap_min_uf is not None:
+        # Add a bulk cap and a bypass cap
+        bulk_cap = _format_capacitance(reqs.output_cap_min_uf)
+        params["output_caps"] = [bulk_cap, "100nF"]
+        if reqs.output_cap_max_esr_mohm is not None:
+            notes.append(f"Output cap max ESR: {reqs.output_cap_max_esr_mohm}m\u03a9")
+    else:
+        params["output_caps"] = ["10uF", "100nF"]
 
-        # Get component requirements from database
-        try:
-            reqs = get_component_requirements(regulator_mpn)
-        except KeyError:
-            # Component not in database, use defaults
-            notes.append(f"Component {regulator_mpn} not in database, using defaults")
-            reqs = self._get_default_ldo_requirements()
+    # Thermal requirements
+    if reqs.thermal_pad_required:
+        params["thermal_pad_required"] = True
+        notes.append("Thermal pad required for proper heat dissipation")
+    else:
+        params["thermal_pad_required"] = False
 
-        # Build parameters
-        params: dict[str, Any] = {}
+    # Dropout voltage (informational)
+    if reqs.dropout_voltage is not None:
+        params["dropout_voltage"] = reqs.dropout_voltage
+        notes.append(f"Dropout voltage: {reqs.dropout_voltage}V")
 
-        # Input capacitor
-        if reqs.input_cap_min_uf is not None:
-            params["input_cap"] = self._format_capacitance(reqs.input_cap_min_uf)
-            if reqs.input_cap_max_esr_mohm is not None:
-                notes.append(f"Input cap max ESR: {reqs.input_cap_max_esr_mohm}mΩ")
-        else:
-            params["input_cap"] = "10uF"
+    # Max output current
+    if reqs.max_output_current_ma is not None:
+        params["max_output_current_ma"] = reqs.max_output_current_ma
 
-        # Output capacitors
-        if reqs.output_cap_min_uf is not None:
-            # Add a bulk cap and a bypass cap
-            bulk_cap = self._format_capacitance(reqs.output_cap_min_uf)
-            params["output_caps"] = [bulk_cap, "100nF"]
-            if reqs.output_cap_max_esr_mohm is not None:
-                notes.append(f"Output cap max ESR: {reqs.output_cap_max_esr_mohm}mΩ")
-        else:
-            params["output_caps"] = ["10uF", "100nF"]
+    # Apply overrides
+    params.update(overrides)
 
-        # Thermal requirements
-        if reqs.thermal_pad_required:
-            params["thermal_pad_required"] = True
-            notes.append("Thermal pad required for proper heat dissipation")
-        else:
-            params["thermal_pad_required"] = False
+    return AdaptedPatternParams(
+        pattern_type="LDO",
+        component_mpn=regulator_mpn,
+        parameters=params,
+        notes=notes,
+    )
 
-        # Dropout voltage (informational)
-        if reqs.dropout_voltage is not None:
-            params["dropout_voltage"] = reqs.dropout_voltage
-            notes.append(f"Dropout voltage: {reqs.dropout_voltage}V")
 
-        # Max output current
-        if reqs.max_output_current_ma is not None:
-            params["max_output_current_ma"] = reqs.max_output_current_ma
+def adapt_buck_pattern(
+    regulator_mpn: str,
+    **overrides: Any,
+) -> AdaptedPatternParams:
+    """Adapt a buck converter pattern for a specific regulator.
 
-        # Apply overrides
-        params.update(overrides)
+    Loads the regulator's requirements from the component database
+    and generates appropriate inductor, capacitor, and diode values.
 
-        return AdaptedPatternParams(
-            pattern_type="LDO",
-            component_mpn=regulator_mpn,
-            parameters=params,
-            notes=notes,
-        )
+    Args:
+        regulator_mpn: Manufacturer part number of the buck regulator
+        **overrides: Override specific parameters
 
-    def adapt_buck_pattern(
-        self,
-        regulator_mpn: str,
-        **overrides: Any,
-    ) -> AdaptedPatternParams:
-        """Adapt a buck converter pattern for a specific regulator.
+    Returns:
+        AdaptedPatternParams with buck converter parameters
 
-        Loads the regulator's requirements from the component database
-        and generates appropriate inductor, capacitor, and diode values.
+    Example:
+        >>> params = adapt_buck_pattern("LM2596-5.0")
+        >>> print(params.parameters["inductor"])
+        '33uH'
+    """
+    notes: list[str] = []
 
-        Args:
-            regulator_mpn: Manufacturer part number of the buck regulator
-            **overrides: Override specific parameters
+    # Get component requirements from database
+    try:
+        reqs = get_component_requirements(regulator_mpn)
+    except KeyError:
+        notes.append(f"Component {regulator_mpn} not in database, using defaults")
+        reqs = _get_default_buck_requirements()
 
-        Returns:
-            AdaptedPatternParams with buck converter parameters
+    params: dict[str, Any] = {}
 
-        Example:
-            >>> params = adapter.adapt_buck_pattern("LM2596-5.0")
-            >>> print(params.parameters["inductor"])
-            '33uH'
-        """
-        notes: list[str] = []
+    # Input capacitor
+    if reqs.input_cap_min_uf is not None:
+        params["input_cap"] = _format_capacitance(reqs.input_cap_min_uf)
+    else:
+        params["input_cap"] = "100uF"
 
-        # Get component requirements from database
-        try:
-            reqs = get_component_requirements(regulator_mpn)
-        except KeyError:
-            notes.append(f"Component {regulator_mpn} not in database, using defaults")
-            reqs = self._get_default_buck_requirements()
+    # Output capacitor
+    if reqs.output_cap_min_uf is not None:
+        params["output_cap"] = _format_capacitance(reqs.output_cap_min_uf)
+    else:
+        params["output_cap"] = "220uF"
 
-        params: dict[str, Any] = {}
+    # Inductor
+    if reqs.inductor_min_uh is not None:
+        params["inductor"] = _format_inductance(reqs.inductor_min_uh)
+        if reqs.inductor_max_dcr_mohm is not None:
+            notes.append(f"Inductor max DCR: {reqs.inductor_max_dcr_mohm}m\u03a9")
+    else:
+        params["inductor"] = "33uH"
 
-        # Input capacitor
-        if reqs.input_cap_min_uf is not None:
-            params["input_cap"] = self._format_capacitance(reqs.input_cap_min_uf)
-        else:
-            params["input_cap"] = "100uF"
+    # Diode (for async topology)
+    if reqs.diode_part_number is not None:
+        params["diode"] = reqs.diode_part_number
+    else:
+        params["diode"] = "SS34"
 
-        # Output capacitor
-        if reqs.output_cap_min_uf is not None:
-            params["output_cap"] = self._format_capacitance(reqs.output_cap_min_uf)
-        else:
-            params["output_cap"] = "220uF"
+    # Switching frequency
+    if reqs.switching_freq_khz is not None:
+        params["switching_freq_khz"] = reqs.switching_freq_khz
+        notes.append(f"Switching frequency: {reqs.switching_freq_khz}kHz")
 
-        # Inductor
-        if reqs.inductor_min_uh is not None:
-            params["inductor"] = self._format_inductance(reqs.inductor_min_uh)
-            if reqs.inductor_max_dcr_mohm is not None:
-                notes.append(f"Inductor max DCR: {reqs.inductor_max_dcr_mohm}mΩ")
-        else:
-            params["inductor"] = "33uH"
+    # Apply overrides
+    params.update(overrides)
 
-        # Diode (for async topology)
-        if reqs.diode_part_number is not None:
-            params["diode"] = reqs.diode_part_number
-        else:
-            params["diode"] = "SS34"
+    return AdaptedPatternParams(
+        pattern_type="BuckConverter",
+        component_mpn=regulator_mpn,
+        parameters=params,
+        notes=notes,
+    )
 
-        # Switching frequency
-        if reqs.switching_freq_khz is not None:
-            params["switching_freq_khz"] = reqs.switching_freq_khz
-            notes.append(f"Switching frequency: {reqs.switching_freq_khz}kHz")
 
-        # Apply overrides
-        params.update(overrides)
+def adapt_decoupling_pattern(
+    ic_mpn: str,
+    **overrides: Any,
+) -> AdaptedPatternParams:
+    """Adapt a decoupling pattern for a specific IC.
 
-        return AdaptedPatternParams(
-            pattern_type="BuckConverter",
-            component_mpn=regulator_mpn,
-            parameters=params,
-            notes=notes,
-        )
+    Loads the IC's requirements from the component database
+    and generates appropriate decoupling capacitor values.
 
-    def adapt_decoupling_pattern(
-        self,
-        ic_mpn: str,
-        **overrides: Any,
-    ) -> AdaptedPatternParams:
-        """Adapt a decoupling pattern for a specific IC.
+    Args:
+        ic_mpn: Manufacturer part number of the IC
+        **overrides: Override specific parameters
 
-        Loads the IC's requirements from the component database
-        and generates appropriate decoupling capacitor values.
+    Returns:
+        AdaptedPatternParams with decoupling parameters
 
-        Args:
-            ic_mpn: Manufacturer part number of the IC
-            **overrides: Override specific parameters
+    Example:
+        >>> params = adapt_decoupling_pattern("STM32F405RGT6")
+        >>> print(params.parameters["capacitors"])
+        ['4.7uF', '100nF', '100nF', '100nF', '100nF']
+    """
+    notes: list[str] = []
 
-        Returns:
-            AdaptedPatternParams with decoupling parameters
+    # Get component requirements from database
+    try:
+        reqs = get_component_requirements(ic_mpn)
+    except KeyError:
+        notes.append(f"Component {ic_mpn} not in database, using defaults")
+        reqs = _get_default_ic_requirements()
 
-        Example:
-            >>> params = adapter.adapt_decoupling_pattern("STM32F405RGT6")
-            >>> print(params.parameters["capacitors"])
-            ['4.7uF', '100nF', '100nF', '100nF', '100nF']
-        """
-        notes: list[str] = []
+    params: dict[str, Any] = {}
 
-        # Get component requirements from database
-        try:
-            reqs = get_component_requirements(ic_mpn)
-        except KeyError:
-            notes.append(f"Component {ic_mpn} not in database, using defaults")
-            reqs = self._get_default_ic_requirements()
+    # Decoupling capacitors
+    if reqs.decoupling_caps is not None:
+        params["capacitors"] = reqs.decoupling_caps
+    else:
+        # Default: one bulk + bypass caps per VDD pin
+        num_vdd_pins = reqs.num_vdd_pins or 1
+        params["capacitors"] = ["4.7uF"] + ["100nF"] * num_vdd_pins
 
-        params: dict[str, Any] = {}
+    # Maximum distance requirement
+    if reqs.max_decoupling_distance_mm is not None:
+        params["max_distance_mm"] = reqs.max_decoupling_distance_mm
+    else:
+        params["max_distance_mm"] = 5.0
 
-        # Decoupling capacitors
-        if reqs.decoupling_caps is not None:
-            params["capacitors"] = reqs.decoupling_caps
-        else:
-            # Default: one bulk + bypass caps per VDD pin
-            num_vdd_pins = reqs.num_vdd_pins or 1
-            params["capacitors"] = ["4.7uF"] + ["100nF"] * num_vdd_pins
+    # Apply overrides
+    params.update(overrides)
 
-        # Maximum distance requirement
-        if reqs.max_decoupling_distance_mm is not None:
-            params["max_distance_mm"] = reqs.max_decoupling_distance_mm
-        else:
-            params["max_distance_mm"] = 5.0
+    return AdaptedPatternParams(
+        pattern_type="Decoupling",
+        component_mpn=ic_mpn,
+        parameters=params,
+        notes=notes,
+    )
 
-        # Apply overrides
-        params.update(overrides)
 
-        return AdaptedPatternParams(
-            pattern_type="Decoupling",
-            component_mpn=ic_mpn,
-            parameters=params,
-            notes=notes,
-        )
+def adapt_from_pcb(
+    pattern_type: str,
+    pcb: PCB,
+    main_component_ref: str,
+) -> AdaptedPatternParams:
+    """Adapt a pattern based on existing PCB component values.
 
-    def adapt_from_pcb(
-        self,
-        pattern_type: str,
-        pcb: PCB,
-        main_component_ref: str,
-    ) -> AdaptedPatternParams:
-        """Adapt a pattern based on existing PCB component values.
+    Reads the current component values from the PCB and generates
+    parameters that match the existing design.
 
-        Reads the current component values from the PCB and generates
-        parameters that match the existing design.
+    Args:
+        pattern_type: Type of pattern to adapt
+        pcb: PCB containing the existing design
+        main_component_ref: Reference of the main component (e.g., "U1")
 
-        Args:
-            pattern_type: Type of pattern to adapt
-            pcb: PCB containing the existing design
-            main_component_ref: Reference of the main component (e.g., "U1")
+    Returns:
+        AdaptedPatternParams based on existing PCB values
 
-        Returns:
-            AdaptedPatternParams based on existing PCB values
+    Example:
+        >>> pcb = PCB.load("board.kicad_pcb")
+        >>> params = adapt_from_pcb("LDO", pcb, "U1")
+    """
+    fp = pcb.get_footprint(main_component_ref)
+    if not fp:
+        raise ValueError(f"Component {main_component_ref} not found on PCB")
 
-        Example:
-            >>> pcb = PCB.load("board.kicad_pcb")
-            >>> params = adapter.adapt_from_pcb("LDO", pcb, "U1")
-        """
-        fp = pcb.get_footprint(main_component_ref)
-        if not fp:
-            raise ValueError(f"Component {main_component_ref} not found on PCB")
+    # Try to get MPN from footprint value or properties
+    mpn = fp.value or "Unknown"
 
-        # Try to get MPN from footprint value or properties
-        mpn = fp.value or "Unknown"
+    # Get adapted parameters for this component
+    params = adapt_pattern(pattern_type, mpn)
 
-        # Get adapted parameters for this component
-        params = self.adapt(pattern_type, mpn)
+    # Add note about source
+    params.notes.append(f"Adapted from existing PCB component {main_component_ref}")
 
-        # Add note about source
-        params.notes.append(f"Adapted from existing PCB component {main_component_ref}")
+    return params
 
-        return params
 
-    @staticmethod
-    def _format_capacitance(value_uf: float) -> str:
-        """Format a capacitance value in appropriate units.
+def _format_capacitance(value_uf: float) -> str:
+    """Format a capacitance value in appropriate units.
 
-        Args:
-            value_uf: Capacitance in microfarads
+    Args:
+        value_uf: Capacitance in microfarads
 
-        Returns:
-            Formatted string (e.g., "10uF", "100nF", "47pF")
-        """
-        if value_uf >= 1.0:
-            if value_uf == int(value_uf):
-                return f"{int(value_uf)}uF"
-            return f"{value_uf}uF"
-        elif value_uf >= 0.001:
-            nf = value_uf * 1000
-            if nf == int(nf):
-                return f"{int(nf)}nF"
-            return f"{nf}nF"
-        else:
-            pf = value_uf * 1_000_000
-            if pf == int(pf):
-                return f"{int(pf)}pF"
-            return f"{pf}pF"
+    Returns:
+        Formatted string (e.g., "10uF", "100nF", "47pF")
+    """
+    if value_uf >= 1.0:
+        if value_uf == int(value_uf):
+            return f"{int(value_uf)}uF"
+        return f"{value_uf}uF"
+    elif value_uf >= 0.001:
+        nf = value_uf * 1000
+        if nf == int(nf):
+            return f"{int(nf)}nF"
+        return f"{nf}nF"
+    else:
+        pf = value_uf * 1_000_000
+        if pf == int(pf):
+            return f"{int(pf)}pF"
+        return f"{pf}pF"
 
-    @staticmethod
-    def _format_inductance(value_uh: float) -> str:
-        """Format an inductance value in appropriate units.
 
-        Args:
-            value_uh: Inductance in microhenries
+def _format_inductance(value_uh: float) -> str:
+    """Format an inductance value in appropriate units.
 
-        Returns:
-            Formatted string (e.g., "33uH", "4.7uH", "100nH")
-        """
-        if value_uh >= 1.0:
-            if value_uh == int(value_uh):
-                return f"{int(value_uh)}uH"
-            return f"{value_uh}uH"
-        else:
-            nh = value_uh * 1000
-            if nh == int(nh):
-                return f"{int(nh)}nH"
-            return f"{nh}nH"
+    Args:
+        value_uh: Inductance in microhenries
 
-    @staticmethod
-    def _get_default_ldo_requirements() -> ComponentRequirements:
-        """Get default requirements for an unknown LDO."""
-        return ComponentRequirements(
-            mpn="Unknown",
-            component_type="LDO",
-            input_cap_min_uf=10.0,
-            output_cap_min_uf=10.0,
-            input_cap_max_esr_mohm=500,
-            output_cap_max_esr_mohm=500,
-            thermal_pad_required=False,
-        )
+    Returns:
+        Formatted string (e.g., "33uH", "4.7uH", "100nH")
+    """
+    if value_uh >= 1.0:
+        if value_uh == int(value_uh):
+            return f"{int(value_uh)}uH"
+        return f"{value_uh}uH"
+    else:
+        nh = value_uh * 1000
+        if nh == int(nh):
+            return f"{int(nh)}nH"
+        return f"{nh}nH"
 
-    @staticmethod
-    def _get_default_buck_requirements() -> ComponentRequirements:
-        """Get default requirements for an unknown buck converter."""
-        return ComponentRequirements(
-            mpn="Unknown",
-            component_type="BuckConverter",
-            input_cap_min_uf=100.0,
-            output_cap_min_uf=220.0,
-            inductor_min_uh=33.0,
-            switching_freq_khz=150,
-        )
 
-    @staticmethod
-    def _get_default_ic_requirements() -> ComponentRequirements:
-        """Get default requirements for an unknown IC."""
-        return ComponentRequirements(
-            mpn="Unknown",
-            component_type="IC",
-            num_vdd_pins=1,
-            decoupling_caps=["4.7uF", "100nF"],
-            max_decoupling_distance_mm=5.0,
-        )
+def _get_default_ldo_requirements() -> ComponentRequirements:
+    """Get default requirements for an unknown LDO."""
+    return ComponentRequirements(
+        mpn="Unknown",
+        component_type="LDO",
+        input_cap_min_uf=10.0,
+        output_cap_min_uf=10.0,
+        input_cap_max_esr_mohm=500,
+        output_cap_max_esr_mohm=500,
+        thermal_pad_required=False,
+    )
+
+
+def _get_default_buck_requirements() -> ComponentRequirements:
+    """Get default requirements for an unknown buck converter."""
+    return ComponentRequirements(
+        mpn="Unknown",
+        component_type="BuckConverter",
+        input_cap_min_uf=100.0,
+        output_cap_min_uf=220.0,
+        inductor_min_uh=33.0,
+        switching_freq_khz=150,
+    )
+
+
+def _get_default_ic_requirements() -> ComponentRequirements:
+    """Get default requirements for an unknown IC."""
+    return ComponentRequirements(
+        mpn="Unknown",
+        component_type="IC",
+        num_vdd_pins=1,
+        decoupling_caps=["4.7uF", "100nF"],
+        max_decoupling_distance_mm=5.0,
+    )
