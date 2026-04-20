@@ -3197,6 +3197,13 @@ def _add_pipeline_parser(subparsers) -> None:
             "exceed the displacement budget."
         ),
     )
+    pipeline_parser.add_argument(
+        "--best-effort",
+        dest="pipeline_best_effort",
+        action="store_true",
+        default=False,
+        help="Continue past routing failures to zone fill, audit, and export",
+    )
 
 
 def _add_create_pcb_parser(subparsers) -> None:

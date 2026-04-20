@@ -1753,9 +1753,20 @@ def load_pcb_for_routing(
             pad_h = float(size_match.group(2))
 
             # Extract net (if present)
+            # KiCad 7/8: (net <number> "name"), KiCad 9+: (net "name")
             net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_block)
-            net_num = int(net_match.group(1)) if net_match else 0
-            net_name = net_match.group(2) if net_match else ""
+            if net_match:
+                net_num = int(net_match.group(1))
+                net_name = net_match.group(2)
+            else:
+                # KiCad 9 name-only format
+                net_name_match = re.search(r'\(net\s+"([^"]+)"\)', pad_block)
+                if net_name_match:
+                    net_name = net_name_match.group(1)
+                    net_num = net_map.get(net_name, 0)
+                else:
+                    net_num = 0
+                    net_name = ""
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)

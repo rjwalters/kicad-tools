@@ -44,6 +44,10 @@ def run_pipeline_command(args) -> int:
     if max_disp is not None and max_disp != 2.0:
         sub_argv.extend(["--max-displacement", str(max_disp)])
 
+    # Best-effort mode
+    if getattr(args, "pipeline_best_effort", False):
+        sub_argv.append("--best-effort")
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")

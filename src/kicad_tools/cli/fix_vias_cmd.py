@@ -172,7 +172,11 @@ def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int
 
         diameter = float(size_node.get_first_atom()) if size_node else 0
         drill = float(drill_node.get_first_atom()) if drill_node else 0
-        net = int(net_node.get_first_atom()) if net_node else 0
+        net_val = net_node.get_first_atom() if net_node else ""
+        try:
+            net = int(net_val)
+        except (ValueError, TypeError):
+            net = 0  # KiCad 9 name-only format or empty string
         uuid = uuid_node.get_first_atom() if uuid_node else ""
 
         vias.append((via_node, x, y, drill, diameter, net, uuid))
