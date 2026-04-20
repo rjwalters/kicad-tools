@@ -1500,6 +1500,155 @@ class PCB:
                 return fp
         return None
 
+    def _find_footprint_sexp(self, reference: str) -> SExp | None:
+        """Find a footprint S-expression node by reference designator.
+
+        Searches both KiCad 7 (fp_text) and KiCad 8+ (property) formats.
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "U1")
+
+        Returns:
+            The footprint SExp node if found, None otherwise.
+        """
+        for fp_sexp in self._sexp.find_all("footprint"):
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in fp_sexp.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in fp_sexp.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value == reference:
+                return fp_sexp
+
+        return None
+
+    def remove_footprint(self, reference: str) -> bool:
+        """Remove a footprint from the PCB by reference designator.
+
+        Removes the footprint from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_footprints`` list.
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "U1")
+
+        Returns:
+            True if the footprint was found and removed, False otherwise.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.remove_footprint("C1")
+            True
+            >>> pcb.get_footprint("C1") is None
+            True
+        """
+        # Remove from the S-expression tree
+        fp_sexp = self._find_footprint_sexp(reference)
+        if fp_sexp is None:
+            return False
+
+        self._sexp.remove(fp_sexp)
+
+        # Remove from the in-memory list
+        self._footprints = [fp for fp in self._footprints if fp.reference != reference]
+
+        return True
+
+    def remove_segments(self, segments: list[Segment]) -> int:
+        """Remove specific trace segments from the PCB.
+
+        Removes matching segments from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_segments`` list.
+        Segments are matched by UUID when available, falling back to
+        matching by start/end coordinates and layer.
+
+        Args:
+            segments: List of Segment objects to remove.
+
+        Returns:
+            The number of segments actually removed.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> segs = list(pcb.segments_in_net(5))
+            >>> removed = pcb.remove_segments(segs)
+            >>> print(f"Removed {removed} segments")
+        """
+        if not segments:
+            return 0
+
+        # Build lookup sets for fast matching
+        uuids_to_remove: set[str] = set()
+        # Fallback: match by (start, end, layer) for segments without UUIDs
+        coords_to_remove: set[tuple[float, float, float, float, str]] = set()
+
+        for seg in segments:
+            if seg.uuid:
+                uuids_to_remove.add(seg.uuid)
+            else:
+                coords_to_remove.add(
+                    (seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.layer)
+                )
+
+        # Remove from S-expression tree
+        removed_count = 0
+        sexp_to_remove = []
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "segment":
+                continue
+
+            # Check UUID match
+            uuid_node = child.find("uuid")
+            if uuid_node:
+                seg_uuid = uuid_node.get_string(0) or ""
+                if seg_uuid in uuids_to_remove:
+                    sexp_to_remove.append(child)
+                    continue
+
+            # Fallback: coordinate match
+            start_node = child.find("start")
+            end_node = child.find("end")
+            layer_node = child.find("layer")
+            if start_node and end_node and layer_node:
+                key = (
+                    start_node.get_float(0) or 0.0,
+                    start_node.get_float(1) or 0.0,
+                    end_node.get_float(0) or 0.0,
+                    end_node.get_float(1) or 0.0,
+                    layer_node.get_string(0) or "",
+                )
+                if key in coords_to_remove:
+                    sexp_to_remove.append(child)
+
+        for node in sexp_to_remove:
+            self._sexp.remove(node)
+            removed_count += 1
+
+        # Remove from in-memory list
+        remaining = []
+        for seg in self._segments:
+            should_remove = False
+            if seg.uuid and seg.uuid in uuids_to_remove:
+                should_remove = True
+            elif not seg.uuid:
+                key = (seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.layer)
+                if key in coords_to_remove:
+                    should_remove = True
+            if not should_remove:
+                remaining.append(seg)
+        self._segments = remaining
+
+        return removed_count
+
     def footprints_on_layer(self, layer: str) -> Iterator[Footprint]:
         """Get footprints on a specific layer."""
         for fp in self._footprints:

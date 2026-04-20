@@ -571,12 +571,16 @@ class Reconciler:
         placement_columns = 10
 
         has_add_footprint = any(a["type"] == "add_footprint" for a in actions_to_apply)
+        has_update_footprint = any(a["type"] == "update_footprint" for a in actions_to_apply)
 
         for action in actions_to_apply:
             if action["type"] == "add_footprint":
                 change = self._apply_add_footprint(
-                    pcb, action, dry_run,
-                    placement_x, placement_y,
+                    pcb,
+                    action,
+                    dry_run,
+                    placement_x,
+                    placement_y,
                 )
                 if change:
                     changes.append(change)
@@ -588,15 +592,24 @@ class Reconciler:
                         placement_y += placement_spacing
                     else:
                         placement_x += placement_spacing
+            elif action["type"] == "update_footprint":
+                change = self._apply_update_footprint(pcb, action, dry_run)
+                if change:
+                    changes.append(change)
             else:
                 change = self._apply_action(pcb._sexp, action, dry_run)
                 if change:
                     changes.append(change)
 
-        # Assign nets from schematic netlist after all footprints are added
-        if not dry_run and has_add_footprint and any(
-            c.applied and c.change_type == "add_footprint" for c in changes
-        ):
+        # Assign nets from schematic netlist after all footprints are added/swapped
+        needs_net_assignment = (
+            has_add_footprint
+            and any(c.applied and c.change_type == "add_footprint" for c in changes)
+        ) or (
+            has_update_footprint
+            and any(c.applied and c.change_type == "update_footprint" for c in changes)
+        )
+        if not dry_run and needs_net_assignment:
             self._assign_nets(pcb)
 
         # Save if not dry-run and there were changes
@@ -695,6 +708,156 @@ class Reconciler:
                 applied=False,
             )
 
+    def _apply_update_footprint(
+        self,
+        pcb,
+        action: dict[str, Any],
+        dry_run: bool,
+    ) -> SyncChange | None:
+        """Apply an update_footprint action: swap an existing footprint for a new one.
+
+        Removes the old footprint, loads the new one at the same position/rotation/layer,
+        and re-assigns nets from the old pads to the new pads by pad number. Traces
+        connected to old pad positions are removed since pad geometry has changed.
+
+        Args:
+            pcb: The PCB object.
+            action: Action dict with update_footprint details.
+            dry_run: If True, don't modify the PCB.
+
+        Returns:
+            SyncChange record, or None if the action failed.
+        """
+        import math
+
+        ref = action["reference"]
+        old_fp_name = action["old_value"]
+        new_fp_name = action["new_value"]
+
+        if dry_run:
+            return SyncChange(
+                reference=ref,
+                change_type="update_footprint",
+                old_value=old_fp_name,
+                new_value=new_fp_name,
+                applied=False,
+            )
+
+        # Step 1: Capture state from the old footprint
+        old_fp = pcb.get_footprint(ref)
+        if not old_fp:
+            return None
+
+        old_position = old_fp.position
+        old_rotation = old_fp.rotation
+        old_layer = old_fp.layer
+
+        # Capture pad-to-net mapping: {pad_number: (net_number, net_name)}
+        pad_net_map: dict[str, tuple[int, str]] = {}
+        for pad in old_fp.pads:
+            if pad.net_number != 0 or pad.net_name:
+                pad_net_map[pad.number] = (pad.net_number, pad.net_name)
+
+        # Step 2: Find trace segments connected to old pad positions
+        old_pad_positions: list[tuple[float, float]] = []
+        connected_segments = []
+        affected_net_names: set[str] = set()
+
+        for pad in old_fp.pads:
+            pos = pcb.get_pad_position(ref, pad.number)
+            if pos:
+                old_pad_positions.append(pos)
+                # Find segments in this pad's net that touch this pad position
+                if pad.net_number != 0:
+                    for seg in pcb.segments_in_net(pad.net_number):
+                        tolerance = 0.01  # mm
+                        start_dist = math.sqrt(
+                            (seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2
+                        )
+                        end_dist = math.sqrt(
+                            (seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2
+                        )
+                        if start_dist < tolerance or end_dist < tolerance:
+                            connected_segments.append(seg)
+                            if pad.net_name:
+                                affected_net_names.add(pad.net_name)
+
+        # De-duplicate segments by UUID
+        seen_uuids: set[str] = set()
+        unique_segments = []
+        for seg in connected_segments:
+            key = seg.uuid if seg.uuid else id(seg)
+            if key not in seen_uuids:
+                seen_uuids.add(key)
+                unique_segments.append(seg)
+        connected_segments = unique_segments
+
+        # Step 3: Add the new footprint BEFORE removing the old one.
+        # This ensures we never lose the old footprint if add_footprint fails.
+        # Use a temporary reference to avoid duplicate references in _footprints,
+        # which would cause remove_footprint(ref) to delete BOTH old and new.
+        temp_ref = f"__SWAP_TEMP__{ref}"
+        try:
+            new_fp = pcb.add_footprint(
+                library_id=new_fp_name,
+                reference=temp_ref,
+                x=old_position[0],
+                y=old_position[1],
+                rotation=old_rotation,
+                layer=old_layer,
+                value=old_fp.value or "",
+            )
+        except (FileNotFoundError, ValueError) as e:
+            return SyncChange(
+                reference=ref,
+                change_type="update_footprint",
+                old_value=old_fp_name,
+                new_value=f"{new_fp_name} [error: {e}]",
+                applied=False,
+            )
+
+        # Step 4: Remove the old footprint only after the new one was added successfully.
+        # The old footprint has ref; the new one has temp_ref, so only the old is removed.
+        pcb.remove_footprint(ref)
+
+        # Rename the new footprint from the temporary reference to the real one
+        pcb.update_footprint_reference(temp_ref, ref)
+
+        # Step 5: Re-assign nets from old pads to new pads by pad number
+        new_pad_count = len(new_fp.pads)
+        old_pad_count = len(pad_net_map)
+
+        if old_pad_count > 0 and new_pad_count > 0:
+            # Check if we can map by pad number (same-family swap)
+            new_pad_numbers = {p.number for p in new_fp.pads}
+            mappable = all(pn in new_pad_numbers for pn in pad_net_map)
+
+            if mappable:
+                # Same-family swap: map old pad nets to new pads by number
+                for pad_num, (net_num, net_name) in pad_net_map.items():
+                    if net_name:
+                        pcb.assign_net_to_footprint_pad(ref, pad_num, net_name)
+            # If pad numbers don't match, we rely on netlist assignment
+            # which is called after all footprint operations complete
+
+        # Step 6: Remove invalidated trace segments
+        if connected_segments:
+            pcb.remove_segments(connected_segments)
+
+        # Build informative new_value with affected nets info
+        new_value = new_fp_name
+        if affected_net_names:
+            nets_str = ", ".join(sorted(affected_net_names))
+            new_value = f"{new_fp_name} [re-route: {nets_str}]"
+
+        return SyncChange(
+            reference=ref,
+            change_type="update_footprint",
+            old_value=old_fp_name,
+            new_value=new_value,
+            applied=True,
+        )
+
     def _assign_nets(self, pcb) -> None:
         """Export netlist from schematic and assign nets to PCB pads.
 
@@ -718,9 +881,7 @@ class Reconciler:
             # The user can run assign_nets_from_netlist() separately.
             pass
 
-    def _apply_action(
-        self, sexp, action: dict[str, Any], dry_run: bool
-    ) -> SyncChange | None:
+    def _apply_action(self, sexp, action: dict[str, Any], dry_run: bool) -> SyncChange | None:
         """Apply a single action to the PCB s-expression.
 
         Args:
@@ -781,20 +942,9 @@ class Reconciler:
             )
 
         elif action_type == "update_footprint":
-            ref = action["reference"]
-            old_fp = action["old_value"]
-            new_fp = action["new_value"]
-
-            # Footprint updates are recorded but not applied automatically
-            # because changing the footprint invalidates pad layout and routing.
-            # This is logged as a warning for manual resolution.
-            return SyncChange(
-                reference=ref,
-                change_type="update_footprint",
-                old_value=old_fp,
-                new_value=new_fp,
-                applied=False,  # Never auto-applied
-            )
+            # update_footprint is handled by _apply_update_footprint() with
+            # full PCB object access. If we reach here, something is wrong.
+            return None
 
         return None
 
