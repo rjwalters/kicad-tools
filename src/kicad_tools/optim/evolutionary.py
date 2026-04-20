@@ -45,6 +45,15 @@ if TYPE_CHECKING:
     from kicad_tools.acceleration.backend import ArrayBackend
     from kicad_tools.schema.pcb import PCB
 
+# Try to import C++ fitness evaluator
+_PLACEMENT_CPP_AVAILABLE = False
+try:
+    from kicad_tools.placement import placement_cpp
+
+    _PLACEMENT_CPP_AVAILABLE = True
+except ImportError:
+    placement_cpp = None  # type: ignore[assignment]
+
 __all__ = [
     "EvolutionaryPlacementOptimizer",
     "EvolutionaryConfig",
@@ -148,6 +157,67 @@ class _EvaluationContext:
     pin_alignment_tolerance: float
 
 
+def _evaluate_fitness_worker_cpp(
+    args: tuple[Individual, _EvaluationContext],
+) -> float:
+    """
+    C++ fitness evaluation for parallel processing.
+
+    Converts _EvaluationContext data to C++ types and calls the C++
+    evaluate_fitness function. Falls back to Python if conversion fails.
+
+    Args:
+        args: Tuple of (individual, evaluation_context)
+
+    Returns:
+        Fitness value (higher is better)
+    """
+    ind, ctx = args
+
+    # Convert components to C++ FitnessComponentData
+    cpp_components: dict[str, object] = {}
+    for ref, (x, y, rot, width, height, pin_offsets) in ctx.components.items():
+        comp = placement_cpp.FitnessComponentData()
+        comp.x = x
+        comp.y = y
+        comp.rotation = rot
+        comp.width = width
+        comp.height = height
+        comp.pin_offsets = [(ox, oy, pn) for ox, oy, pn in pin_offsets]
+        cpp_components[ref] = comp
+
+    # Convert springs to C++ FitnessSpring
+    cpp_springs = []
+    for comp1_ref, pin1_num, comp2_ref, pin2_num in ctx.springs:
+        spring = placement_cpp.FitnessSpring()
+        spring.comp1_ref = comp1_ref
+        spring.pin1_num = pin1_num
+        spring.comp2_ref = comp2_ref
+        spring.pin2_num = pin2_num
+        cpp_springs.append(spring)
+
+    # Convert board vertices
+    cpp_board_vertices = [(x, y) for x, y in ctx.board_vertices]
+
+    # Build weights
+    cpp_weights = placement_cpp.FitnessWeights()
+    cpp_weights.wire_length_weight = ctx.wire_length_weight
+    cpp_weights.conflict_weight = ctx.conflict_weight
+    cpp_weights.routability_weight = ctx.routability_weight
+    cpp_weights.boundary_violation_weight = ctx.boundary_violation_weight
+    cpp_weights.pin_alignment_weight = ctx.pin_alignment_weight
+    cpp_weights.pin_alignment_tolerance = ctx.pin_alignment_tolerance
+
+    return placement_cpp.evaluate_fitness(
+        ind.positions,
+        ind.rotations,
+        cpp_components,
+        cpp_springs,
+        cpp_board_vertices,
+        cpp_weights,
+    )
+
+
 def _evaluate_fitness_worker(
     args: tuple[Individual, _EvaluationContext],
 ) -> float:
@@ -155,6 +225,31 @@ def _evaluate_fitness_worker(
     Stateless fitness evaluation function for parallel processing.
 
     This is a module-level function so it can be pickled for ProcessPoolExecutor.
+    When the C++ backend is available, delegates to _evaluate_fitness_worker_cpp
+    for better performance. Falls back to pure Python implementation otherwise.
+
+    Args:
+        args: Tuple of (individual, evaluation_context)
+
+    Returns:
+        Fitness value (higher is better)
+    """
+    if _PLACEMENT_CPP_AVAILABLE:
+        try:
+            return _evaluate_fitness_worker_cpp(args)
+        except Exception:
+            pass  # Fall through to Python implementation
+
+    return _evaluate_fitness_worker_python(args)
+
+
+def _evaluate_fitness_worker_python(
+    args: tuple[Individual, _EvaluationContext],
+) -> float:
+    """
+    Pure Python fitness evaluation for parallel processing.
+
+    This is the original implementation, kept as fallback when C++ is unavailable.
 
     Args:
         args: Tuple of (individual, evaluation_context)

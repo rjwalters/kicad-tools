@@ -2,14 +2,19 @@
  * Placement C++ Core - nanobind Python bindings
  *
  * Exposes AABB overlap/clearance operations, the BatchCostEvaluator,
- * and the force-directed placement engine for high-performance
- * placement cost and force evaluation.
+ * force-directed placement engine, and evolutionary fitness evaluation
+ * for high-performance placement cost and force evaluation.
  */
 
 #include "aabb.hpp"
 #include "cost_evaluator.hpp"
+#include "fitness_evaluator.hpp"
 #include "force_engine.hpp"
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
 namespace nb = nanobind;
@@ -17,7 +22,7 @@ using namespace nb::literals;
 using namespace placement;
 
 NB_MODULE(placement_cpp, m) {
-    m.doc() = "C++ placement core for high-performance AABB cost and force evaluation";
+    m.doc() = "C++ placement core for high-performance AABB cost, force, and fitness evaluation";
 
     // AABB struct
     nb::class_<AABB>(m, "AABB")
@@ -99,7 +104,46 @@ NB_MODULE(placement_cpp, m) {
           "fixed_mask"_a, "inside_flags"_a,
           "Compute boundary forces from board edges on all components.");
 
+    // --- Evolutionary fitness evaluation ---
+
+    // FitnessComponentData struct
+    nb::class_<FitnessComponentData>(m, "FitnessComponentData")
+        .def(nb::init<>())
+        .def_rw("x", &FitnessComponentData::x)
+        .def_rw("y", &FitnessComponentData::y)
+        .def_rw("rotation", &FitnessComponentData::rotation)
+        .def_rw("width", &FitnessComponentData::width)
+        .def_rw("height", &FitnessComponentData::height)
+        .def_rw("pin_offsets", &FitnessComponentData::pin_offsets);
+
+    // FitnessSpring struct
+    nb::class_<FitnessSpring>(m, "FitnessSpring")
+        .def(nb::init<>())
+        .def_rw("comp1_ref", &FitnessSpring::comp1_ref)
+        .def_rw("pin1_num", &FitnessSpring::pin1_num)
+        .def_rw("comp2_ref", &FitnessSpring::comp2_ref)
+        .def_rw("pin2_num", &FitnessSpring::pin2_num);
+
+    // FitnessWeights struct
+    nb::class_<FitnessWeights>(m, "FitnessWeights")
+        .def(nb::init<>())
+        .def_rw("wire_length_weight", &FitnessWeights::wire_length_weight)
+        .def_rw("conflict_weight", &FitnessWeights::conflict_weight)
+        .def_rw("routability_weight", &FitnessWeights::routability_weight)
+        .def_rw("boundary_violation_weight", &FitnessWeights::boundary_violation_weight)
+        .def_rw("pin_alignment_weight", &FitnessWeights::pin_alignment_weight)
+        .def_rw("pin_alignment_tolerance", &FitnessWeights::pin_alignment_tolerance);
+
+    // evaluate_fitness function
+    m.def("evaluate_fitness", &evaluate_fitness,
+          "ind_positions"_a, "ind_rotations"_a,
+          "components"_a, "springs"_a,
+          "board_vertices"_a, "weights"_a,
+          "Evaluate fitness for a single individual placement.\n\n"
+          "Mirrors _evaluate_fitness_worker() in evolutionary.py.\n"
+          "Returns a fitness value (higher is better).");
+
     // Version info
-    m.def("version", []() { return "2.0.0"; });
+    m.def("version", []() { return "2.1.0"; });
     m.def("is_available", []() { return true; });
 }
