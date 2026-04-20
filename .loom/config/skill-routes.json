@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "description": "Default skill routing table for Loom agent suggestions. Routes are evaluated top-to-bottom, first match wins. Place specific patterns before general ones.",
+  "routes": [
+    {
+      "pattern": "shepherd|orchestrate|lifecycle|end.to.end",
+      "agent": "/shepherd",
+      "description": "Full issue lifecycle orchestration"
+    },
+    {
+      "pattern": "architect|design|proposal|system design|rfc",
+      "agent": "/architect",
+      "description": "System design and architecture"
+    },
+    {
+      "pattern": "review|\\bPR\\b|pull request|code review",
+      "agent": "/judge",
+      "description": "Code review"
+    },
+    {
+      "pattern": "fix|bug|broken|changes.requested|merge.conflict",
+      "agent": "/doctor",
+      "description": "Bug fixes and PR feedback"
+    },
+    {
+      "pattern": "simplify|refactor|clean.?up|dead.?code|complexity",
+      "agent": "/hermit",
+      "description": "Simplification opportunities"
+    },
+    {
+      "pattern": "build|implement|feature|develop|code",
+      "agent": "/builder",
+      "description": "Implement features and fixes"
+    },
+    {
+      "pattern": "curate|triage|issue|enhance|enrich",
+      "agent": "/curator",
+      "description": "Issue enrichment"
+    },
+    {
+      "pattern": "prioriti[zs]e|backlog|roadmap",
+      "agent": "/guide",
+      "description": "Backlog triage"
+    },
+    {
+      "pattern": "audit|validate|check.?build",
+      "agent": "/auditor",
+      "description": "Build validation"
+    },
+    {
+      "pattern": "loom|daemon|auto.?build",
+      "agent": "/loom",
+      "description": "System daemon orchestration"
+    }
+  ]
+}
