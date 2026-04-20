@@ -140,14 +140,16 @@ def get_design_session(session_id: str) -> Design:
     Raises:
         SessionNotFoundError: If session doesn't exist
     """
-    from kicad_tools.mcp.tools.session import _sessions
+    from kicad_tools.mcp.tools.session import get_session_manager
 
-    if session_id not in _sessions:
+    manager = get_session_manager()
+    metadata = manager.get(session_id)
+
+    if metadata is None:
         raise SessionNotFoundError(f"Session not found: {session_id}")
 
     if session_id not in _design_sessions:
         # Create Design wrapper for existing session
-        metadata = _sessions[session_id]
         design = Design(metadata.session.pcb)
         # Replace session with existing one
         design._session = metadata.session
