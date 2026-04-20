@@ -59,8 +59,6 @@ import yaml
 
 from .base import PCBPattern
 from .checks import CheckContext, ValidationCheck, create_check
-
-logger = logging.getLogger(__name__)
 from .schema import (
     PatternSpec,
     PatternViolation,
@@ -69,6 +67,8 @@ from .schema import (
     PlacementRule,
     RoutingConstraint,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
