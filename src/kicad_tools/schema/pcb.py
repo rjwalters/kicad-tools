@@ -921,7 +921,15 @@ class PCB:
         Args:
             sexp: Parsed S-expression data
             path: Optional path to the PCB file (used for export operations)
+
+        Raises:
+            TypeError: If sexp is a string or Path instead of a parsed SExp
         """
+        if isinstance(sexp, (str, Path)):
+            raise TypeError(
+                f"PCB() expects a parsed SExp, not a file path. "
+                f"Use PCB.load({str(sexp)!r}) instead."
+            )
         self._sexp = sexp
         self._path: Path | None = Path(path) if path else None
         self._layers: dict[int, Layer] = {}
@@ -1230,6 +1238,8 @@ class PCB:
         """Parse the PCB data structure."""
         for child in self._sexp.iter_children():
             tag = child.tag
+            if tag is None:
+                continue  # Skip unnamed list nodes
 
             if tag == "layers":
                 self._parse_layers(child)
