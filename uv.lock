@@ -1769,7 +1769,6 @@ name = "kicad-tools"
 version = "0.12.0"
 source = { editable = "." }
 dependencies = [
-    { name = "cmaes" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
@@ -1785,6 +1784,7 @@ all = [
     { name = "botorch", version = "0.16.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "botorch", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "cairosvg" },
+    { name = "cmaes" },
     { name = "cupy-cuda12x" },
     { name = "fastmcp" },
     { name = "jinja2" },
@@ -1808,9 +1808,6 @@ bayesian = [
     { name = "botorch", version = "0.16.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "botorch", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-constraints = [
-    { name = "pyyaml" },
-]
 cuda = [
     { name = "cupy-cuda12x" },
 ]
@@ -1820,6 +1817,7 @@ datasheet = [
     { name = "pymupdf" },
 ]
 dev = [
+    { name = "cmaes" },
     { name = "fastmcp" },
     { name = "jinja2" },
     { name = "markdown" },
@@ -1859,6 +1857,9 @@ native = [
 parts = [
     { name = "requests" },
 ]
+placement = [
+    { name = "cmaes" },
+]
 report = [
     { name = "jinja2" },
     { name = "markdown" },
@@ -1885,7 +1886,9 @@ requires-dist = [
     { name = "botorch", marker = "extra == 'bayesian'", specifier = ">=0.12.0" },
     { name = "cairosvg", marker = "extra == 'all'", specifier = ">=2.6" },
     { name = "cairosvg", marker = "extra == 'screenshot'", specifier = ">=2.6" },
-    { name = "cmaes", specifier = ">=0.12.0" },
+    { name = "cmaes", marker = "extra == 'all'", specifier = ">=0.12.0" },
+    { name = "cmaes", marker = "extra == 'dev'", specifier = ">=0.12.0" },
+    { name = "cmaes", marker = "extra == 'placement'", specifier = ">=0.12.0" },
     { name = "cmake", marker = "extra == 'native'", specifier = ">=3.15" },
     { name = "cupy-cuda12x", marker = "extra == 'all'", specifier = ">=13.0" },
     { name = "cupy-cuda12x", marker = "extra == 'cuda'", specifier = ">=13.0" },
@@ -1926,7 +1929,6 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'all'", specifier = ">=6.0" },
-    { name = "pyyaml", marker = "extra == 'constraints'", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.28" },
     { name = "requests", marker = "extra == 'dev'", specifier = ">=2.28" },
@@ -1943,7 +1945,7 @@ requires-dist = [
     { name = "weasyprint", marker = "extra == 'dev'", specifier = ">=60.0" },
     { name = "weasyprint", marker = "extra == 'report'", specifier = ">=60.0" },
 ]
-provides-extras = ["drc", "parts", "datasheet", "constraints", "mcp", "native", "cuda", "metal", "visualization", "bayesian", "screenshot", "report", "all", "dev"]
+provides-extras = ["drc", "parts", "datasheet", "placement", "mcp", "native", "cuda", "metal", "visualization", "bayesian", "screenshot", "report", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
