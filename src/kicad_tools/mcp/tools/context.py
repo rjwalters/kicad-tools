@@ -554,37 +554,3 @@ def get_session_summary(
             success=False,
             error_message=f"Failed to get session summary: {e}",
         )
-
-
-# =============================================================================
-# Integration with Session Tools
-# =============================================================================
-
-
-def link_session_to_context(session_id: str, pcb_path: str) -> SessionContext:
-    """Link an existing session to a context (creates if needed).
-
-    Called by session tools to ensure context exists when sessions are created.
-
-    Args:
-        session_id: Session identifier.
-        pcb_path: PCB file path.
-
-    Returns:
-        The SessionContext for the session.
-    """
-    return _context_manager.get_or_create(session_id, pcb_path)
-
-
-def unlink_session_context(session_id: str) -> bool:
-    """Remove context when session is closed.
-
-    Called by session tools when sessions are committed or rolled back.
-
-    Args:
-        session_id: Session identifier.
-
-    Returns:
-        True if context was removed, False if not found.
-    """
-    return _context_manager.close(session_id)
