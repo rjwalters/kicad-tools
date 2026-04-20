@@ -576,8 +576,11 @@ class Reconciler:
         for action in actions_to_apply:
             if action["type"] == "add_footprint":
                 change = self._apply_add_footprint(
-                    pcb, action, dry_run,
-                    placement_x, placement_y,
+                    pcb,
+                    action,
+                    dry_run,
+                    placement_x,
+                    placement_y,
                 )
                 if change:
                     changes.append(change)
@@ -789,10 +792,8 @@ class Reconciler:
                 unique_segments.append(seg)
         connected_segments = unique_segments
 
-        # Step 3: Remove the old footprint
-        pcb.remove_footprint(ref)
-
-        # Step 4: Load and place the new footprint at the same position
+        # Step 3: Add the new footprint BEFORE removing the old one.
+        # This ensures we never lose the old footprint if add_footprint fails.
         try:
             new_fp = pcb.add_footprint(
                 library_id=new_fp_name,
@@ -811,6 +812,9 @@ class Reconciler:
                 new_value=f"{new_fp_name} [error: {e}]",
                 applied=False,
             )
+
+        # Step 4: Remove the old footprint only after the new one was added successfully
+        pcb.remove_footprint(ref)
 
         # Step 5: Re-assign nets from old pads to new pads by pad number
         new_pad_count = len(new_fp.pads)
@@ -870,9 +874,7 @@ class Reconciler:
             # The user can run assign_nets_from_netlist() separately.
             pass
 
-    def _apply_action(
-        self, sexp, action: dict[str, Any], dry_run: bool
-    ) -> SyncChange | None:
+    def _apply_action(self, sexp, action: dict[str, Any], dry_run: bool) -> SyncChange | None:
         """Apply a single action to the PCB s-expression.
 
         Args:

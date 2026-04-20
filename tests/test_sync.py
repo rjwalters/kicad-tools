@@ -141,9 +141,7 @@ class TestSyncAnalysis:
     def test_analysis_with_value_mismatches(self):
         """Test analysis with value mismatches."""
         analysis = SyncAnalysis(
-            value_mismatches=[
-                {"reference": "R1", "schematic_value": "10k", "pcb_value": "4.7k"}
-            ]
+            value_mismatches=[{"reference": "R1", "schematic_value": "10k", "pcb_value": "4.7k"}]
         )
         assert not analysis.is_in_sync
         assert analysis.has_actionable_items
@@ -260,9 +258,7 @@ class TestReconciler:
 class TestReconcilerAnalyze:
     """Tests for Reconciler.analyze() using mocked schematic/PCB data."""
 
-    def _make_bom_item(
-        self, ref: str, value: str = "", footprint: str = "", lib_id: str = ""
-    ):
+    def _make_bom_item(self, ref: str, value: str = "", footprint: str = "", lib_id: str = ""):
         """Create a BOMItem for mocking extract_bom."""
         return BOMItem(
             reference=ref,
@@ -321,8 +317,8 @@ class TestReconcilerAnalyze:
         bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
         footprints = [self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402")]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -341,8 +337,8 @@ class TestReconcilerAnalyze:
         bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
         footprints = [self._make_mock_footprint("R1", "4.7k", "Resistor_SMD:R_0402")]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -366,8 +362,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("C1", "100nF", "C_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -389,8 +385,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("R99", "22k", "Resistor_SMD:R_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -419,8 +415,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("C1", "100nF", "C_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -447,8 +443,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("C5", "100nF", "C_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -473,8 +469,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("R1", "10k", "R_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -509,8 +505,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("R1", "10k", "R_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -534,8 +530,8 @@ class TestReconcilerAnalyze:
             self._make_mock_footprint("R1", "10k", "R_0402"),
         ]
 
-        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
-            self._make_reconciler_with_mocks(bom_items, footprints)
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
         )
 
         analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
@@ -596,9 +592,7 @@ class TestReconcilerApplyAddFootprint:
         }
 
         mock_pcb = MagicMock()
-        change = reconciler._apply_add_footprint(
-            mock_pcb, action, dry_run=False, x=20.0, y=110.0
-        )
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=20.0, y=110.0)
 
         assert change is not None
         assert change.applied is True
@@ -629,9 +623,7 @@ class TestReconcilerApplyAddFootprint:
 
         mock_pcb = MagicMock()
         mock_pcb.add_footprint.side_effect = FileNotFoundError("Footprint not found")
-        change = reconciler._apply_add_footprint(
-            mock_pcb, action, dry_run=False, x=10.0, y=10.0
-        )
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=10.0, y=10.0)
 
         assert change is not None
         assert change.applied is False
@@ -653,9 +645,7 @@ class TestReconcilerApplyAddFootprint:
 
         mock_pcb = MagicMock()
         mock_pcb.add_footprint.side_effect = ValueError("KiCad library path not found")
-        change = reconciler._apply_add_footprint(
-            mock_pcb, action, dry_run=False, x=10.0, y=10.0
-        )
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=10.0, y=10.0)
 
         assert change is not None
         assert change.applied is False
@@ -705,7 +695,6 @@ class TestReconcilerApplyIntegration:
         mock_pcb._sexp = MagicMock()
 
         with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
-
             changes = reconciler.apply(analysis, dry_run=False)
 
         assert len(changes) == 2
@@ -742,7 +731,6 @@ class TestReconcilerApplyIntegration:
         mock_pcb.get_board_outline.return_value = []
 
         with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
-
             changes = reconciler.apply(analysis, dry_run=True)
 
         assert len(changes) == 1
@@ -1013,7 +1001,10 @@ class TestReconcilerApplyIntegration:
         mock_pcb = MagicMock()
         # Board outline: a 100x80mm rectangle at sheet position (50, 50) to (150, 130)
         mock_pcb.get_board_outline.return_value = [
-            (50.0, 50.0), (150.0, 50.0), (150.0, 130.0), (50.0, 130.0),
+            (50.0, 50.0),
+            (150.0, 50.0),
+            (150.0, 130.0),
+            (50.0, 130.0),
         ]
         mock_pcb.board_origin = (50.0, 50.0)
 
@@ -1265,10 +1256,12 @@ class TestReconcilerApplyUpdateFootprint:
         mock_pcb = MagicMock()
         mock_pcb.get_footprint.return_value = mock_old_fp
         mock_pcb.get_pad_position.side_effect = lambda ref, pad: {
-            "1": (49.49, 30.0), "2": (50.51, 30.0),
+            "1": (49.49, 30.0),
+            "2": (50.51, 30.0),
         }.get(pad)
         mock_pcb.segments_in_net.side_effect = lambda net: {
-            1: [mock_seg1], 2: [mock_seg2],
+            1: [mock_seg1],
+            2: [mock_seg2],
         }.get(net, [])
         mock_pcb.add_footprint.return_value = mock_new_fp
 
@@ -1329,6 +1322,74 @@ class TestReconcilerApplyUpdateFootprint:
         assert change is not None
         assert change.applied is False
         assert "error:" in change.new_value
+
+    def test_update_footprint_no_removal_on_add_failure(self):
+        """Test that old footprint is NOT removed when add_footprint fails.
+
+        Regression test: previously, remove_footprint was called before
+        add_footprint, so a failure in add_footprint would leave the board
+        with the old footprint deleted — data loss.
+        """
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "U1",
+            "old_value": "Package_SO:SOIC-8",
+            "new_value": "CustomLib:BadFootprint",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 20.0)
+        mock_old_fp.rotation = 90.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "IC1"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = FileNotFoundError("library not found")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+        # The critical assertion: remove_footprint must NOT have been called
+        mock_pcb.remove_footprint.assert_not_called()
+
+    def test_update_footprint_no_removal_on_value_error(self):
+        """Test that old footprint is NOT removed when add_footprint raises ValueError."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "R5",
+            "old_value": "Resistor_SMD:R_0402",
+            "new_value": "Resistor_SMD:R_invalid",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (5.0, 5.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "10k"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = ValueError("invalid footprint")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+        mock_pcb.remove_footprint.assert_not_called()
 
 
 class TestReconcilerApplyUpdateFootprintIntegration:
