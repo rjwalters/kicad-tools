@@ -185,6 +185,64 @@ class TestSyncCLIApplyMode:
         assert len(data["changes"]) == 1
 
 
+class TestOutputChangesTableFootprintStatus:
+    """Tests for update_footprint status display in _output_changes_table."""
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_update_footprint_dry_run_shows_would_swap(self, MockReconciler, capsys):
+        """Test update_footprint in dry-run shows '(would swap)'."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis()
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("U1", "update_footprint", "SOIC-8", "QFN-16", applied=False),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(["--apply", "--dry-run", "project.kicad_pro"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(would swap)" in captured.out
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_update_footprint_applied_shows_swapped(self, MockReconciler, capsys):
+        """Test update_footprint when applied shows '(swapped)'."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis()
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("U1", "update_footprint", "SOIC-8", "QFN-16", applied=True),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(["--apply", "--confirm", "project.kicad_pro"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(swapped)" in captured.out
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_update_footprint_failed_shows_error(self, MockReconciler, capsys):
+        """Test update_footprint when not applied shows '(failed - see error)'."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis()
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("U1", "update_footprint", "SOIC-8", "QFN-16", applied=False),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(["--apply", "--confirm", "project.kicad_pro"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(failed - see error)" in captured.out
+
+
 class TestSyncCLIMapping:
     """Tests for --output-mapping flag."""
 
