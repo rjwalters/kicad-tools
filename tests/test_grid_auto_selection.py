@@ -5,6 +5,7 @@ import pytest
 from kicad_tools.router.io import (
     GridAutoSelection,
     PadPosition,
+    _compute_gcd_grid_candidates,
     _is_on_grid,
     auto_select_grid_resolution,
     extract_pad_positions,
@@ -453,3 +454,195 @@ class TestRecommendGridForBoardSize:
         # Just over medium threshold
         grid = recommend_grid_for_board_size(151, 100, clearance=0.3)
         assert grid == 0.25  # Now large
+
+
+class TestComputeGcdGridCandidates:
+    """Tests for _compute_gcd_grid_candidates helper."""
+
+    def test_empty_pads(self):
+        """No candidates from fewer than 2 pads."""
+        assert _compute_gcd_grid_candidates([]) == []
+        assert _compute_gcd_grid_candidates([PadPosition(x=0.0, y=0.0)]) == []
+
+    def test_single_spacing(self):
+        """Two pads 0.65mm apart produce GCD = 0.65mm."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=0.65, y=0.0)]
+        result = _compute_gcd_grid_candidates(pads)
+        # GCD should be 0.65mm; multiples 1.3mm and 3.25mm also returned
+        assert 0.65 in result
+
+    def test_tssop_pitch(self):
+        """Multiple 0.65mm-spaced pads produce GCD = 0.65mm."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=1.95, y=0.0),
+        ]
+        result = _compute_gcd_grid_candidates(pads)
+        assert 0.65 in result
+
+    def test_mixed_065_254_gcd(self):
+        """Mixed 0.65mm and 2.54mm spacings produce GCD = 0.01mm."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=10.0, y=0.0),
+            PadPosition(x=12.54, y=0.0),
+        ]
+        result = _compute_gcd_grid_candidates(pads)
+        # GCD of 650 and 2540 (in microns) is 10 microns = 0.01mm
+        assert 0.01 in result
+
+    def test_pure_imperial(self):
+        """Pure 2.54mm pads produce GCD = 2.54mm."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+        ]
+        result = _compute_gcd_grid_candidates(pads)
+        assert 2.54 in result
+
+    def test_min_grid_filter(self):
+        """Candidates below min_grid are filtered out."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.003, y=0.0),  # 3um spacing
+        ]
+        result = _compute_gcd_grid_candidates(pads, min_grid=0.005)
+        # 0.003mm rounds to 0.005 after the 5um rounding, but delta may be 0
+        # Either way, nothing below 0.005mm should appear
+        for c in result:
+            assert c >= 0.005
+
+
+class TestGcdBasedGridSelection:
+    """Tests for GCD-based candidate integration in auto_select_grid_resolution."""
+
+    def test_ssop_065_pitch_zero_off_grid(self):
+        """Board with 0.65mm-pitch SSOP pads achieves 0 off-grid.
+
+        This is the core scenario from issue #1753: SSOP/TSSOP packages
+        with 0.65mm pitch should be fully on-grid after GCD candidate
+        injection.
+        """
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=1.95, y=0.0),
+            PadPosition(x=2.60, y=0.0),
+            PadPosition(x=3.25, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert result.off_grid_pads == 0, (
+            f"SSOP 0.65mm pads should have zero off-grid, got {result.off_grid_pads} "
+            f"with grid {result.resolution}mm"
+        )
+
+    def test_mixed_065_and_254_minimises_off_grid(self):
+        """Mixed 0.65mm SSOP + 2.54mm THT pads with GCD candidates.
+
+        The GCD of spacings should produce a candidate that aligns with
+        both pitches, or at least minimise off-grid count better than
+        the fixed candidates alone.
+        """
+        pads = [
+            # SSOP at 0.65mm pitch
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=1.95, y=0.0),
+            # THT at 2.54mm pitch
+            PadPosition(x=10.0, y=5.0),
+            PadPosition(x=12.54, y=5.0),
+            PadPosition(x=15.08, y=5.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        # With GCD candidates, off-grid count should be lower than without
+        assert result.total_pads == 7
+        # The GCD-derived candidate (e.g. 0.01mm) should achieve all on-grid
+        # if it passes the memory filter
+        assert result.off_grid_pads <= 3, (
+            f"Mixed board should have at most 3 off-grid pads, got {result.off_grid_pads}"
+        )
+
+    def test_standard_pitch_regression(self):
+        """Pure standard-pitch boards behave unchanged.
+
+        For boards with only 0.5mm/1.27mm/2.54mm components, the GCD
+        candidates should not change the selected grid (the fixed
+        candidates already handle these pitches).
+        """
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=1.27, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.3)
+        # 0.127mm is the classic imperial grid; should still be selected
+        assert result.off_grid_pads == 0
+        assert result.resolution == 0.127
+
+    def test_gcd_candidate_respects_memory_budget(self):
+        """Fine GCD candidates are filtered out when they exceed memory budget."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+        ]
+        # Board where 0.065mm grid would exceed budget but 0.65mm fits
+        # 100x100mm board, max_cells=500k: 100*100/0.065^2 = 2.37M (too much)
+        # but 100*100/0.65^2 = 23.7k (fits)
+        result = auto_select_grid_resolution(
+            pads,
+            clearance=1.5,  # Very loose clearance so all candidates pass DRC
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=500_000,
+        )
+        # The fine GCD candidates (0.065mm etc.) should be filtered out
+        # by the memory budget; only coarser ones should survive.
+        cells = (100.0 * 100.0) / (result.resolution ** 2)
+        assert cells <= 500_000, (
+            f"Selected grid {result.resolution}mm produces {cells:.0f} cells, "
+            f"exceeds budget of 500000"
+        )
+
+    def test_gcd_candidates_in_summary(self):
+        """GCD-derived candidates appear in the summary output."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=1.5)
+        summary = result.summary()
+        # The GCD of 0.65mm spacings is 0.65mm; it or its multiples should
+        # appear as candidates in the summary
+        assert "0.65mm" in summary or "1.3mm" in summary or "3.25mm" in summary, (
+            f"GCD-derived candidates should appear in summary:\n{summary}"
+        )
+
+    def test_single_component_single_pad(self):
+        """Board with only 1 pad produces no GCD candidates (no crash)."""
+        pads = [PadPosition(x=5.0, y=5.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.3)
+        # Should work fine, just use fixed candidates
+        assert result.total_pads == 1
+
+    def test_custom_candidates_skips_gcd(self):
+        """When custom candidates are provided, GCD injection is skipped."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+        ]
+        result = auto_select_grid_resolution(
+            pads, clearance=1.5, candidates=[0.5, 0.25]
+        )
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        # Only the user-specified candidates should be tried
+        assert 0.65 not in resolutions_tried
