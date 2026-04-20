@@ -2672,3 +2672,108 @@ class TestKiCad10NetNumberRecovery:
         assert pad1.net_name == "GND"
         assert pad2.net_number == 2
         assert pad2.net_name == "+3.3V"
+
+
+class TestRemoveFootprint:
+    """Tests for PCB.remove_footprint method."""
+
+    def test_remove_existing_footprint(self, minimal_pcb: Path):
+        """Test that a footprint is removed from both sexp and in-memory list."""
+        pcb = PCB.load(str(minimal_pcb))
+        assert pcb.get_footprint("R1") is not None
+        assert len(pcb.footprints) == 1
+
+        result = pcb.remove_footprint("R1")
+
+        assert result is True
+        assert pcb.get_footprint("R1") is None
+        assert len(pcb.footprints) == 0
+
+    def test_remove_nonexistent_footprint(self, minimal_pcb: Path):
+        """Test that removing a nonexistent footprint returns False."""
+        pcb = PCB.load(str(minimal_pcb))
+
+        result = pcb.remove_footprint("NONEXISTENT")
+
+        assert result is False
+        assert len(pcb.footprints) == 1
+
+    def test_remove_footprint_persists_to_save(self, minimal_pcb: Path, tmp_path: Path):
+        """Test that removed footprint is not present after save and reload."""
+        pcb = PCB.load(str(minimal_pcb))
+        pcb.remove_footprint("R1")
+
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(str(output_path))
+
+        pcb2 = PCB.load(str(output_path))
+        assert pcb2.get_footprint("R1") is None
+        assert len(pcb2.footprints) == 0
+
+    def test_remove_footprint_sexp_node_gone(self, minimal_pcb: Path):
+        """Test that the footprint S-expression node is removed from the tree."""
+        pcb = PCB.load(str(minimal_pcb))
+        fp_nodes_before = pcb._sexp.find_all("footprint")
+        assert len(fp_nodes_before) == 1
+
+        pcb.remove_footprint("R1")
+
+        fp_nodes_after = pcb._sexp.find_all("footprint")
+        assert len(fp_nodes_after) == 0
+
+
+class TestRemoveSegments:
+    """Tests for PCB.remove_segments method."""
+
+    def test_remove_segment_by_uuid(self, minimal_pcb: Path):
+        """Test removing a segment matched by UUID."""
+        pcb = PCB.load(str(minimal_pcb))
+        assert len(pcb.segments) == 1
+
+        seg = pcb.segments[0]
+        assert seg.uuid == "00000000-0000-0000-0000-000000000020"
+
+        removed = pcb.remove_segments([seg])
+
+        assert removed == 1
+        assert len(pcb.segments) == 0
+
+    def test_remove_segment_persists_to_save(self, minimal_pcb: Path, tmp_path: Path):
+        """Test that removed segments are not present after save and reload."""
+        pcb = PCB.load(str(minimal_pcb))
+        seg = pcb.segments[0]
+
+        pcb.remove_segments([seg])
+
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(str(output_path))
+
+        pcb2 = PCB.load(str(output_path))
+        assert len(pcb2.segments) == 0
+
+    def test_remove_empty_list(self, minimal_pcb: Path):
+        """Test that removing an empty list returns 0 and changes nothing."""
+        pcb = PCB.load(str(minimal_pcb))
+        assert len(pcb.segments) == 1
+
+        removed = pcb.remove_segments([])
+
+        assert removed == 0
+        assert len(pcb.segments) == 1
+
+    def test_remove_segment_sexp_node_gone(self, minimal_pcb: Path):
+        """Test that the segment S-expression node is removed from the tree."""
+        pcb = PCB.load(str(minimal_pcb))
+        seg_nodes_before = [
+            c for c in pcb._sexp.children
+            if not c.is_atom and c.name == "segment"
+        ]
+        assert len(seg_nodes_before) == 1
+
+        pcb.remove_segments(pcb.segments[:])
+
+        seg_nodes_after = [
+            c for c in pcb._sexp.children
+            if not c.is_atom and c.name == "segment"
+        ]
+        assert len(seg_nodes_after) == 0

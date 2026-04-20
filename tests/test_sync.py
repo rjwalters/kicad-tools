@@ -1039,6 +1039,554 @@ class TestReconcilerApplyIntegration:
         assert col == 0
 
 
+class TestReconcilerApplyUpdateFootprint:
+    """Tests for Reconciler._apply_update_footprint() method."""
+
+    def test_update_footprint_dry_run(self):
+        """Test that update_footprint in dry-run mode produces unapplied SyncChange."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402_1005Metric",
+            "new_value": "Capacitor_SMD:C_0805_2012Metric",
+        }
+
+        mock_pcb = MagicMock()
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=True)
+
+        assert change is not None
+        assert change.change_type == "update_footprint"
+        assert change.reference == "C1"
+        assert change.old_value == "Capacitor_SMD:C_0402_1005Metric"
+        assert change.new_value == "Capacitor_SMD:C_0805_2012Metric"
+        assert change.applied is False
+        # PCB should NOT be modified in dry-run
+        mock_pcb.get_footprint.assert_not_called()
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.add_footprint.assert_not_called()
+
+    def test_update_footprint_applied(self):
+        """Test that update_footprint swaps the footprint preserving position."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402_1005Metric",
+            "new_value": "Capacitor_SMD:C_0805_2012Metric",
+        }
+
+        # Mock old footprint
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 90.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_pad2 = MagicMock()
+        mock_pad2.number = "2"
+        mock_pad2.net_number = 2
+        mock_pad2.net_name = "+3V3"
+        mock_old_fp.pads = [mock_pad1, mock_pad2]
+
+        # Mock new footprint (returned by add_footprint)
+        mock_new_fp = MagicMock()
+        mock_new_pad1 = MagicMock()
+        mock_new_pad1.number = "1"
+        mock_new_pad2 = MagicMock()
+        mock_new_pad2.number = "2"
+        mock_new_fp.pads = [mock_new_pad1, mock_new_pad2]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.return_value = (50.0, 30.0)
+        mock_pcb.segments_in_net.return_value = []
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        assert change.change_type == "update_footprint"
+        assert change.reference == "C1"
+
+        # Verify old footprint was removed
+        mock_pcb.remove_footprint.assert_called_once_with("C1")
+
+        # Verify new footprint was added at same position/rotation/layer
+        mock_pcb.add_footprint.assert_called_once_with(
+            library_id="Capacitor_SMD:C_0805_2012Metric",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+            layer="F.Cu",
+            value="100nF",
+        )
+
+        # Verify net assignment was called for each pad
+        mock_pcb.assign_net_to_footprint_pad.assert_any_call("C1", "1", "GND")
+        mock_pcb.assign_net_to_footprint_pad.assert_any_call("C1", "2", "+3V3")
+
+    def test_update_footprint_preserves_back_layer(self):
+        """Test that B.Cu layer is preserved during swap."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "R1",
+            "old_value": "Resistor_SMD:R_0402",
+            "new_value": "Resistor_SMD:R_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 20.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "B.Cu"
+        mock_old_fp.value = "10k"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        # Verify layer was preserved
+        call_kwargs = mock_pcb.add_footprint.call_args
+        assert call_kwargs[1]["layer"] == "B.Cu"
+
+    def test_update_footprint_removes_connected_traces(self):
+        """Test that traces connected to old pad positions are removed."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402",
+            "new_value": "Capacitor_SMD:C_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_old_fp.pads = [mock_pad1]
+
+        # Create a segment that touches the pad position
+        mock_seg = MagicMock()
+        mock_seg.start = (49.49, 30.0)  # Close to pad position
+        mock_seg.end = (45.0, 30.0)
+        mock_seg.uuid = "seg-uuid-1"
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = [MagicMock(number="1")]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.return_value = (49.49, 30.0)
+        mock_pcb.segments_in_net.return_value = [mock_seg]
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        # Verify connected segments were removed
+        mock_pcb.remove_segments.assert_called_once()
+        removed_segs = mock_pcb.remove_segments.call_args[0][0]
+        assert len(removed_segs) == 1
+        assert removed_segs[0].uuid == "seg-uuid-1"
+
+    def test_update_footprint_reports_affected_nets(self):
+        """Test that affected nets are reported in the new_value field."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "C_0402",
+            "new_value": "C_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_pad2 = MagicMock()
+        mock_pad2.number = "2"
+        mock_pad2.net_number = 2
+        mock_pad2.net_name = "+3V3"
+        mock_old_fp.pads = [mock_pad1, mock_pad2]
+
+        # Create segments touching each pad
+        mock_seg1 = MagicMock()
+        mock_seg1.start = (49.49, 30.0)
+        mock_seg1.end = (45.0, 30.0)
+        mock_seg1.uuid = "seg-1"
+        mock_seg2 = MagicMock()
+        mock_seg2.start = (50.51, 30.0)
+        mock_seg2.end = (55.0, 30.0)
+        mock_seg2.uuid = "seg-2"
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = [MagicMock(number="1"), MagicMock(number="2")]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.side_effect = lambda ref, pad: {
+            "1": (49.49, 30.0), "2": (50.51, 30.0),
+        }.get(pad)
+        mock_pcb.segments_in_net.side_effect = lambda net: {
+            1: [mock_seg1], 2: [mock_seg2],
+        }.get(net, [])
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        assert "re-route" in change.new_value
+        assert "GND" in change.new_value
+        assert "+3V3" in change.new_value
+
+    def test_update_footprint_missing_reference(self):
+        """Test that missing footprint reference returns None."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "MISSING",
+            "old_value": "C_0402",
+            "new_value": "C_0805",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = None
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is None
+
+    def test_update_footprint_library_not_found(self):
+        """Test graceful fallback when new footprint library is not found."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "U1",
+            "old_value": "Package_SO:SOIC-8",
+            "new_value": "CustomLib:NoSuchPart",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 10.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "IC1"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = FileNotFoundError("Not found")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+
+
+class TestReconcilerApplyUpdateFootprintIntegration:
+    """Integration tests for update_footprint via Reconciler.apply()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_apply_update_footprint_to_pcb(self):
+        """Test that apply() swaps footprints via update_footprint actions."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "Capacitor_SMD:C_0402",
+                            "new_value": "Capacitor_SMD:C_0805",
+                        },
+                    ),
+                ),
+            ],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "Capacitor_SMD:C_0805",
+                    "pcb_footprint": "Capacitor_SMD:C_0402",
+                },
+            ],
+        )
+
+        # Mock old footprint
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+        mock_pcb._sexp = MagicMock()
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "update_footprint"
+        assert changes[0].applied is True
+        assert changes[0].reference == "C1"
+
+        # Verify PCB was saved
+        mock_pcb.save.assert_called_once()
+        # Verify net assignment was run
+        mock_pcb.assign_nets_from_netlist.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_update_footprint_dry_run(self):
+        """Test that dry-run does not modify the PCB for update_footprint."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "C_0402",
+                            "new_value": "C_0805",
+                        },
+                    ),
+                ),
+            ],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "C_0805",
+                    "pcb_footprint": "C_0402",
+                },
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert changes[0].change_type == "update_footprint"
+        # PCB should NOT be modified
+        mock_pcb.get_footprint.assert_not_called()
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.add_footprint.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_mixed_update_and_add_footprint(self):
+        """Test applying both update_footprint and add_footprint actions."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "C_0402",
+                            "new_value": "C_0805",
+                        },
+                    ),
+                ),
+            ],
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R5",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                },
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+        mock_pcb._sexp = MagicMock()
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        update_changes = [c for c in changes if c.change_type == "update_footprint"]
+        add_changes = [c for c in changes if c.change_type == "add_footprint"]
+        assert len(update_changes) == 1
+        assert len(add_changes) == 1
+        assert update_changes[0].applied is True
+        assert add_changes[0].applied is True
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_update_footprint_creates_backup(self):
+        """Test that a backup file is created before modifying for update_footprint."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 10.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "1k"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "R1",
+                            "old_value": "R_0402",
+                            "new_value": "R_0805",
+                        },
+                    ),
+                ),
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch("kicad_tools.sync.reconciler.shutil.copy2") as mock_copy,
+        ):
+            reconciler.apply(analysis, dry_run=False)
+
+        mock_copy.assert_called_once()
+        backup_call = mock_copy.call_args
+        assert str(backup_call[0][1]).endswith(".kicad_pcb.bak")
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
 class TestReconcilerSaveMapping:
     """Tests for Reconciler.save_mapping()."""
 
