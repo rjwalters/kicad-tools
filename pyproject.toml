@@ -44,7 +44,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
     "pydantic>=2.0",
-    "cmaes>=0.12.0",
 ]
 
 [project.urls]
@@ -100,9 +99,9 @@ datasheet = [
     "pdfplumber>=0.10.0",
     "PyMuPDF>=1.23.0",
 ]
-# YAML constraint manifest support
-constraints = [
-    "pyyaml>=6.0",
+# CMA-ES placement optimization strategy
+placement = [
+    "cmaes>=0.12.0",
 ]
 # MCP server for AI agent integration
 mcp = [
@@ -159,6 +158,7 @@ all = [
     "matplotlib>=3.5",
     "ax-platform>=0.4.0",
     "botorch>=0.12.0",
+    "cmaes>=0.12.0",
     "cairosvg>=2.6",
     "jinja2>=3.1",
     "markdown>=3.5",
@@ -180,6 +180,7 @@ dev = [
     "pyyaml>=6.0",
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
+    "cmaes>=0.12.0",
     "matplotlib>=3.5",
     "jinja2>=3.1",
     "markdown>=3.5",
