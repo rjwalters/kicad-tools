@@ -2,28 +2,28 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
-            "command": ".loom/hooks/guard-destructive.sh",
-            "type": "command"
+            "type": "command",
+            "command": ".loom/hooks/guard-destructive.sh"
           }
-        ],
-        "matcher": "Bash"
+        ]
       }
     ],
     "UserPromptSubmit": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": ".loom/hooks/skill-router.sh",
-            "type": "command"
+            "type": "command",
+            "command": ".loom/hooks/skill-router.sh"
           },
           {
-            "command": ".loom/hooks/methodology-inject.sh",
-            "type": "command"
+            "type": "command",
+            "command": ".loom/hooks/methodology-inject.sh"
           }
-        ],
-        "matcher": ""
+        ]
       }
     ]
   },
