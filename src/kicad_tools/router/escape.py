@@ -1060,6 +1060,11 @@ class EscapeRouter:
         This is specifically designed for fine-pitch packages where the pitch
         (0.65mm or less) doesn't allow traces to pass between adjacent pads.
 
+        Issue #1778: Escape segments use min_trace_width (manufacturer minimum)
+        instead of net-class trace width. These segments are short (< 1mm) and
+        only need to clear the pad congestion zone. Using the full trace width
+        would violate clearances between adjacent fine-pitch pads.
+
         Args:
             pads: Row of pads sorted by position along the row
             direction: Primary escape direction (perpendicular to row)
@@ -1070,6 +1075,16 @@ class EscapeRouter:
         """
         escapes: list[EscapeRoute] = []
         dx, dy = self._direction_to_vector(direction)
+
+        # Issue #1778: Use min_trace_width for escape segments in fine-pitch
+        # packages. The escape segments are short and only need to clear the
+        # pad congestion zone -- using the full trace width would violate
+        # clearances between adjacent pads at 0.65mm pitch.
+        escape_width = (
+            self.rules.min_trace_width
+            if self.rules.min_trace_width is not None
+            else self._get_trace_width_for_net(pads[0].net_name if pads else "")
+        )
 
         # For fine-pitch, use minimal escape distance
         # Vias placed just outside pad clearance zone
@@ -1104,7 +1119,7 @@ class EscapeRouter:
                         y1=pad.y,
                         x2=via_x,
                         y2=via_y,
-                        width=self._get_trace_width_for_net(pad.net_name),
+                        width=escape_width,
                         layer=pad.layer,
                         net=pad.net,
                         net_name=pad.net_name,
@@ -1129,7 +1144,7 @@ class EscapeRouter:
                         y1=via_y,
                         x2=escape_x,
                         y2=escape_y,
-                        width=self._get_trace_width_for_net(pad.net_name),
+                        width=escape_width,
                         layer=escape_layer,
                         net=pad.net,
                         net_name=pad.net_name,
@@ -1161,7 +1176,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=self._get_trace_width_for_net(pad.net_name),
+                    width=escape_width,
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,

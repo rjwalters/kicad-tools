@@ -658,15 +658,22 @@ class RoutingGrid:
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         self.grid[layer_idx][gy][gx].blocked = True
 
-    def add_pad(self, pad: Pad) -> None:
+    def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
 
         Thread-safe when thread_safe=True.
+
+        Args:
+            pad: Pad to add as obstacle.
+            pin_pitch: Optional pin pitch in mm for this pad's component.
+                When provided and below the fine-pitch threshold, uses reduced
+                clearance (manufacturer minimum) to allow pathfinder access
+                between adjacent fine-pitch pads.
         """
         with self._acquire_lock():
-            self._add_pad_unsafe(pad)
+            self._add_pad_unsafe(pad, pin_pitch=pin_pitch)
 
-    def _add_pad_unsafe(self, pad: Pad) -> None:
+    def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
@@ -677,7 +684,32 @@ class RoutingGrid:
         # If we only blocked trace_clearance, a trace center placed at the boundary
         # would have its edge at (trace_clearance - trace_width/2) from the pad,
         # violating the required clearance.
-        clearance = self.rules.trace_clearance + self.rules.trace_width / 2
+        #
+        # Issue #1778: For fine-pitch packages (<=0.65mm pitch), the standard
+        # clearance envelope causes adjacent pad zones to completely overlap,
+        # leaving zero unblocked cells for pathfinding. When pin_pitch is below
+        # the fine-pitch threshold, use a reduced clearance envelope that only
+        # prevents the necked-down trace edge from overlapping pad copper.
+        #
+        # Standard clearance: trace_clearance + trace_width/2 (blocks where trace
+        # center would cause edge to violate clearance from pad).
+        #
+        # Fine-pitch clearance: min_trace_width/2 (blocks only where trace center
+        # would cause its edge to overlap the pad metal). This is the minimum
+        # needed for grid-level blocking -- the actual manufacturer clearance is
+        # validated during DRC after routing. This ensures at least 1-3 passable
+        # grid cells between adjacent fine-pitch pads for A* to find paths.
+        if (
+            pin_pitch is not None
+            and pin_pitch < self.rules.fine_pitch_threshold
+            and self.rules.min_trace_width is not None
+        ):
+            # Use min_trace_width/2 as clearance: ensures the necked-down trace
+            # edge doesn't physically overlap pad copper. The full manufacturer
+            # clearance (0.127mm) is validated in post-routing DRC.
+            clearance = self.rules.min_trace_width / 2
+        else:
+            clearance = self.rules.trace_clearance + self.rules.trace_width / 2
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
