@@ -1,5 +1,7 @@
 """Tests for the optimization module."""
 
+import math
+
 import pytest
 
 from kicad_tools.optim import (
@@ -424,7 +426,7 @@ class TestPlacementConfig:
         assert config.charge_density == 100.0
         assert config.min_distance == 0.5
         assert config.spring_stiffness == 10.0
-        assert config.damping == 0.95
+        assert config.damping == 0.85
         assert config.max_velocity == 10.0
 
 
@@ -1407,3 +1409,97 @@ class TestThermalOptimization:
         # Both components should have forces applied
         assert forces["U1"].magnitude() > 0
         assert forces["Y1"].magnitude() > 0
+
+
+class TestOptimizerConvergence:
+    """Tests for force-directed optimizer convergence (issue #1766)."""
+
+    def test_energy_decreases(self):
+        """Energy should decrease after the initial transient."""
+        board = Polygon.rectangle(50, 50, 80, 80)
+        config = PlacementConfig()
+        optimizer = PlacementOptimizer(board, config)
+
+        # Add 10 components in a cluster near center
+        for i in range(10):
+            x = 40.0 + (i % 5) * 4.0
+            y = 45.0 + (i // 5) * 4.0
+            comp = Component(ref=f"C{i}", x=x, y=y, width=3.0, height=2.0)
+            optimizer.add_component(comp)
+
+        # Run initial transient (energy rises as forces separate components)
+        optimizer.run(iterations=100, dt=0.01)
+        energy_after_transient = optimizer.compute_energy()
+
+        # Run more iterations -- system should be settling
+        optimizer.run(iterations=400, dt=0.01)
+        energy_end = optimizer.compute_energy()
+
+        # Energy should decrease after the transient phase
+        assert energy_end < energy_after_transient, (
+            f"Energy increased from {energy_after_transient:.2f} to {energy_end:.2f} "
+            f"after transient (divergence detected)"
+        )
+
+    def test_components_stay_within_bounds(self):
+        """All components must remain inside board bounding box after optimization."""
+        board = Polygon.rectangle(50, 50, 80, 80)
+        config = PlacementConfig()
+        optimizer = PlacementOptimizer(board, config)
+
+        # Place components in a tight cluster to generate high repulsion
+        for i in range(8):
+            x = 48.0 + (i % 4) * 2.0
+            y = 48.0 + (i // 4) * 2.0
+            comp = Component(ref=f"R{i}", x=x, y=y, width=2.5, height=1.5)
+            optimizer.add_component(comp)
+
+        optimizer.run(iterations=1000, dt=0.01)
+
+        # Board bounding box
+        min_x = min(v.x for v in board.vertices)
+        max_x = max(v.x for v in board.vertices)
+        min_y = min(v.y for v in board.vertices)
+        max_y = max(v.y for v in board.vertices)
+
+        for comp in optimizer.components:
+            assert min_x <= comp.x <= max_x, (
+                f"Component {comp.ref} escaped board: x={comp.x:.2f} "
+                f"(bounds [{min_x:.2f}, {max_x:.2f}])"
+            )
+            assert min_y <= comp.y <= max_y, (
+                f"Component {comp.ref} escaped board: y={comp.y:.2f} "
+                f"(bounds [{min_y:.2f}, {max_y:.2f}])"
+            )
+
+    def test_overlapping_components_converge(self):
+        """Components initially nearly overlapping should separate without diverging."""
+        board = Polygon.rectangle(50, 50, 100, 100)
+        config = PlacementConfig()
+        optimizer = PlacementOptimizer(board, config)
+
+        # Place three components very close together (near-overlap, worst realistic case)
+        for i in range(3):
+            # Offset by 0.1mm to avoid exact overlap degenerate case
+            comp = Component(ref=f"U{i}", x=50.0 + i * 0.1, y=50.0 + i * 0.1,
+                             width=5.0, height=5.0)
+            optimizer.add_component(comp)
+
+        optimizer.run(iterations=500, dt=0.01)
+
+        energy = optimizer.compute_energy()
+        # Energy should be finite (no NaN/inf from singularity)
+        assert math.isfinite(energy), f"Energy is not finite: {energy}"
+
+        # Components should have separated
+        positions = [(c.x, c.y) for c in optimizer.components]
+        # At least one pair should be separated by more than 1mm
+        separated = False
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                dx = positions[i][0] - positions[j][0]
+                dy = positions[i][1] - positions[j][1]
+                if math.sqrt(dx * dx + dy * dy) > 1.0:
+                    separated = True
+                    break
+        assert separated, "Overlapping components did not separate"
