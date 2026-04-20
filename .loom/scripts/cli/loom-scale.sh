@@ -169,23 +169,20 @@ show_status() {
         return 0
     fi
 
-    # Count by role pattern
-    declare -A role_counts
+    # Count by role pattern (bash 3.2-compatible: no associative arrays)
+    # Extract role names, sort and count with uniq -c, then display
+    local role_summary
+    role_summary=$(echo "$sessions" \
+        | sed 's/^loom-//' \
+        | sed 's/-[0-9]*$//' \
+        | sort \
+        | uniq -c)
 
-    while read -r session; do
-        if [[ -n "$session" ]]; then
-            # Extract role name (e.g., loom-shepherd-1 -> shepherd)
-            local role
-            role=$(echo "$session" | sed 's/^loom-//' | sed 's/-[0-9]*$//')
-            role_counts["$role"]=$((${role_counts["$role"]:-0} + 1))
+    while read -r count role; do
+        if [[ -n "$role" ]]; then
+            echo -e "  ${CYAN}$role:${NC} $count"
         fi
-    done <<< "$sessions"
-
-    # Display counts
-    for role in "${!role_counts[@]}"; do
-        local count="${role_counts[$role]}"
-        echo -e "  ${CYAN}$role:${NC} $count"
-    done
+    done <<< "$role_summary"
 
     echo ""
     echo -e "${GRAY}Total: $(echo "$sessions" | wc -l | tr -d ' ') session(s)${NC}"

@@ -1114,6 +1114,15 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         help="Disable routing cache (force fresh routing)",
     )
+    route_parser.add_argument(
+        "--backend",
+        choices=["auto", "cpp", "python"],
+        default="auto",
+        help=(
+            "Router backend: 'auto' = C++ if available (default); "
+            "'cpp' = require C++; 'python' = force Python"
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
@@ -4152,4 +4161,10 @@ def _add_export_parser(subparsers) -> None:
         default="text",
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
+    )
+    export_parser.add_argument(
+        "--latest-only",
+        dest="export_latest_only",
+        action="store_true",
+        help="Flatten the latest versioned report into a single report/ directory",
     )

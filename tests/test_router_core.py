@@ -3080,3 +3080,56 @@ class TestPostRouteClearanceCorrection:
         # Route with negotiated mode - should invoke the correction pass
         routes = router.route_all_negotiated(max_iterations=2)
         assert isinstance(routes, list)
+
+    def test_post_route_correction_uses_mark_route(self):
+        """Issue #1694: Correction pass must call mark_route (width-aware), not mark_route_usage."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+        )
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Create a route manually to simulate rerouting
+        seg = Segment(
+            x1=5.0, y1=10.0, x2=15.0, y2=10.0,
+            width=0.5, net=1, layer=Layer.F_CU,
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+
+        # Patch validate_routes to return a violation so the correction runs,
+        # then return no violations on the second call so it stops.
+        violation = type(
+            "V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"}
+        )()
+        call_count = [0]
+
+        def mock_validate(router_obj):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return [violation]
+            return []
+
+        # Patch _route_net_negotiated to return the route
+        def mock_route_net(net, pf, per_net_timeout=None):
+            return [route]
+
+        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
+             patch.object(router, "_route_net_negotiated", mock_route_net), \
+             patch.object(router.grid, "mark_route") as mock_mark_route, \
+             patch.object(router.grid, "mark_route_usage") as mock_mark_usage:
+
+            router._post_route_clearance_correction(
+                net_routes={1: [route], 2: []},
+                pads_by_net={},
+                present_factor=0.5,
+            )
+
+            # mark_route should be called (width-aware blocking)
+            assert mock_mark_route.called, (
+                "mark_route must be called in correction pass for width-aware blocking"
+            )
+            # mark_route_usage should NOT be called
+            assert not mock_mark_usage.called, (
+                "mark_route_usage should not be called in correction pass"
+            )

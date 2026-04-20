@@ -7,7 +7,7 @@ import pytest
 
 from kicad_tools.cli.repair_clearance_cmd import main
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
-from kicad_tools.drc.report import DRCReport
+from kicad_tools.drc.report import DRCReport, parse_text_report
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
 # PCB with two traces that are too close together
@@ -2306,3 +2306,116 @@ class TestOscillationDetection:
         )
         # At least some violations should be skipped due to oscillation
         assert result2.skipped_infeasible > 0
+
+
+class TestWidthAwareDisplacement:
+    """Issue #1694: Nudge displacement must account for trace widths."""
+
+    # PCB with two segments of different widths close together
+    PCB_DIFFERENT_WIDTHS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (segment (start 100 100) (end 110 100) (width 0.5) (layer "F.Cu") (net 1) (uuid "wide-seg"))
+  (segment (start 100 100.5) (end 110 100.5) (width 0.2) (layer "F.Cu") (net 2) (uuid "narrow-seg"))
+)
+"""
+
+    DRC_REPORT_DIFFERENT_WIDTHS = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.5000 mm): Track [VCC] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+    def test_width_aware_displacement_increases_for_different_widths(self, tmp_path: Path):
+        """Nudge displacement should be larger for wider traces to ensure clearance."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_DIFFERENT_WIDTHS)
+
+        drc_file = tmp_path / "drc.rpt"
+        drc_file.write_text(self.DRC_REPORT_DIFFERENT_WIDTHS)
+
+        report = parse_text_report(drc_file.read_text(), str(drc_file))
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+
+        # Should produce at least one nudge
+        assert len(result.nudges) > 0, "Should have produced a nudge for the violation"
+
+        nudge = result.nudges[0]
+
+        # The wide trace is 0.5mm, narrow is 0.2mm.
+        # Center-to-center = 0.5mm.  Required center dist = 0.25 + 0.1 + 0.2 = 0.55mm.
+        # Width-aware displacement = 0.55 - 0.5 = 0.05mm (plus margin).
+        # Without width-awareness, delta = 0.05mm would be used.
+        # With width-awareness the displacement should be at least as large as delta.
+        assert nudge.displacement_mm >= 0.05, (
+            f"Displacement {nudge.displacement_mm:.4f}mm should be >= 0.05mm"
+        )
+
+    def test_equal_width_displacement_unchanged(self, tmp_path: Path):
+        """For equal-width traces, displacement should match the DRC deficit (no boost)."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE_VIOLATION)
+
+        drc_file = tmp_path / "drc.rpt"
+        drc_file.write_text(DRC_REPORT_CLEARANCE)
+
+        report = parse_text_report(drc_file.read_text(), str(drc_file))
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.2,
+            dry_run=True,
+        )
+
+        # Should still produce nudges for equal-width traces
+        seg_nudges = [n for n in result.nudges if n.object_type == "segment"]
+        assert len(seg_nudges) > 0, "Should produce nudges for equal-width segments"
+
+        # Displacement should be close to delta (0.05mm) + margin, not inflated
+        for nudge in seg_nudges:
+            assert nudge.displacement_mm < 0.15, (
+                f"Equal-width displacement {nudge.displacement_mm:.4f}mm should not be "
+                "inflated beyond the DRC deficit"
+            )
+
+    def test_get_node_width_segment(self, tmp_path: Path):
+        """_get_node_width extracts width from segment nodes."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_DIFFERENT_WIDTHS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Find the wide segment (width=0.5)
+        for seg_node in repairer.doc.find_all("segment"):
+            uuid_node = seg_node.find("uuid")
+            if uuid_node and uuid_node.get_first_atom() == "wide-seg":
+                assert repairer._get_node_width(seg_node) == 0.5
+            elif uuid_node and uuid_node.get_first_atom() == "narrow-seg":
+                assert repairer._get_node_width(seg_node) == 0.2

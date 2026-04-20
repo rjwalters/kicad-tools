@@ -1075,6 +1075,65 @@ class RoutingGrid:
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
 
+    def validate_via_to_via_clearance(
+        self,
+        via: "Via",
+        exclude_net: int,
+        min_clearance: float | None = None,
+    ) -> tuple[bool, float, tuple[float, float] | None]:
+        """Validate geometric clearance of a via against all other-net vias.
+
+        Issue #1693: Complements validate_via_clearance() by checking vias
+        against other-net vias. Without this, two vias from different nets can
+        be placed too close together, creating a DRC violation that grid-based
+        checking misses because the grid marking radius is tuned for trace
+        avoidance, not via-to-via proximity.
+
+        Uses simple center-to-center Euclidean distance minus both via radii
+        to compute edge-to-edge clearance. No layer filtering is needed since
+        vias are through-hole.
+
+        Args:
+            via: The via to validate
+            exclude_net: Net ID to exclude (same-net vias don't violate clearance)
+            min_clearance: Minimum required clearance (default: rules.via_clearance)
+
+        Returns:
+            Tuple of (is_valid, actual_clearance, violation_location)
+            - is_valid: True if via meets clearance requirements
+            - actual_clearance: Minimum clearance found (negative if overlapping)
+            - violation_location: (x, y) of worst violation, or None if valid
+        """
+        import math
+
+        if min_clearance is None:
+            min_clearance = self.rules.via_clearance
+
+        via_radius = via.diameter / 2
+        min_actual_clearance = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        has_violation = False
+
+        for route in self.routes:
+            if route.net == exclude_net:
+                continue
+
+            for existing_via in route.vias:
+                distance = math.sqrt(
+                    (via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2
+                )
+                existing_via_radius = existing_via.diameter / 2
+                clearance = distance - via_radius - existing_via_radius
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                if clearance < min_clearance:
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
+
+        is_valid = not has_violation
+        return is_valid, min_actual_clearance, violation_loc
+
     def _point_to_segment_distance(
         self,
         px: float,
@@ -1242,7 +1301,7 @@ class RoutingGrid:
             layer_idx = self.layer_to_index(seg.layer.value)
             self._rtree_remove_segment(seg, layer_idx)
 
-    def mark_route(self, route: Route) -> None:
+    def mark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Mark a route's cells as used.
 
         Thread-safe when thread_safe=True.
@@ -1254,6 +1313,13 @@ class RoutingGrid:
         ``trace_width + 2 * trace_clearance`` when grid snap rounds their
         positions inward.  The extra cell ensures the blocked envelope is
         always at least as large as the geometric clearance requirement.
+
+        Args:
+            route: The route to mark on the grid.
+            max_trace_width: Maximum trace width across all net classes.
+                Passed through to ``_mark_via()`` so via blocking envelopes
+                account for the widest trace that may be routed nearby
+                (Issue #1692).  Falls back to ``rules.trace_width``.
         """
         with self._acquire_lock():
             for seg in route.segments:
@@ -1266,7 +1332,7 @@ class RoutingGrid:
                 clearance_cells += 1
                 self._mark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
-                self._mark_via(via)
+                self._mark_via(via, max_trace_width=max_trace_width)
             self.routes.append(route)
             # Maintain R-tree index for fast clearance queries (Issue #1249)
             self._rtree_insert_route(route)
@@ -1322,12 +1388,23 @@ class RoutingGrid:
         for nx, ny in marked_cells:
             self._update_congestion(nx, ny, layer_idx)
 
-    def _mark_via(self, via: Via) -> None:
-        """Mark cells around a via as blocked on ALL layers (through-hole via)."""
+    def _mark_via(self, via: Via, max_trace_width: float | None = None) -> None:
+        """Mark cells around a via as blocked on ALL layers (through-hole via).
+
+        Args:
+            via: The via to mark.
+            max_trace_width: Maximum trace width across all net classes.
+                When provided, used as the trace half-width buffer so that
+                wide-trace nets routed near this via maintain clearance
+                (Issue #1692).  Falls back to ``rules.trace_width``.
+        """
         gx, gy = self.world_to_grid(via.x, via.y)
         # Include trace half-width so trace edges maintain via_clearance from via edge
+        # Issue #1692: Use the maximum trace width (across all net classes)
+        # so that wide-trace nets routed later still clear this via.
+        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
         radius = int(
-            (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+            (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
             / self.resolution
         )
 
@@ -1342,13 +1419,18 @@ class RoutingGrid:
                             cell.net = via.net
                         cell.blocked = True
 
-    def unmark_route(self, route: Route) -> None:
+    def unmark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Unmark a route's cells (rip-up). Reverses mark_route().
 
         Thread-safe when thread_safe=True.
 
         Issue #1674: Computes clearance per-segment from ``seg.width``
         to match the per-segment marking done by ``mark_route()``.
+
+        Args:
+            route: The route to unmark.
+            max_trace_width: Must match the value used in ``mark_route()``
+                so via cells are cleared symmetrically (Issue #1692).
         """
         with self._acquire_lock():
             for seg in route.segments:
@@ -1358,7 +1440,7 @@ class RoutingGrid:
                 clearance_cells += 1
                 self._unmark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
-                self._unmark_via(via)
+                self._unmark_via(via, max_trace_width=max_trace_width)
 
             if route in self.routes:
                 # Remove from R-tree index before removing from list (Issue #1249)
@@ -1410,12 +1492,20 @@ class RoutingGrid:
                     err += dx
                     gy += sy
 
-    def _unmark_via(self, via: Via) -> None:
-        """Unmark cells around a via on ALL layers."""
+    def _unmark_via(self, via: Via, max_trace_width: float | None = None) -> None:
+        """Unmark cells around a via on ALL layers.
+
+        Args:
+            via: The via to unmark.
+            max_trace_width: Must match the value used in ``_mark_via()``
+                so the same cells are cleared (Issue #1692).
+        """
         gx, gy = self.world_to_grid(via.x, via.y)
         # Include trace half-width to match _mark_via calculation
+        # Issue #1692: Use the same max_trace_width as _mark_via
+        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
         radius = int(
-            (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+            (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
             / self.resolution
         )
 

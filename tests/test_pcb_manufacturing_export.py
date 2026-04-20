@@ -262,7 +262,13 @@ class TestGenerateReport:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
-            pkg._generate_report(out_dir, result)
+
+            # Force PDF rendering off so we test pure Markdown output
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
 
             # report_path should be set to a valid .md file
             assert result.report_path is not None
@@ -321,6 +327,172 @@ class TestGenerateReport:
             content = result.report_path.read_text(encoding="utf-8")
             # Should contain some markdown content
             assert len(content) > 0
+
+
+class TestRenderReportPdf:
+    """Tests for ManufacturingPackage._render_report_pdf integration."""
+
+    def test_render_pdf_produces_pdf_when_available(self, test_project_pcb):
+        """_generate_report produces report.pdf when weasyprint is available."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            # Mock both render_html and render_pdf to avoid needing
+            # the markdown and weasyprint packages at test time.
+            def fake_render_html(md_content, figures_dir=None):
+                return "<html><body>mock</body></html>"
+
+            def fake_render_pdf(html_content, output_path):
+                Path(output_path).write_bytes(b"%PDF-mock")
+
+            with patch(
+                "kicad_tools.export.manufacturing.ManufacturingPackage._render_report_pdf",
+                wraps=None,
+            ) as mock_render:
+                # Let _generate_report run normally to produce the .md,
+                # then manually call the rendering logic with mocks.
+                pkg._generate_report(out_dir, result)
+
+            # At this point result.report_path is .md; now test the
+            # rendering step in isolation.
+            assert result.report_path is not None
+            md_path = result.report_path
+            assert md_path.suffix == ".md"
+
+            # Simulate what _render_report_pdf does with mocked renderers
+            with patch(
+                "kicad_tools.report.renderers.render_html",
+                side_effect=fake_render_html,
+            ), patch(
+                "kicad_tools.report.renderers.render_pdf",
+                side_effect=fake_render_pdf,
+            ):
+                from kicad_tools.export.manufacturing import ManufacturingPackage as MP
+
+                version_dir = md_path.parent
+                MP._render_report_pdf(md_path, version_dir, result)
+
+            assert result.report_path is not None
+            assert result.report_path.suffix == ".pdf"
+            assert result.report_path.exists()
+
+    def test_render_pdf_falls_back_to_md(self, test_project_pcb):
+        """_generate_report falls back to .md when weasyprint is absent."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
+
+            # result.report_path should remain as .md
+            assert result.report_path is not None
+            assert result.report_path.suffix == ".md"
+            assert result.report_path.exists()
+            # No errors recorded for graceful fallback
+            report_errors = [e for e in result.errors if "report" in e.lower()]
+            assert len(report_errors) == 0
+
+
+class TestFlattenLatestReportPdf:
+    """Tests for _flatten_latest_report preferring PDF over MD."""
+
+    def test_flatten_prefers_pdf_over_md(self, test_project_pcb):
+        """_flatten_latest_report sets report_path to PDF when both exist."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingConfig,
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        config = ManufacturingConfig(
+            include_report=True,
+            latest_report_only=True,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            # Generate the MD report without PDF rendering
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
+
+            # Manually create a PDF alongside the MD to simulate PDF rendering
+            assert result.report_path is not None
+            pdf_path = result.report_path.with_suffix(".pdf")
+            pdf_path.write_bytes(b"%PDF-mock")
+
+            # Now flatten -- it should prefer the PDF
+            pkg._flatten_latest_report(out_dir, result)
+
+            assert result.report_path is not None
+            assert result.report_path.suffix == ".pdf"
+            assert "report" in result.report_path.parent.name
+
+    def test_flatten_falls_back_to_md(self, test_project_pcb):
+        """_flatten_latest_report falls back to MD when no PDF exists."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingConfig,
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        config = ManufacturingConfig(
+            include_report=True,
+            latest_report_only=True,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
+                pkg._flatten_latest_report(out_dir, result)
+
+            assert result.report_path is not None
+            assert result.report_path.suffix == ".md"
 
 
 # Fixtures

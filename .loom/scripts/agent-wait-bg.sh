@@ -59,6 +59,7 @@ detect_repo_nwo() {
 }
 
 # Cache repo NWO to avoid repeated detection
+# shellcheck disable=SC2034
 REPO_NWO="$(detect_repo_nwo)" || REPO_NWO=""
 
 # tmux configuration (must match agent-spawn.sh)

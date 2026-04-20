@@ -1376,6 +1376,186 @@ class TestViaClearanceValidation:
         assert clearance < grid.rules.via_clearance
 
 
+class TestViaToViaClearanceValidation:
+    """Tests for validate_via_to_via_clearance() -- Issue #1693.
+
+    Verifies that vias are checked against other-net vias for clearance
+    violations. This catches via-to-via violations that grid-based checking
+    misses because the grid marking radius is tuned for trace avoidance,
+    not via-to-via proximity.
+    """
+
+    @pytest.fixture
+    def grid(self):
+        """Create a routing grid for via-to-via clearance testing."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+        )
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_via_to_via_far_apart(self, grid):
+        """Test via far from other-net via passes validation."""
+        other_route = Route(net=1, net_name="NET1")
+        other_route.vias.append(
+            Via(x=5.0, y=5.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(other_route)
+
+        # Place a via far away (at 15.0, 15.0)
+        via = Via(
+            x=15.0, y=15.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is True
+        # Distance = sqrt(200) ~ 14.14, edge clearance = 14.14 - 0.35 - 0.35 = 13.44
+        assert clearance > grid.rules.via_clearance
+        assert location is None
+
+    def test_via_to_via_too_close(self, grid):
+        """Test via too close to other-net via is detected as violation."""
+        other_route = Route(net=1, net_name="NET1")
+        other_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(other_route)
+
+        # Place a via very close: center distance = 0.8
+        # Edge clearance = 0.8 - 0.35 - 0.35 = 0.1, required = 0.2 => violation
+        via = Via(
+            x=10.8, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is False
+        assert clearance < grid.rules.via_clearance
+        assert location is not None
+        assert location == (10.8, 10.0)
+
+    def test_via_to_via_same_net_ignored(self, grid):
+        """Test that same-net vias are ignored in clearance check."""
+        same_net_route = Route(net=2, net_name="NET2")
+        same_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2")
+        )
+        grid.routes.append(same_net_route)
+
+        # Place a via overlapping the same-net via
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is True
+
+    def test_via_to_via_at_exact_boundary(self, grid):
+        """Test via exactly at clearance boundary passes validation."""
+        other_route = Route(net=1, net_name="NET1")
+        other_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(other_route)
+
+        # Edge-to-edge clearance == required_clearance should pass
+        # Required clearance = 0.2, via radius = 0.35 each
+        # Need: distance - 0.35 - 0.35 = 0.2 => distance = 0.9
+        via = Via(
+            x=10.9, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is True
+        assert abs(clearance - 0.2) < 0.01
+
+    def test_via_to_via_just_below_boundary(self, grid):
+        """Test via 0.001mm below clearance boundary is detected as violation."""
+        other_route = Route(net=1, net_name="NET1")
+        other_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(other_route)
+
+        # Edge clearance = 0.899 - 0.35 - 0.35 = 0.199, just below 0.2
+        via = Via(
+            x=10.899, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is False
+        assert clearance < grid.rules.via_clearance
+
+    def test_via_to_via_different_diameters(self, grid):
+        """Test via-to-via clearance with different via diameters."""
+        other_route = Route(net=1, net_name="NET1")
+        # Larger via with diameter 1.0
+        other_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.5, diameter=1.0,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(other_route)
+
+        # Standard via (diameter 0.7) placed too close
+        # Center distance = 0.9, edge clearance = 0.9 - 0.5 - 0.35 = 0.05 < 0.2
+        via = Via(
+            x=10.9, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is False
+        assert clearance < grid.rules.via_clearance
+
+    def test_via_to_via_multiple_existing_vias(self, grid):
+        """Test via checked against multiple existing vias from different nets."""
+        # Add vias on two different nets
+        route1 = Route(net=1, net_name="NET1")
+        route1.vias.append(
+            Via(x=5.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(route1)
+
+        route3 = Route(net=3, net_name="NET3")
+        route3.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=3, net_name="NET3")
+        )
+        grid.routes.append(route3)
+
+        # Place via close to NET3's via but far from NET1's via
+        # Distance to NET3 via = 0.8, edge clearance = 0.8 - 0.35 - 0.35 = 0.1 < 0.2
+        via = Via(
+            x=10.8, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
+
+        assert is_valid is False
+        assert clearance < grid.rules.via_clearance
+
+
 class TestHeuristics:
     """Tests for heuristic classes."""
 

@@ -34,6 +34,7 @@ if command -v loom-forge &>/dev/null; then
 else
     FORGE="gh"
 fi
+# shellcheck disable=SC2034
 GH_CACHED="$_SCRIPT_DIR/gh-cached"
 if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
