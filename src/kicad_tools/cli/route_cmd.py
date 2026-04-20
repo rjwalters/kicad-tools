@@ -1879,6 +1879,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--grid-strategy",
+        choices=["adaptive", "uniform"],
+        default="adaptive",
+        help=(
+            "Grid strategy when --grid auto is used. "
+            "'adaptive' (default) uses multi-resolution grids with fine zones "
+            "around fine-pitch components. 'uniform' forces single-resolution grid."
+        ),
+    )
+    parser.add_argument(
         "--trace-width",
         type=float,
         default=0.2,
@@ -2402,9 +2412,11 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve grid value: "auto" or numeric
     # We need to resolve this early, before sub-functions are called
     grid_auto_result = None
+    multi_res_plan = None
     if args.grid.lower() == "auto":
         from kicad_tools.router.io import (
             auto_select_grid_resolution,
+            compute_multi_resolution_plan,
             extract_board_dimensions,
             extract_pad_positions,
         )
@@ -2421,11 +2433,40 @@ def main(argv: list[str] | None = None) -> int:
             board_width=board_width,
             board_height=board_height,
         )
-        # Replace args.grid with resolved float for downstream code
-        args.grid = grid_auto_result.resolution
-        if not args.quiet:
-            print(grid_auto_result.summary())
-            print()
+
+        # When grid_strategy is adaptive (default), attempt multi-resolution
+        grid_strategy = getattr(args, "grid_strategy", "adaptive")
+        if grid_strategy == "adaptive":
+            # compute_multi_resolution_plan needs full Pad objects (with ref)
+            # Try loading them; fall back to uniform if not available
+            try:
+                from kicad_tools.router.io import load_pads_for_analysis
+
+                full_pads = load_pads_for_analysis(pcb_path)
+                multi_res_plan = compute_multi_resolution_plan(
+                    pads=full_pads,
+                    clearance=args.clearance,
+                )
+            except Exception:
+                # Fall back: try with pad positions (won't have ref info)
+                multi_res_plan = compute_multi_resolution_plan(
+                    pads=pad_positions,
+                    clearance=args.clearance,
+                )
+
+        if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+            # Use coarse resolution for the global grid
+            args.grid = multi_res_plan.coarse_resolution
+            if not args.quiet:
+                print(multi_res_plan.summary())
+                print()
+        else:
+            # No fine-pitch components or uniform strategy requested
+            multi_res_plan = None
+            args.grid = grid_auto_result.resolution
+            if not args.quiet:
+                print(grid_auto_result.summary())
+                print()
     else:
         try:
             args.grid = float(args.grid)
@@ -2944,6 +2985,51 @@ def main(argv: list[str] | None = None) -> int:
         # Define routing function for profiling
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report
+
+            # Adaptive multi-resolution routing (when --grid auto selects it)
+            if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+                from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
+
+                if not quiet:
+                    flush_print("  Using adaptive multi-resolution grid strategy")
+                adaptive_router = AdaptiveGridRouter(
+                    grid=router.grid,
+                    rules=rules,
+                    router=router,
+                )
+
+                # Build nets dict (filter to routable multi-pad nets)
+                adaptive_nets = {
+                    net_id: pad_keys
+                    for net_id, pad_keys in router.nets.items()
+                    if net_id > 0 and len(pad_keys) >= 2
+                }
+                adaptive_pads = router.pads
+
+                # Define the Phase 2 routing function
+                def phase2_route_fn():
+                    if args.strategy == "negotiated":
+                        return router.route_all_negotiated(
+                            max_iterations=args.iterations,
+                            timeout=args.timeout,
+                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                            batch_routing=getattr(args, "batch_routing", False)
+                            or getattr(args, "high_performance", False),
+                            hierarchical=getattr(args, "hierarchical", False),
+                        )
+                    else:
+                        return router.route_all()
+
+                adaptive_result = adaptive_router.route_adaptive(
+                    nets=adaptive_nets,
+                    pads=adaptive_pads,
+                    route_fn=phase2_route_fn,
+                )
+
+                if not quiet:
+                    flush_print(f"\n{adaptive_result.format_summary()}")
+
+                return adaptive_result.all_routes
 
             # Check if escape routing should run as a pre-phase
             if _should_use_escape_routing(router, escape_routing_flag, quiet):
