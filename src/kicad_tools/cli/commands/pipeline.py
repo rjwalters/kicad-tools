@@ -44,10 +44,6 @@ def run_pipeline_command(args) -> int:
     if max_disp is not None and max_disp != 2.0:
         sub_argv.extend(["--max-displacement", str(max_disp)])
 
-    # Zones opt-in
-    if getattr(args, "pipeline_zones", False):
-        sub_argv.append("--zones")
-
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
