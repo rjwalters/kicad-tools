@@ -215,7 +215,8 @@ class SubGridRouter:
             Default is resolution/4, which catches pads that are more than
             25% of a grid cell away from the nearest grid point.
         escape_search_radius: Number of grid cells to search for a valid
-            escape endpoint. Default is 3 cells.
+            escape endpoint. Default adapts to grid resolution
+            (minimum 3 cells, scaled so search covers at least 0.3mm).
     """
 
     def __init__(
