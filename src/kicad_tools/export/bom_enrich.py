@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..cost.suggest import PartSuggester
+from ..parts.cache import PartsCache
 from ..parts.lcsc import LCSCForbiddenError
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ class EnrichmentEntry:
     footprint: str
     references: list[str]
     lcsc_part: str  # The assigned LCSC part number (empty if unmatched)
-    source: str  # "schematic" | "auto" | "unmatched"
+    source: str  # "schematic" | "auto" | "cache" | "unmatched"
     confidence: float = 0.0
     part_type: str = ""  # "Basic" | "Pref" | "Ext" | ""
     error: str = ""
@@ -68,6 +69,11 @@ class EnrichmentReport:
         return len([e for e in self.entries if e.source == "auto"])
 
     @property
+    def cache_matched(self) -> int:
+        """Groups matched from stale cache when API was unavailable."""
+        return len([e for e in self.entries if e.source == "cache"])
+
+    @property
     def unmatched(self) -> int:
         """Groups that could not be matched."""
         return len([e for e in self.entries if e.source == "unmatched"])
@@ -80,6 +86,8 @@ class EnrichmentReport:
     def summary_lines(self) -> list[str]:
         """Return human-readable summary lines."""
         parts = [f"{self.auto_matched} auto-matched"]
+        if self.cache_matched:
+            parts.append(f"{self.cache_matched} from cache")
         if self.spec_populated:
             parts.append(f"{self.spec_populated} from spec")
         parts.append(f"{self.already_populated} from schematic")
@@ -136,10 +144,61 @@ def enrich_bom_lcsc(
     api_forbidden = False
     forbidden_error = "JLCPCB API unavailable (403)"
 
+    def _try_cache_fallback(
+        cache: PartsCache | None,
+        value: str,
+        footprint: str,
+        refs: list[str],
+        group_items: list[BOMItem],
+    ) -> EnrichmentEntry:
+        """Attempt to resolve a part from the enrichment cache.
+
+        Returns an ``EnrichmentEntry`` with ``source="cache"`` on hit,
+        or ``source="unmatched"`` on miss.
+        """
+        if cache is not None:
+            match = cache.get_enrichment_match(
+                value, footprint, ignore_expiry=True
+            )
+            if match is not None:
+                lcsc = match["lcsc_part"]
+                for it in group_items:
+                    it.lcsc = lcsc
+                logger.info(
+                    "Cache fallback %s [%s] -> %s (stale cache)",
+                    value,
+                    footprint,
+                    lcsc,
+                )
+                return EnrichmentEntry(
+                    value=value,
+                    footprint=footprint,
+                    references=refs,
+                    lcsc_part=lcsc,
+                    source="cache",
+                    confidence=match["confidence"],
+                    part_type=match["part_type"],
+                )
+        return EnrichmentEntry(
+            value=value,
+            footprint=footprint,
+            references=refs,
+            lcsc_part="",
+            source="unmatched",
+            error=forbidden_error,
+        )
+
     with PartSuggester(
         prefer_basic=prefer_basic,
         min_stock=min_stock,
     ) as suggester:
+        # Obtain the parts cache from the underlying LCSC client so we
+        # can store and retrieve enrichment matches.
+        cache: PartsCache | None = None
+        client = suggester._get_client()
+        if client is not None:
+            cache = client.cache
+
         for (value, footprint), group_items in groups.items():
             refs = [it.reference for it in group_items]
 
@@ -175,17 +234,11 @@ def enrich_bom_lcsc(
                 )
                 continue
 
-            # If the API is known to be forbidden, skip without calling
+            # If the API is known to be forbidden, try the cache before
+            # marking as unmatched.
             if api_forbidden:
                 report.entries.append(
-                    EnrichmentEntry(
-                        value=value,
-                        footprint=footprint,
-                        references=refs,
-                        lcsc_part="",
-                        source="unmatched",
-                        error=forbidden_error,
-                    )
+                    _try_cache_fallback(cache, value, footprint, refs, group_items)
                 )
                 continue
 
@@ -201,22 +254,15 @@ def enrich_bom_lcsc(
                 )
             except LCSCForbiddenError:
                 # API is globally unavailable -- emit a single warning and
-                # mark this and all remaining groups as unmatched.
+                # fall back to cache for this and all remaining groups.
                 api_forbidden = True
                 logger.warning(
                     "JLCPCB API returned 403 Forbidden -- "
-                    "skipping remaining LCSC auto-matching. "
+                    "falling back to enrichment cache for remaining groups. "
                     "Use --no-auto-lcsc to suppress."
                 )
                 report.entries.append(
-                    EnrichmentEntry(
-                        value=value,
-                        footprint=footprint,
-                        references=refs,
-                        lcsc_part="",
-                        source="unmatched",
-                        error=forbidden_error,
-                    )
+                    _try_cache_fallback(cache, value, footprint, refs, group_items)
                 )
                 continue
 
@@ -228,6 +274,16 @@ def enrich_bom_lcsc(
                 # Write back to all items in the group
                 for it in group_items:
                     it.lcsc = lcsc
+
+                # Store the match in the enrichment cache for offline use
+                if cache is not None:
+                    cache.put_enrichment_match(
+                        value,
+                        footprint,
+                        lcsc,
+                        confidence=best.confidence,
+                        part_type=best.type_str,
+                    )
 
                 report.entries.append(
                     EnrichmentEntry(
