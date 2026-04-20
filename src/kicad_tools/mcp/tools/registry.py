@@ -1893,3 +1893,100 @@ register_tool(
     handler=_handler_screenshot_schematic,
     category="screenshot",
 )
+
+# -----------------------------------------------------------------------------
+# Workflow Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_create_pcb_from_schematic(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle create_pcb_from_schematic tool call."""
+    from kicad_tools.mcp.tools.workflow import create_pcb_from_schematic
+
+    return create_pcb_from_schematic(
+        schematic_path=params["schematic_path"],
+        output_path=params.get("output_path"),
+        width=params.get("width", 100.0),
+        height=params.get("height", 100.0),
+        layers=params.get("layers", 2),
+        title=params.get("title", ""),
+        revision=params.get("revision", "1.0"),
+        company=params.get("company", ""),
+        auto_place=params.get("auto_place", True),
+        placement_spacing=params.get("placement_spacing", 15.0),
+        placement_columns=params.get("placement_columns", 10),
+    )
+
+
+register_tool(
+    name="create_pcb_from_schematic",
+    description=(
+        "Create a PCB from a KiCad schematic file. Extracts netlist data, "
+        "creates a blank PCB with specified dimensions, places footprints "
+        "for all components in a grid layout, and assigns nets based on "
+        "schematic connectivity. Returns the path to the saved PCB file "
+        "along with placement and net assignment statistics."
+    ),
+    parameters=_make_params(
+        properties={
+            "schematic_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_sch schematic file",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Output .kicad_pcb file path. "
+                    "Default: <schematic-stem>.kicad_pcb in the same directory."
+                ),
+            },
+            "width": {
+                "type": "number",
+                "description": "Board width in mm (default: 100.0)",
+                "default": 100.0,
+            },
+            "height": {
+                "type": "number",
+                "description": "Board height in mm (default: 100.0)",
+                "default": 100.0,
+            },
+            "layers": {
+                "type": "integer",
+                "description": "Number of copper layers, 2 or 4 (default: 2)",
+                "default": 2,
+                "enum": [2, 4],
+            },
+            "title": {
+                "type": "string",
+                "description": "Board title for title block (default: schematic filename)",
+            },
+            "revision": {
+                "type": "string",
+                "description": "Board revision (default: 1.0)",
+                "default": "1.0",
+            },
+            "company": {
+                "type": "string",
+                "description": "Company name for title block",
+            },
+            "auto_place": {
+                "type": "boolean",
+                "description": "Whether to automatically place components in a grid (default: true)",
+                "default": True,
+            },
+            "placement_spacing": {
+                "type": "number",
+                "description": "Spacing between auto-placed components in mm (default: 15.0)",
+                "default": 15.0,
+            },
+            "placement_columns": {
+                "type": "integer",
+                "description": "Number of columns for auto-placement grid (default: 10)",
+                "default": 10,
+            },
+        },
+        required=["schematic_path"],
+    ),
+    handler=_handler_create_pcb_from_schematic,
+    category="workflow",
+)

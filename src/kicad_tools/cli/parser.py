@@ -41,6 +41,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools analyze <command>      - PCB analysis tools
     kicad-tools audit <project>        - Manufacturing readiness audit
     kicad-tools pipeline <pcb>         - End-to-end repair pipeline for existing PCBs
+    kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools clean <project>        - Clean up old/orphaned files
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
@@ -176,6 +177,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_mcp_parser(subparsers)
     _add_init_parser(subparsers)
     _add_pipeline_parser(subparsers)
+    _add_create_pcb_parser(subparsers)
     _add_build_parser(subparsers)
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
@@ -3204,6 +3206,96 @@ def _add_pipeline_parser(subparsers) -> None:
             "Include zone fill step. Disabled by default due to data corruption "
             "risk (see issue #1392). Use --step zones to fill zones only."
         ),
+    )
+
+
+def _add_create_pcb_parser(subparsers) -> None:
+    """Add create-pcb subcommand parser for generating PCBs from schematics."""
+    create_pcb_parser = subparsers.add_parser(
+        "create-pcb",
+        help="Create a PCB from a KiCad schematic",
+        description=(
+            "Generate a PCB file from a KiCad schematic. Extracts netlist data, "
+            "creates a blank PCB with specified dimensions, places footprints for "
+            "all components, and assigns nets based on schematic connectivity."
+        ),
+    )
+    create_pcb_parser.add_argument(
+        "create_pcb_schematic",
+        metavar="SCHEMATIC",
+        help="Path to .kicad_sch schematic file",
+    )
+    create_pcb_parser.add_argument(
+        "-o",
+        "--output",
+        dest="create_pcb_output",
+        help="Output .kicad_pcb file path (default: <schematic-stem>.kicad_pcb)",
+    )
+    create_pcb_parser.add_argument(
+        "--width",
+        dest="create_pcb_width",
+        type=float,
+        default=100.0,
+        help="Board width in mm (default: 100.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--height",
+        dest="create_pcb_height",
+        type=float,
+        default=100.0,
+        help="Board height in mm (default: 100.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--layers",
+        dest="create_pcb_layers",
+        type=int,
+        choices=[2, 4],
+        default=2,
+        help="Number of copper layers (default: 2)",
+    )
+    create_pcb_parser.add_argument(
+        "--title",
+        dest="create_pcb_title",
+        default="",
+        help="Board title for title block (default: schematic filename)",
+    )
+    create_pcb_parser.add_argument(
+        "--revision",
+        dest="create_pcb_revision",
+        default="1.0",
+        help="Board revision (default: 1.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--company",
+        dest="create_pcb_company",
+        default="",
+        help="Company name for title block",
+    )
+    create_pcb_parser.add_argument(
+        "--no-place",
+        dest="create_pcb_no_place",
+        action="store_true",
+        help="Skip automatic component placement",
+    )
+    create_pcb_parser.add_argument(
+        "--spacing",
+        dest="create_pcb_spacing",
+        type=float,
+        default=15.0,
+        help="Spacing between auto-placed components in mm (default: 15.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--columns",
+        dest="create_pcb_columns",
+        type=int,
+        default=10,
+        help="Number of columns for auto-placement grid (default: 10)",
+    )
+    create_pcb_parser.add_argument(
+        "--dry-run",
+        dest="create_pcb_dry_run",
+        action="store_true",
+        help="Show what would be done without saving",
     )
 
 

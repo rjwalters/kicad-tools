@@ -32,6 +32,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools interactive            - Launch interactive REPL mode
     kicad-tools net-status <pcb>       - Report net connectivity status
     kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
+    kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
 
@@ -54,6 +55,7 @@ from .commands import (
     run_clean_command,
     run_config_command,
     run_constraints_command,
+    run_create_pcb_command,
     run_datasheet_command,
     run_decisions_command,
     run_estimate_command,
@@ -416,6 +418,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "pipeline":
         return run_pipeline_command(args)
+
+    elif args.command == "create-pcb":
+        return run_create_pcb_command(args)
 
     elif args.command == "build":
         return run_build_command(args)
