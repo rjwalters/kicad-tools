@@ -487,6 +487,71 @@ def _is_on_grid(value: float, resolution: float, threshold: float | None = None)
     return distance_to_grid <= threshold
 
 
+def _compute_gcd_grid_candidates(
+    pad_list: list[Pad] | list[PadPosition],
+    min_grid: float = 0.005,
+) -> list[float]:
+    """Compute GCD-based grid candidates from pad spacings.
+
+    Collects all unique x and y coordinates, computes deltas between
+    consecutive sorted values, converts to integer microns to avoid
+    floating-point issues, and returns the GCD plus simple multiples
+    as candidate grid resolutions.
+
+    Args:
+        pad_list: List of pad objects with x, y attributes.
+        min_grid: Minimum grid resolution in mm (default: 0.005mm).
+                  GCD values below this are discarded.
+
+    Returns:
+        List of GCD-derived candidate resolutions in mm (may be empty).
+    """
+    if len(pad_list) < 2:
+        return []
+
+    # Collect unique x and y coordinates, rounded to nearest 5um
+    # to absorb floating-point noise
+    xs = sorted({round(p.x / 0.005) * 0.005 for p in pad_list})
+    ys = sorted({round(p.y / 0.005) * 0.005 for p in pad_list})
+
+    # Compute deltas between consecutive sorted coordinates
+    deltas_mm: list[float] = []
+    for coords in (xs, ys):
+        for i in range(1, len(coords)):
+            delta = coords[i] - coords[i - 1]
+            if delta > 0.001:  # Ignore near-zero deltas
+                deltas_mm.append(delta)
+
+    if not deltas_mm:
+        return []
+
+    # Convert to integer microns (multiply by 1000) for integer GCD
+    deltas_um = [round(d * 1000) for d in deltas_mm]
+    # Filter out zeros after rounding
+    deltas_um = [d for d in deltas_um if d > 0]
+
+    if not deltas_um:
+        return []
+
+    # Compute GCD of all deltas
+    gcd_um = deltas_um[0]
+    for d in deltas_um[1:]:
+        gcd_um = math.gcd(gcd_um, d)
+
+    gcd_mm = gcd_um / 1000.0
+
+    # Generate candidates: GCD itself plus 2x and 5x multiples
+    raw_candidates = [gcd_mm, gcd_mm * 2, gcd_mm * 5]
+
+    # Filter: must be >= min_grid to avoid absurdly fine grids
+    result = [c for c in raw_candidates if c >= min_grid]
+
+    # Deduplicate and sort descending
+    result = sorted(set(result), reverse=True)
+
+    return result
+
+
 def auto_select_grid_resolution(
     pads: list[Pad] | list[PadPosition] | dict[tuple[str, str], Pad],
     clearance: float,
@@ -507,7 +572,13 @@ def auto_select_grid_resolution(
         board_height: Board height in mm (for memory constraint check)
         max_cells: Maximum grid cells to allow (default: 500k for performance)
         candidates: Optional list of candidate resolutions to try.
-                   Default: [0.5, 0.25, 0.127, 0.1, 0.05]
+                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+                   plus GCD-derived candidates from pad spacings.
+                   When candidates is None, GCD-based candidates are
+                   automatically computed from pad positions and added
+                   to the fixed list.  This handles packages like
+                   SSOP/TSSOP with 0.65mm pitch whose pads don't align
+                   to any standard grid size.
 
     Returns:
         GridAutoSelection with the chosen resolution and analysis details.
@@ -543,6 +614,16 @@ def auto_select_grid_resolution(
     #             (2.54 / 0.0508 = 50 exact, 5.08 / 0.0508 = 100 exact)
     if candidates is None:
         candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+
+        # Add GCD-derived candidates from pad spacings.  This handles
+        # packages like SSOP/TSSOP whose 0.65mm pitch doesn't align to
+        # any fixed candidate.  The GCD of all pad-to-pad spacings
+        # (computed in integer microns to avoid floating-point issues)
+        # naturally produces a grid that places every pad on-grid.
+        gcd_candidates = _compute_gcd_grid_candidates(pad_list)
+        for gc in gcd_candidates:
+            if gc not in candidates:
+                candidates.append(gc)
 
     # Sort candidates from coarsest to finest
     candidates = sorted(candidates, reverse=True)
