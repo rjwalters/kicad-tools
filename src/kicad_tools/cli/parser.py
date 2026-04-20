@@ -3197,16 +3197,6 @@ def _add_pipeline_parser(subparsers) -> None:
             "exceed the displacement budget."
         ),
     )
-    pipeline_parser.add_argument(
-        "--zones",
-        dest="pipeline_zones",
-        action="store_true",
-        default=False,
-        help=(
-            "Include zone fill step. Disabled by default due to data corruption "
-            "risk (see issue #1392). Use --step zones to fill zones only."
-        ),
-    )
 
 
 def _add_create_pcb_parser(subparsers) -> None:
