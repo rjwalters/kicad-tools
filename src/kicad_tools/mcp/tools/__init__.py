@@ -63,6 +63,7 @@ from kicad_tools.mcp.tools.screenshot import (
     screenshot_board,
     screenshot_schematic,
 )
+from kicad_tools.mcp.tools.workflow import create_pcb_from_schematic
 
 __all__ = [
     # Registry exports
@@ -106,4 +107,5 @@ __all__ = [
     "validate_design",
     "validate_move",
     "validate_pattern",
+    "create_pcb_from_schematic",
 ]
