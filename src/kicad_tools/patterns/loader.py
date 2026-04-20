@@ -49,6 +49,8 @@ Usage::
 
 from __future__ import annotations
 
+import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,8 @@ import yaml
 
 from .base import PCBPattern
 from .checks import CheckContext, ValidationCheck, create_check
+
+logger = logging.getLogger(__name__)
 from .schema import (
     PatternSpec,
     PatternViolation,
@@ -253,8 +257,11 @@ class YAMLPattern(PCBPattern):
     def _build_context(self, pcb_path: Path | str) -> CheckContext:
         """Build a CheckContext from a PCB file.
 
-        This is a placeholder that would be expanded to actually
-        parse the KiCad PCB file.
+        Parses the KiCad PCB file using ``schema.pcb.PCB.load()`` and
+        extracts component positions, values, footprints, and net trace
+        lengths.  When the file does not exist or cannot be parsed, an
+        empty context is returned with a warning so that callers passing
+        dummy paths (e.g. in tests) continue to work.
 
         Args:
             pcb_path: Path to the PCB file
@@ -262,14 +269,68 @@ class YAMLPattern(PCBPattern):
         Returns:
             CheckContext with PCB data
         """
-        # TODO: Implement actual PCB parsing
-        # For now, return empty context
-        return CheckContext(
+        pcb_path = Path(pcb_path) if isinstance(pcb_path, str) else pcb_path
+
+        empty_context = CheckContext(
             component_positions={},
             component_values={},
             component_footprints={},
             net_lengths={},
-            pcb_path=Path(pcb_path) if isinstance(pcb_path, str) else pcb_path,
+            pcb_path=pcb_path,
+        )
+
+        if not pcb_path.exists():
+            import warnings
+
+            warnings.warn(
+                f"PCB file not found: {pcb_path}. Returning empty context.",
+                stacklevel=2,
+            )
+            return empty_context
+
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(pcb_path)
+        except Exception as exc:
+            import warnings
+
+            warnings.warn(
+                f"Failed to parse PCB file {pcb_path}: {exc}. Returning empty context.",
+                stacklevel=2,
+            )
+            return empty_context
+
+        # Build component maps from footprints
+        component_positions: dict[str, tuple[float, float]] = {}
+        component_values: dict[str, str] = {}
+        component_footprints: dict[str, str] = {}
+
+        for fp in pcb.footprints:
+            if fp.reference:
+                component_positions[fp.reference] = fp.position
+                component_values[fp.reference] = fp.value
+                component_footprints[fp.reference] = fp.name
+
+        # Build net lengths by summing Euclidean segment lengths per net
+        net_lengths: dict[str, float] = {}
+        for net in pcb.nets.values():
+            if not net.name or net.number == 0:
+                continue
+            total = 0.0
+            for seg in pcb.segments_in_net(net.number):
+                dx = seg.end[0] - seg.start[0]
+                dy = seg.end[1] - seg.start[1]
+                total += math.sqrt(dx * dx + dy * dy)
+            if total > 0.0:
+                net_lengths[net.name] = total
+
+        return CheckContext(
+            component_positions=component_positions,
+            component_values=component_values,
+            component_footprints=component_footprints,
+            net_lengths=net_lengths,
+            pcb_path=pcb_path,
         )
 
     @property
