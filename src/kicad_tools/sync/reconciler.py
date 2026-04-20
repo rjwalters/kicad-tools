@@ -21,7 +21,9 @@ Example:
 from __future__ import annotations
 
 import json
+import math
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -564,27 +566,27 @@ class Reconciler:
         # Load PCB as a PCB object for full API access (add_footprint, add_net, etc.)
         pcb = PCB.load(str(self._pcb_path))
 
-        # Compute placement position for new footprints (below board outline)
+        # Compute grid fallback position for new footprints (below board outline)
         placement_x, placement_y, placement_col = self._compute_placement_start(pcb)
         placement_start_x = placement_x
         placement_spacing = 15.0
         placement_columns = 10
+
+        # Compute smart placement positions for new footprints based on net adjacency
+        add_refs = [a["reference"] for a in actions_to_apply if a["type"] == "add_footprint"]
+        smart_positions = self._compute_smart_placement(pcb, add_refs) if add_refs else {}
 
         has_add_footprint = any(a["type"] == "add_footprint" for a in actions_to_apply)
         has_update_footprint = any(a["type"] == "update_footprint" for a in actions_to_apply)
 
         for action in actions_to_apply:
             if action["type"] == "add_footprint":
-                change = self._apply_add_footprint(
-                    pcb,
-                    action,
-                    dry_run,
-                    placement_x,
-                    placement_y,
-                )
-                if change:
-                    changes.append(change)
-                    # Advance grid position for next footprint
+                ref = action["reference"]
+                if ref in smart_positions:
+                    pos_x, pos_y = smart_positions[ref]
+                else:
+                    pos_x, pos_y = placement_x, placement_y
+                    # Advance grid position for next grid-placed footprint
                     placement_col += 1
                     if placement_col >= placement_columns:
                         placement_col = 0
@@ -592,6 +594,16 @@ class Reconciler:
                         placement_y += placement_spacing
                     else:
                         placement_x += placement_spacing
+
+                change = self._apply_add_footprint(
+                    pcb,
+                    action,
+                    dry_run,
+                    pos_x,
+                    pos_y,
+                )
+                if change:
+                    changes.append(change)
             elif action["type"] == "update_footprint":
                 change = self._apply_update_footprint(pcb, action, dry_run)
                 if change:
@@ -647,6 +659,163 @@ class Reconciler:
             start_x = 10.0
             start_y = 10.0
         return start_x, start_y, 0
+
+    def _build_net_adjacency(
+        self,
+        new_refs: set[str],
+    ) -> dict[str, set[str]]:
+        """Build a map from each new component to its net-neighbor references.
+
+        A net-neighbor is any component that shares at least one net with the
+        given component. Only neighbors that are NOT in new_refs (i.e., already
+        placed on the PCB) are included.
+
+        Args:
+            new_refs: Set of reference designators for new (unplaced) components.
+
+        Returns:
+            Dict mapping each new ref to a set of existing (placed) neighbor refs.
+        """
+        try:
+            from kicad_tools.operations.netlist import export_netlist
+
+            netlist = export_netlist(str(self._schematic_path))
+        except Exception:
+            return {}
+
+        # For each net, collect all component references connected to it
+        adjacency: dict[str, set[str]] = defaultdict(set)
+        for net in netlist.nets:
+            if not net.name:
+                continue
+            refs_in_net = {node.reference for node in net.nodes if node.reference}
+            for ref in refs_in_net:
+                if ref in new_refs:
+                    # Add all non-new refs from this net as neighbors
+                    placed_neighbors = refs_in_net - new_refs - {ref}
+                    adjacency[ref].update(placed_neighbors)
+
+        return dict(adjacency)
+
+    def _compute_smart_placement(
+        self,
+        pcb,
+        new_refs: list[str],
+    ) -> dict[str, tuple[float, float]]:
+        """Compute placement positions for new components near their net neighbors.
+
+        For each new component, finds existing components that share nets with it,
+        computes the centroid of those neighbors' positions, and offsets the new
+        component to avoid overlap using a spiral search.
+
+        Components with no placed net-neighbors are omitted from the result;
+        the caller should fall back to grid placement for those.
+
+        Args:
+            pcb: The loaded PCB object.
+            new_refs: List of reference designators for components to place.
+
+        Returns:
+            Dict mapping ref to (x, y) board-relative placement position.
+            Only contains entries for components that have placed net-neighbors.
+        """
+        new_ref_set = set(new_refs)
+        adjacency = self._build_net_adjacency(new_ref_set)
+
+        if not adjacency:
+            return {}
+
+        # Build position lookup for existing footprints (sheet-absolute coords)
+        fp_positions: dict[str, tuple[float, float]] = {}
+        for fp in pcb.footprints:
+            if fp.reference and not fp.reference.startswith("#"):
+                fp_positions[fp.reference] = fp.position
+
+        origin_x, origin_y = pcb.board_origin
+
+        # Track all occupied positions (existing + newly assigned) for overlap avoidance
+        occupied: list[tuple[float, float]] = []
+        for pos in fp_positions.values():
+            # Convert to board-relative
+            occupied.append((pos[0] - origin_x, pos[1] - origin_y))
+
+        result: dict[str, tuple[float, float]] = {}
+        min_spacing = 5.0  # minimum distance between footprint centers (mm)
+
+        for ref in new_refs:
+            neighbors = adjacency.get(ref, set())
+            if not neighbors:
+                continue
+
+            # Compute centroid of neighbor positions (in board-relative coords)
+            neighbor_positions = []
+            for n_ref in neighbors:
+                if n_ref in fp_positions:
+                    abs_pos = fp_positions[n_ref]
+                    neighbor_positions.append(
+                        (abs_pos[0] - origin_x, abs_pos[1] - origin_y)
+                    )
+
+            if not neighbor_positions:
+                continue
+
+            cx = sum(p[0] for p in neighbor_positions) / len(neighbor_positions)
+            cy = sum(p[1] for p in neighbor_positions) / len(neighbor_positions)
+
+            # Find a non-overlapping position near the centroid using spiral search
+            x, y = self._find_non_overlapping_position(cx, cy, occupied, min_spacing)
+            result[ref] = (x, y)
+            occupied.append((x, y))
+
+        return result
+
+    @staticmethod
+    def _find_non_overlapping_position(
+        cx: float,
+        cy: float,
+        occupied: list[tuple[float, float]],
+        min_spacing: float,
+    ) -> tuple[float, float]:
+        """Find the nearest non-overlapping position to (cx, cy).
+
+        Uses a spiral search pattern, checking concentric rings of positions
+        at increasing distance from the target centroid.
+
+        Args:
+            cx: Target X position (board-relative).
+            cy: Target Y position (board-relative).
+            occupied: List of already-occupied (x, y) positions.
+            min_spacing: Minimum distance between footprint centers.
+
+        Returns:
+            (x, y) position that does not overlap with any occupied position.
+        """
+
+        def _is_clear(x: float, y: float) -> bool:
+            for ox, oy in occupied:
+                if math.sqrt((x - ox) ** 2 + (y - oy) ** 2) < min_spacing:
+                    return False
+            return True
+
+        # Try the centroid itself first
+        if _is_clear(cx, cy):
+            return cx, cy
+
+        # Spiral outward in concentric rings
+        step = min_spacing
+        for ring in range(1, 20):
+            radius = ring * step
+            # Check 8 * ring points around the ring for good coverage
+            num_points = 8 * ring
+            for i in range(num_points):
+                angle = 2.0 * math.pi * i / num_points
+                x = cx + radius * math.cos(angle)
+                y = cy + radius * math.sin(angle)
+                if _is_clear(x, y):
+                    return x, y
+
+        # Fallback: offset far enough that overlap is impossible
+        return cx + 20 * min_spacing, cy
 
     def _apply_add_footprint(
         self,
@@ -728,8 +897,6 @@ class Reconciler:
         Returns:
             SyncChange record, or None if the action failed.
         """
-        import math
-
         ref = action["reference"]
         old_fp_name = action["old_value"]
         new_fp_name = action["new_value"]
