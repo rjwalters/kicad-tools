@@ -2,8 +2,12 @@
 
 Tests the complete session management workflow:
 start_session -> query_move -> apply_move -> commit/rollback
+
+Also tests thread safety, session expiry, and the SessionManager class.
 """
 
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pytest
@@ -916,3 +920,198 @@ class TestDRCDeltaWorkflow:
             assert result.drc_preview.check_time_ms < 100
 
         rollback_session(session_id)
+
+
+class TestSessionManagerThreadSafety:
+    """Tests for thread-safe concurrent access to SessionManager."""
+
+    def test_concurrent_create(self, session_pcb_path: str) -> None:
+        """Test that concurrent session creation produces unique IDs."""
+        manager = get_session_manager()
+        num_threads = 10
+        session_ids: list[str] = []
+
+        def create_session():
+            result = start_session(session_pcb_path)
+            return result.session_id
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(create_session) for _ in range(num_threads)]
+            for future in as_completed(futures):
+                session_ids.append(future.result())
+
+        # All sessions should be created with unique IDs
+        assert len(session_ids) == num_threads
+        assert len(set(session_ids)) == num_threads
+        assert len(manager) == num_threads
+
+        # Clean up
+        for sid in session_ids:
+            rollback_session(sid)
+
+    def test_concurrent_get(self, session_pcb_path: str) -> None:
+        """Test that concurrent session access works correctly."""
+        result = start_session(session_pcb_path)
+        session_id = result.session_id
+        manager = get_session_manager()
+        num_threads = 10
+        results: list[bool] = []
+
+        def get_session():
+            metadata = manager.get(session_id)
+            return metadata is not None
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(get_session) for _ in range(num_threads)]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        assert all(results)
+        assert len(results) == num_threads
+
+        rollback_session(session_id)
+
+    def test_concurrent_access_with_queries(self, session_pcb_path: str) -> None:
+        """Test that concurrent query_move operations don't interfere."""
+        result = start_session(session_pcb_path)
+        session_id = result.session_id
+        num_threads = 5
+        errors: list[Exception] = []
+
+        def query_session(x_offset: float):
+            try:
+                query_move(session_id, "R1", 20.0 + x_offset, 20.0)
+            except Exception as e:
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(query_session, float(i)) for i in range(num_threads)]
+            for future in as_completed(futures):
+                future.result()
+
+        assert len(errors) == 0
+
+        rollback_session(session_id)
+
+
+class TestSessionManagerExpiry:
+    """Tests for session timeout and cleanup."""
+
+    def test_cleanup_expired_sessions(self, session_pcb_path: str) -> None:
+        """Test that expired sessions are cleaned up."""
+        manager = get_session_manager()
+        # Override timeout to very short duration
+        original_timeout = manager.timeout_seconds
+        manager.timeout_seconds = 0.1  # 100ms
+
+        result = start_session(session_pcb_path)
+        session_id = result.session_id
+        assert len(manager) >= 1
+
+        # Wait for session to expire
+        time.sleep(0.2)
+
+        # Cleanup should remove the session
+        removed = manager.cleanup_expired()
+
+        assert removed >= 1
+        assert session_id not in manager
+
+        # Restore timeout
+        manager.timeout_seconds = original_timeout
+
+    def test_cleanup_preserves_active_sessions(self, session_pcb_path: str) -> None:
+        """Test that active sessions are not cleaned up."""
+        manager = get_session_manager()
+
+        result = start_session(session_pcb_path)
+        session_id = result.session_id
+
+        # Cleanup should not remove active session (not expired yet)
+        removed = manager.cleanup_expired()
+
+        assert removed == 0
+        assert session_id in manager
+
+        rollback_session(session_id)
+
+    def test_cleanup_partial(self, session_pcb_path: str) -> None:
+        """Test that only expired sessions are cleaned up."""
+        manager = get_session_manager()
+        original_timeout = manager.timeout_seconds
+        manager.timeout_seconds = 0.1
+
+        # Create first session
+        result1 = start_session(session_pcb_path)
+        session_id1 = result1.session_id
+
+        # Wait for first to expire
+        time.sleep(0.15)
+
+        # Create second session (should be active)
+        result2 = start_session(session_pcb_path)
+        session_id2 = result2.session_id
+
+        # Cleanup should only remove expired session
+        removed = manager.cleanup_expired()
+
+        assert removed >= 1
+        assert session_id1 not in manager
+        assert session_id2 in manager
+
+        rollback_session(session_id2)
+        manager.timeout_seconds = original_timeout
+
+
+class TestSessionManagerContainerProtocol:
+    """Tests for __len__ and __contains__ on SessionManager."""
+
+    def test_len_empty(self) -> None:
+        """Test __len__ on empty manager."""
+        manager = get_session_manager()
+        assert len(manager) == 0
+
+    def test_len_after_create(self, session_pcb_path: str) -> None:
+        """Test __len__ after creating sessions."""
+        manager = get_session_manager()
+        r1 = start_session(session_pcb_path)
+        assert len(manager) == 1
+
+        r2 = start_session(session_pcb_path)
+        assert len(manager) == 2
+
+        rollback_session(r1.session_id)
+        rollback_session(r2.session_id)
+
+    def test_contains(self, session_pcb_path: str) -> None:
+        """Test __contains__ for session existence check."""
+        manager = get_session_manager()
+        result = start_session(session_pcb_path)
+
+        assert result.session_id in manager
+        assert "nonexistent" not in manager
+
+        rollback_session(result.session_id)
+
+    def test_list_sessions_returns_metadata(self, session_pcb_path: str) -> None:
+        """Test that list_sessions returns SessionMetadata objects."""
+        manager = get_session_manager()
+        r1 = start_session(session_pcb_path)
+        r2 = start_session(session_pcb_path)
+
+        sessions = manager.list_sessions()
+
+        assert len(sessions) == 2
+        session_ids = {s.session_id for s in sessions}
+        assert r1.session_id in session_ids
+        assert r2.session_id in session_ids
+
+        # Each item should be a SessionMetadata with expected attributes
+        for s in sessions:
+            assert hasattr(s, "session_id")
+            assert hasattr(s, "pcb_path")
+            assert hasattr(s, "session")
+            assert hasattr(s, "initial_score")
+
+        rollback_session(r1.session_id)
+        rollback_session(r2.session_id)

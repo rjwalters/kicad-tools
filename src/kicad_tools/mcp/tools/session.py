@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from kicad_tools.drc.predictive import PredictiveAnalyzer
@@ -152,15 +154,33 @@ class SessionMetadata:
 
 
 class SessionManager:
-    """Manages active placement sessions.
+    """Thread-safe manager for active placement sessions.
 
     Provides a registry of active sessions indexed by session ID.
     Sessions are automatically cleaned up when committed or rolled back.
+    Supports session timeout/expiry for idle session cleanup.
+
+    Attributes:
+        timeout_seconds: Session timeout in seconds. Sessions not accessed
+            within this time will be removed during cleanup.
     """
 
-    def __init__(self) -> None:
-        """Initialize the session manager."""
+    def __init__(self, timeout_minutes: int = 30) -> None:
+        """Initialize the session manager.
+
+        Args:
+            timeout_minutes: Session timeout in minutes. Default is 30 minutes.
+                Sessions not accessed within this time will be expired during
+                cleanup operations.
+        """
         self._sessions: dict[str, SessionMetadata] = {}
+        self._last_accessed: dict[str, str] = {}
+        self._lock = Lock()
+        self.timeout_seconds = timeout_minutes * 60
+
+    def _now_iso(self) -> str:
+        """Get current time as ISO 8601 string."""
+        return datetime.now(timezone.utc).isoformat()
 
     def create(self, pcb_path: str, fixed_refs: list[str] | None = None) -> SessionMetadata:
         """Create a new placement session.
@@ -196,11 +216,13 @@ class SessionManager:
             initial_score=initial_score,
         )
 
-        self._sessions[session_id] = metadata
+        with self._lock:
+            self._sessions[session_id] = metadata
+            self._last_accessed[session_id] = self._now_iso()
         return metadata
 
     def get(self, session_id: str) -> SessionMetadata | None:
-        """Get session metadata by ID.
+        """Get session metadata by ID, updating last-accessed timestamp.
 
         Args:
             session_id: The session identifier
@@ -208,7 +230,11 @@ class SessionManager:
         Returns:
             SessionMetadata or None if not found
         """
-        return self._sessions.get(session_id)
+        with self._lock:
+            metadata = self._sessions.get(session_id)
+            if metadata is not None:
+                self._last_accessed[session_id] = self._now_iso()
+            return metadata
 
     def close(self, session_id: str) -> bool:
         """Close and remove a session.
@@ -219,18 +245,56 @@ class SessionManager:
         Returns:
             True if session was closed, False if not found
         """
-        if session_id in self._sessions:
-            del self._sessions[session_id]
-            return True
-        return False
+        with self._lock:
+            if session_id in self._sessions:
+                del self._sessions[session_id]
+                self._last_accessed.pop(session_id, None)
+                return True
+            return False
 
-    def list_sessions(self) -> list[str]:
-        """List all active session IDs.
+    def list_sessions(self) -> list[SessionMetadata]:
+        """List all active sessions with their metadata.
 
         Returns:
-            List of session IDs
+            List of SessionMetadata for all active sessions
         """
-        return list(self._sessions.keys())
+        with self._lock:
+            return list(self._sessions.values())
+
+    def cleanup_expired(self) -> int:
+        """Remove sessions that have exceeded the timeout.
+
+        Sessions that haven't been accessed within timeout_seconds
+        will be removed.
+
+        Returns:
+            Number of sessions removed.
+        """
+        now = datetime.now(timezone.utc)
+        expired: list[str] = []
+
+        with self._lock:
+            for session_id, last_accessed_str in self._last_accessed.items():
+                last_accessed = datetime.fromisoformat(last_accessed_str)
+                elapsed = (now - last_accessed).total_seconds()
+                if elapsed > self.timeout_seconds:
+                    expired.append(session_id)
+
+            for session_id in expired:
+                del self._sessions[session_id]
+                del self._last_accessed[session_id]
+
+        return len(expired)
+
+    def __len__(self) -> int:
+        """Return the number of active sessions."""
+        with self._lock:
+            return len(self._sessions)
+
+    def __contains__(self, session_id: str) -> bool:
+        """Check if a session exists."""
+        with self._lock:
+            return session_id in self._sessions
 
 
 # Global session manager instance
