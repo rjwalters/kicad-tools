@@ -57,9 +57,10 @@ void Pathfinder::set_routable_layers(const std::vector<int>& layers) {
 }
 
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
-                                  bool allow_sharing) const {
-    for (int dy = -trace_half_width_cells_; dy <= trace_half_width_cells_; ++dy) {
-        for (int dx = -trace_half_width_cells_; dx <= trace_half_width_cells_; ++dx) {
+                                  bool allow_sharing, int radius_override) const {
+    int radius = (radius_override > 0) ? radius_override : trace_half_width_cells_;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
             int cx = x + dx, cy = y + dy;
             if (!grid_.is_valid(cx, cy, layer)) {
                 return true;  // Out of bounds
@@ -123,10 +124,12 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
     return false;
 }
 
-bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing) const {
+bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
+                                int radius_override) const {
+    int radius = (radius_override > 0) ? radius_override : via_half_cells_;
     for (int layer = 0; layer < grid_.layers(); ++layer) {
-        for (int dy = -via_half_cells_; dy <= via_half_cells_; ++dy) {
-            for (int dx = -via_half_cells_; dx <= via_half_cells_; ++dx) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
                 int cx = x + dx, cy = y + dy;
                 if (!grid_.is_valid(cx, cy, layer)) {
                     return true;
@@ -191,7 +194,9 @@ RouteResult Pathfinder::route(
     const std::vector<int>& end_layers,
     bool negotiated_mode,
     float present_cost_factor,
-    float weight
+    float weight,
+    int trace_radius_cells,
+    int via_radius_cells
 ) {
     RouteResult result;
     result.net = net;
@@ -275,19 +280,33 @@ RouteResult Pathfinder::route(
 
             // Check cell blocking
             const auto& cell = grid_.at(nx, ny, nlayer);
+
+            // Check if cell is near start/end pads (pad approach relaxation)
+            bool is_start = (nx == start_gx && ny == start_gy &&
+                std::find(valid_start_layers.begin(), valid_start_layers.end(), nlayer) !=
+                valid_start_layers.end());
+            bool is_end = (nx == end_gx && ny == end_gy &&
+                std::find(valid_end_layers.begin(), valid_end_layers.end(), nlayer) !=
+                valid_end_layers.end());
+
             if (cell.blocked) {
                 // Allow routing through start/end pad centers
-                bool is_start = (nx == start_gx && ny == start_gy &&
-                    std::find(valid_start_layers.begin(), valid_start_layers.end(), nlayer) !=
-                    valid_start_layers.end());
-                bool is_end = (nx == end_gx && ny == end_gy &&
-                    std::find(valid_end_layers.begin(), valid_end_layers.end(), nlayer) !=
-                    valid_end_layers.end());
-
                 if (is_start || is_end) {
                     if (cell.net != net) continue;  // Wrong net
                 } else {
-                    if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode)) {
+                    if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells)) {
+                        continue;
+                    }
+                }
+            } else {
+                // Issue #1702 Gap 1: Even when center cell is unblocked, check
+                // trace clearance. The trace has physical width and must not
+                // violate clearance to other nets within its radius. Skip this
+                // check near start/end pads to allow pad approach/exit.
+                if (!is_start && !is_end) {
+                    if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells)) {
                         continue;
                     }
                 }
@@ -331,7 +350,8 @@ RouteResult Pathfinder::route(
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
-            if (is_via_blocked(current.x, current.y, net, negotiated_mode)) {
+            if (is_via_blocked(current.x, current.y, net, negotiated_mode,
+                               via_radius_cells)) {
                 continue;
             }
 

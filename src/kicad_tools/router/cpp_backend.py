@@ -10,6 +10,7 @@ operations, making fine-grid routing (0.0635mm) practical for production use.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -196,6 +197,9 @@ class CppGrid:
             origin_y=grid.origin_y,
         )
 
+        # Store reference to original Python grid for post-route validation
+        cpp_grid._py_grid = grid
+
         # Copy layer index mappings for layer conversion
         cpp_grid._index_to_layer = dict(grid._index_to_layer)
         cpp_grid._layer_to_index = dict(grid._layer_to_index)
@@ -339,8 +343,8 @@ class CppPathfinder:
         Args:
             start: Source pad
             end: Destination pad
-            net_class: Optional net class for routing parameters (for interface
-                compatibility with Python Router; not fully used by C++ backend)
+            net_class: Optional net class for routing parameters (used to
+                compute per-net trace/via clearance radii for the C++ A* search)
             negotiated_mode: Enable negotiated congestion routing
             present_cost_factor: Multiplier for sharing penalty
             weight: A* weight (1.0 = optimal, >1.0 = faster)
@@ -381,6 +385,28 @@ class CppPathfinder:
             if not start_layers or not end_layers:
                 return None
 
+        # Issue #1702 Gap 2: Compute per-net trace and via clearance radii.
+        # Use the net class trace width / via size (if available) instead of
+        # the global defaults so wider nets correctly reserve space during
+        # pathfinding in the C++ A* search.
+        net_class = self._net_class_map.get(start.net_name)
+        net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
+        trace_radius_cells = max(
+            1,
+            math.ceil(
+                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
+            ),
+        )
+
+        net_via_size = net_class.via_size if net_class else self._rules.via_diameter
+        via_radius_cells = max(
+            1,
+            math.ceil(
+                (net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution
+            ),
+        )
+
         # Route using C++ implementation
         result = self._impl.route(
             start.x,
@@ -395,6 +421,8 @@ class CppPathfinder:
             negotiated_mode,
             present_cost_factor,
             weight,
+            trace_radius_cells,
+            via_radius_cells,
         )
 
         if not result.success:
@@ -406,7 +434,7 @@ class CppPathfinder:
         # Issue #1543: Apply net-class-aware trace width to segments.
         # The C++ backend uses the global rules.trace_width for all segments,
         # so we override with the per-net width when converting to Python.
-        net_class = self._net_class_map.get(start.net_name)
+        # net_class was already looked up above for Gap 2 radius computation.
         trace_width = net_class.trace_width if net_class else None
 
         for cpp_seg in result.segments:
@@ -444,6 +472,36 @@ class CppPathfinder:
             via_drill=self._rules.via_drill,
             via_diameter=self._rules.via_diameter,
         )
+
+        # Issue #1702 Gap 3: Post-route geometric clearance validation.
+        # Grid-based A* checking is approximate; diagonal segments can cut
+        # through obstacle corners. Validate actual geometry to catch
+        # clearance violations that grid-based checking missed.
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is not None:
+            # Validate segment-to-obstacle clearance
+            for seg in route.segments:
+                is_valid, _clearance, _location = py_grid.validate_segment_clearance(
+                    seg, exclude_net=start.net
+                )
+                if not is_valid:
+                    return None
+
+            # Validate via-to-segment clearance
+            for via in route.vias:
+                is_valid, _clearance, _location = py_grid.validate_via_clearance(
+                    via, exclude_net=start.net
+                )
+                if not is_valid:
+                    return None
+
+            # Validate via-to-via clearance
+            for via in route.vias:
+                is_valid, _clearance, _location = py_grid.validate_via_to_via_clearance(
+                    via, exclude_net=start.net
+                )
+                if not is_valid:
+                    return None
 
         return route
 
