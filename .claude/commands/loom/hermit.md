@@ -78,6 +78,102 @@ rg "TODO|FIXME|HACK|WORKAROUND" -n
 rg "function (.*)" -o | sort | uniq -c | sort -rn
 ```
 
+
+### Dishonest Code (Interface-Implementation Mismatch)
+
+Code that IS used but doesn't do what it claims. The common thread is **interface-implementation mismatch** -- the code's external contract (docstrings, type signatures, class structure, method names) promises behavior that the implementation doesn't deliver. These patterns are particularly common in AI-assisted codebases where code generation can produce structurally complete but behaviorally hollow implementations.
+
+> **Note**: These are heuristic checks. False positives will occur. Always verify findings before creating proposals -- a false positive that starts a discussion is still valuable, but verify the code actually behaves as the heuristic suggests.
+
+**1. Parallel Drift (duplicate implementations solving the same problem):**
+
+Two or more classes/modules with different names and APIs but solving the same domain problem. Only one is used at runtime; the other is referenced only by its own tests.
+
+Current hermit checks grep for duplicate function *names*. Parallel drift has different names, different files, different APIs -- finding semantic duplicates requires understanding *purpose*, not matching strings.
+
+```bash
+# Find classes/modules with semantically similar names (shared root words)
+rg "^class \w*(Session|Manager|Handler|Builder|Parser|Validator)\w*" --type py -n | \\
+  sed 's/.*class \([A-Za-z]*\).*/\1/' | sort | uniq -d
+
+# TypeScript variant
+rg "^(export )?(class|interface) \w*(Session|Manager|Handler|Builder|Parser|Validator)\w*" --type ts -n
+```
+
+When matches are found, compare them: do they cover the same domain concept? Is one only referenced by its own tests? If so, propose consolidation.
+
+**2. Stub Theater (methods with rich interfaces that return hardcoded values):**
+
+Methods whose body is trivially a single `return <literal>` but whose docstring/signature promises complex behavior. An entire subsystem can be inert because a key method always returns `False` or `True`.
+
+Current hermit finds `TODO`/`FIXME` comments but treats them as reminders rather than recognizing that the hardcoded return makes the surrounding code inert.
+
+```bash
+# Find Python methods whose body is ONLY a return literal
+rg "def \w+\(self" -A 5 --type py | \\
+  grep -A 4 "def " | grep -B 1 "return (False|True|None|\"\"|\[\]|\{\}|0)$"
+
+# Cross-reference: methods with docstrings that just return a literal
+rg "def \w+.*:\s*\n\s+\"\"\"" -A 8 --type py | grep -B 5 "return (False|True|None)"
+
+# TypeScript: methods returning hardcoded values
+rg "(public|private|protected)?\s+\w+\(.*\).*\{" -A 3 --type ts | \\
+  grep -B 1 "return (false|true|null|\[\]|\{\}|0|\"\")"
+```
+
+**3. Framework Scaffolding (validation/processing pipelines operating on empty data):**
+
+Builder/context/factory methods that return empty collections or default-constructed objects, while downstream consumers treat the result as meaningful data. The pipeline runs but processes nothing.
+
+Current hermit checks if exports are *imported* -- but these functions ARE called. The code is "alive" by import analysis. The issue is that the pipeline processes empty inputs.
+
+```bash
+# Find methods returning empty collections with TODOs nearby
+rg "return \{\}" -B 5 --type py | grep -B 4 "TODO\|FIXME\|NotImplemented"
+rg "return \[\]" -B 5 --type py | grep -B 4 "TODO\|FIXME\|NotImplemented"
+
+# TypeScript variant
+rg "return \{\}" -B 5 --type ts | grep -B 4 "TODO\|FIXME"
+rg "return \[\]" -B 5 --type ts | grep -B 4 "TODO\|FIXME"
+```
+
+**4. Stateless Ceremony (classes with no instance state that should be functions):**
+
+Classes where `__init__` is `pass`/empty/missing AND no methods assign to `self.*`. These are module-level functions wearing a class costume. Instantiation is ceremony with no purpose.
+
+Current hermit flags "one-method classes" but not "zero-state classes." A class with multiple methods passes the one-method heuristic even when it has no instance state.
+
+```bash
+# Find Python classes with no instance state
+python3 -c "
+import ast, sys, os
+for root, dirs, files in os.walk('.'):
+    dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'node_modules']
+    for f in files:
+        if not f.endswith('.py'): continue
+        path = os.path.join(root, f)
+        try:
+            tree = ast.parse(open(path).read())
+        except: continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef): continue
+            has_self_assign = any(
+                isinstance(n, ast.Assign) and
+                any(isinstance(t, ast.Attribute) and
+                    isinstance(t.value, ast.Name) and t.value.id == 'self'
+                    for t in n.targets)
+                for n in ast.walk(node)
+            )
+            if not has_self_assign:
+                print(f'{path}:{node.lineno}: {node.name} (no instance state)')
+"
+
+# TypeScript: classes with no property assignments
+rg "class \w+" --type ts -l | while read file; do
+  rg "this\.\w+\s*=" "$file" --count 2>/dev/null || echo "$file: 0 instance assignments"
+done
+```
+
 ### Code Smells
 
 Look for these patterns that often indicate bloat. *For detailed examples with before/after code, see `hermit-patterns.md`.*
@@ -192,6 +288,10 @@ When running autonomously (every 15 minutes), **randomly select ONE check** to p
   3. Commented code: Find commented-out code
   4. Old TODOs: Find TODOs/FIXMEs
   5. Large files: Find files >300 lines
+  6. Parallel drift: Find semantically duplicate classes/modules
+  7. Stub theater: Find methods returning hardcoded literals with rich interfaces
+  8. Framework scaffolding: Find pipelines operating on empty data
+  9. Stateless ceremony: Find classes with no instance state
 
 - **30% - Random File Review**:
   - Pick 1 random file

@@ -1,103 +1,36 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-/parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-coverage.xml
-coverage/
-*.cover
-*.rpt
-
-# Build
-*.whl
-*.tar.gz
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Loom
-
-# Board outputs (regenerated artifacts)
-boards/*/design_output.log
-boards/*/output/*.kicad_pro
-boards/*/output/*.kicad_prl
-boards/*/output/drc_report.json
-boards/*/output/manufacturing/
-boards/external/*
-!boards/external/softstart/
-boards/external/softstart/output/
-boards/manufacturing/
-
-# Claude
-.claude/worktrees/
-.loom/daemon-state.json
-.loom/00-daemon-state.json
-.loom/stop-daemon
+# Loom runtime state (don't commit these)
 .loom-in-use
+.loom-checkpoint
 .loom/.daemon.pid
 .loom/.daemon.log
 .loom/daemon.sock
+.loom/daemon-state.json
 .loom/daemon-loop.pid
 .loom/daemon-metrics.json
 .loom/loom-source-path
 .loom/[0-9][0-9]-daemon-state.json
 .loom/stuck-history.json
 .loom/alerts.json
+.loom/issue-failures.json
 .loom/health-metrics.json
 .loom/interventions/
+.loom/worktrees/
+.loom/state.json
 .loom/mcp-command.json
 .loom/activity.db
 .loom/claims/
 .loom/signals/
 .loom/status/
 .loom/progress/
+.loom/retry-state/
 .loom/diagnostics/
 .loom/guide-docs-state.json
 .loom/metrics_state.json
 .loom/manifest.json
 .loom/stuck-config.json
 .loom/metrics/
-.loom/logs/
-.loom-checkpoint
-.loom/issue-failures.json
 .loom/usage-cache.json
 .loom/claude-config/
-.loom/retry-state/
-.loom/worktrees/
-.loom/state.json
 .loom/*.log
 .loom/*.sock
+.loom/logs/
