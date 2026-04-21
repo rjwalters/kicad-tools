@@ -733,6 +733,27 @@ def _run_step_zones(ctx: PipelineContext, console: Console) -> PipelineResult:
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
+    # Validate net format after zone fill — kicad-cli may corrupt nets.
+    if success:
+        from .runner import validate_net_format
+
+        report = validate_net_format(ctx.pcb_file)
+        if not report.valid:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Net format corruption detected after zone fill: "
+                "%d element(s) have non-canonical net format "
+                "(name_only_segments=%d, name_only_vias=%d, name_only_pads=%d, "
+                "empty_net_segments=%d, empty_net_vias=%d, empty_net_pads=%d)",
+                report.total_corrupt,
+                report.name_only_segments,
+                report.name_only_vias,
+                report.name_only_pads,
+                report.empty_net_segments,
+                report.empty_net_vias,
+                report.empty_net_pads,
+            )
+
     return PipelineResult(
         step=PipelineStep.ZONES,
         success=success,
@@ -782,6 +803,27 @@ def _run_step_zones_refill(ctx: PipelineContext, console: Console) -> PipelineRe
         cmd.append("--quiet")
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+
+    # Validate net format after zone refill — kicad-cli may corrupt nets.
+    if success:
+        from .runner import validate_net_format
+
+        report = validate_net_format(ctx.pcb_file)
+        if not report.valid:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Net format corruption detected after zone refill: "
+                "%d element(s) have non-canonical net format "
+                "(name_only_segments=%d, name_only_vias=%d, name_only_pads=%d, "
+                "empty_net_segments=%d, empty_net_vias=%d, empty_net_pads=%d)",
+                report.total_corrupt,
+                report.name_only_segments,
+                report.name_only_vias,
+                report.name_only_pads,
+                report.empty_net_segments,
+                report.empty_net_vias,
+                report.empty_net_pads,
+            )
 
     return PipelineResult(
         step=PipelineStep.ZONES_REFILL,

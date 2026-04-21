@@ -34,6 +34,7 @@ class _StubAutorouter:
     """Minimal stand-in for Autorouter used by drc_nudge."""
 
     routes: list[Route] = field(default_factory=list)
+    existing_routes: list[Route] = field(default_factory=list)
     rules: DesignRules = field(default_factory=DesignRules)
     pads: dict = field(default_factory=dict)
     nets: dict = field(default_factory=dict)
@@ -494,3 +495,258 @@ class TestDRCNudgeResult:
         assert "Segments nudged: 4" in summary
         assert "Same-net vias merged: 2" in summary
         assert "Remaining violations: 1" in summary
+
+
+# ---------------------------------------------------------------------------
+# Tests for existing-routes awareness (Issue #1809)
+# ---------------------------------------------------------------------------
+
+
+class TestMergeExistingRouteVias:
+    """Merging new vias against pre-existing vias (Phase 3)."""
+
+    def test_new_via_merged_into_existing(self):
+        """A new via within threshold of an existing via is removed."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        existing_route = Route(
+            net=1, net_name="Net1", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.3, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[seg], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        # New via removed
+        assert len(new_route.vias) == 0
+        # Existing via survives
+        assert len(existing_route.vias) == 1
+        assert existing_route.vias[0] is existing_via
+        # Segment endpoint reconnected to existing via position
+        assert math.isclose(seg.x2, 10.0)
+        assert math.isclose(seg.y2, 10.0)
+
+    def test_existing_via_survives_merge(self):
+        """The pre-existing via is kept, not the new via."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        existing_route = Route(
+            net=1, net_name="Net1", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=10.0, y=10.005, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        _merge_same_net_vias(router)
+        # Existing via still present
+        assert existing_via in existing_route.vias
+        # New via gone
+        assert new_via not in new_route.vias
+
+    def test_distant_existing_via_not_merged(self):
+        """Vias beyond the threshold should not be merged."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        existing_route = Route(
+            net=1, net_name="Net1", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=15.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
+        assert len(new_route.vias) == 1
+
+    def test_different_net_existing_via_not_merged(self):
+        """Existing vias on a different net should not be merged."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        existing_route = Route(
+            net=2, net_name="Net2", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=10.005, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
+        assert len(new_route.vias) == 1
+
+    def test_empty_existing_routes_no_change(self):
+        """With no existing routes, Phase 3 is a no-op."""
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route], existing_routes=[])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
+        assert len(route.vias) == 1
+
+    def test_exact_same_location_existing_via(self):
+        """New via at exactly the same location as existing merges cleanly."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        existing_route = Route(
+            net=1, net_name="Net1", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[seg], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        assert len(new_route.vias) == 0
+        assert len(existing_route.vias) == 1
+
+
+class TestValidateRoutesWithExistingRoutes:
+    """DRC validation detects violations between new and pre-existing vias."""
+
+    def test_cross_origin_via_violation_detected(self):
+        """A new via and an existing via on different nets within clearance
+        should produce a ClearanceViolation."""
+        from kicad_tools.router.io import validate_routes
+
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        existing_route = Route(
+            net=2, net_name="Net2", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        violations = validate_routes(router)
+        via_violations = [v for v in violations if v.obstacle_type == "via"]
+        assert len(via_violations) >= 1, (
+            "Should detect via-to-via violation between new and existing routes"
+        )
+
+    def test_no_violation_when_far_apart(self):
+        """Vias on different nets that are far apart should not produce violations."""
+        from kicad_tools.router.io import validate_routes
+
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        existing_route = Route(
+            net=2, net_name="Net2", segments=[], vias=[existing_via],
+        )
+
+        new_via = Via(
+            x=20.0, y=20.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
+
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        violations = validate_routes(router)
+        via_violations = [v for v in violations if v.obstacle_type == "via"]
+        assert len(via_violations) == 0
+
+    def test_existing_routes_not_in_to_sexp(self):
+        """Existing routes must not appear in to_sexp() output."""
+        existing_via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        existing_route = Route(
+            net=1, net_name="Net1", segments=[], vias=[existing_via],
+        )
+
+        new_seg = Segment(
+            x1=1.0, y1=1.0, x2=5.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=2,
+        )
+        new_route = Route(net=2, net_name="Net2", segments=[new_seg], vias=[])
+
+        # Use a stub that has a to_sexp method similar to Autorouter
+        router = _StubAutorouter(
+            routes=[new_route],
+            existing_routes=[existing_route],
+        )
+
+        # Simulate Autorouter.to_sexp() which only iterates self.routes
+        sexp_output = "\n\t".join(r.to_sexp() for r in router.routes)
+        assert "10.0" not in sexp_output or "Net2" in sexp_output
+        # The existing via coordinates should not appear in the new route sexp
+        existing_sexp = existing_route.to_sexp()
+        assert existing_sexp not in sexp_output

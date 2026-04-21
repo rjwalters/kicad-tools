@@ -122,6 +122,35 @@ class StitchResult:
     fallback_nets: list[str] = field(default_factory=list)
 
 
+@dataclass
+class FilledPolygon:
+    """A filled polygon from a zone fill with bounding box for fast pre-filtering.
+
+    Represents the actual copper pour geometry from a zone fill (as opposed to
+    the zone boundary polygon). These are created by KiCad's zone fill
+    algorithm and account for clearances, thermal reliefs, etc.
+    """
+
+    net_number: int
+    net_name: str
+    layer: str
+    points: list[tuple[float, float]]
+    # Bounding box for fast pre-filtering
+    min_x: float = 0.0
+    min_y: float = 0.0
+    max_x: float = 0.0
+    max_y: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.points:
+            xs = [p[0] for p in self.points]
+            ys = [p[1] for p in self.points]
+            self.min_x = min(xs)
+            self.max_x = max(xs)
+            self.min_y = min(ys)
+            self.max_y = max(ys)
+
+
 def get_net_map(sexp: SExp) -> dict[int, str]:
     """Build a mapping of net number to net name."""
     net_map = {}
@@ -650,11 +679,13 @@ def calculate_via_position(
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
     Tries to place the via offset from the pad center, checking for conflicts
-    with both same-net vias and other-net copper (tracks, vias, and pads).
+    with both same-net vias and other-net copper (tracks, vias, pads, and
+    zone fill polygons).
     When trace_width > 0, also checks the connecting trace path from pad
     center to via center for clearance violations.
     Returns None if no valid position found.
@@ -670,6 +701,7 @@ def calculate_via_position(
         other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
         trace_width: Width of the connecting trace from pad to via in mm.
             When > 0, the trace path is checked for clearance violations.
+        other_net_filled_polygons: Filled polygons from other-net zone fills
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -677,6 +709,8 @@ def calculate_via_position(
         other_net_vias = []
     if other_net_pads is None:
         other_net_pads = []
+    if other_net_filled_polygons is None:
+        other_net_filled_polygons = []
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -752,6 +786,16 @@ def calculate_via_position(
             if conflict:
                 continue
 
+            # Check for conflicts with other-net filled polygons (zone fill copper)
+            if other_net_filled_polygons:
+                if not _check_point_filled_polygon_clearance(
+                    via_x, via_y, via_radius, other_net_filled_polygons, clearance
+                ):
+                    conflict = True
+
+            if conflict:
+                continue
+
             # Check connecting trace path (pad center -> via center) for clearance
             if trace_width > 0:
                 # Check trace path against other-net track segments
@@ -794,6 +838,19 @@ def calculate_via_position(
                 if conflict:
                     continue
 
+                # Check trace path against other-net filled polygons
+                if other_net_filled_polygons:
+                    if not _check_segment_filled_polygon_clearance(
+                        pad.x,
+                        pad.y,
+                        via_x,
+                        via_y,
+                        trace_half_width,
+                        other_net_filled_polygons,
+                        clearance,
+                    ):
+                        continue
+
             return (via_x, via_y)
 
     return None
@@ -811,6 +868,7 @@ def _check_dogleg_path_clearance(
     other_net_vias: list[tuple[float, float, float, int]],
     other_net_pads: list[tuple[float, float, float, int]],
     clearance: float,
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
 ) -> bool:
     """Check if a dog-leg (L-shaped) trace path has adequate clearance.
 
@@ -820,6 +878,9 @@ def _check_dogleg_path_clearance(
 
     Returns True if path is clear, False if there's a conflict.
     """
+    if other_net_filled_polygons is None:
+        other_net_filled_polygons = []
+
     # Define the two path segments
     legs = [
         (pad_x, pad_y, intermediate_x, intermediate_y),  # First leg
@@ -857,6 +918,19 @@ def _check_dogleg_path_clearance(
             if dist < min_dist:
                 return False
 
+        # Check against other-net filled polygons (zone fill copper)
+        if other_net_filled_polygons:
+            if not _check_segment_filled_polygon_clearance(
+                leg_sx,
+                leg_sy,
+                leg_ex,
+                leg_ey,
+                trace_half_width,
+                other_net_filled_polygons,
+                clearance,
+            ):
+                return False
+
     return True
 
 
@@ -870,6 +944,7 @@ def calculate_dogleg_via_position(
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -891,6 +966,7 @@ def calculate_dogleg_via_position(
         other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
         other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
         trace_width: Width of the connecting trace in mm
+        other_net_filled_polygons: Filled polygons from other-net zone fills
 
     Returns:
         Tuple of (via_x, via_y, intermediate_x, intermediate_y) for an L-shaped
@@ -902,6 +978,8 @@ def calculate_dogleg_via_position(
         other_net_vias = []
     if other_net_pads is None:
         other_net_pads = []
+    if other_net_filled_polygons is None:
+        other_net_filled_polygons = []
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -1031,6 +1109,19 @@ def calculate_dogleg_via_position(
                     if conflict:
                         continue
 
+                    # Check other-net filled polygon clearance at via position
+                    if other_net_filled_polygons:
+                        if not _check_point_filled_polygon_clearance(
+                            via_x,
+                            via_y,
+                            via_radius,
+                            other_net_filled_polygons,
+                            clearance,
+                        ):
+                            conflict = True
+                    if conflict:
+                        continue
+
                     # Check the entire L-shaped path for clearance
                     if trace_width > 0:
                         if not _check_dogleg_path_clearance(
@@ -1045,6 +1136,7 @@ def calculate_dogleg_via_position(
                             other_net_vias,
                             other_net_pads,
                             clearance,
+                            other_net_filled_polygons,
                         ):
                             continue
 
@@ -1544,11 +1636,199 @@ def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
             points.append((x, y))
 
         if len(points) >= 3:
-            polygons.append(
-                ZonePolygon(net_name=net_name, layer=zone_layer, points=points)
-            )
+            polygons.append(ZonePolygon(net_name=net_name, layer=zone_layer, points=points))
 
     return polygons
+
+
+def find_all_filled_polygons(
+    sexp: SExp, exclude_nets: set[int] | None = None
+) -> list[FilledPolygon]:
+    """Extract filled polygon geometry from zone fills for clearance checking.
+
+    After KiCad fills zones (via ``kicad-cli pcb drc``), each zone contains
+    ``(filled_polygon ...)`` nodes representing the actual copper pour.  These
+    must be checked during via placement to avoid clearance violations with
+    other-net zone fill copper.
+
+    Args:
+        sexp: PCB S-expression
+        exclude_nets: Net numbers to exclude (e.g., the nets being stitched)
+
+    Returns:
+        List of FilledPolygon objects with point lists and bounding boxes
+    """
+    polygons: list[FilledPolygon] = []
+    if exclude_nets is None:
+        exclude_nets = set()
+
+    net_map = get_net_map(sexp)
+
+    for child in sexp.iter_children():
+        if child.tag != "zone":
+            continue
+
+        # Get net number from zone
+        net_node = child.find_child("net")
+        if not net_node:
+            continue
+        net_num = net_node.get_int(0)
+        # KiCad 9 name-only format: (net "GND") -- get_int returns None
+        if net_num is None:
+            net_name_str = net_node.get_string(0)
+            if net_name_str:
+                # Reverse-lookup net number from name
+                for num, name in net_map.items():
+                    if name == net_name_str:
+                        net_num = num
+                        break
+            if net_num is None:
+                continue
+        if net_num in exclude_nets:
+            continue
+
+        # Get net name
+        zone_net_name = net_map.get(net_num, "")
+        net_name_node = child.find_child("net_name")
+        if net_name_node:
+            zone_net_name = net_name_node.get_string(0) or zone_net_name
+
+        # Get layer
+        layer_node = child.find_child("layer")
+        if not layer_node:
+            continue
+        zone_layer = layer_node.get_string(0)
+        if not zone_layer:
+            continue
+
+        # Extract filled_polygon nodes
+        for filled_poly_node in child.find_children("filled_polygon"):
+            pts_node = filled_poly_node.find_child("pts")
+            if not pts_node:
+                continue
+
+            points: list[tuple[float, float]] = []
+            for xy_node in pts_node.find_children("xy"):
+                x = xy_node.get_float(0) or 0.0
+                y = xy_node.get_float(1) or 0.0
+                points.append((x, y))
+
+            if len(points) >= 3:
+                polygons.append(
+                    FilledPolygon(
+                        net_number=net_num,
+                        net_name=zone_net_name,
+                        layer=zone_layer,
+                        points=points,
+                    )
+                )
+
+    return polygons
+
+
+def _check_point_filled_polygon_clearance(
+    px: float,
+    py: float,
+    radius: float,
+    filled_polygons: list[FilledPolygon],
+    clearance: float,
+) -> bool:
+    """Check if a circular copper object clears all filled polygons.
+
+    Args:
+        px, py: Center of the copper object
+        radius: Radius of the copper object (via_radius or trace_half_width)
+        filled_polygons: Other-net filled polygons to check against
+        clearance: Required clearance from filled polygon copper
+
+    Returns:
+        True if clearance is satisfied, False if there is a violation
+    """
+    required = radius + clearance
+    for fp in filled_polygons:
+        # Bounding-box pre-filter
+        if (
+            px + required < fp.min_x
+            or px - required > fp.max_x
+            or py + required < fp.min_y
+            or py - required > fp.max_y
+        ):
+            continue
+
+        # Check if point is inside the filled polygon (immediate violation)
+        if point_in_polygon(px, py, fp.points):
+            return False
+
+        # Check distance to every edge of the polygon
+        n = len(fp.points)
+        for i in range(n):
+            j = (i + 1) % n
+            dist = point_to_segment_distance(
+                px, py, fp.points[i][0], fp.points[i][1], fp.points[j][0], fp.points[j][1]
+            )
+            if dist < required:
+                return False
+
+    return True
+
+
+def _check_segment_filled_polygon_clearance(
+    sx: float,
+    sy: float,
+    ex: float,
+    ey: float,
+    half_width: float,
+    filled_polygons: list[FilledPolygon],
+    clearance: float,
+) -> bool:
+    """Check if a trace segment clears all filled polygons.
+
+    Checks both endpoints inside polygon and segment-to-edge distances.
+
+    Args:
+        sx, sy: Segment start
+        ex, ey: Segment end
+        half_width: Half the trace width
+        filled_polygons: Other-net filled polygons to check against
+        clearance: Required clearance
+
+    Returns:
+        True if clearance is satisfied, False if there is a violation
+    """
+    required = half_width + clearance
+    for fp in filled_polygons:
+        # Bounding-box pre-filter for the segment
+        seg_min_x = min(sx, ex) - required
+        seg_max_x = max(sx, ex) + required
+        seg_min_y = min(sy, ey) - required
+        seg_max_y = max(sy, ey) + required
+        if seg_max_x < fp.min_x or seg_min_x > fp.max_x:
+            continue
+        if seg_max_y < fp.min_y or seg_min_y > fp.max_y:
+            continue
+
+        # Check if either endpoint is inside the polygon
+        if point_in_polygon(sx, sy, fp.points) or point_in_polygon(ex, ey, fp.points):
+            return False
+
+        # Check segment-to-edge distances
+        n = len(fp.points)
+        for i in range(n):
+            j = (i + 1) % n
+            dist = segment_to_segment_distance(
+                sx,
+                sy,
+                ex,
+                ey,
+                fp.points[i][0],
+                fp.points[i][1],
+                fp.points[j][0],
+                fp.points[j][1],
+            )
+            if dist < required:
+                return False
+
+    return True
 
 
 def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
@@ -1659,6 +1939,7 @@ def check_via_clearance(
     other_net_vias: list[tuple[float, float, float, int]],
     other_net_pads: list[tuple[float, float, float, int]],
     same_net_vias: list[tuple[float, float]],
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
 ) -> bool:
     """Check if a via at (x, y) passes all clearance checks.
 
@@ -1670,6 +1951,7 @@ def check_via_clearance(
         other_net_vias: Vias on other nets as (x, y, size, net_num)
         other_net_pads: Pads on other nets as (x, y, radius, net_num)
         same_net_vias: Existing same-net vias as (x, y) for stacking prevention
+        other_net_filled_polygons: Filled polygons from other-net zone fills
 
     Returns:
         True if the position is clear for via placement
@@ -1684,9 +1966,7 @@ def check_via_clearance(
 
     # Check against other-net track segments
     for seg in other_net_tracks:
-        dist = point_to_segment_distance(
-            x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
-        )
+        dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
         min_dist = via_radius + seg.width / 2 + clearance
         if dist < min_dist:
             return False
@@ -1703,6 +1983,13 @@ def check_via_clearance(
         dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
         min_dist = via_radius + p_radius + clearance
         if dist < min_dist:
+            return False
+
+    # Check against other-net filled polygons (zone fill copper)
+    if other_net_filled_polygons:
+        if not _check_point_filled_polygon_clearance(
+            x, y, via_radius, other_net_filled_polygons, clearance
+        ):
             return False
 
     return True
@@ -1755,6 +2042,7 @@ def run_blanket_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=target_net_nums)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
+    other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
 
     # Collect all existing same-net vias (to prevent stacking)
     all_same_net_vias = find_existing_vias(sexp, target_net_nums)
@@ -1811,6 +2099,7 @@ def run_blanket_stitch(
                     other_net_vias,
                     other_net_pads,
                     same_net_via_positions,
+                    other_net_filled_polys,
                 ):
                     continue
 
@@ -1938,6 +2227,7 @@ def run_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
     other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
+    other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=net_numbers)
 
     # Process each pad
     for pad in pads:
@@ -1958,6 +2248,7 @@ def run_stitch(
             other_net_vias=other_net_vias,
             other_net_pads=other_net_pads,
             trace_width=trace_width,
+            other_net_filled_polygons=other_net_filled_polys,
         )
 
         # Track if we're using dog-leg or extended escape routing
@@ -1978,6 +2269,7 @@ def run_stitch(
                 other_net_vias=other_net_vias,
                 other_net_pads=other_net_pads,
                 trace_width=trace_width,
+                other_net_filled_polygons=other_net_filled_polys,
             )
 
             if dogleg_pos is None:

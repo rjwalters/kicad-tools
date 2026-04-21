@@ -211,12 +211,14 @@ class ChangeDetector:
         """
         return True  # <-- validation never actually runs
 
-# GOOD: Either implement it or remove the interface
+# GOOD (preferred): Finish the feature — check if dependencies now exist
 class ChangeDetector:
     def _is_component_modified(self, component: Component, baseline: Snapshot) -> bool:
         current_hash = component.content_hash()
         baseline_hash = baseline.get_hash(component.id)
         return current_hash != baseline_hash
+
+# GOOD (alternative): Remove if the feature is clearly abandoned
 ```
 
 ```typescript
@@ -231,10 +233,14 @@ class PermissionChecker {
   }
 }
 
-// GOOD: Implement or simplify
-function canAccess(user: User, resource: Resource): boolean {
-  return user.roles.some(role => resource.allowedRoles.includes(role));
+// GOOD (preferred): Finish the feature
+function canAccess(user: User, resource: Resource, operation: Operation): boolean {
+  return user.roles.some(role =>
+    resource.allowedRoles.includes(role) && role.permits(operation)
+  );
 }
+
+// GOOD (alternative): Remove if clearly abandoned
 ```
 
 **Detection scripts:**
@@ -359,6 +365,37 @@ def match(text: str, pattern: str) -> bool:
 
 def adapt_patterns(patterns: list[str]) -> list[re.Pattern]:
     return [re.compile(convert_glob_to_regex(p)) for p in patterns]
+
+# NOT a stateless ceremony: Dispatch-table class (uses self for method dispatch)
+class CommandRouter:
+    """Routes commands to handler methods. Stateless by design --
+    the class provides method-dispatch organization, not instance state."""
+
+    def route(self, command: str, args: dict) -> Result:
+        handler = {
+            "create": self.handle_create,
+            "update": self.handle_update,
+            "delete": self.handle_delete,
+            "list": self.handle_list,
+        }.get(command)
+        if not handler:
+            return Result(error=f"Unknown command: {command}")
+        return handler(args)
+
+    def handle_create(self, args: dict) -> Result:
+        return Result(data=create_record(args))
+
+    def handle_update(self, args: dict) -> Result:
+        return Result(data=update_record(args["id"], args))
+
+    def handle_delete(self, args: dict) -> Result:
+        return Result(data=delete_record(args["id"]))
+
+    def handle_list(self, args: dict) -> Result:
+        return Result(data=list_records(args.get("filter")))
+    # This class has no self.x = assignments but DOES use self.method()
+    # for internal dispatch. Converting to module functions would lose
+    # the dispatch-table organization. Do NOT flag this.
 ```
 
 ```typescript
@@ -391,7 +428,7 @@ function normalizeData(data: RawData): NormalizedData {
 **Detection scripts:**
 
 ```bash
-# Python: Find classes with no instance state (AST-based)
+# Python: Find classes with no instance state (AST-based, excludes dispatch-table classes)
 python3 -c "
 import ast, sys, os
 for root, dirs, files in os.walk('.'):
@@ -411,8 +448,41 @@ for root, dirs, files in os.walk('.'):
                     for t in n.targets)
                 for n in ast.walk(node)
             )
-            if not has_self_assign:
-                print(f'{path}:{node.lineno}: {node.name} (no instance state)')
+            if has_self_assign:
+                continue  # Has instance state -- not a stateless ceremony
+            # Exclusion 1: Internal method dispatch (self.method() calls)
+            has_self_method_call = any(
+                isinstance(n, ast.Call) and
+                isinstance(getattr(n, 'func', None), ast.Attribute) and
+                isinstance(getattr(n.func, 'value', None), ast.Name) and
+                n.func.value.id == 'self'
+                for n in ast.walk(node)
+            )
+            if has_self_method_call:
+                continue  # Uses internal dispatch -- likely a namespace
+            # Exclusion 2: Method count threshold (10+ methods = namespace)
+            method_count = sum(
+                1 for n in ast.walk(node)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            if method_count >= 10:
+                continue  # Too many methods to practically convert
+            # Exclusion 3: Dispatch-table pattern (self.method refs inside dict/list/set)
+            has_dispatch_table = False
+            for n in ast.walk(node):
+                if not isinstance(n, (ast.Dict, ast.List, ast.Set)):
+                    continue
+                for val in ast.walk(n):
+                    if (isinstance(val, ast.Attribute) and
+                        isinstance(getattr(val, 'value', None), ast.Name) and
+                        val.value.id == 'self'):
+                        has_dispatch_table = True
+                        break
+                if has_dispatch_table:
+                    break
+            if has_dispatch_table:
+                continue  # Builds dispatch table from self.method references
+            print(f'{path}:{node.lineno}: {node.name} (no instance state)')
 "
 
 # TypeScript: classes with no 'this.' property assignments
