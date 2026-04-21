@@ -944,6 +944,20 @@ def _add_stitch_parser(subparsers) -> None:
         help="Width of pad-to-via trace segments in mm (default: 0.2)",
     )
     stitch_parser.add_argument(
+        "--blanket",
+        "-b",
+        action="store_true",
+        dest="stitch_blanket",
+        help="Place vias on a grid pattern across zone polygons (blanket stitching)",
+    )
+    stitch_parser.add_argument(
+        "--spacing",
+        type=float,
+        default=3.0,
+        dest="stitch_spacing",
+        help="Grid spacing for blanket stitching in mm (default: 3.0)",
+    )
+    stitch_parser.add_argument(
         "--dry-run",
         "-d",
         action="store_true",
