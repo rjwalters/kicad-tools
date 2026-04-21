@@ -3256,3 +3256,164 @@ class TestPostRouteClearanceCorrection:
             assert not mock_mark_usage.called, (
                 "mark_route_usage should not be called in correction pass"
             )
+
+
+class TestPostRouteCorrectionAllStrategies:
+    """Tests for Issue #1783: clearance correction runs for all strategies."""
+
+    def test_build_net_routes_map(self):
+        """_build_net_routes_map groups routes by net ID."""
+        router = Autorouter(width=50.0, height=40.0)
+        seg1 = Segment(x1=1, y1=1, x2=10, y2=1, width=0.2, net=1, layer=Layer.F_CU)
+        seg2 = Segment(x1=1, y1=5, x2=10, y2=5, width=0.2, net=2, layer=Layer.F_CU)
+        seg3 = Segment(x1=1, y1=3, x2=10, y2=3, width=0.2, net=1, layer=Layer.F_CU)
+        r1 = Route(net=1, net_name="A", segments=[seg1], vias=[])
+        r2 = Route(net=2, net_name="B", segments=[seg2], vias=[])
+        r3 = Route(net=1, net_name="A", segments=[seg3], vias=[])
+        router.routes = [r1, r2, r3]
+
+        net_routes = router._build_net_routes_map()
+        assert set(net_routes.keys()) == {1, 2}
+        assert len(net_routes[1]) == 2
+        assert len(net_routes[2]) == 1
+
+    def test_route_all_advanced_calls_clearance_correction_for_monte_carlo(self):
+        """route_all_advanced runs clearance correction after monte_carlo."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+        )
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add two simple nets
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 5.0, "y": 12.0, "net": 2, "net_name": "NET2"},
+                {"number": "2", "x": 15.0, "y": 12.0, "net": 2, "net_name": "NET2"},
+            ],
+        )
+
+        # Track whether correction was called
+        correction_called = [False]
+        original_correction = router._post_route_clearance_correction
+
+        def mock_correction(*args, **kwargs):
+            correction_called[0] = True
+            return original_correction(*args, **kwargs)
+
+        with patch.object(router, "_post_route_clearance_correction", side_effect=mock_correction):
+            router.route_all_advanced(monte_carlo_trials=2)
+
+        assert correction_called[0], (
+            "route_all_advanced must call _post_route_clearance_correction for monte_carlo"
+        )
+
+    def test_route_all_advanced_calls_clearance_correction_for_plain(self):
+        """route_all_advanced runs clearance correction after plain route_all."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+        )
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            ],
+        )
+
+        correction_called = [False]
+        original_correction = router._post_route_clearance_correction
+
+        def mock_correction(*args, **kwargs):
+            correction_called[0] = True
+            return original_correction(*args, **kwargs)
+
+        with patch.object(router, "_post_route_clearance_correction", side_effect=mock_correction):
+            router.route_all_advanced()
+
+        assert correction_called[0], (
+            "route_all_advanced must call _post_route_clearance_correction for plain routing"
+        )
+
+    def test_correction_revalidates_after_each_net(self):
+        """Issue #1783: correction pass re-validates after each net is rerouted."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        seg1 = Segment(x1=5, y1=10, x2=15, y2=10, width=0.2, net=1, layer=Layer.F_CU)
+        seg2 = Segment(x1=5, y1=10.1, x2=15, y2=10.1, width=0.2, net=2, layer=Layer.F_CU)
+        r1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        r2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+        router.routes = [r1, r2]
+
+        # Create a violation between nets 1 and 2
+        violation = type(
+            "V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"}
+        )()
+
+        validate_call_count = [0]
+
+        def mock_validate(router_obj):
+            validate_call_count[0] += 1
+            # First call: report violation. Subsequent calls: no violations.
+            if validate_call_count[0] == 1:
+                return [violation]
+            return []
+
+        good_route = Route(
+            net=1, net_name="NET1",
+            segments=[Segment(x1=5, y1=11, x2=15, y2=11, width=0.2, net=1, layer=Layer.F_CU)],
+            vias=[],
+        )
+
+        def mock_route_net(net, pf, per_net_timeout=None):
+            return [good_route]
+
+        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
+             patch.object(router, "_route_net_negotiated", mock_route_net), \
+             patch.object(router.grid, "mark_route"), \
+             patch.object(router.grid, "unmark_route"), \
+             patch.object(router.grid, "unmark_route_usage"):
+
+            corrected = router._post_route_clearance_correction(
+                net_routes={1: [r1], 2: [r2]},
+                present_factor=0.5,
+            )
+
+        assert corrected > 0
+        # validate_routes should be called more than once:
+        # once at the start of the pass, plus re-validation calls after each net
+        assert validate_call_count[0] >= 2, (
+            "validate_routes must be called multiple times for iterative re-validation"
+        )
+
+    def test_correction_pads_by_net_optional(self):
+        """pads_by_net parameter is optional (backward compatibility)."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        # No routes means no violations, returns 0
+        corrected = router._post_route_clearance_correction(
+            net_routes={},
+            present_factor=0.5,
+        )
+        assert corrected == 0
+
+        # Also works when pads_by_net is explicitly passed as None
+        corrected = router._post_route_clearance_correction(
+            net_routes={},
+            pads_by_net=None,
+            present_factor=0.5,
+        )
+        assert corrected == 0

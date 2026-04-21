@@ -2821,8 +2821,8 @@ class Autorouter:
     def _post_route_clearance_correction(
         self,
         net_routes: dict[int, list[Route]],
-        pads_by_net: dict[int, list[Pad]],
-        present_factor: float,
+        pads_by_net: dict[int, list[Pad]] | None = None,
+        present_factor: float = 0.5,
         per_net_timeout: float | None = None,
         max_correction_passes: int = 3,
     ) -> int:
@@ -2835,9 +2835,14 @@ class Autorouter:
         reroute the offending nets so they settle into positions that
         satisfy the world-coordinate clearance constraint.
 
+        Issue #1783: After each net is rerouted, re-validate it against all
+        already-placed routes to catch violations introduced by sequential
+        rerouting.  This prevents Net B's new position from creating a new
+        violation with Net A that goes undetected.
+
         Args:
             net_routes: Mapping of net ID to its current routes.
-            pads_by_net: Mapping of net ID to its pad objects.
+            pads_by_net: (Unused, kept for backward compatibility.)
             present_factor: Congestion cost factor for rerouting.
             per_net_timeout: Optional per-net A* timeout.
             max_correction_passes: Maximum correction iterations (default 3).
@@ -2877,9 +2882,10 @@ class Autorouter:
             nets_to_reroute = [n for n in violating_nets if n in net_routes]
             neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-            # Reroute them
+            # Reroute them one at a time, re-validating after each net to
+            # catch violations introduced by sequential placement (Issue #1783).
             rerouted_count = 0
-            for net in nets_to_reroute:
+            for net_idx, net in enumerate(nets_to_reroute):
                 routes = self._route_net_negotiated(
                     net, present_factor, per_net_timeout=per_net_timeout
                 )
@@ -2893,6 +2899,29 @@ class Autorouter:
                         # too close to wider traces.
                         self.grid.mark_route(route)
                         self.routes.append(route)
+
+                    # Issue #1783: After placing this net, check if it violates
+                    # clearance against already-placed routes.  If so, rip it up
+                    # and reroute once more with updated grid state.
+                    if net_idx < len(nets_to_reroute) - 1:
+                        post_violations = validate_routes(self)
+                        net_seg_violations = [
+                            v
+                            for v in post_violations
+                            if v.obstacle_type == "segment"
+                            and (v.net == net or v.obstacle_net == net)
+                        ]
+                        if net_seg_violations:
+                            # Rip up just this net and try again
+                            neg_router.rip_up_nets([net], net_routes, self.routes)
+                            retry_routes = self._route_net_negotiated(
+                                net, present_factor * 1.5, per_net_timeout=per_net_timeout
+                            )
+                            if retry_routes:
+                                net_routes[net] = retry_routes
+                                for route in retry_routes:
+                                    self.grid.mark_route(route)
+                                    self.routes.append(route)
 
             total_corrected += rerouted_count
             flush_print(
@@ -3405,6 +3434,17 @@ class Autorouter:
 
         return all_routes
 
+    def _build_net_routes_map(self) -> dict[int, list[Route]]:
+        """Build a net_id -> routes mapping from ``self.routes``.
+
+        Used by ``_post_route_clearance_correction`` when the calling
+        strategy does not maintain its own ``net_routes`` dictionary.
+        """
+        net_routes: dict[int, list[Route]] = {}
+        for route in self.routes:
+            net_routes.setdefault(route.net, []).append(route)
+        return net_routes
+
     def route_all_advanced(
         self,
         monte_carlo_trials: int = 0,
@@ -3439,29 +3479,54 @@ class Autorouter:
             hierarchical > two_phase > negotiated > standard
         """
         if use_block_aware and self.registered_blocks:
-            return self.route_all_block_aware(
+            result = self.route_all_block_aware(
                 use_negotiated=use_negotiated, progress_callback=progress_callback
             )
-        if monte_carlo_trials > 0:
-            return self.route_all_monte_carlo(
+        elif monte_carlo_trials > 0:
+            result = self.route_all_monte_carlo(
                 monte_carlo_trials, use_negotiated, progress_callback=progress_callback
             )
         elif use_multi_resolution:
-            return self.route_all_multi_resolution(
+            result = self.route_all_multi_resolution(
                 use_negotiated=use_negotiated,
                 progress_callback=progress_callback,
             )
         elif use_hierarchical:
-            return self.route_all_hierarchical(
+            result = self.route_all_hierarchical(
                 use_negotiated=use_negotiated, progress_callback=progress_callback
             )
         elif use_two_phase:
-            return self.route_all_two_phase(
+            result = self.route_all_two_phase(
                 use_negotiated=use_negotiated, progress_callback=progress_callback
             )
         elif use_negotiated:
+            # Negotiated strategy already runs clearance correction internally;
+            # skip the unified pass below to avoid double-correction.
             return self.route_all_negotiated(progress_callback=progress_callback)
-        return self.route_all(progress_callback=progress_callback)
+        else:
+            result = self.route_all(progress_callback=progress_callback)
+
+        # Issue #1783: Run post-route clearance correction for ALL strategies.
+        # Previously this only ran inside route_all_negotiated, leaving
+        # monte-carlo, two-phase, hierarchical, block-aware, and plain
+        # routing without seg-seg clearance verification.
+        if result:
+            import time
+
+            start = time.time()
+            net_routes = self._build_net_routes_map()
+            corrected = self._post_route_clearance_correction(
+                net_routes=net_routes,
+                present_factor=0.5,
+            )
+            if corrected > 0:
+                elapsed = time.time() - start
+                flush_print(
+                    f"\n  Post-route clearance correction rerouted {corrected} net(s) "
+                    f"({elapsed:.1f}s)"
+                )
+
+        return result
 
     def to_sexp(self) -> str:
         """Generate KiCad S-expressions for all routes."""
