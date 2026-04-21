@@ -551,6 +551,27 @@ class SubGridRouter:
         min_search_mm = 0.3
         fine_radius = max(3, math.ceil(min_search_mm / fine_resolution))
 
+        # Issue #1834: Extend search radius for tight-pitch pads where the
+        # inter-pad gap is too narrow for between-pad escape.  This pushes
+        # candidates outward (away from the IC body) where clearance permits.
+        half_width = (
+            self.rules.trace_width / 2
+            if self.rules.min_trace_width is None
+            else self.rules.min_trace_width / 2
+        )
+        required_clearance = self.rules.trace_clearance
+        pitches = self.grid.compute_component_pitches()
+        pad_pitch = pitches.get(pad.ref)
+        if pad_pitch is not None:
+            pad_half = max(pad.width, pad.height) / 2
+            min_channel = pad_pitch - 2 * pad_half
+            needed_channel = 2 * half_width + 2 * required_clearance
+            if min_channel < needed_channel:
+                # Between-pad routing is impossible; extend radius so the
+                # search reaches past the IC body edge.
+                extended_mm = max(min_search_mm, pad_pitch * 2)
+                fine_radius = max(fine_radius, math.ceil(extended_mm / fine_resolution))
+
         # The fine grid is centred on the pad's nearest coarse-grid point
         # (sgp.snap_x, sgp.snap_y) and extends ``fine_radius`` fine cells
         # in each direction.
@@ -608,15 +629,19 @@ class SubGridRouter:
                 if dist > fine_resolution * fine_radius:
                     score += dist * 2
 
-                # Clearance-aware scoring
+                # Issue #1834: Hard-reject candidates that violate minimum
+                # clearance against neighboring pads.  On tight-pitch ICs
+                # (e.g. 0.65mm SSOP) the inter-pad gap is too narrow for a
+                # trace, so candidates between pads must be eliminated early
+                # rather than merely penalized.
+                neighbor_clearance = self._min_clearance_to_neighbors(
+                    fx, fy, half_width, pad.net, check_layers[0],
+                )
+                if neighbor_clearance < required_clearance:
+                    continue  # Physically impossible -- skip
+
+                # Clearance-aware soft scoring for remaining candidates
                 if self.clearance_weight > 0:
-                    required_clearance = self.rules.trace_clearance
-                    neighbor_clearance = self._min_clearance_to_neighbors(
-                        fx, fy,
-                        self.rules.trace_width / 2 if self.rules.min_trace_width is None
-                        else self.rules.min_trace_width / 2,
-                        pad.net, check_layers[0],
-                    )
                     threshold = required_clearance * 2
                     if neighbor_clearance < threshold:
                         clearance_penalty = (
@@ -737,17 +762,21 @@ class SubGridRouter:
                 if dist > self.grid.resolution * radius:
                     score += dist * 2
 
+                # Issue #1834: Hard-reject coarse candidates that violate
+                # minimum clearance against neighboring pads, consistent
+                # with the fine-grid hard-reject added in the same issue.
+                required_clearance = self.rules.trace_clearance
+                neighbor_clearance = self._min_clearance_to_neighbors(
+                    snap_x, snap_y, width / 2, pad.net, check_layers[0],
+                )
+                if neighbor_clearance < required_clearance:
+                    continue  # Physically impossible -- skip
+
                 # Clearance-aware scoring (Phase 2, Issue #1642)
                 # Penalize candidates that are close to different-net pads.
                 # This re-orders candidates so that high-clearance points are
                 # preferred, reducing DRC violations on tightly-packed ICs.
                 if self.clearance_weight > 0:
-                    required_clearance = self.rules.trace_clearance
-                    neighbor_clearance = self._min_clearance_to_neighbors(
-                        snap_x, snap_y, width / 2, pad.net, check_layers[0],
-                    )
-                    # Only penalize when clearance margin is tight
-                    # (below 2x required clearance)
                     threshold = required_clearance * 2
                     if neighbor_clearance < threshold:
                         clearance_penalty = (

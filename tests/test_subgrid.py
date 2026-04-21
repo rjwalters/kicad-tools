@@ -1682,3 +1682,224 @@ class TestFineZoneAwareEscape:
                 f"Fine-zone escape for {escape.pad.ref}.{escape.pad.pin} "
                 f"violates clearance={clearance:.4f}mm at {violation_loc}"
             )
+
+
+# =========================================================================
+# Issue #1834: Inter-pad clearance on tight-pitch SSOP
+# =========================================================================
+
+
+class TestTightPitchClearanceRejection:
+    """Tests for Issue #1834: fine zone escape segments must not violate
+    inter-pad clearance on 0.65mm-pitch SSOP.
+
+    On 0.65mm-pitch SSOP-28 (e.g. PCM5122) with 0.35mm pads, the
+    inter-pad gap is only 0.30mm. With a 0.2mm trace and 0.15mm clearance
+    there is physically no room to route between adjacent pads.  The escape
+    generator must hard-reject between-pad candidates and route outward.
+    """
+
+    def test_ssop28_tight_pitch_no_clearance_violation(self):
+        """SSOP-28 at 0.65mm pitch, 0.35mm pads, 0.2mm trace, 0.15mm
+        clearance should produce zero escape clearance violations.
+
+        This is the primary regression test for Issue #1834.
+        """
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # SSOP-28: 14 pads per side, 0.65mm pitch, 0.35mm pad width
+        pads = []
+        base_x = 10.0
+        base_y = 10.0
+
+        # Left side pads (pin 1-14)
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x,
+                y=base_y + i * 0.65,
+                net=i + 1,
+                ref="U4",
+                pin=str(i + 1),
+                width=0.35,
+                height=0.45,
+            ))
+
+        # Right side pads (pin 15-28)
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x + 6.0,
+                y=base_y + i * 0.65,
+                net=i + 15,
+                ref="U4",
+                pin=str(i + 15),
+                width=0.35,
+                height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Every accepted escape must pass clearance validation
+        component_pitches = grid.compute_component_pitches()
+        violations = []
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+                component_pitches=component_pitches,
+            )
+            if not is_valid:
+                violations.append(
+                    f"{escape.pad.ref}.{escape.pad.pin} net={escape.pad.net} "
+                    f"clearance={clearance:.4f}mm at {violation_loc}"
+                )
+
+        assert len(violations) == 0, (
+            f"Found {len(violations)} escape clearance violations on SSOP-28:\n"
+            + "\n".join(violations)
+        )
+
+    def test_escape_prefers_outward_when_between_pads_blocked(self):
+        """When between-pad gap is too tight, escape should route outward
+        from IC body rather than between adjacent pads."""
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Three adjacent SSOP pads: middle pad should escape outward,
+        # not between the two neighbors.
+        #
+        # Component center is computed from all pads -- placing them
+        # along Y axis at x=10.0 means the center X is 10.0 and the
+        # escape direction for pads on the left side points leftward
+        # (away from IC body at center).
+        pads = []
+        base_y = 10.0
+        for i in range(3):
+            pads.append(make_pad(
+                x=10.0,
+                y=base_y + i * 0.65,
+                net=i + 1,
+                ref="U4",
+                pin=str(i + 1),
+                width=0.35,
+                height=0.45,
+            ))
+        # Add a pad on the opposite side for realistic component center
+        pads.append(make_pad(
+            x=16.0,
+            y=base_y + 0.65,
+            net=10,
+            ref="U4",
+            pin="10",
+            width=0.35,
+            height=0.45,
+        ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Check the middle pad (pin 2) escape direction
+        middle_escapes = [
+            e for e in result.escapes
+            if e.pad.pin == "2" and e.pad.ref == "U4"
+        ]
+        if middle_escapes:
+            escape = middle_escapes[0]
+            # The escape should NOT go between pads (Y direction toward
+            # neighbors).  Instead it should go outward (negative X
+            # direction, away from the component center at ~13.0).
+            dx = escape.segment.x2 - escape.segment.x1
+            dy = escape.segment.y2 - escape.segment.y1
+            seg_len = math.sqrt(dx * dx + dy * dy)
+            if seg_len > 0.001:
+                # The X component of the escape direction should be
+                # negative (leftward, away from IC body) or neutral
+                assert dx <= 0.01, (
+                    f"Middle pad escape goes toward IC body (dx={dx:.3f}), "
+                    f"expected outward escape"
+                )
+
+            # Must also pass clearance
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+            )
+            assert is_valid, (
+                f"Outward escape for middle pad violates clearance="
+                f"{clearance:.4f}mm at {violation_loc}"
+            )
+
+    def test_wider_pitch_ssop_still_works(self):
+        """SSOP-like pads at 0.85mm pitch (wider gap) with off-grid
+        placement should still produce valid escapes -- the hard-reject
+        must not be too aggressive."""
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # 0.85mm pitch with 0.3mm pads: gap = 0.55mm
+        # Channel = 0.55 - 2*0.075 - 2*0.1 = 0.2mm (feasible)
+        # Use off-grid base_y so pads don't snap to grid points.
+        pads = []
+        for i in range(6):
+            pads.append(make_pad(
+                x=10.0,
+                y=10.03 + i * 0.85,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3,
+                height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        assert analysis.has_off_grid_pads, (
+            "Test expects off-grid pads at 0.85mm pitch on 0.1mm grid "
+            f"(found {analysis.off_grid_count} off-grid)"
+        )
+
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Should still produce escape segments
+        assert result.success_count > 0, (
+            f"Wider-pitch SSOP should still produce escapes, "
+            f"got {result.success_count}/{result.total_attempted}"
+        )
+
+        # All must pass clearance
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+            )
+            assert is_valid, (
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates "
+                f"clearance={clearance:.4f}mm"
+            )
