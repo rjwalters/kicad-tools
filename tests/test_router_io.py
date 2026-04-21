@@ -1047,6 +1047,57 @@ class TestValidateRoutes:
         seg_violations = [v for v in violations if v.obstacle_type == "segment"]
         assert len(seg_violations) == 0
 
+
+    def test_inner_layer_segment_violation_has_layer(self):
+        """Segment violations on inner layers should include layer info (Issue #1798)."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Two parallel segments on In2.Cu, too close together
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.IN2_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.IN2_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        # The violation should record the layer where it occurred
+        assert seg_violations[0].layer == Layer.IN2_CU
+
+    def test_outer_layer_segment_violation_has_layer(self):
+        """Segment violations on outer layers should include layer info (Issue #1798)."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        assert seg_violations[0].layer == Layer.F_CU
+
     def test_detects_segment_to_via_violation(self):
         """Test detection of clearance violations between segment and via."""
         rules = DesignRules(

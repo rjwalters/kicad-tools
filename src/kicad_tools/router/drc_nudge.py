@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .core import Autorouter
 
 from .io import ClearanceViolation, validate_routes
+from .layers import Layer
 from .primitives import Route, Segment
 
 logger = logging.getLogger(__name__)
@@ -312,6 +313,7 @@ def _try_nudge_seg_seg(
     target_seg = _find_segment(
         router, violation.net, violation.segment_index,
         violation.x1, violation.y1, violation.x2, violation.y2,
+        layer=violation.layer,
     )
     if target_seg is None:
         return False
@@ -356,6 +358,7 @@ def _try_nudge_seg_via(
     target_seg = _find_segment(
         router, violation.net, violation.segment_index,
         violation.x1, violation.y1, violation.x2, violation.y2,
+        layer=violation.layer,
     )
     if target_seg is None:
         return False
@@ -402,6 +405,7 @@ def _try_nudge_seg_pad(
     target_seg = _find_segment(
         router, violation.net, violation.segment_index,
         violation.x1, violation.y1, violation.x2, violation.y2,
+        layer=violation.layer,
     )
     if target_seg is None:
         return False
@@ -439,33 +443,38 @@ def _find_segment(
     x2: float,
     y2: float,
     tol: float = 0.001,
+    layer: "Layer | None" = None,
 ) -> Segment | None:
-    """Locate a segment in *router.routes* by net + coordinates.
+    """Locate a segment in *router.routes* by net + coordinates + optional layer.
 
     We first try the indexed lookup (net + seg_index), then fall back to a
-    coordinate search across all segments of matching nets.
+    coordinate search across all segments of matching nets.  When *layer* is
+    provided (non-None), only segments on that layer are considered.  This
+    prevents inner-layer segments from being confused with outer-layer
+    segments that share similar coordinates (Issue #1798).
     """
+    def _coords_match(seg: Segment) -> bool:
+        return (
+            abs(seg.x1 - x1) < tol
+            and abs(seg.y1 - y1) < tol
+            and abs(seg.x2 - x2) < tol
+            and abs(seg.y2 - y2) < tol
+        )
+
+    def _layer_match(seg: Segment) -> bool:
+        return layer is None or seg.layer == layer
+
     for route in router.routes:
         if route.net != net:
             continue
         # Try index lookup
         if 0 <= seg_index < len(route.segments):
             seg = route.segments[seg_index]
-            if (
-                abs(seg.x1 - x1) < tol
-                and abs(seg.y1 - y1) < tol
-                and abs(seg.x2 - x2) < tol
-                and abs(seg.y2 - y2) < tol
-            ):
+            if _coords_match(seg) and _layer_match(seg):
                 return seg
         # Fallback: coordinate search
         for seg in route.segments:
-            if (
-                abs(seg.x1 - x1) < tol
-                and abs(seg.y1 - y1) < tol
-                and abs(seg.x2 - x2) < tol
-                and abs(seg.y2 - y2) < tol
-            ):
+            if _coords_match(seg) and _layer_match(seg):
                 return seg
     return None
 
