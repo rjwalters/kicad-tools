@@ -122,6 +122,7 @@ from .heuristics import (
     ManhattanHeuristic,
     WeightedCongestionHeuristic,
 )
+from .drc_nudge import DRCNudgeResult, drc_verify_and_nudge
 from .io import (
     ClearanceViolation,
     FineZone,
@@ -408,6 +409,9 @@ __all__ = [
     "parse_pcb_design_rules",
     "validate_grid_resolution",
     "validate_routes",
+    # DRC nudge
+    "DRCNudgeResult",
+    "drc_verify_and_nudge",
     # Optimizer
     "TraceOptimizer",
     "OptimizationConfig",
