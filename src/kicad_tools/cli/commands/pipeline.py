@@ -48,6 +48,16 @@ def run_pipeline_command(args) -> int:
     if getattr(args, "pipeline_best_effort", False):
         sub_argv.append("--best-effort")
 
+    # Cache control
+    if getattr(args, "pipeline_no_cache", False):
+        sub_argv.append("--no-cache")
+    if getattr(args, "pipeline_clear_cache", False):
+        sub_argv.append("--clear-cache")
+
+    # Schematic override
+    if getattr(args, "pipeline_sch", None):
+        sub_argv.extend(["--sch", args.pipeline_sch])
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
