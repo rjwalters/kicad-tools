@@ -2875,7 +2875,6 @@ class Autorouter:
                 if getattr(v, "layer", None) is not None
                 and v.layer not in (Layer.F_CU, Layer.B_CU)
             ]
-            outer_count = len(seg_violations) - len(inner_layer_violations)
 
             # Collect the distinct layer names for the log message.
             violation_layers: set[str] = set()
