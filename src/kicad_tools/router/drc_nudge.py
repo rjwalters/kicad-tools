@@ -134,21 +134,49 @@ def _segment_to_segment_distance(
 # Same-net via merging
 # ---------------------------------------------------------------------------
 
-COINCIDENT_THRESHOLD = 0.01  # mm -- same as DrillClearanceRepairer
+COINCIDENT_THRESHOLD = 0.01  # mm -- legacy constant kept for backward compat
+_ENDPOINT_TOL = 0.05  # mm -- tolerance for matching segment endpoints to via positions
+
+
+def _compute_merge_threshold(router: Autorouter) -> float:
+    """Return the drill-overlap merge threshold from design rules.
+
+    Two same-net vias closer than ``via_diameter + min_drill_clearance``
+    would create a drill overlap DRC violation and must be merged.
+    Falls back to ``COINCIDENT_THRESHOLD`` when rules are unavailable.
+    """
+    rules = getattr(router, "rules", None)
+    if rules is None:
+        return COINCIDENT_THRESHOLD
+    via_diameter = getattr(rules, "via_diameter", 0.0)
+    min_drill = getattr(rules, "min_drill_clearance", 0.0)
+    threshold = via_diameter + min_drill
+    # Ensure we never go below the legacy coincident threshold
+    return max(threshold, COINCIDENT_THRESHOLD)
 
 
 def _merge_same_net_vias(router: Autorouter) -> int:
-    """Merge same-net vias that are nearly coincident.
+    """Merge same-net vias that are closer than the drill-overlap threshold.
 
-    For each route, find pairs of vias closer than ``COINCIDENT_THRESHOLD``.
-    Keep the first via and remove the second, then update any segment
-    endpoints that referenced the removed via's position.
+    Issue #1796: The previous implementation only merged nearly-coincident
+    vias (within 0.01 mm) and only within a single route.  Vias placed by
+    independent routing passes (e.g. escape routing) on the same net could
+    end up close enough to violate drill-to-drill clearance without being
+    merged.
+
+    This version:
+    * Uses ``via_diameter + min_drill_clearance`` as the merge threshold.
+    * Merges across different routes that share the same net.
+    * Keeps the first via encountered and reconnects all segments from
+      the removed via to the surviving one.
 
     Returns:
         Number of vias merged.
     """
+    merge_threshold = _compute_merge_threshold(router)
     total_merged = 0
 
+    # --- Phase 1: intra-route merges (vias within the same Route object) ---
     for route in router.routes:
         if len(route.vias) < 2:
             continue
@@ -166,14 +194,61 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                 dist = math.sqrt(
                     (via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2
                 )
-                if dist < COINCIDENT_THRESHOLD:
-                    # Reconnect segments that reference via_b to via_a
-                    _reconnect_segments(route.segments, via_b.x, via_b.y, via_a.x, via_a.y)
+                if dist < merge_threshold:
+                    _reconnect_segments(
+                        route.segments, via_b.x, via_b.y,
+                        via_a.x, via_a.y, _ENDPOINT_TOL,
+                    )
                     merged_indices.add(j)
 
         if merged_indices:
-            route.vias = [v for idx, v in enumerate(route.vias) if idx not in merged_indices]
+            route.vias = [
+                v for idx, v in enumerate(route.vias) if idx not in merged_indices
+            ]
             total_merged += len(merged_indices)
+
+    # --- Phase 2: cross-route merges (different Route objects, same net) ---
+    # Group routes by net so we only compare routes that could conflict.
+    from collections import defaultdict
+
+    net_routes: dict[int, list[Route]] = defaultdict(list)
+    for route in router.routes:
+        if route.vias:
+            net_routes[route.net].append(route)
+
+    for net_id, routes in net_routes.items():
+        if len(routes) < 2:
+            continue
+
+        # For each pair of routes on the same net, check their vias.
+        for ri in range(len(routes)):
+            route_a = routes[ri]
+            for rj in range(ri + 1, len(routes)):
+                route_b = routes[rj]
+                remove_from_b: set[int] = set()
+
+                for via_a in route_a.vias:
+                    for bj, via_b in enumerate(route_b.vias):
+                        if bj in remove_from_b:
+                            continue
+                        dist = math.sqrt(
+                            (via_a.x - via_b.x) ** 2
+                            + (via_a.y - via_b.y) ** 2
+                        )
+                        if dist < merge_threshold:
+                            # Keep via_a, remove via_b, reconnect route_b segments
+                            _reconnect_segments(
+                                route_b.segments, via_b.x, via_b.y,
+                                via_a.x, via_a.y, _ENDPOINT_TOL,
+                            )
+                            remove_from_b.add(bj)
+
+                if remove_from_b:
+                    route_b.vias = [
+                        v for idx, v in enumerate(route_b.vias)
+                        if idx not in remove_from_b
+                    ]
+                    total_merged += len(remove_from_b)
 
     return total_merged
 
@@ -184,9 +259,19 @@ def _reconnect_segments(
     old_y: float,
     new_x: float,
     new_y: float,
+    tol: float | None = None,
 ) -> None:
-    """Snap segment endpoints at ``(old_x, old_y)`` to ``(new_x, new_y)``."""
-    tol = COINCIDENT_THRESHOLD
+    """Snap segment endpoints at ``(old_x, old_y)`` to ``(new_x, new_y)``.
+
+    Args:
+        segments: Segments to scan and update in place.
+        old_x, old_y: Position of the removed via.
+        new_x, new_y: Position of the surviving via.
+        tol: Coordinate tolerance for matching endpoints.
+            Defaults to ``COINCIDENT_THRESHOLD`` for backward compatibility.
+    """
+    if tol is None:
+        tol = COINCIDENT_THRESHOLD
     for seg in segments:
         if abs(seg.x1 - old_x) < tol and abs(seg.y1 - old_y) < tol:
             seg.x1 = new_x

@@ -11,6 +11,7 @@ import pytest
 from kicad_tools.router.drc_nudge import (
     COINCIDENT_THRESHOLD,
     DRCNudgeResult,
+    _compute_merge_threshold,
     _merge_same_net_vias,
     _nudge_segment,
     _perpendicular_unit,
@@ -143,6 +144,112 @@ class TestReconnectSegments:
         _reconnect_segments([seg], 10.005, 10.005, 10.0, 10.0)
         assert math.isclose(seg.x2, 10.0)
         assert math.isclose(seg.y2, 10.0)
+
+
+class TestComputeMergeThreshold:
+    def test_uses_design_rules(self):
+        """Merge threshold should be via_diameter + min_drill_clearance."""
+        rules = DesignRules(via_diameter=0.7, min_drill_clearance=0.102)
+        router = _StubAutorouter(rules=rules)
+        threshold = _compute_merge_threshold(router)
+        assert math.isclose(threshold, 0.802)
+
+    def test_falls_back_to_coincident(self):
+        """When rules are missing, use COINCIDENT_THRESHOLD."""
+        router = _StubAutorouter()
+        router.rules = None  # type: ignore[assignment]
+        threshold = _compute_merge_threshold(router)
+        assert threshold == COINCIDENT_THRESHOLD
+
+
+class TestMergeSameNetViasWithDrillThreshold:
+    """Tests for the drill-overlap merge threshold (Issue #1796)."""
+
+    def test_vias_within_drill_overlap_merged(self):
+        """Vias within via_diameter + min_drill_clearance should be merged."""
+        # Default rules: via_diameter=0.7, min_drill_clearance=0.102
+        # merge threshold = 0.802mm
+        # Place two vias 0.5mm apart (< 0.802)
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=10.5, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg = Segment(x1=5.0, y1=5.0, x2=10.5, y2=10.0,
+                      width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[seg], vias=[via_a, via_b])
+        router = _StubAutorouter(routes=[route])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        assert len(route.vias) == 1
+        # Segment endpoint reconnected to surviving via_a
+        assert math.isclose(seg.x2, 10.0)
+        assert math.isclose(seg.y2, 10.0)
+
+    def test_vias_beyond_drill_overlap_not_merged(self):
+        """Vias farther than the threshold should NOT be merged."""
+        # merge threshold = 0.802mm; place vias 1.0mm apart
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=11.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via_a, via_b])
+        router = _StubAutorouter(routes=[route])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
+        assert len(route.vias) == 2
+
+
+class TestCrossRouteMerge:
+    """Tests for cross-route same-net via merging (Issue #1796)."""
+
+    def test_cross_route_vias_merged(self):
+        """Vias on different routes of the same net should be merged."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg_b = Segment(x1=5.0, y1=5.0, x2=10.3, y2=10.0,
+                        width=0.2, layer=Layer.F_CU, net=1)
+        route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
+        route_b = Route(net=1, net_name="Net1", segments=[seg_b], vias=[via_b])
+        router = _StubAutorouter(routes=[route_a, route_b])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        # via_b should have been removed from route_b
+        assert len(route_a.vias) == 1
+        assert len(route_b.vias) == 0
+        # segment in route_b reconnected to via_a position
+        assert math.isclose(seg_b.x2, 10.0)
+        assert math.isclose(seg_b.y2, 10.0)
+
+    def test_cross_route_different_nets_not_merged(self):
+        """Vias on different nets should NOT be merged even if close."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=2)
+        route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
+        route_b = Route(net=2, net_name="Net2", segments=[], vias=[via_b])
+        router = _StubAutorouter(routes=[route_a, route_b])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
+        assert len(route_a.vias) == 1
+        assert len(route_b.vias) == 1
+
+    def test_cross_route_only_one_has_vias(self):
+        """No crash when only one route on a net has vias."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
+        route_b = Route(net=1, net_name="Net1", segments=[], vias=[])
+        router = _StubAutorouter(routes=[route_a, route_b])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 0
 
 
 # ---------------------------------------------------------------------------
