@@ -944,6 +944,13 @@ def _add_stitch_parser(subparsers) -> None:
         help="Width of pad-to-via trace segments in mm (default: 0.2)",
     )
     stitch_parser.add_argument(
+        "--escape-distance",
+        type=float,
+        default=3.0,
+        dest="stitch_escape_distance",
+        help="Maximum escape trace length in mm for dense IC pads (default: 3.0)",
+    )
+    stitch_parser.add_argument(
         "--blanket",
         "-b",
         action="store_true",

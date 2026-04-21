@@ -479,6 +479,8 @@ def _run_stitch_command(args) -> int:
         sub_argv.extend(["--target-layer", args.stitch_target_layer])
     if hasattr(args, "stitch_trace_width") and args.stitch_trace_width != 0.2:
         sub_argv.extend(["--trace-width", str(args.stitch_trace_width)])
+    if hasattr(args, "stitch_escape_distance") and args.stitch_escape_distance != 3.0:
+        sub_argv.extend(["--escape-distance", str(args.stitch_escape_distance)])
     if hasattr(args, "stitch_blanket") and args.stitch_blanket:
         sub_argv.append("--blanket")
     if hasattr(args, "stitch_spacing") and args.stitch_spacing != 3.0:
