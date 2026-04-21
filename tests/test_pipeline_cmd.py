@@ -24,6 +24,7 @@ from kicad_tools.cli.pipeline_cmd import (
     _run_step_export,
     _run_step_fix_erc,
     _run_step_report,
+    _run_step_stitch,
     main,
     run_pipeline,
 )
@@ -703,13 +704,14 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: zones before fix-drc, refill after fix-drc."""
+        """Steps execute in the correct order: stitch after route, zones before fix-drc."""
         expected = [
             PipelineStep.ERC,
             PipelineStep.FIX_ERC,
             PipelineStep.FIX_SILKSCREEN,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
+            PipelineStep.STITCH,
             PipelineStep.OPTIMIZE,
             PipelineStep.ZONES,
             PipelineStep.FIX_DRC,
@@ -3959,3 +3961,154 @@ class TestBestEffort:
         # Just verify it parses without error (dry-run avoids subprocess calls)
         result = main(["--best-effort", "--dry-run", "--quiet", str(unrouted_pcb)])
         assert result == 0
+
+
+# 4-layer PCB with power-plane zones for stitch testing.
+# Has GND zone on In1.Cu and +3.3V zone on In2.Cu.
+FOUR_LAYER_PCB_WITH_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" power)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "z1")
+    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 100 100) (xy 150 100) (xy 150 150) (xy 100 150)))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "In2.Cu") (uuid "z2")
+    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 100 100) (xy 150 100) (xy 150 150) (xy 100 150)))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 125 125)
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (segment (start 122 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "seg-1"))
+)
+"""
+
+
+@pytest.fixture
+def four_layer_pcb_with_zones(tmp_path: Path) -> Path:
+    """Create a 4-layer PCB with power-plane zones for stitch testing."""
+    pcb_file = tmp_path / "four_layer_zones.kicad_pcb"
+    pcb_file.write_text(FOUR_LAYER_PCB_WITH_ZONES)
+    return pcb_file
+
+
+class TestStitchStep:
+    """Tests for the stitch pipeline step."""
+
+    def test_stitch_in_all_steps(self):
+        """PipelineStep.STITCH is present in ALL_STEPS."""
+        assert PipelineStep.STITCH in ALL_STEPS
+
+    def test_stitch_after_route_before_optimize(self):
+        """STITCH is positioned after ROUTE and before OPTIMIZE in ALL_STEPS."""
+        route_idx = ALL_STEPS.index(PipelineStep.ROUTE)
+        stitch_idx = ALL_STEPS.index(PipelineStep.STITCH)
+        optimize_idx = ALL_STEPS.index(PipelineStep.OPTIMIZE)
+        assert route_idx < stitch_idx < optimize_idx
+
+    def test_stitch_immediately_after_route(self):
+        """STITCH is the step immediately following ROUTE."""
+        route_idx = ALL_STEPS.index(PipelineStep.ROUTE)
+        stitch_idx = ALL_STEPS.index(PipelineStep.STITCH)
+        assert stitch_idx == route_idx + 1
+
+    def test_stitch_enum_value(self):
+        """PipelineStep.STITCH has the correct string value."""
+        assert PipelineStep.STITCH.value == "stitch"
+
+    def test_stitch_skips_on_2_layer_board(self, routed_pcb: Path):
+        """Stitch step skips gracefully on 2-layer boards."""
+        console = MagicMock()
+        ctx = PipelineContext(pcb_file=routed_pcb, layers="2", quiet=True)
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is True
+        assert "2-layer" in result.message
+
+    def test_stitch_skips_when_no_plane_nets(self, routed_pcb: Path):
+        """Stitch step skips when no plane zones are found in the PCB."""
+        console = MagicMock()
+        # routed_pcb has no zones, so find_all_plane_nets returns empty
+        ctx = PipelineContext(pcb_file=routed_pcb, layers="4", quiet=True)
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is True
+        assert "no plane nets" in result.message
+
+    def test_stitch_dry_run(self, four_layer_pcb_with_zones: Path):
+        """Stitch step in dry-run mode reports what it would do."""
+        console = MagicMock()
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", dry_run=True, quiet=True
+        )
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is False
+        assert "[dry-run]" in result.message
+        assert "stitch" in result.message
+        # Should mention auto-detected nets
+        assert "GND" in result.message or "+3.3V" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_stitch_invokes_subprocess(self, mock_run, four_layer_pcb_with_zones: Path):
+        """Stitch step invokes kct stitch as a subprocess on multi-layer boards."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        console = MagicMock()
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", quiet=True
+        )
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is False
+        # Verify subprocess was called with kct stitch
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "stitch" in cmd
+        assert str(four_layer_pcb_with_zones) in cmd
+
+    def test_step_stitch_accepted_by_argparse(self, routed_pcb: Path):
+        """--step stitch is accepted by the CLI argument parser."""
+        result = main(["--step", "stitch", "--dry-run", "--quiet", str(routed_pcb)])
+        # 2-layer board, so stitch skips -> success
+        assert result == 0
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_full_pipeline_includes_stitch(self, mock_run, four_layer_pcb_with_zones: Path):
+        """Full pipeline dry-run includes the stitch step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", dry_run=True, quiet=True
+        )
+        results = run_pipeline(ctx)
+        step_names = [r.step for r in results]
+        assert PipelineStep.STITCH in step_names
+
+    def test_stitch_skips_default_2_layer_board(self, routed_pcb: Path):
+        """Stitch step skips when layers is None (defaults to 2)."""
+        console = MagicMock()
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is True
