@@ -2730,6 +2730,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Pass fine zones from multi-resolution plan to the router (Issue #1828).
+    # This enables SubGridRouter to use fine-grid resolution for escape
+    # routing of pads within dense IC packages (e.g. SSOP at 0.05mm)
+    # instead of the coarse global grid (e.g. 0.17mm).
+    if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+        router.fine_zones = list(multi_res_plan.fine_zones)
+        if not quiet:
+            flush_print(
+                f"  Fine zones: {len(router.fine_zones)} "
+                f"(sub-grid escape routing enabled)"
+            )
+
     # Set up Ctrl+C handling to save partial results
     _interrupt_state["router"] = router
     _interrupt_state["output_path"] = output_path

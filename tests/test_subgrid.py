@@ -1421,3 +1421,264 @@ class TestFineGridClearanceZoneUnblocking:
                 f"{escape.pad.net}) violates clearance={clearance:.4f}mm "
                 f"at {violation_loc}"
             )
+
+
+# =========================================================================
+# Fine-zone-aware escape routing tests (Issue #1828)
+# =========================================================================
+
+
+class TestFineZoneContains:
+    """Tests for FineZone.contains() method."""
+
+    def test_point_inside_zone(self):
+        from kicad_tools.router.io import FineZone
+
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=10.0, y_max=10.0, resolution=0.05)
+        assert zone.contains(7.0, 7.0) is True
+
+    def test_point_outside_zone(self):
+        from kicad_tools.router.io import FineZone
+
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=10.0, y_max=10.0, resolution=0.05)
+        assert zone.contains(3.0, 7.0) is False
+
+    def test_point_on_boundary(self):
+        from kicad_tools.router.io import FineZone
+
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=10.0, y_max=10.0, resolution=0.05)
+        assert zone.contains(5.0, 5.0) is True
+        assert zone.contains(10.0, 10.0) is True
+
+
+class TestFineZoneAwareEscape:
+    """Tests for SubGridRouter using fine zones for escape routing (Issue #1828)."""
+
+    def test_fine_zones_stored_on_subgrid_router(self):
+        """SubGridRouter stores fine_zones when provided."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(resolution=0.17)
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=15.0, y_max=15.0, resolution=0.05)
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+        assert len(subgrid.fine_zones) == 1
+        assert subgrid.fine_zones[0].resolution == 0.05
+
+    def test_no_fine_zones_default(self):
+        """SubGridRouter defaults to empty fine_zones list."""
+        grid, rules = make_grid_and_rules(resolution=0.17)
+        subgrid = SubGridRouter(grid, rules)
+        assert subgrid.fine_zones == []
+
+    def test_get_pad_fine_resolution_inside_zone(self):
+        """_get_pad_fine_resolution returns zone resolution for pad inside zone."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(resolution=0.17)
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=15.0, y_max=15.0, resolution=0.05)
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+
+        pad = make_pad(x=10.0, y=10.0, net=1, ref="U1", pin="1")
+        assert subgrid._get_pad_fine_resolution(pad) == 0.05
+
+    def test_get_pad_fine_resolution_outside_zone(self):
+        """_get_pad_fine_resolution returns None for pad outside all zones."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(resolution=0.17)
+        zone = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=15.0, y_max=15.0, resolution=0.05)
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+
+        pad = make_pad(x=2.0, y=2.0, net=1, ref="R1", pin="1")
+        assert subgrid._get_pad_fine_resolution(pad) is None
+
+    def test_get_pad_fine_resolution_overlapping_zones_uses_finest(self):
+        """When pad is in multiple zones, the finest resolution is returned."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(resolution=0.17)
+        zone1 = FineZone(ref="U1", x_min=5.0, y_min=5.0, x_max=15.0, y_max=15.0, resolution=0.05)
+        zone2 = FineZone(ref="U2", x_min=8.0, y_min=8.0, x_max=18.0, y_max=18.0, resolution=0.025)
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone1, zone2])
+
+        # Pad at (10, 10) is inside both zones
+        pad = make_pad(x=10.0, y=10.0, net=1, ref="U1", pin="1")
+        assert subgrid._get_pad_fine_resolution(pad) == 0.025
+
+    def test_fine_zone_escape_produces_shorter_segments(self):
+        """Pads in a fine zone should get escape segments at least as short as coarse."""
+        from kicad_tools.router.io import FineZone
+
+        # Coarse grid at 0.17mm
+        grid, rules = make_grid_and_rules(
+            width=20.0, height=20.0, resolution=0.17,
+            trace_width=0.15, trace_clearance=0.1,
+        )
+
+        # Place a pad at an off-grid position (offset > resolution/4 = 0.0425mm)
+        pad_x, pad_y = 10.075, 10.075  # off-grid for 0.17mm
+        pad = make_pad(x=pad_x, y=pad_y, net=1, ref="U1", pin="1")
+        grid.add_pad(pad)
+
+        # Fine zone covering the pad area
+        zone = FineZone(
+            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            resolution=0.05,
+        )
+
+        # Route WITHOUT fine zone
+        subgrid_coarse = SubGridRouter(grid, rules)
+        analysis_coarse = subgrid_coarse.analyze_pads([pad])
+        result_coarse = subgrid_coarse.generate_escape_segments(analysis_coarse)
+
+        # Route WITH fine zone
+        subgrid_fine = SubGridRouter(grid, rules, fine_zones=[zone])
+        analysis_fine = subgrid_fine.analyze_pads([pad])
+        result_fine = subgrid_fine.generate_escape_segments(analysis_fine)
+
+        # Both should produce escape segments
+        assert result_coarse.success_count >= 1, "Coarse escape should succeed"
+        assert result_fine.success_count >= 1, "Fine-zone escape should succeed"
+
+        # Fine-zone escape segment should be no longer than coarse
+        # (fine grid candidates are closer to the pad)
+        coarse_seg = result_coarse.escapes[0].segment
+        fine_seg = result_fine.escapes[0].segment
+
+        coarse_len = math.sqrt(
+            (coarse_seg.x2 - coarse_seg.x1) ** 2 + (coarse_seg.y2 - coarse_seg.y1) ** 2
+        )
+        fine_len = math.sqrt(
+            (fine_seg.x2 - fine_seg.x1) ** 2 + (fine_seg.y2 - fine_seg.y1) ** 2
+        )
+
+        assert fine_len <= coarse_len + 0.001, (
+            f"Fine escape segment ({fine_len:.4f}mm) should be no longer than "
+            f"coarse ({coarse_len:.4f}mm)"
+        )
+
+    def test_fine_zone_escape_grid_point_is_coarse(self):
+        """Escape grid_point must be a valid coarse grid cell."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(
+            width=20.0, height=20.0, resolution=0.17,
+            trace_width=0.15, trace_clearance=0.1,
+        )
+
+        pad = make_pad(x=10.075, y=10.075, net=1, ref="U1", pin="1")
+        grid.add_pad(pad)
+
+        zone = FineZone(
+            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            resolution=0.05,
+        )
+
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+        analysis = subgrid.analyze_pads([pad])
+        result = subgrid.generate_escape_segments(analysis)
+
+        assert result.success_count >= 1
+        escape = result.escapes[0]
+        gx, gy = escape.grid_point
+
+        # The grid point must be within the coarse grid bounds
+        assert 0 <= gx < grid.cols, f"gx={gx} out of bounds (cols={grid.cols})"
+        assert 0 <= gy < grid.rows, f"gy={gy} out of bounds (rows={grid.rows})"
+
+    def test_pads_outside_fine_zone_use_coarse_grid(self):
+        """Pads outside any fine zone should produce identical results."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(
+            width=20.0, height=20.0, resolution=0.17,
+            trace_width=0.15, trace_clearance=0.1,
+        )
+
+        # Pad well outside the fine zone (offset > resolution/4 = 0.0425mm)
+        pad = make_pad(x=2.075, y=2.075, net=1, ref="R1", pin="1")
+        grid.add_pad(pad)
+
+        zone = FineZone(
+            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            resolution=0.05,
+        )
+
+        subgrid_no_zone = SubGridRouter(grid, rules)
+        subgrid_with_zone = SubGridRouter(grid, rules, fine_zones=[zone])
+
+        analysis_no = subgrid_no_zone.analyze_pads([pad])
+        analysis_with = subgrid_with_zone.analyze_pads([pad])
+
+        result_no = subgrid_no_zone.generate_escape_segments(analysis_no)
+        result_with = subgrid_with_zone.generate_escape_segments(analysis_with)
+
+        # Both should have same escape grid point (pad is outside zone)
+        if result_no.success_count > 0 and result_with.success_count > 0:
+            assert result_no.escapes[0].grid_point == result_with.escapes[0].grid_point
+
+    def test_generate_fine_grid_candidates_count(self):
+        """Fine-grid candidate generation should produce candidates on fine grid."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(
+            width=20.0, height=20.0, resolution=0.17,
+            trace_width=0.15, trace_clearance=0.1,
+        )
+
+        pad = make_pad(x=10.075, y=10.075, net=1, ref="U1", pin="1")
+        grid.add_pad(pad)
+
+        zone = FineZone(
+            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            resolution=0.05,
+        )
+
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+        analysis = subgrid.analyze_pads([pad])
+        assert analysis.has_off_grid_pads
+
+        # Generate fine candidates directly
+        sgp = analysis.off_grid_pads[0]
+        candidates = subgrid._generate_fine_grid_candidates(sgp, 0.05)
+
+        # Should have candidates -- fine grid 0.05mm with 0.3mm search radius
+        # gives radius of 6, so (2*6+1)^2 = 169 candidate points
+        # minus any that are out of bounds or inaccessible
+        assert len(candidates) > 0, "Fine-grid should produce candidates"
+
+    def test_fine_zone_escape_clearance_valid(self):
+        """Escape segments produced with fine zones must pass clearance validation."""
+        from kicad_tools.router.io import FineZone
+
+        grid, rules = make_grid_and_rules(
+            width=20.0, height=20.0, resolution=0.17,
+            trace_width=0.15, trace_clearance=0.1,
+        )
+
+        # Place two pads from the same component at fine pitch (0.65mm)
+        pad1 = make_pad(x=10.075, y=10.0, net=1, ref="U1", pin="1")
+        pad2 = make_pad(x=10.075, y=10.65, net=2, ref="U1", pin="2")
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        zone = FineZone(
+            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=12.0,
+            resolution=0.05,
+        )
+
+        subgrid = SubGridRouter(grid, rules, fine_zones=[zone])
+        result = subgrid.route_with_subgrid([pad1, pad2])
+
+        # All generated escapes should pass clearance
+        component_pitches = grid.compute_component_pitches()
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+                component_pitches=component_pitches,
+            )
+            assert is_valid, (
+                f"Fine-zone escape for {escape.pad.ref}.{escape.pad.pin} "
+                f"violates clearance={clearance:.4f}mm at {violation_loc}"
+            )

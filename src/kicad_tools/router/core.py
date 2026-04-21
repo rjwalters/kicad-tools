@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
+    from .io import FineZone
     from .pathfinder import Router
 
 from kicad_tools.cli.progress import flush_print
@@ -355,6 +356,12 @@ class Autorouter:
         self._diffpair_router: DiffPairRouter | None = None
         self._escape_router: EscapeRouter | None = None
         self._subgrid_router: SubGridRouter | None = None
+
+        # Fine zones for multi-resolution escape routing (Issue #1828)
+        # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
+        # routing so the SubGridRouter uses fine grid resolution for pads
+        # within dense IC packages.
+        self.fine_zones: list[FineZone] = []
 
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
@@ -4237,9 +4244,18 @@ class Autorouter:
 
     @property
     def _subgrid(self) -> SubGridRouter:
-        """Lazy-initialize sub-grid router."""
+        """Lazy-initialize sub-grid router.
+
+        Passes any configured fine zones (Issue #1828) so that escape
+        routing uses fine-grid resolution for pads within dense IC packages
+        instead of the coarse global grid.
+        """
         if self._subgrid_router is None:
-            self._subgrid_router = SubGridRouter(self.grid, self.rules)
+            self._subgrid_router = SubGridRouter(
+                self.grid,
+                self.rules,
+                fine_zones=self.fine_zones if self.fine_zones else None,
+            )
         return self._subgrid_router
 
     def prepare_subgrid_escapes(self) -> SubGridResult:
