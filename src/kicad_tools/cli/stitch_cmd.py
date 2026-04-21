@@ -1126,6 +1126,396 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
         sexp.append(seg)
 
 
+@dataclass
+class ZonePolygon:
+    """A zone boundary polygon with its net and layer."""
+
+    net_name: str
+    layer: str
+    points: list[tuple[float, float]]
+
+
+def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
+    """Extract zone boundary polygons for a given net.
+
+    Parses the S-expression structure:
+        (zone ... (polygon (pts (xy X Y) (xy X Y) ...)))
+
+    Supports both KiCad 8 (net_name node) and KiCad 9 (name-only net node)
+    formats.
+
+    Args:
+        sexp: PCB S-expression
+        net_name: Net name to find zone polygons for
+
+    Returns:
+        List of ZonePolygon objects with boundary points
+    """
+    polygons = []
+    for child in sexp.iter_children():
+        if child.tag != "zone":
+            continue
+
+        # Get net name from zone (same dual-format logic as find_zones_for_net)
+        zone_net_name = None
+        net_name_node = child.find_child("net_name")
+        if net_name_node:
+            zone_net_name = net_name_node.get_string(0)
+        else:
+            # KiCad 9 name-only format: (net "GND") without separate net_name node
+            net_node = child.find_child("net")
+            if net_node and net_node.get_int(0) is None:
+                zone_net_name = net_node.get_string(0)
+
+        if zone_net_name != net_name:
+            continue
+
+        # Get layer
+        layer_node = child.find_child("layer")
+        if not layer_node:
+            continue
+        zone_layer = layer_node.get_string(0)
+        if not zone_layer:
+            continue
+
+        # Get polygon boundary
+        polygon_node = child.find_child("polygon")
+        if not polygon_node:
+            continue
+
+        pts_node = polygon_node.find_child("pts")
+        if not pts_node:
+            continue
+
+        points: list[tuple[float, float]] = []
+        for xy_node in pts_node.find_children("xy"):
+            x = xy_node.get_float(0) or 0.0
+            y = xy_node.get_float(1) or 0.0
+            points.append((x, y))
+
+        if len(points) >= 3:
+            polygons.append(
+                ZonePolygon(net_name=net_name, layer=zone_layer, points=points)
+            )
+
+    return polygons
+
+
+def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
+    """Test if a point is inside a polygon using ray casting.
+
+    Casts a ray from the point in the +X direction and counts the number
+    of polygon edge crossings. An odd count means inside.
+
+    Args:
+        x, y: Point to test
+        polygon: List of (x, y) vertices forming the polygon boundary
+
+    Returns:
+        True if the point is inside the polygon
+    """
+    n = len(polygon)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def generate_grid_positions(
+    polygon: list[tuple[float, float]],
+    spacing: float,
+    margin: float,
+) -> list[tuple[float, float]]:
+    """Generate grid positions inside a zone polygon.
+
+    1. Computes the axis-aligned bounding box of the polygon
+    2. Generates a regular grid at `spacing` mm intervals aligned to round coords
+    3. Filters: keeps only points inside the polygon with margin from edges
+
+    Args:
+        polygon: List of (x, y) vertices
+        spacing: Grid spacing in mm
+        margin: Inset from polygon edges (via_size/2 + clearance)
+
+    Returns:
+        List of (x, y) grid positions inside the polygon
+    """
+    if not polygon or spacing <= 0:
+        return []
+
+    # Compute bounding box
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    # Align grid to round coordinates
+    # E.g., if min_x=10.7 and spacing=3.0, start at 12.0
+    import math as _math
+
+    start_x = _math.ceil(min_x / spacing) * spacing
+    start_y = _math.ceil(min_y / spacing) * spacing
+
+    positions = []
+    gx = start_x
+    while gx <= max_x:
+        gy = start_y
+        while gy <= max_y:
+            if point_in_polygon(gx, gy, polygon):
+                # Check margin from all polygon edges
+                if _point_has_edge_margin(gx, gy, polygon, margin):
+                    positions.append((gx, gy))
+            gy += spacing
+        gx += spacing
+
+    return positions
+
+
+def _point_has_edge_margin(
+    x: float, y: float, polygon: list[tuple[float, float]], margin: float
+) -> bool:
+    """Check if a point has at least `margin` distance from all polygon edges.
+
+    Args:
+        x, y: Point to check
+        polygon: Polygon vertices
+        margin: Required minimum distance from edges
+
+    Returns:
+        True if the point is at least `margin` from all edges
+    """
+    n = len(polygon)
+    for i in range(n):
+        j = (i + 1) % n
+        dist = point_to_segment_distance(
+            x, y, polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1]
+        )
+        if dist < margin:
+            return False
+    return True
+
+
+def check_via_clearance(
+    x: float,
+    y: float,
+    via_size: float,
+    clearance: float,
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+    other_net_pads: list[tuple[float, float, float, int]],
+    same_net_vias: list[tuple[float, float]],
+) -> bool:
+    """Check if a via at (x, y) passes all clearance checks.
+
+    Args:
+        x, y: Proposed via position
+        via_size: Via pad diameter in mm
+        clearance: Minimum clearance from existing copper in mm
+        other_net_tracks: Track segments on other nets
+        other_net_vias: Vias on other nets as (x, y, size, net_num)
+        other_net_pads: Pads on other nets as (x, y, radius, net_num)
+        same_net_vias: Existing same-net vias as (x, y) for stacking prevention
+
+    Returns:
+        True if the position is clear for via placement
+    """
+    via_radius = via_size / 2
+
+    # Check against same-net vias (prevent stacking)
+    for vx, vy in same_net_vias:
+        dist = math.sqrt((vx - x) ** 2 + (vy - y) ** 2)
+        if dist < via_size + clearance:
+            return False
+
+    # Check against other-net track segments
+    for seg in other_net_tracks:
+        dist = point_to_segment_distance(
+            x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
+        )
+        min_dist = via_radius + seg.width / 2 + clearance
+        if dist < min_dist:
+            return False
+
+    # Check against other-net vias
+    for ovx, ovy, ov_size, _onet in other_net_vias:
+        dist = math.sqrt((ovx - x) ** 2 + (ovy - y) ** 2)
+        min_dist = via_radius + ov_size / 2 + clearance
+        if dist < min_dist:
+            return False
+
+    # Check against other-net pads
+    for px, py, p_radius, _pnet in other_net_pads:
+        dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+        min_dist = via_radius + p_radius + clearance
+        if dist < min_dist:
+            return False
+
+    return True
+
+
+def run_blanket_stitch(
+    pcb_path: Path,
+    net_names: list[str],
+    via_size: float = 0.45,
+    drill: float = 0.2,
+    clearance: float = 0.2,
+    spacing: float = 3.0,
+    target_layer: str | None = None,
+    dry_run: bool = False,
+) -> StitchResult:
+    """Run blanket (grid-based) stitching on a PCB.
+
+    Places vias on a regular grid pattern within zone polygons.
+    Unlike pad-based stitching, blanket vias connect through the zone
+    fill itself and do not need pad-to-via trace segments.
+
+    Args:
+        pcb_path: Path to the PCB file
+        net_names: List of net names to stitch
+        via_size: Via pad diameter in mm
+        drill: Via drill size in mm
+        clearance: Minimum clearance from existing copper in mm
+        spacing: Grid spacing in mm
+        target_layer: Target plane layer (auto-detect from zones if None)
+        dry_run: If True, don't modify the file
+
+    Returns:
+        StitchResult with details of what was done
+    """
+    sexp = load_pcb(pcb_path)
+
+    result = StitchResult(
+        pcb_name=pcb_path.name,
+        target_nets=net_names,
+    )
+
+    # Margin from polygon edges: via must be fully inside zone
+    margin = via_size / 2 + clearance
+
+    # Get net numbers for the target nets
+    net_map = get_net_map(sexp)
+    target_net_nums = {num for num, name in net_map.items() if name in set(net_names)}
+
+    # Collect other-net copper for clearance checking
+    other_net_tracks = find_all_track_segments(sexp, exclude_nets=target_net_nums)
+    other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
+    other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
+
+    # Collect all existing same-net vias (to prevent stacking)
+    all_same_net_vias = find_existing_vias(sexp, target_net_nums)
+    same_net_via_positions: list[tuple[float, float]] = [
+        (vx, vy) for vx, vy, _vn in all_same_net_vias
+    ]
+
+    # Also collect same-net pads to avoid placing vias on top of pads
+    same_net_pads = find_all_pads(sexp, exclude_nets=set())
+    same_net_pad_positions: list[tuple[float, float, float]] = [
+        (px, py, pr) for px, py, pr, pnet in same_net_pads if pnet in target_net_nums
+    ]
+
+    for net_name in net_names:
+        # Extract zone polygons for this net
+        zone_polygons = extract_zone_polygons(sexp, net_name)
+
+        if not zone_polygons:
+            print(
+                f"Warning: No zone polygon found for net '{net_name}', skipping blanket stitch",
+                file=sys.stderr,
+            )
+            continue
+
+        # Get net number
+        net_number = get_net_number(sexp, net_name)
+        if net_number is None:
+            continue
+
+        # Determine target layer
+        if target_layer:
+            net_target_layer = target_layer
+        else:
+            zone_layers = find_zones_for_net(sexp, net_name)
+            if zone_layers:
+                net_target_layer = zone_layers[0]
+                result.detected_layers[net_name] = zone_layers[0]
+            else:
+                net_target_layer = None
+                result.fallback_nets.append(net_name)
+
+        for zone_poly in zone_polygons:
+            # Generate grid positions inside this zone polygon
+            grid_positions = generate_grid_positions(zone_poly.points, spacing, margin)
+
+            for gx, gy in grid_positions:
+                # Check clearance against all existing copper
+                if not check_via_clearance(
+                    gx,
+                    gy,
+                    via_size,
+                    clearance,
+                    other_net_tracks,
+                    other_net_vias,
+                    other_net_pads,
+                    same_net_via_positions,
+                ):
+                    continue
+
+                # Check against same-net pads (avoid placing via on a pad)
+                pad_conflict = False
+                for px, py, pr in same_net_pad_positions:
+                    dist = math.sqrt((px - gx) ** 2 + (py - gy) ** 2)
+                    if dist < via_size / 2 + pr + clearance:
+                        pad_conflict = True
+                        break
+                if pad_conflict:
+                    continue
+
+                # Determine via layers
+                # For blanket vias, use F.Cu -> target or F.Cu -> B.Cu
+                surface_layer = "F.Cu"
+                if zone_poly.layer.startswith("B."):
+                    surface_layer = "B.Cu"
+                layers = get_via_layers(surface_layer, net_target_layer)
+
+                # Create a dummy PadInfo for ViaPlacement compatibility
+                dummy_pad = PadInfo(
+                    reference="blanket",
+                    pad_number="0",
+                    net_number=net_number,
+                    net_name=net_name,
+                    x=gx,
+                    y=gy,
+                    layer=surface_layer,
+                    width=via_size,
+                    height=via_size,
+                )
+
+                placement = ViaPlacement(
+                    pad=dummy_pad,
+                    via_x=gx,
+                    via_y=gy,
+                    size=via_size,
+                    drill=drill,
+                    layers=layers,
+                )
+                result.vias_added.append(placement)
+
+                # Track newly placed vias to prevent stacking
+                same_net_via_positions.append((gx, gy))
+
+    # Apply changes if not dry run
+    if not dry_run and result.vias_added:
+        for placement in result.vias_added:
+            add_via_to_pcb(sexp, placement)
+        save_pcb(sexp, pcb_path)
+
+    return result
+
+
 def run_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -1544,6 +1934,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Width of pad-to-via trace segments in mm (default: 0.2)",
     )
     parser.add_argument(
+        "--blanket",
+        "-b",
+        action="store_true",
+        help="Place vias on a grid pattern across zone polygons (blanket stitching)",
+    )
+    parser.add_argument(
+        "--spacing",
+        type=float,
+        default=3.0,
+        help="Grid spacing for blanket stitching in mm (default: 3.0)",
+    )
+    parser.add_argument(
         "--dry-run",
         "-d",
         action="store_true",
@@ -1601,17 +2003,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Auto-detected {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
     try:
-        result = run_stitch(
-            pcb_path=pcb_path,
-            net_names=net_names,
-            via_size=args.via_size,
-            drill=args.drill,
-            clearance=args.clearance,
-            offset=args.offset,
-            target_layer=args.target_layer,
-            trace_width=args.trace_width,
-            dry_run=args.dry_run,
-        )
+        if args.blanket:
+            result = run_blanket_stitch(
+                pcb_path=pcb_path,
+                net_names=net_names,
+                via_size=args.via_size,
+                drill=args.drill,
+                clearance=args.clearance,
+                spacing=args.spacing,
+                target_layer=args.target_layer,
+                dry_run=args.dry_run,
+            )
+        else:
+            result = run_stitch(
+                pcb_path=pcb_path,
+                net_names=net_names,
+                via_size=args.via_size,
+                drill=args.drill,
+                clearance=args.clearance,
+                offset=args.offset,
+                target_layer=args.target_layer,
+                trace_width=args.trace_width,
+                dry_run=args.dry_run,
+            )
 
         output_result(result, dry_run=args.dry_run, run_drc=args.drc)
 

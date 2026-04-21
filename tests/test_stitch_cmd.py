@@ -11,6 +11,8 @@ from kicad_tools.cli.stitch_cmd import (
     TrackSegment,
     calculate_dogleg_via_position,
     calculate_via_position,
+    check_via_clearance,
+    extract_zone_polygons,
     find_all_board_vias,
     find_all_pads,
     find_all_plane_nets,
@@ -18,12 +20,15 @@ from kicad_tools.cli.stitch_cmd import (
     find_existing_tracks,
     find_existing_vias,
     find_pads_on_nets,
+    generate_grid_positions,
     get_net_map,
     get_net_number,
     get_via_layers,
     is_pad_connected,
     main,
+    point_in_polygon,
     point_to_segment_distance,
+    run_blanket_stitch,
     run_post_stitch_drc,
     run_stitch,
     segment_to_segment_distance,
@@ -2765,3 +2770,490 @@ class TestPostStitchDRC:
         assert result == 1
         captured = capsys.readouterr()
         assert "DRC failed to run" in captured.err
+
+
+# ============================================================================
+# Blanket Stitching Tests
+# ============================================================================
+
+
+# PCB with a GND zone polygon for blanket stitching tests
+BLANKET_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-blanket-uuid")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+  )
+)
+"""
+
+
+# PCB with zone but also a track across it for clearance testing
+BLANKET_CLEARANCE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-clr-uuid")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 115 100) (xy 115 115) (xy 100 115)))
+  )
+  (segment (start 105 105) (end 110 105) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+
+class TestPointInPolygon:
+    """Tests for the point_in_polygon ray-casting function."""
+
+    def test_point_inside_rectangle(self):
+        """Point inside a simple rectangle should return True."""
+        rect = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        assert point_in_polygon(5, 5, rect) is True
+
+    def test_point_outside_rectangle(self):
+        """Point outside a rectangle should return False."""
+        rect = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        assert point_in_polygon(15, 5, rect) is False
+
+    def test_point_above_rectangle(self):
+        """Point above a rectangle should return False."""
+        rect = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        assert point_in_polygon(5, 15, rect) is False
+
+    def test_point_inside_triangle(self):
+        """Point inside a triangle should return True."""
+        tri = [(0, 0), (10, 0), (5, 10)]
+        assert point_in_polygon(5, 3, tri) is True
+
+    def test_point_outside_triangle(self):
+        """Point outside a triangle should return False."""
+        tri = [(0, 0), (10, 0), (5, 10)]
+        assert point_in_polygon(0, 10, tri) is False
+
+    def test_point_at_negative_coords(self):
+        """Point testing with negative coordinates."""
+        rect = [(-10, -10), (10, -10), (10, 10), (-10, 10)]
+        assert point_in_polygon(0, 0, rect) is True
+        assert point_in_polygon(-15, 0, rect) is False
+
+
+class TestGenerateGridPositions:
+    """Tests for the grid position generation function."""
+
+    def test_basic_grid_in_rectangle(self):
+        """Should generate grid positions inside a rectangular polygon."""
+        # 30x30 rectangle from (100,100) to (130,130)
+        rect = [(100, 100), (130, 100), (130, 130), (100, 130)]
+        positions = generate_grid_positions(rect, spacing=5.0, margin=1.0)
+        assert len(positions) > 0
+
+        # All positions should be inside the polygon
+        for x, y in positions:
+            assert point_in_polygon(x, y, rect), f"({x}, {y}) not inside polygon"
+
+    def test_grid_spacing_respected(self):
+        """Grid positions should be spaced at the given interval."""
+        rect = [(0, 0), (30, 0), (30, 30), (0, 30)]
+        positions = generate_grid_positions(rect, spacing=5.0, margin=0.5)
+
+        # All x and y coordinates should be multiples of 5.0
+        for x, y in positions:
+            assert x % 5.0 == pytest.approx(0, abs=1e-9), f"x={x} not on grid"
+            assert y % 5.0 == pytest.approx(0, abs=1e-9), f"y={y} not on grid"
+
+    def test_margin_respected(self):
+        """Grid positions should be at least `margin` from polygon edges."""
+        rect = [(100, 100), (130, 100), (130, 130), (100, 130)]
+        margin = 2.0
+        positions = generate_grid_positions(rect, spacing=3.0, margin=margin)
+
+        for x, y in positions:
+            # Check distance from each edge
+            assert x >= 100 + margin - 0.01, f"x={x} too close to left edge"
+            assert x <= 130 - margin + 0.01, f"x={x} too close to right edge"
+            assert y >= 100 + margin - 0.01, f"y={y} too close to top edge"
+            assert y <= 130 - margin + 0.01, f"y={y} too close to bottom edge"
+
+    def test_empty_polygon(self):
+        """Empty polygon should return no positions."""
+        positions = generate_grid_positions([], spacing=5.0, margin=1.0)
+        assert positions == []
+
+    def test_zero_spacing(self):
+        """Zero spacing should return no positions."""
+        rect = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        positions = generate_grid_positions(rect, spacing=0, margin=0.5)
+        assert positions == []
+
+    def test_large_spacing_small_polygon(self):
+        """Large spacing relative to polygon may yield few or zero positions."""
+        small_rect = [(0, 0), (2, 0), (2, 2), (0, 2)]
+        positions = generate_grid_positions(small_rect, spacing=5.0, margin=0.5)
+        # The polygon is only 2x2, spacing 5.0 -- no grid point can fit
+        assert len(positions) == 0
+
+
+class TestCheckViaClearance:
+    """Tests for the check_via_clearance function."""
+
+    def test_clear_position(self):
+        """A position with no nearby copper should pass clearance."""
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+        )
+        assert result is True
+
+    def test_conflict_with_track(self):
+        """A via near an other-net track should fail clearance."""
+        track = TrackSegment(
+            start_x=49.5, start_y=50.0,
+            end_x=50.5, end_y=50.0,
+            width=0.25, layer="F.Cu", net_number=2,
+        )
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[track],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+        )
+        assert result is False
+
+    def test_conflict_with_same_net_via(self):
+        """A via stacked on an existing same-net via should fail."""
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[(50.0, 50.0)],
+        )
+        assert result is False
+
+    def test_conflict_with_other_net_via(self):
+        """A via near an other-net via should fail clearance."""
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[(50.2, 50.0, 0.45, 2)],
+            other_net_pads=[],
+            same_net_vias=[],
+        )
+        assert result is False
+
+    def test_conflict_with_other_net_pad(self):
+        """A via near an other-net pad should fail clearance."""
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[(50.0, 50.3, 0.3, 2)],
+            same_net_vias=[],
+        )
+        assert result is False
+
+    def test_far_away_copper_passes(self):
+        """Copper far from the via position should not cause a conflict."""
+        track = TrackSegment(
+            start_x=100.0, start_y=100.0,
+            end_x=110.0, end_y=100.0,
+            width=0.25, layer="F.Cu", net_number=2,
+        )
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[track],
+            other_net_vias=[(100.0, 100.0, 0.45, 2)],
+            other_net_pads=[(100.0, 100.0, 0.3, 2)],
+            same_net_vias=[(100.0, 100.0)],
+        )
+        assert result is True
+
+
+class TestExtractZonePolygons:
+    """Tests for extracting zone boundary polygons from PCB S-expressions."""
+
+    def test_extract_gnd_zone(self):
+        """Should extract zone polygon for GND net."""
+        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
+        from io import StringIO
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
+            f.write(BLANKET_TEST_PCB)
+            f.flush()
+            sexp = _load_pcb(Path(f.name))
+
+        polygons = extract_zone_polygons(sexp, "GND")
+        assert len(polygons) == 1
+        assert polygons[0].net_name == "GND"
+        assert polygons[0].layer == "In1.Cu"
+        assert len(polygons[0].points) == 4
+
+    def test_extract_nonexistent_net(self):
+        """Should return empty list for net with no zones."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
+            f.write(BLANKET_TEST_PCB)
+            f.flush()
+            sexp = load_pcb(Path(f.name))
+
+        polygons = extract_zone_polygons(sexp, "NONEXISTENT")
+        assert len(polygons) == 0
+
+    def test_extract_from_stitch_zone_pcb(self, stitch_zone_pcb: Path):
+        """Should extract zone polygons from the fixture PCB."""
+        sexp = load_pcb(stitch_zone_pcb)
+
+        gnd_polys = extract_zone_polygons(sexp, "GND")
+        assert len(gnd_polys) == 1
+        assert gnd_polys[0].layer == "In1.Cu"
+
+        v3_polys = extract_zone_polygons(sexp, "+3.3V")
+        assert len(v3_polys) == 1
+        assert v3_polys[0].layer == "In2.Cu"
+
+
+class TestRunBlanketStitch:
+    """Integration tests for the blanket stitching operation."""
+
+    def test_blanket_places_vias_in_zone(self, tmp_path: Path):
+        """Blanket stitch should place vias on a grid inside the zone."""
+        pcb_file = tmp_path / "blanket.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=5.0,
+            dry_run=False,
+        )
+
+        # Should have placed some vias
+        assert len(result.vias_added) > 0
+
+        # All vias should be inside the zone polygon (100,100)-(130,130)
+        zone_poly = [(100, 100), (130, 100), (130, 130), (100, 130)]
+        for via in result.vias_added:
+            assert point_in_polygon(via.via_x, via.via_y, zone_poly), (
+                f"Via at ({via.via_x}, {via.via_y}) outside zone"
+            )
+
+        # All vias should be on the GND net
+        for via in result.vias_added:
+            assert via.pad.net_name == "GND"
+
+        # Should detect In1.Cu as target layer
+        assert "GND" in result.detected_layers
+        assert result.detected_layers["GND"] == "In1.Cu"
+
+    def test_blanket_dry_run(self, tmp_path: Path):
+        """Dry run should not modify the PCB file."""
+        pcb_file = tmp_path / "blanket_dry.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+        original_content = pcb_file.read_text()
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=5.0,
+            dry_run=True,
+        )
+
+        assert len(result.vias_added) > 0
+        assert pcb_file.read_text() == original_content
+
+    def test_blanket_no_traces_added(self, tmp_path: Path):
+        """Blanket vias should not add any trace segments."""
+        pcb_file = tmp_path / "blanket_no_traces.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=5.0,
+        )
+
+        # Blanket mode should not add traces
+        assert len(result.traces_added) == 0
+
+    def test_blanket_respects_clearance(self, tmp_path: Path):
+        """Blanket vias should not be placed near other-net copper."""
+        pcb_file = tmp_path / "blanket_clr.kicad_pcb"
+        pcb_file.write_text(BLANKET_CLEARANCE_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+        )
+
+        # The track runs from (105,105) to (110,105) on net 2
+        # Vias should not be placed within clearance distance of this track
+        for via in result.vias_added:
+            dist = point_to_segment_distance(
+                via.via_x, via.via_y, 105.0, 105.0, 110.0, 105.0
+            )
+            min_required = 0.45 / 2 + 0.25 / 2 + 0.2  # via_r + track_w/2 + clearance
+            assert dist >= min_required - 0.01, (
+                f"Via at ({via.via_x}, {via.via_y}) too close to track: {dist:.3f} < {min_required:.3f}"
+            )
+
+    def test_blanket_no_zone_warns(self, tmp_path: Path, capsys):
+        """Blanket stitch with no zone polygon should warn and place no vias."""
+        no_zone_pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+)
+"""
+        pcb_file = tmp_path / "no_zone.kicad_pcb"
+        pcb_file.write_text(no_zone_pcb)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+        )
+
+        assert len(result.vias_added) == 0
+        captured = capsys.readouterr()
+        assert "No zone polygon found" in captured.err
+
+    def test_blanket_spacing_affects_count(self, tmp_path: Path):
+        """Smaller spacing should produce more vias."""
+        pcb_file_sparse = tmp_path / "sparse.kicad_pcb"
+        pcb_file_sparse.write_text(BLANKET_TEST_PCB)
+
+        pcb_file_dense = tmp_path / "dense.kicad_pcb"
+        pcb_file_dense.write_text(BLANKET_TEST_PCB)
+
+        sparse = run_blanket_stitch(
+            pcb_path=pcb_file_sparse,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=10.0,
+            dry_run=True,
+        )
+
+        dense = run_blanket_stitch(
+            pcb_path=pcb_file_dense,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+
+        assert len(dense.vias_added) > len(sparse.vias_added)
+
+    def test_blanket_with_drc_flag(self, tmp_path: Path, capsys):
+        """Blanket mode with --drc should call DRC after stitching."""
+        pcb_file = tmp_path / "blanket_drc.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        # Run with --blanket and --drc flags via main()
+        exit_code = main([
+            str(pcb_file),
+            "--net", "GND",
+            "--blanket",
+            "--spacing", "5.0",
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        # Dry run output should show vias
+        assert "Added" in captured.out or "via" in captured.out.lower()
+
+    def test_blanket_cli_main(self, tmp_path: Path, capsys):
+        """Test blanket mode via the main() CLI entry point."""
+        pcb_file = tmp_path / "blanket_cli.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        exit_code = main([
+            str(pcb_file),
+            "--net", "GND",
+            "--blanket",
+            "--spacing", "5.0",
+        ])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "stitching vias" in captured.out.lower() or "Added" in captured.out
