@@ -571,8 +571,13 @@ def _canonicalize_net_node(
 
     if net_node is None:
         return net_node
-    # Already has a numeric first value — nothing to fix
+    # Already has a numeric first value
     if net_node.get_int(0) is not None:
+        # When numeric_only is requested, strip any trailing name string.
+        # kicad-cli DRC may rewrite (net N) → (net N "name") on segments;
+        # KiCad 9 rejects the dual-atom format on segments/vias.
+        if numeric_only and len(net_node.children) > 1:
+            return SExp.list("net", net_node.get_int(0))
         return net_node
     # Name-only format: (net "name")
     net_name = net_node.get_string(0) or ""
@@ -906,6 +911,79 @@ def _assign_empty_nets_to_zero(output_sexp) -> bool:
     return changed
 
 
+def _strip_dual_atom_nets(output_sexp) -> bool:
+    """Strip trailing name from ``(net N "name")`` on segments and vias.
+
+    KiCad 9 rejects dual-atom ``(net N "name")`` format on segments and
+    vias — it expects ``(net N)`` only.  kicad-cli DRC may rewrite nets
+    into dual-atom format.  This final pass ensures all segments/vias
+    have numeric-only net nodes.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        net_num = net_node.get_int(0)
+        if net_num is not None and len(net_node.children) > 1:
+            child.remove(net_node)
+            child.append(SExp.list("net", net_num))
+            changed = True
+    return changed
+
+
+def _resolve_name_only_nets(output_sexp) -> bool:
+    """Resolve name-only ``(net "NAME")`` on segments/vias to ``(net N)``.
+
+    kicad-cli zone fill may create new segments or vias with name-only
+    net references like ``(net "GND")`` instead of ``(net 2)``.  These
+    won't match any snapshot entry, so the key-based and proximity
+    restore passes leave them untouched.
+
+    This pass builds a name→number lookup from the PCB's net declarations
+    and resolves any remaining name-only references.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    # Build name → number mapping from header net declarations.
+    name_to_number: dict[str, int] = {}
+    for child in output_sexp.children:
+        if child.name == "net":
+            net_num = child.get_int(0)
+            net_name = child.get_string(1) or ""
+            if net_num is not None and net_num != 0 and net_name:
+                name_to_number[net_name] = net_num
+
+    if not name_to_number:
+        return False
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        # Skip if already has a numeric ID
+        if net_node.get_int(0) is not None:
+            continue
+        # Name-only format: (net "GND")
+        net_name = net_node.get_string(0)
+        if net_name and net_name in name_to_number:
+            child.remove(net_node)
+            child.append(SExp.list("net", name_to_number[net_name]))
+            changed = True
+    return changed
+
+
 def _restore_net_declarations(
     target_pcb: Path,
     net_nodes: list,
@@ -1011,6 +1089,21 @@ def _restore_net_declarations(
         # prevent DRC errors from empty-string net corruption.
         if _assign_empty_nets_to_zero(output_sexp):
             modified = True
+
+    # --- Resolve name-only (net "NAME") on segments/vias ---
+    # kicad-cli zone fill may create new segments/vias with name-only net
+    # references that have no snapshot entry.  Resolve them using the
+    # PCB's net declarations.
+    if _resolve_name_only_nets(output_sexp):
+        modified = True
+
+    # --- Strip dual-atom (net N "name") from segments/vias ---
+    # KiCad 9 rejects dual-atom format on segments/vias.  kicad-cli DRC
+    # may rewrite (net N) → (net N "name"); this pass ensures only (net N).
+    # Runs unconditionally (not just when element_nets is populated) since
+    # the corruption can also come from the router output or other tools.
+    if _strip_dual_atom_nets(output_sexp):
+        modified = True
 
     if modified:
         save_pcb(output_sexp, target_pcb)
