@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
-from .layers import Layer
+from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
 
 logger = logging.getLogger(__name__)
@@ -1125,16 +1125,21 @@ class EscapeRouter:
                 # neighbour is closer, biasing away from the lower-indexed
                 # (even) neighbour.
                 sign = 1 if (i // 2) % 2 == 0 else -1
-                via_x = pad.x + dx * via_offset + row_dx * lateral_offset * sign
-                via_y = pad.y + dy * via_offset + row_dy * lateral_offset * sign
+                # Issue #1840: Place via INWARD (toward IC body center)
+                # instead of outward. The inward direction has more
+                # available space under the IC body for via placement.
+                via_x = pad.x - dx * via_offset + row_dx * lateral_offset * sign
+                via_y = pad.y - dy * via_offset + row_dy * lateral_offset * sign
 
-                # Try to use In1.Cu if available (4-layer board), else B.Cu
-                # For now, use B.Cu for simplicity
-                escape_layer = Layer.B_CU
+                # Issue #1840: Select inner signal layer from LayerStack
+                # when available (e.g. In1.Cu on 4-layer boards), falling
+                # back to B.Cu when no inner signal layers exist.
+                escape_layer = self._select_inner_escape_layer(pad.layer)
 
-                # Escape point is beyond the via on the escape layer
-                escape_x = via_x + dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
-                escape_y = via_y + dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                # Escape point is beyond the via on the escape layer,
+                # continuing inward (same direction as via placement).
+                escape_x = via_x - dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                escape_y = via_y - dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
 
                 # Create segments
                 segments: list[Segment] = []
@@ -1642,6 +1647,33 @@ class EscapeRouter:
                 return EscapeDirection.NORTH
             else:
                 return EscapeDirection.SOUTH
+
+    def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
+        """Select the best inner layer for via escape routing.
+
+        Queries the grid's LayerStack for available inner signal layers.
+        Prefers the first inner signal layer (typically In1.Cu on 4-layer
+        boards) over B.Cu, since inner layers provide shorter via stubs
+        and better signal integrity.
+
+        Falls back to B.Cu when no inner signal layers are available
+        (e.g., on 2-layer boards or when all inner layers are planes).
+
+        Args:
+            surface_layer: The surface layer the pad is on (used as fallback
+                reference -- the via must transition away from this layer).
+
+        Returns:
+            The selected escape layer (inner signal layer or B.Cu fallback).
+        """
+        if self.grid.layer_stack is not None:
+            inner_indices = self.grid.layer_stack.get_inner_layer_indices()
+            for idx in inner_indices:
+                layer_def = self.grid.layer_stack.get_layer(idx)
+                if layer_def is not None and layer_def.layer_type == LayerType.SIGNAL:
+                    return layer_def.layer_enum
+        # Fallback: use B.Cu (opposite outer layer)
+        return Layer.B_CU
 
     def _direction_to_vector(self, direction: EscapeDirection) -> tuple[float, float]:
         """Convert escape direction to unit vector."""

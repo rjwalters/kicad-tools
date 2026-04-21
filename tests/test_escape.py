@@ -812,13 +812,35 @@ class TestSOPStaggeredEscape:
                 EscapeDirection.WEST,
             )
 
-        # Check that escapes are going outward from the package
-        # (escape point should be further from center than the pad)
+        # Check escape direction along the escape axis:
+        # - Even pads (no via): escape outward along direction vector
+        # - Odd pads (with via): via placed inward (opposite to escape direction)
+        #   (Issue #1840: odd-pad vias route inward toward IC body center)
         for escape in escapes:
-            pad_dist = math.sqrt(escape.pad.x**2 + escape.pad.y**2)
             escape_x, escape_y = escape.escape_point
-            escape_dist = math.sqrt(escape_x**2 + escape_y**2)
-            assert escape_dist >= pad_dist
+            # Get the escape direction unit vector
+            dx, dy = router._direction_to_vector(escape.direction)
+            if escape.via is None:
+                # Even pad: escape point moves outward along direction
+                # Project displacement onto direction vector
+                disp_along_dir = (
+                    (escape_x - escape.pad.x) * dx
+                    + (escape_y - escape.pad.y) * dy
+                )
+                assert disp_along_dir > 0, (
+                    f"Even pad escape should move outward: disp={disp_along_dir:.4f}"
+                )
+            else:
+                # Odd pad: via is placed inward (opposite to direction)
+                via_x, via_y = escape.via_pos
+                via_disp_along_dir = (
+                    (via_x - escape.pad.x) * dx
+                    + (via_y - escape.pad.y) * dy
+                )
+                assert via_disp_along_dir < 0, (
+                    f"Odd pad via should move inward (opposite to direction): "
+                    f"disp={via_disp_along_dir:.4f}"
+                )
 
 
 # ==============================================================================
@@ -1006,3 +1028,189 @@ class TestFinePitchEscapeClearance:
                 assert abs(e.via_pos[0] - e.pad.x) < 1e-6, (
                     f"Unexpected lateral offset for {e.pad.net_name}"
                 )
+
+
+# ==============================================================================
+# Inward-Via Strategy Tests (Issue #1840)
+# ==============================================================================
+
+
+class TestInwardViaStrategy:
+    """Tests for SSOP inward-via escape routing (Issue #1840).
+
+    Verifies that odd-indexed pads in fine-pitch dual-row packages place
+    vias INWARD (toward the IC body center) instead of outward, and that
+    the inner layer selection prefers signal layers over planes.
+    """
+
+    @pytest.fixture
+    def fine_pitch_rules(self):
+        return DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.05,
+            min_trace_width=0.1,
+        )
+
+    def test_odd_pad_vias_placed_inward(self, fine_pitch_rules):
+        """Odd-pad vias must be placed inward (toward IC body center).
+
+        For a vertical SSOP-20 with left column escaping WEST (dx=-1),
+        odd-pad vias should have x > pad.x (closer to center at x=0).
+        """
+        grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                dx, dy = router._direction_to_vector(escape.direction)
+                # Via displacement should be opposite to escape direction
+                via_x, via_y = escape.via_pos
+                via_disp = (via_x - escape.pad.x) * dx + (via_y - escape.pad.y) * dy
+                assert via_disp < 0, (
+                    f"Odd pad {escape.pad.net_name} via should be inward: "
+                    f"via_disp_along_direction={via_disp:.4f}"
+                )
+
+    def test_even_pad_escapes_stay_outward(self, fine_pitch_rules):
+        """Even-pad surface escapes must still route outward."""
+        grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is None:
+                dx, dy = router._direction_to_vector(escape.direction)
+                ex, ey = escape.escape_point
+                disp = (ex - escape.pad.x) * dx + (ey - escape.pad.y) * dy
+                assert disp > 0, (
+                    f"Even pad {escape.pad.net_name} escape should be outward: "
+                    f"disp={disp:.4f}"
+                )
+
+    def test_inner_layer_selection_signal(self, fine_pitch_rules):
+        """On 4-layer board with In1.Cu as signal, vias target In1.Cu."""
+        from kicad_tools.router.layers import LayerStack
+
+        layer_stack = LayerStack.four_layer_sig_sig_gnd_pwr()
+        grid = RoutingGrid(
+            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            layer_stack=layer_stack,
+        )
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                assert escape.escape_layer == Layer.IN1_CU, (
+                    f"Expected In1.Cu for signal layer, got {escape.escape_layer}"
+                )
+
+    def test_inner_layer_selection_plane_fallback(self, fine_pitch_rules):
+        """On 4-layer board with In1.Cu as plane (GND), vias fall back to B.Cu."""
+        from kicad_tools.router.layers import LayerStack
+
+        # sig_gnd_pwr_sig has In1.Cu=GND plane, In2.Cu=PWR plane
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        grid = RoutingGrid(
+            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            layer_stack=layer_stack,
+        )
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                assert escape.escape_layer == Layer.B_CU, (
+                    f"Expected B.Cu fallback when inner layers are planes, "
+                    f"got {escape.escape_layer}"
+                )
+
+    def test_two_layer_board_fallback(self, fine_pitch_rules):
+        """On 2-layer board, vias fall back to B.Cu."""
+        from kicad_tools.router.layers import LayerStack
+
+        layer_stack = LayerStack.two_layer()
+        grid = RoutingGrid(
+            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            layer_stack=layer_stack,
+        )
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                assert escape.escape_layer == Layer.B_CU, (
+                    f"Expected B.Cu on 2-layer board, got {escape.escape_layer}"
+                )
+
+    def test_ssop28_inward_vias(self, fine_pitch_rules):
+        """SSOP-28 at 0.65mm pitch also uses inward via strategy."""
+        grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(28, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        assert len(escapes) == 28
+
+        via_count = sum(1 for e in escapes if e.via is not None)
+        # Half of pads (odd-indexed) should have vias
+        assert via_count == 14
+
+        # All vias should be inward
+        for escape in escapes:
+            if escape.via is not None:
+                dx, dy = router._direction_to_vector(escape.direction)
+                via_x, via_y = escape.via_pos
+                via_disp = (via_x - escape.pad.x) * dx + (via_y - escape.pad.y) * dy
+                assert via_disp < 0
+
+    def test_clearance_validation_zero_warnings(self, fine_pitch_rules):
+        """Inward vias should produce zero clearance warnings on 0.65mm SSOP."""
+        import logging
+        import logging.handlers
+
+        grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, fine_pitch_rules)
+
+        pads = create_sop_pads(20, pitch=0.65)
+        info = router.analyze_package(pads)
+
+        handler = logging.handlers.MemoryHandler(capacity=1000)
+        escape_logger = logging.getLogger("kicad_tools.router.escape")
+        escape_logger.addHandler(handler)
+        try:
+            escapes = router.generate_escapes(info)
+            handler.flush()
+            warnings = [
+                r for r in handler.buffer
+                if r.levelno >= logging.WARNING
+                and "clearance violation" in r.getMessage().lower()
+            ]
+            assert len(warnings) == 0, (
+                f"Expected 0 clearance warnings, got {len(warnings)}: "
+                + "; ".join(r.getMessage() for r in warnings)
+            )
+        finally:
+            escape_logger.removeHandler(handler)
