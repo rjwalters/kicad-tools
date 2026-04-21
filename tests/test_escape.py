@@ -819,3 +819,190 @@ class TestSOPStaggeredEscape:
             escape_x, escape_y = escape.escape_point
             escape_dist = math.sqrt(escape_x**2 + escape_y**2)
             assert escape_dist >= pad_dist
+
+
+# ==============================================================================
+# Fine-Pitch Escape Clearance Tests (Issue #1784)
+# ==============================================================================
+
+
+def _min_segment_edge_gap(seg1, seg2) -> float:
+    """Compute minimum edge-to-edge gap between two segments on the same layer.
+
+    Uses a simple point-to-segment closest approach for all endpoint
+    combinations, then subtracts half-widths.
+    """
+
+    def _pt_seg_dist(px, py, ax, ay, bx, by):
+        abx, aby = bx - ax, by - ay
+        apx, apy = px - ax, py - ay
+        len_sq = abx * abx + aby * aby
+        if len_sq < 1e-12:
+            return math.sqrt(apx * apx + apy * apy)
+        t = max(0.0, min(1.0, (apx * abx + apy * aby) / len_sq))
+        cx, cy = ax + t * abx, ay + t * aby
+        dx, dy = px - cx, py - cy
+        return math.sqrt(dx * dx + dy * dy)
+
+    d1 = _pt_seg_dist(seg1.x1, seg1.y1, seg2.x1, seg2.y1, seg2.x2, seg2.y2)
+    d2 = _pt_seg_dist(seg1.x2, seg1.y2, seg2.x1, seg2.y1, seg2.x2, seg2.y2)
+    d3 = _pt_seg_dist(seg2.x1, seg2.y1, seg1.x1, seg1.y1, seg1.x2, seg1.y2)
+    d4 = _pt_seg_dist(seg2.x2, seg2.y2, seg1.x1, seg1.y1, seg1.x2, seg1.y2)
+    centre_dist = min(d1, d2, d3, d4)
+    return centre_dist - (seg1.width + seg2.width) / 2
+
+
+class TestFinePitchEscapeClearance:
+    """Tests that fine-pitch SSOP/TSSOP escape traces respect clearance.
+
+    Issue #1784: Escape traces for adjacent pins were generated independently,
+    causing odd-pin surface segments to run parallel to even-pin escape
+    segments with as little as 0.020mm gap, violating DRC clearance rules.
+    """
+
+    @pytest.fixture
+    def fine_pitch_rules(self):
+        """Design rules typical for fine-pitch SSOP boards."""
+        return DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.05,
+            min_trace_width=0.1,
+        )
+
+    @pytest.fixture
+    def fine_pitch_router(self, fine_pitch_rules):
+        grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
+        return EscapeRouter(grid, fine_pitch_rules)
+
+    def test_ssop_065mm_adjacent_clearance(self, fine_pitch_router, fine_pitch_rules):
+        """SSOP-20 at 0.65mm pitch must maintain trace clearance between adjacent pins."""
+        pads = create_sop_pads(20, pitch=0.65)
+        info = fine_pitch_router.analyze_package(pads)
+        escapes = fine_pitch_router.generate_escapes(info)
+
+        assert len(escapes) == 20
+
+        # Group escapes by side (left/right column)
+        left_escapes = sorted(
+            [e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y
+        )
+        right_escapes = sorted(
+            [e for e in escapes if e.pad.x > 0], key=lambda e: e.pad.y
+        )
+
+        for side_escapes in [left_escapes, right_escapes]:
+            for idx in range(len(side_escapes) - 1):
+                e1 = side_escapes[idx]
+                e2 = side_escapes[idx + 1]
+                # Check all same-layer segment pairs
+                for seg1 in e1.segments:
+                    for seg2 in e2.segments:
+                        if seg1.layer != seg2.layer:
+                            continue
+                        gap = _min_segment_edge_gap(seg1, seg2)
+                        assert gap >= fine_pitch_rules.trace_clearance - 1e-6, (
+                            f"Clearance violation between pad {e1.pad.net_name} "
+                            f"and {e2.pad.net_name} on {seg1.layer}: "
+                            f"gap={gap:.4f}mm < {fine_pitch_rules.trace_clearance}mm"
+                        )
+
+    @pytest.mark.parametrize(
+        "pitch,clearance",
+        [
+            (0.5, 0.1),   # TSSOP, tight clearance
+            (0.5, 0.15),  # TSSOP, moderate clearance
+            (0.5, 0.2),   # TSSOP, generous clearance
+            (0.65, 0.1),  # SSOP, tight clearance
+            (0.65, 0.15), # SSOP, moderate clearance
+            (0.65, 0.2),  # SSOP, generous clearance
+        ],
+    )
+    def test_parametric_pitch_clearance(self, pitch, clearance):
+        """Adjacent escape clearance is respected across pitch/clearance combos."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=clearance,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=clearance,
+            grid_resolution=0.05,
+            min_trace_width=0.1,
+        )
+        grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, rules)
+
+        pads = create_sop_pads(20, pitch=pitch)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        assert len(escapes) == 20
+
+        # Check all consecutive same-side escapes
+        left = sorted([e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y)
+        right = sorted([e for e in escapes if e.pad.x > 0], key=lambda e: e.pad.y)
+
+        for side in [left, right]:
+            for idx in range(len(side) - 1):
+                for seg1 in side[idx].segments:
+                    for seg2 in side[idx + 1].segments:
+                        if seg1.layer != seg2.layer:
+                            continue
+                        gap = _min_segment_edge_gap(seg1, seg2)
+                        assert gap >= clearance - 1e-6, (
+                            f"pitch={pitch} clearance={clearance}: "
+                            f"gap={gap:.4f}mm between {side[idx].pad.net_name} "
+                            f"and {side[idx + 1].pad.net_name}"
+                        )
+
+    def test_fine_pitch_sufficient_clearance_no_offset(self, fine_pitch_rules):
+        """When pitch is wide enough for clearance, no lateral offset is applied.
+
+        At 0.65mm pitch with min_trace_width=0.1 and clearance=0.15:
+        lateral_clearance = 0.65 - 0.1 = 0.55 > 0.15, so no offset needed.
+        Odd-pin vias should be inline (same row-axis coordinate as pad).
+        """
+        # Use rules where lateral_clearance (pitch - escape_width) >> clearance
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.1,  # small clearance
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.1,
+            grid_resolution=0.05,
+            min_trace_width=0.1,
+        )
+        grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
+        router = EscapeRouter(grid, rules)
+
+        # 0.65mm pitch, escape_width=0.1 -> lateral_clearance=0.55 >> 0.1
+        pads = create_sop_pads(8, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # For the vertical SOP layout, pads are at x=-2 and x=2.
+        # The left column may escape WEST (dx=-1,dy=0 -> row=(0,-1)) or
+        # SOUTH (dx=0,dy=-1 -> row=(1,0)) depending on package geometry.
+        # In either case, lateral offset shifts along the row axis.
+        # With sufficient clearance, the via should stay inline with the
+        # pad in the row-direction coordinate.
+        left_escapes = sorted(
+            [e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y
+        )
+        for e in left_escapes:
+            if e.via_pos is None:
+                continue
+            # Determine row axis from escape direction
+            if e.direction == EscapeDirection.WEST:
+                # row direction is y-axis; check via y == pad y
+                assert abs(e.via_pos[1] - e.pad.y) < 1e-6, (
+                    f"Unexpected lateral offset for {e.pad.net_name}"
+                )
+            elif e.direction == EscapeDirection.SOUTH:
+                # row direction is x-axis; check via x == pad x
+                assert abs(e.via_pos[0] - e.pad.x) < 1e-6, (
+                    f"Unexpected lateral offset for {e.pad.net_name}"
+                )

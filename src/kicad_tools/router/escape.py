@@ -28,6 +28,7 @@ Example::
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
 
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
+
+logger = logging.getLogger(__name__)
 
 
 class PackageType(Enum):
@@ -1091,15 +1094,39 @@ class EscapeRouter:
         pad_clearance = self.rules.trace_clearance + package.pin_pitch / 4
         via_offset = pad_clearance + self.rules.via_diameter / 2
 
+        # Issue #1784: Compute lateral fan-out offset for odd-pin vias when
+        # adjacent escape traces would violate clearance.  The row direction
+        # is perpendicular to the escape direction: if escape is (dx, dy),
+        # the row axis is (-dy, dx).  Adjacent pads are separated by
+        # pin_pitch along that axis.  Two parallel escape segments (one from
+        # an even pin, one surface-segment from an odd pin) have edge-to-edge
+        # gap = pin_pitch - escape_width.  When that gap is less than
+        # trace_clearance we must shift the odd-pin via laterally.
+        lateral_clearance = package.pin_pitch - escape_width
+        if lateral_clearance < self.rules.trace_clearance:
+            lateral_offset = (self.rules.trace_clearance - lateral_clearance + escape_width) / 2
+        else:
+            lateral_offset = 0.0
+
+        # Row direction unit vector (perpendicular to escape direction).
+        # Sign chosen so that a positive offset moves "forward" along the row.
+        row_dx, row_dy = -dy, dx
+
         for i, pad in enumerate(pads):
             # Determine if this pin needs layer transition
             needs_via = i % 2 == 1  # Odd pins via down
 
             if needs_via:
                 # Odd pin: Via to inner layer
-                # Calculate via position - place via perpendicular to pin row
-                via_x = pad.x + dx * via_offset
-                via_y = pad.y + dy * via_offset
+                # Calculate via position - place via perpendicular to pin row,
+                # with lateral fan-out offset to avoid clearance violations
+                # against the adjacent even-pin escape segment.
+                # Alternate the lateral offset direction (+/-) based on which
+                # neighbour is closer, biasing away from the lower-indexed
+                # (even) neighbour.
+                sign = 1 if (i // 2) % 2 == 0 else -1
+                via_x = pad.x + dx * via_offset + row_dx * lateral_offset * sign
+                via_y = pad.y + dy * via_offset + row_dy * lateral_offset * sign
 
                 # Try to use In1.Cu if available (4-layer board), else B.Cu
                 # For now, use B.Cu for simplicity
@@ -1112,7 +1139,8 @@ class EscapeRouter:
                 # Create segments
                 segments: list[Segment] = []
 
-                # Segment from pad to via on surface layer
+                # Segment from pad to via on surface layer (may be diagonal
+                # when lateral_offset > 0)
                 segments.append(
                     Segment(
                         x1=pad.x,
@@ -1195,7 +1223,79 @@ class EscapeRouter:
                     )
                 )
 
+        # Issue #1784: Post-generation pairwise clearance validation
+        self._validate_escape_clearances(escapes, self.rules.trace_clearance)
+
         return escapes
+
+    @staticmethod
+    def _min_segment_distance(s1: Segment, s2: Segment) -> float:
+        """Return the minimum centre-line distance between two segments.
+
+        Uses closest-point-on-segment computation for each pair of
+        endpoints/projections.  This is the geometric distance between the
+        two line-segments (not accounting for trace width -- the caller
+        subtracts half-widths separately).
+        """
+
+        def _dot(ax: float, ay: float, bx: float, by: float) -> float:
+            return ax * bx + ay * by
+
+        def _clamp01(v: float) -> float:
+            return max(0.0, min(1.0, v))
+
+        def _point_seg_dist(
+            px: float, py: float, ax: float, ay: float, bx: float, by: float
+        ) -> float:
+            abx, aby = bx - ax, by - ay
+            apx, apy = px - ax, py - ay
+            len_sq = abx * abx + aby * aby
+            if len_sq < 1e-12:
+                return math.sqrt(apx * apx + apy * apy)
+            t = _clamp01(_dot(apx, apy, abx, aby) / len_sq)
+            cx, cy = ax + t * abx, ay + t * aby
+            dx, dy_val = px - cx, py - cy
+            return math.sqrt(dx * dx + dy_val * dy_val)
+
+        # Check all four endpoint-to-segment distances, plus
+        # segment-segment closest approach.
+        d1 = _point_seg_dist(s1.x1, s1.y1, s2.x1, s2.y1, s2.x2, s2.y2)
+        d2 = _point_seg_dist(s1.x2, s1.y2, s2.x1, s2.y1, s2.x2, s2.y2)
+        d3 = _point_seg_dist(s2.x1, s2.y1, s1.x1, s1.y1, s1.x2, s1.y2)
+        d4 = _point_seg_dist(s2.x2, s2.y2, s1.x1, s1.y1, s1.x2, s1.y2)
+        return min(d1, d2, d3, d4)
+
+    def _validate_escape_clearances(
+        self,
+        escapes: list[EscapeRoute],
+        min_clearance: float,
+    ) -> None:
+        """Validate pairwise clearance between consecutive escape routes.
+
+        Iterates through adjacent escape routes and checks that all
+        surface-layer segments maintain at least *min_clearance* edge-to-edge
+        distance.  Logs a warning for any violating pair so that regressions
+        are visible without silently producing DRC violations.
+        """
+        for idx in range(len(escapes) - 1):
+            e1 = escapes[idx]
+            e2 = escapes[idx + 1]
+            for seg1 in e1.segments:
+                for seg2 in e2.segments:
+                    if seg1.layer != seg2.layer:
+                        continue  # different layers cannot violate
+                    centre_dist = self._min_segment_distance(seg1, seg2)
+                    edge_gap = centre_dist - (seg1.width + seg2.width) / 2
+                    if edge_gap < min_clearance - 1e-6:
+                        logger.warning(
+                            "Escape clearance violation between pads %s and %s "
+                            "on %s: gap=%.4fmm (required %.4fmm)",
+                            e1.pad.net_name,
+                            e2.pad.net_name,
+                            seg1.layer.kicad_name,
+                            edge_gap,
+                            min_clearance,
+                        )
 
     def _escape_sop_staggered(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate escape routes with staggered vias for SOP/TSSOP/SOIC packages.
