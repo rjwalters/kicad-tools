@@ -55,6 +55,7 @@ class DesignRules:
     via_drill: float = 0.35  # mm (JLCPCB min is 0.3, use 0.35 for margin)
     via_diameter: float = 0.7  # mm (0.35 drill + 0.35 annular ring)
     via_clearance: float = 0.2  # mm
+    min_drill_clearance: float = 0.102  # mm (minimum drill-to-drill spacing, including same-net)
     grid_resolution: float = 0.1  # mm (routing grid)
 
     # Per-component clearance overrides (Issue #1016)
