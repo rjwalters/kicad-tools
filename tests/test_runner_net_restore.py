@@ -123,6 +123,53 @@ class TestHasCanonicalNet:
 
 
 # ---------------------------------------------------------------------------
+# _canonicalize_net_node
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalizeNetNode:
+    """Verify ``_canonicalize_net_node`` format selection (issue #1820)."""
+
+    def test_name_only_default_produces_dual_atom(self):
+        """Default (pads): name-only -> (net N "name")."""
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        node = _canonicalize_net_node(_net_node("GND"), {"GND": 1})
+        assert node.get_int(0) == 1
+        assert node.get_string(1) == "GND"
+
+    def test_name_only_numeric_only_produces_number(self):
+        """numeric_only=True (segments/vias): name-only -> (net N)."""
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        node = _canonicalize_net_node(
+            _net_node("GND"), {"GND": 1}, numeric_only=True
+        )
+        assert node.get_int(0) == 1
+        assert node.get_string(1) is None
+
+    def test_already_numeric_unchanged(self):
+        """A node with numeric ID is returned unchanged regardless of flag."""
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        original = _net_node(5)
+        result = _canonicalize_net_node(original, {"X": 5}, numeric_only=True)
+        assert result is original
+
+    def test_none_returns_none(self):
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        assert _canonicalize_net_node(None, {}) is None
+
+    def test_unknown_name_returns_original(self):
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        original = _net_node("UNKNOWN")
+        result = _canonicalize_net_node(original, {"GND": 1})
+        assert result is original
+
+
+# ---------------------------------------------------------------------------
 # validate_net_format
 # ---------------------------------------------------------------------------
 
@@ -229,7 +276,7 @@ class TestRestoreNetDeclarations:
         return pcb
 
     def test_restores_name_only_segment(self, tmp_path):
-        """A segment with ``(net "SYNC_R")`` should be restored to ``(net 18 "SYNC_R")``."""
+        """A segment with ``(net "SYNC_R")`` should be restored to ``(net 18)`` numeric-only."""
         from kicad_tools.cli.runner import _restore_net_declarations
         from kicad_tools.core.sexp_file import load_pcb
 
@@ -248,19 +295,21 @@ class TestRestoreNetDeclarations:
         # Build snapshot data: the canonical net node for this segment
         net_nodes = [_net_node(0, ""), _net_node(18, "SYNC_R")]
         element_nets = {
-            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(18, "SYNC_R")],
+            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(18)],
         }
 
         _restore_net_declarations(pcb, net_nodes, element_nets)
 
-        # Verify the segment now has canonical format
+        # Verify the segment now has numeric-only format (KiCad 9 requirement)
         sexp = load_pcb(str(pcb))
         for child in sexp.children:
             if child.name == "segment":
                 net_node = child.get("net")
                 assert net_node is not None
                 net_num = net_node.get_int(0)
-                assert net_num == 18, f"Expected (net 18 ...) but got {net_node}"
+                assert net_num == 18, f"Expected (net 18) but got {net_node}"
+                # Verify no net name string is present (numeric-only)
+                assert net_node.get_string(1) is None, "Segment net should be numeric-only"
                 break
         else:
             pytest.fail("No segment found in restored PCB")
@@ -283,7 +332,7 @@ class TestRestoreNetDeclarations:
 
         net_nodes = [_net_node(0, ""), _net_node(1, "GND")]
         element_nets = {
-            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(1, "GND")],
+            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(1)],
         }
 
         _restore_net_declarations(pcb, net_nodes, element_nets)
@@ -294,7 +343,9 @@ class TestRestoreNetDeclarations:
                 net_node = child.get("net")
                 assert net_node is not None
                 net_num = net_node.get_int(0)
-                assert net_num == 1, f"Expected (net 1 ...) but got {net_node}"
+                assert net_num == 1, f"Expected (net 1) but got {net_node}"
+                # Verify no net name string is present (numeric-only)
+                assert net_node.get_string(1) is None, "Segment net should be numeric-only"
                 break
         else:
             pytest.fail("No segment found in restored PCB")
@@ -317,7 +368,7 @@ class TestRestoreNetDeclarations:
 
         net_nodes = [_net_node(0, ""), _net_node(18, "SYNC_R")]
         element_nets = {
-            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(18, "SYNC_R")],
+            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(18)],
         }
 
         _restore_net_declarations(pcb, net_nodes, element_nets)
