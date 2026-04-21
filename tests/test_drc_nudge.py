@@ -189,6 +189,56 @@ class TestDRCVerifyAndNudge:
         assert result.initial_violations > 0
         assert result.segments_nudged > 0
 
+
+    def test_inner_layer_segment_violation_nudged(self):
+        """Segments violating clearance on an inner layer should be nudged (Issue #1798)."""
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.IN1_CU, net=1)
+        seg_b = Segment(x1=0, y1=0.25, x2=10, y2=0.25, width=0.2, layer=Layer.IN1_CU, net=2)
+        route_a = Route(net=1, net_name="A", segments=[seg_a])
+        route_b = Route(net=2, net_name="B", segments=[seg_b])
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
+
+        result = drc_verify_and_nudge(router)
+        assert result.initial_violations > 0
+        assert result.segments_nudged > 0
+
+    def test_inner_layer_no_cross_layer_violation(self):
+        """Segments on different inner layers should not report violations (Issue #1798)."""
+        # Two segments at the same position but on different layers
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.IN1_CU, net=1)
+        seg_b = Segment(x1=0, y1=0.25, x2=10, y2=0.25, width=0.2, layer=Layer.IN2_CU, net=2)
+        route_a = Route(net=1, net_name="A", segments=[seg_a])
+        route_b = Route(net=2, net_name="B", segments=[seg_b])
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
+
+        result = drc_verify_and_nudge(router)
+        assert result.initial_violations == 0
+        assert result.segments_nudged == 0
+
+    def test_find_segment_matches_correct_layer(self):
+        """_find_segment should match the correct layer when specified (Issue #1798)."""
+        from kicad_tools.router.drc_nudge import _find_segment
+
+        # Two segments with same coordinates on different layers
+        seg_fcu = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg_in1 = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.IN1_CU, net=1)
+        route = Route(net=1, net_name="A", segments=[seg_fcu, seg_in1])
+        router = _StubAutorouter(routes=[route])
+
+        # Without layer filter, should find the first match (F_CU)
+        found = _find_segment(router, 1, 0, 0, 0, 10, 0)
+        assert found is seg_fcu
+
+        # With layer filter for IN1_CU, should find the inner-layer segment
+        found = _find_segment(router, 1, 0, 0, 0, 10, 0, layer=Layer.IN1_CU)
+        assert found is seg_in1
+
+        # With layer filter for F_CU, should find the outer-layer segment
+        found = _find_segment(router, 1, 0, 0, 0, 10, 0, layer=Layer.F_CU)
+        assert found is seg_fcu
+
     def test_violation_exceeding_budget_not_nudged(self):
         """Violations requiring more than max_displacement should not be nudged."""
         # Segments very close: edge-to-edge ~ -0.1mm (overlap)

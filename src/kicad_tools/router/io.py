@@ -185,6 +185,7 @@ class ClearanceViolation:
     obstacle_net_name: str = ""  # Human-readable obstacle net name
     location: tuple[float, float] | None = None  # Approximate violation location (x, y)
     component_inherent: bool = False  # True if both pads are on the same component
+    layer: Layer | None = None  # Copper layer where the violation occurs
 
 
 def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
@@ -1359,6 +1360,7 @@ def validate_routes(
                             obstacle_net_name=_resolve_net_name(pad.net),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
+                            layer=segment.layer,
                         )
                     )
 
@@ -1412,6 +1414,7 @@ def validate_routes(
                                 net_name=_resolve_net_name(route_net),
                                 obstacle_net_name=_resolve_net_name(other_route.net),
                                 location=(loc_x, loc_y),
+                                layer=segment.layer,
                             )
                         )
 
@@ -1445,6 +1448,7 @@ def validate_routes(
                                 net_name=_resolve_net_name(route_net),
                                 obstacle_net_name=_resolve_net_name(other_route.net),
                                 location=(via.x, via.y),
+                                layer=segment.layer,
                             )
                         )
 
@@ -1570,8 +1574,9 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
             loc_str = ""
             if v.location:
                 loc_str = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})"
+            layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
             lines.append(
-                f"  [{v.obstacle_type}] {net_label} vs {obs_label}{loc_str}: "
+                f"  [{v.obstacle_type}] {net_label} vs {obs_label}{loc_str}{layer_str}: "
                 f"{v.distance:.3f}mm (required {v.required:.3f}mm)"
             )
 

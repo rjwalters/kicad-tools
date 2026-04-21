@@ -2868,11 +2868,37 @@ class Autorouter:
                 violating_nets.add(v.net)
                 violating_nets.add(v.obstacle_net)
 
+            # Issue #1798: Categorise violations by layer to identify
+            # inner-layer congestion that needs stronger repulsion.
+            inner_layer_violations = [
+                v for v in seg_violations
+                if getattr(v, "layer", None) is not None
+                and v.layer not in (Layer.F_CU, Layer.B_CU)
+            ]
+            outer_count = len(seg_violations) - len(inner_layer_violations)
+
+            # Collect the distinct layer names for the log message.
+            violation_layers: set[str] = set()
+            for v in seg_violations:
+                v_layer = getattr(v, "layer", None)
+                if v_layer is not None:
+                    violation_layers.add(v_layer.kicad_name)
+
+            layer_info = ", ".join(sorted(violation_layers)) if violation_layers else "unknown"
             flush_print(
                 f"\n--- Post-route clearance pass {pass_idx + 1}: "
                 f"{len(seg_violations)} seg-seg violation(s) across "
-                f"{len(violating_nets)} net(s) ---"
+                f"{len(violating_nets)} net(s) "
+                f"[layers: {layer_info}] ---"
             )
+
+            # Nets with inner-layer violations need a higher congestion
+            # penalty so the rerouter pushes traces further apart on the
+            # typically more congested inner layers.
+            inner_violating_nets: set[int] = set()
+            for v in inner_layer_violations:
+                inner_violating_nets.add(v.net)
+                inner_violating_nets.add(v.obstacle_net)
 
             neg_router = NegotiatedRouter(
                 self.grid, self.router, self.rules, self.net_class_map
@@ -2886,8 +2912,11 @@ class Autorouter:
             # catch violations introduced by sequential placement (Issue #1783).
             rerouted_count = 0
             for net_idx, net in enumerate(nets_to_reroute):
+                # Issue #1798: Use a higher present_factor for nets that had
+                # inner-layer violations, encouraging wider spacing.
+                net_pf = present_factor * 2.0 if net in inner_violating_nets else present_factor
                 routes = self._route_net_negotiated(
-                    net, present_factor, per_net_timeout=per_net_timeout
+                    net, net_pf, per_net_timeout=per_net_timeout
                 )
                 if routes:
                     net_routes[net] = routes
@@ -2912,10 +2941,17 @@ class Autorouter:
                             and (v.net == net or v.obstacle_net == net)
                         ]
                         if net_seg_violations:
-                            # Rip up just this net and try again
+                            # Rip up just this net and try again.
+                            # Issue #1798: Use a stronger factor for
+                            # inner-layer nets where congestion is tighter.
+                            retry_pf = (
+                                present_factor * 3.0
+                                if net in inner_violating_nets
+                                else present_factor * 1.5
+                            )
                             neg_router.rip_up_nets([net], net_routes, self.routes)
                             retry_routes = self._route_net_negotiated(
-                                net, present_factor * 1.5, per_net_timeout=per_net_timeout
+                                net, retry_pf, per_net_timeout=per_net_timeout
                             )
                             if retry_routes:
                                 net_routes[net] = retry_routes
