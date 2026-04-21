@@ -33,6 +33,7 @@ DRC Compliance (v0.5.1):
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import math
 import re
@@ -1419,7 +1420,9 @@ def validate_routes(
                         )
 
             # --- Segment-to-via checks ---
-            for other_route in router.routes:
+            # Include pre-existing routes so new segments are checked against old vias.
+            _all_routes_for_via = itertools.chain(router.routes, getattr(router, "existing_routes", []))
+            for other_route in _all_routes_for_via:
                 if other_route.net == route_net:
                     continue
 
@@ -1453,7 +1456,8 @@ def validate_routes(
                         )
 
     # --- Via-to-pad checks ---
-    for route in router.routes:
+    # Include pre-existing routes so old vias are checked against pads.
+    for route in itertools.chain(router.routes, getattr(router, "existing_routes", [])):
         route_net = route.net
 
         # Build component refs connected to this route's net
@@ -1502,6 +1506,39 @@ def validate_routes(
     # --- Via-to-via checks ---
     for i, route_a in enumerate(router.routes):
         for route_b in router.routes[i + 1 :]:
+            if route_a.net == route_b.net:
+                continue
+
+            for via_a in route_a.vias:
+                for via_b in route_b.vias:
+                    dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
+                    effective_dist = dist - via_a.diameter / 2 - via_b.diameter / 2
+
+                    if effective_dist < via_clear:
+                        loc_x = (via_a.x + via_b.x) / 2
+                        loc_y = (via_a.y + via_b.y) / 2
+                        violations.append(
+                            ClearanceViolation(
+                                segment_index=-1,
+                                x1=via_a.x,
+                                y1=via_a.y,
+                                x2=via_a.x,
+                                y2=via_a.y,
+                                net=route_a.net,
+                                obstacle_type="via",
+                                obstacle_net=route_b.net,
+                                distance=effective_dist,
+                                required=via_clear,
+                                net_name=_resolve_net_name(route_a.net),
+                                obstacle_net_name=_resolve_net_name(route_b.net),
+                                location=(loc_x, loc_y),
+                            )
+                        )
+
+    # --- Via-to-via checks: new routes vs pre-existing routes ---
+    existing_routes = getattr(router, "existing_routes", [])
+    for route_a in router.routes:
+        for route_b in existing_routes:
             if route_a.net == route_b.net:
                 continue
 
@@ -2339,7 +2376,9 @@ def load_pcb_for_routing(
             )
             # Mark on grid as obstacles (blocked cells) but do NOT add to
             # router.routes — these are fixed geometry, not re-routable nets.
+            # Store in router.existing_routes so DRC and via-merge can see them.
             router.grid.mark_route(route)
+            router.existing_routes.append(route)
             route_count += 1
 
         if route_count > 0:
