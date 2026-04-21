@@ -363,6 +363,12 @@ class Autorouter:
         # within dense IC packages.
         self.fine_zones: list[FineZone] = []
 
+        # Pour nets without zones that should be routed as signals (Issue #1841)
+        # Set externally (e.g., from CLI's _auto_skip_pour_nets) after loading.
+        # Nets in this set have is_pour_net=True in their net class but lack a
+        # copper zone, so they must be routed as signal traces instead of skipped.
+        self._pour_nets_without_zones: set[str] = set()
+
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
 
@@ -1425,13 +1431,21 @@ class Autorouter:
         rather than individual traces.  They are identified by the
         ``is_pour_net`` flag on their :class:`NetClassRouting` entry.
 
+        Issue #1841: Pour nets that lack a copper zone in the PCB are stored
+        in :attr:`_pour_nets_without_zones` and must be routed as signals.
+        This method returns False for such nets even though their net class
+        has ``is_pour_net=True``.
+
         Args:
             net_id: The net ID to check.
 
         Returns:
-            True if the net's class has ``is_pour_net=True``, False otherwise.
+            True if the net's class has ``is_pour_net=True`` and the net
+            is not in ``_pour_nets_without_zones``, False otherwise.
         """
         net_name = self.net_names.get(net_id, "")
+        if net_name in self._pour_nets_without_zones:
+            return False
         net_class = self.net_class_map.get(net_name)
         return bool(net_class and net_class.is_pour_net)
 
@@ -2999,6 +3013,7 @@ class Autorouter:
             route_net=self.route_net,
             route_net_with_corridor=self._route_net_with_corridor,
             mark_route=self._mark_route,
+            pour_nets_without_zones=self._pour_nets_without_zones,
         )
 
     def route_all_two_phase(
@@ -3096,6 +3111,7 @@ class Autorouter:
             route_net=self.route_net,
             route_net_with_corridor=self._route_net_with_corridor,
             mark_route=self._mark_route,
+            pour_nets_without_zones=self._pour_nets_without_zones,
         )
 
     def route_all_hierarchical(
