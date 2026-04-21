@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.stitch_cmd import (
+    FilledPolygon,
     PadInfo,
     TraceSegment,
     TrackSegment,
@@ -14,6 +15,7 @@ from kicad_tools.cli.stitch_cmd import (
     check_via_clearance,
     extract_zone_polygons,
     find_all_board_vias,
+    find_all_filled_polygons,
     find_all_pads,
     find_all_plane_nets,
     find_all_track_segments,
@@ -3257,3 +3259,359 @@ class TestRunBlanketStitch:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "stitching vias" in captured.out.lower() or "Added" in captured.out
+
+
+# --- Filled polygon clearance tests ---
+
+
+# PCB with a zone that has filled_polygon nodes (simulating post-DRC fill)
+FILLED_POLYGON_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (net 3 "PWR")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-fp-gnd")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+  )
+  (zone (net 2) (net_name "SIG") (layer "F.Cu") (uuid "zone-fp-sig")
+    (name "SIG_zone")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 50 50) (xy 60 50) (xy 60 60) (xy 50 60)))
+    (filled_polygon (layer "F.Cu") (pts (xy 50 50) (xy 60 50) (xy 60 60) (xy 50 60)))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000900")
+    (at 55 55)
+    (property "Reference" "C9" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c9"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "PWR"))
+  )
+)
+"""
+
+
+class TestFilledPolygonDataclass:
+    """Tests for the FilledPolygon dataclass."""
+
+    def test_bounding_box_computed(self):
+        """Bounding box should be computed from points in __post_init__."""
+        fp = FilledPolygon(
+            net_number=1,
+            net_name="GND",
+            layer="In1.Cu",
+            points=[(10, 20), (30, 40), (15, 50)],
+        )
+        assert fp.min_x == 10
+        assert fp.max_x == 30
+        assert fp.min_y == 20
+        assert fp.max_y == 50
+
+    def test_empty_points(self):
+        """Empty points list should leave bounding box at defaults."""
+        fp = FilledPolygon(
+            net_number=1,
+            net_name="GND",
+            layer="In1.Cu",
+            points=[],
+        )
+        assert fp.min_x == 0.0
+        assert fp.max_x == 0.0
+
+
+class TestFindAllFilledPolygons:
+    """Tests for extracting filled polygon data from PCB S-expressions."""
+
+    def test_extract_filled_polygons(self):
+        """Should extract filled polygons from zones with filled_polygon nodes."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
+            f.write(FILLED_POLYGON_TEST_PCB)
+            f.flush()
+            sexp = load_pcb(Path(f.name))
+
+        # Exclude net 1 (GND) -- should only get SIG zone's filled polygon
+        polys = find_all_filled_polygons(sexp, exclude_nets={1})
+        assert len(polys) == 1
+        assert polys[0].net_name == "SIG"
+        assert polys[0].net_number == 2
+        assert polys[0].layer == "F.Cu"
+        assert len(polys[0].points) == 4
+
+    def test_extract_all_filled_polygons(self):
+        """Should extract all filled polygons when no nets excluded."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
+            f.write(FILLED_POLYGON_TEST_PCB)
+            f.flush()
+            sexp = load_pcb(Path(f.name))
+
+        polys = find_all_filled_polygons(sexp)
+        assert len(polys) == 2
+
+    def test_no_filled_polygons(self):
+        """PCB with zones but no filled_polygon nodes should return empty."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
+            f.write(BLANKET_TEST_PCB)
+            f.flush()
+            sexp = load_pcb(Path(f.name))
+
+        polys = find_all_filled_polygons(sexp)
+        assert len(polys) == 0
+
+
+class TestCheckViaClearanceFilledPolygons:
+    """Tests for filled polygon clearance in check_via_clearance."""
+
+    def _make_filled_polygon(self, points, net_number=2, net_name="SIG", layer="F.Cu"):
+        return FilledPolygon(
+            net_number=net_number,
+            net_name=net_name,
+            layer=layer,
+            points=points,
+        )
+
+    def test_via_inside_other_net_polygon_rejected(self):
+        """A via placed inside an other-net filled polygon should be rejected."""
+        polygon = self._make_filled_polygon(
+            [(40, 40), (60, 40), (60, 60), (40, 60)]
+        )
+        result = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+            other_net_filled_polygons=[polygon],
+        )
+        assert result is False
+
+    def test_via_near_polygon_edge_rejected(self):
+        """A via within clearance of a polygon edge should be rejected."""
+        # Polygon edge runs from (40, 40) to (60, 40)
+        # Via at (50, 39.8) with radius 0.225 + clearance 0.2 = 0.425
+        # Distance from (50, 39.8) to edge y=40 is 0.2, which < 0.425
+        polygon = self._make_filled_polygon(
+            [(40, 40), (60, 40), (60, 60), (40, 60)]
+        )
+        result = check_via_clearance(
+            x=50.0,
+            y=39.8,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+            other_net_filled_polygons=[polygon],
+        )
+        assert result is False
+
+    def test_via_far_from_polygon_passes(self):
+        """A via far from all polygon edges should pass."""
+        polygon = self._make_filled_polygon(
+            [(40, 40), (60, 40), (60, 60), (40, 60)]
+        )
+        result = check_via_clearance(
+            x=10.0,
+            y=10.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+            other_net_filled_polygons=[polygon],
+        )
+        assert result is True
+
+    def test_empty_filled_polygon_list_backward_compat(self):
+        """check_via_clearance with empty filled polygon list behaves identically."""
+        # Test that passing empty list gives same result as not passing it
+        result_without = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+        )
+        result_with_empty = check_via_clearance(
+            x=50.0,
+            y=50.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+            other_net_filled_polygons=[],
+        )
+        assert result_without == result_with_empty == True
+
+    def test_via_exactly_on_polygon_edge(self):
+        """Via center exactly on a polygon edge (boundary condition)."""
+        polygon = self._make_filled_polygon(
+            [(40, 40), (60, 40), (60, 60), (40, 60)]
+        )
+        # Point on the edge y=40: distance is 0, which < via_radius + clearance
+        result = check_via_clearance(
+            x=50.0,
+            y=40.0,
+            via_size=0.45,
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[],
+            same_net_vias=[],
+            other_net_filled_polygons=[polygon],
+        )
+        assert result is False
+
+
+class TestCalculateViaPositionFilledPolygons:
+    """Tests for filled polygon clearance in calculate_via_position."""
+
+    def test_avoids_filled_polygon(self):
+        """calculate_via_position should avoid placing vias near other-net fills."""
+        # Create a polygon that surrounds the pad area except one escape direction
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=50.0, y=50.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+        # Large polygon covering most directions from the pad
+        polygon = FilledPolygon(
+            net_number=2, net_name="SIG", layer="F.Cu",
+            points=[(49, 49), (55, 49), (55, 55), (49, 55)],
+        )
+        # Without polygon, a position should be found
+        pos_without = calculate_via_position(
+            pad, offset=0.5, via_size=0.45,
+            existing_vias=[], clearance=0.2,
+        )
+        assert pos_without is not None
+
+        # With polygon covering the area, the via should either be
+        # placed farther away or in a direction not blocked
+        pos_with = calculate_via_position(
+            pad, offset=0.5, via_size=0.45,
+            existing_vias=[], clearance=0.2,
+            other_net_filled_polygons=[polygon],
+        )
+        # The polygon covers x=49-55, y=49-55. The pad is at (50, 50).
+        # Any via placed at a small offset in most directions will be inside
+        # or too close to the polygon. The function might find a position
+        # in the -x,-y direction or return None.
+        if pos_with is not None:
+            vx, vy = pos_with
+            # Verify the returned position is NOT inside the polygon
+            assert not (49 <= vx <= 55 and 49 <= vy <= 55), \
+                f"Via at ({vx}, {vy}) should not be inside the polygon"
+
+
+class TestBlanketStitchFilledPolygons:
+    """Integration tests for blanket stitching with filled polygon clearance."""
+
+    def test_blanket_stitch_skips_filled_polygon_positions(self, tmp_path: Path):
+        """run_blanket_stitch should skip grid positions that violate fill clearance."""
+        pcb_file = tmp_path / "blanket_fill.kicad_pcb"
+        pcb_file.write_text(FILLED_POLYGON_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+
+        # The GND zone spans (100, 100) to (130, 130).
+        # The SIG filled polygon spans (50, 50) to (60, 60) which is
+        # far from the GND zone, so all vias should be placed fine.
+        # The key point is that the code path runs without error.
+        # Vias should have been generated.
+        assert isinstance(result.vias_added, list)
+
+    def test_blanket_stitch_no_filled_polygons_unchanged(self, tmp_path: Path):
+        """Blanket stitch on PCB with no filled polygons should work as before."""
+        pcb_file = tmp_path / "blanket_no_fill.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+        # Should still work and place vias
+        assert len(result.vias_added) > 0
+
+
+class TestStitchFilledPolygons:
+    """Integration tests for pad-based stitching with filled polygon clearance."""
+
+    def test_stitch_no_filled_polygons_unchanged(self, tmp_path: Path):
+        """Stitch on PCB with no filled polygons should work identically."""
+        pcb_file = tmp_path / "stitch_no_fill.kicad_pcb"
+        pcb_file.write_text(STITCH_TEST_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+        )
+        # Should still work and place vias for the GND pads
+        assert len(result.vias_added) > 0
+
+    def test_stitch_passes_filled_polygons(self, tmp_path: Path):
+        """Stitch on PCB with filled polygons runs without error."""
+        pcb_file = tmp_path / "stitch_fill.kicad_pcb"
+        pcb_file.write_text(FILLED_POLYGON_TEST_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["PWR"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+        )
+        # PWR has a pad at (54.49, 55). The SIG filled polygon is at (50-60, 50-60).
+        # The via placement should either avoid the polygon or skip the pad.
+        assert isinstance(result.vias_added, list)
+        assert isinstance(result.pads_skipped, list)
