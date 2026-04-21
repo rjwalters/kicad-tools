@@ -488,3 +488,120 @@ class TestNetCountFiltering:
         output = capsys.readouterr().out
         assert "0/0" in output
         assert "0%" in output
+
+
+# ---------------------------------------------------------------------------
+# Issue #1833: Unrouted list must exclude skipped/single-pad nets
+# ---------------------------------------------------------------------------
+
+
+class TestUnroutedListFiltering:
+    """The 'Unrouted nets' section must only list nets from the target
+    population (nets_to_route_ids), not skipped power nets or single-pad nets.
+    """
+
+    def test_skipped_power_nets_excluded_from_unrouted(self, capsys):
+        """Power nets that were intentionally skipped (not in
+        nets_to_route_ids) must not appear as 'No path found'."""
+        # Net 1 = GND (power, skipped), Net 2 = SIG_A (signal, routed),
+        # Net 3 = SIG_B (signal, unrouted)
+        route = MagicMock()
+        route.net = 2
+        route.net_name = "SIG_A"
+        route.segments = []
+        route.vias = []
+
+        router = _make_router(routes=[route])
+        net_map = {"GND": 1, "SIG_A": 2, "SIG_B": 3}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+            nets_to_route_ids={2, 3},  # only signal nets
+        )
+
+        output = capsys.readouterr().out
+        # GND should NOT appear as unrouted
+        assert "GND" not in output
+        # SIG_B should appear as unrouted (it's a signal net that failed)
+        assert "SIG_B" in output
+        # Count should be 1/2
+        assert "1/2" in output
+
+    def test_single_pad_nets_excluded_from_unrouted(self, capsys):
+        """Single-pad nets (not in nets_to_route_ids) must not appear
+        as 'No path found'."""
+        # Net 1 = LATCH (single pad), Net 2 = SIG_A (routed)
+        route = MagicMock()
+        route.net = 2
+        route.net_name = "SIG_A"
+        route.segments = []
+        route.vias = []
+
+        router = _make_router(routes=[route])
+        net_map = {"LATCH": 1, "SIG_A": 2}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=1,
+            nets_to_route_ids={2},  # only multi-pad net
+        )
+
+        output = capsys.readouterr().out
+        assert "LATCH" not in output
+        assert "1/1" in output
+
+    def test_unrouted_count_matches_summary(self, capsys):
+        """The number of nets listed as unrouted must equal
+        (denominator - numerator) from the summary line."""
+        # 3 signal nets, 1 routed, 2 power nets skipped
+        route = MagicMock()
+        route.net = 3
+        route.net_name = "SIG_A"
+        route.segments = []
+        route.vias = []
+
+        router = _make_router(routes=[route])
+        net_map = {"GND": 1, "+3.3V": 2, "SIG_A": 3, "SIG_B": 4, "SIG_C": 5}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=3,
+            nets_to_route_ids={3, 4, 5},
+        )
+
+        output = capsys.readouterr().out
+        # Should show 1/3 (only SIG_A routed out of 3 signal nets)
+        assert "1/3" in output
+        # GND and +3.3V must NOT appear
+        assert "GND" not in output
+        assert "+3.3V" not in output
+        # SIG_B and SIG_C should appear as unrouted
+        assert "SIG_B" in output
+        assert "SIG_C" in output
+
+    def test_legacy_no_filter_shows_all_unrouted(self, capsys):
+        """When nets_to_route_ids is None (legacy), all unrouted nets
+        appear (backward compat)."""
+        route = MagicMock()
+        route.net = 2
+        route.net_name = "SIG_A"
+        route.segments = []
+        route.vias = []
+
+        router = _make_router(routes=[route])
+        net_map = {"GND": 1, "SIG_A": 2}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+            nets_to_route_ids=None,
+        )
+
+        output = capsys.readouterr().out
+        # With no filter, GND should still appear as unrouted (legacy behavior)
+        assert "GND" in output

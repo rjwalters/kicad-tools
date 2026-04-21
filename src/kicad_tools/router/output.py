@@ -65,14 +65,18 @@ def show_routing_summary(
         route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
 
     # Identify routed and unrouted nets — filter to target population
-    # so numerator/denominator are consistent (Issue #1643)
+    # so numerator/denominator are consistent (Issue #1643, #1833)
     all_routed_net_ids = {route.net for route in router.routes}
     if nets_to_route_ids is not None:
         routed_net_ids = all_routed_net_ids & nets_to_route_ids
+        # Only report unrouted nets from the target population (multi-pad
+        # signal nets).  Skipped power nets and single-pad nets are not
+        # routing candidates and must not appear as "No path found".
+        unrouted_ids = nets_to_route_ids - all_routed_net_ids
     else:
         routed_net_ids = all_routed_net_ids
-    all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - all_routed_net_ids
+        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - all_routed_net_ids
 
     # Group recorded failures by net
     failures_by_net: dict[int, list[RoutingFailure]] = {}
@@ -442,14 +446,18 @@ def get_routing_diagnostics_json(
         route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
 
     # Identify routed and unrouted nets — filter to target population
-    # so numerator/denominator are consistent (Issue #1643)
+    # so numerator/denominator are consistent (Issue #1643, #1833)
     all_routed_net_ids = {route.net for route in router.routes}
     if nets_to_route_ids is not None:
         routed_net_ids = all_routed_net_ids & nets_to_route_ids
+        # Only report unrouted nets from the target population (multi-pad
+        # signal nets).  Skipped power nets and single-pad nets are not
+        # routing candidates and must not appear as "No path found".
+        unrouted_ids = nets_to_route_ids - all_routed_net_ids
     else:
         routed_net_ids = all_routed_net_ids
-    all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - all_routed_net_ids
+        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - all_routed_net_ids
 
     # Build successful routes list
     successful_routes = []
