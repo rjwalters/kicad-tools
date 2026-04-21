@@ -151,6 +151,111 @@ MIXED_ZONE_PCB = """\
 )
 """
 
+# ---------------------------------------------------------------------------
+# Traditional KiCad 7/8 format fixtures (net N) + (net_name "NAME")
+# ---------------------------------------------------------------------------
+
+# Traditional format: GND net with zone using (net 1) (net_name "GND")
+POUR_NET_TRADITIONAL_PCB = """\
+(kicad_pcb
+  (version 20221018)
+  (generator "pcbnew")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SPI_CLK")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SPI_CLK"))
+  )
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (tstamp "00000000-0000-0000-0000-000000000010")
+    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 40) (xy 0 40)))
+  )
+)
+"""
+
+# Traditional format: mixed -- GND has zone, +5V does not
+MIXED_ZONE_TRADITIONAL_PCB = """\
+(kicad_pcb
+  (version 20221018)
+  (generator "pcbnew")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+5V")
+  (net 3 "SPI_CLK")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SPI_CLK"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "+5V"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SPI_CLK"))
+  )
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (tstamp "00000000-0000-0000-0000-000000000011")
+    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 40) (xy 0 40)))
+  )
+)
+"""
+
 # Minimal PCB with no ground/power nets at all
 NO_GROUND_PCB = """\
 (kicad_pcb
@@ -280,6 +385,22 @@ def pcb_mixed_zone(tmp_path: Path) -> Path:
     """Write a PCB with GND (has zone) and +5V (no zone)."""
     p = tmp_path / "board_mixed.kicad_pcb"
     p.write_text(MIXED_ZONE_PCB)
+    return p
+
+
+@pytest.fixture
+def pcb_traditional_gnd(tmp_path: Path) -> Path:
+    """Write a PCB using traditional KiCad 7/8 format with GND zone."""
+    p = tmp_path / "board_traditional_gnd.kicad_pcb"
+    p.write_text(POUR_NET_TRADITIONAL_PCB)
+    return p
+
+
+@pytest.fixture
+def pcb_traditional_mixed(tmp_path: Path) -> Path:
+    """Write a PCB using traditional KiCad 7/8 format with mixed zones."""
+    p = tmp_path / "board_traditional_mixed.kicad_pcb"
+    p.write_text(MIXED_ZONE_TRADITIONAL_PCB)
     return p
 
 
@@ -631,3 +752,53 @@ class TestAutoSkipZoneAwareness:
 
         out = capsys.readouterr().out
         assert "Routing:" not in out
+
+
+# ===========================================================================
+# Tests for traditional KiCad 7/8 format zone detection (PR #1813 feedback)
+# ===========================================================================
+
+
+class TestAutoSkipZoneAwarenessTraditionalFormat:
+    """Verify _auto_skip_pour_nets detects zones in traditional KiCad 7/8 format.
+
+    Traditional format uses ``(net N)`` with a numeric ID and puts the
+    human-readable name in a separate ``(net_name "...")`` node inside
+    the zone definition, unlike KiCad 9 which uses ``(net "NAME")``.
+    """
+
+    def test_traditional_gnd_zone_detected(self, pcb_traditional_gnd: Path) -> None:
+        """GND zone in traditional (net 1)(net_name "GND") format is detected."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_traditional_gnd, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GND" in auto_skipped
+
+    def test_traditional_mixed_gnd_skipped_5v_routed(self, pcb_traditional_mixed: Path) -> None:
+        """Traditional format: GND (has zone) is skipped; +5V (no zone) is routed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_traditional_mixed, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GND" in auto_skipped
+        assert "+5V" not in skip_nets
+        assert "+5V" not in auto_skipped
+
+    def test_traditional_info_message_for_zoneless_power_nets(
+        self, pcb_traditional_mixed: Path, capsys
+    ) -> None:
+        """Traditional format: info message lists +5V as power net being routed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        _auto_skip_pour_nets(pcb_traditional_mixed, skip_nets, quiet=False)
+
+        out = capsys.readouterr().out
+        assert "Routing:" in out
+        assert "+5V" in out
+        assert "power nets without zones" in out
