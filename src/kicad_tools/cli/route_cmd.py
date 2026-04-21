@@ -278,10 +278,15 @@ def show_preview(
             stats["length"] += math.sqrt(dx * dx + dy * dy)
             stats["layers"].add(seg.layer.kicad_name)
 
-    # Identify unrouted nets
+    # Identify unrouted nets — filter to target population so the
+    # "No path found" list only shows actual routing candidates,
+    # not skipped power nets or single-pad nets (Issue #1833).
     routed_net_ids = set(net_stats.keys())
-    all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - routed_net_ids
+    if nets_to_route_ids is not None:
+        unrouted_ids = nets_to_route_ids - routed_net_ids
+    else:
+        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - routed_net_ids
 
     # Print header
     print("\n" + "=" * 60)
