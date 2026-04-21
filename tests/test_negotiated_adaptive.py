@@ -88,6 +88,31 @@ class TestDetectOscillation:
         # The function doesn't distinguish - that's handled by the caller
         assert result is True  # Technically stagnation, but caller handles this
 
+    def test_no_oscillation_when_window_has_new_minimum(self):
+        """Issue #1823: Should NOT detect oscillation when window contains new best.
+
+        Pattern [21, 21, 8, 21] has overflow 8 as a new minimum compared to
+        earlier history -- this means the router is making progress even though
+        the values bounce back.
+        """
+        # History: earlier overflows were 21, then window [21, 21, 8, 21]
+        assert detect_oscillation([21, 21, 21, 21, 8, 21], window=4) is False
+
+    def test_oscillation_when_no_new_minimum_in_window(self):
+        """Should still detect oscillation when window has no new minimum.
+
+        Pattern [21, 21, 21, 21] with prior history showing best=8 means the
+        router is stuck and not improving.
+        """
+        assert detect_oscillation([21, 8, 21, 21, 21, 21], window=4) is True
+
+    def test_stagnation_still_detected_with_longer_history(self):
+        """Stagnation at the same value should still be detected.
+
+        [50, 50, 50, 50, 50, 50] -- all same value, no new minimum in window.
+        """
+        assert detect_oscillation([50, 50, 50, 50, 50, 50], window=4) is True
+
 
 class TestShouldTerminateEarly:
     """Tests for should_terminate_early function."""
@@ -176,6 +201,25 @@ class TestShouldTerminateEarly:
         assert should_terminate_early([100, 200, 300], iteration=5, min_iterations=3) is False
         assert should_terminate_early([100, 200, 300, 400], iteration=5, min_iterations=3) is False
 
+    def test_no_termination_when_recent_window_has_new_global_min(self):
+        """Issue #1823: Should NOT terminate when recent window found new best.
+
+        History [21, 21, 21, 21, 21, 8, 21, 21, 21, 21] has min(recent)=8
+        which is a new global minimum compared to earlier [21, 21, 21, 21, 21].
+        The router made real progress recently and should keep going.
+        """
+        history = [21, 21, 21, 21, 21, 8, 21, 21, 21, 21]
+        assert should_terminate_early(history, iteration=10, min_iterations=5) is False
+
+    def test_terminates_when_recent_min_equals_earlier_best(self):
+        """Should still terminate when recent best is not better than earlier best.
+
+        History [8, 21, 21, 21, 21, 21, 8, 21, 21, 21] has min(recent)=8
+        but min(earlier)=8 too, so no new improvement.
+        """
+        history = [8, 21, 21, 21, 21, 21, 8, 21, 21, 21]
+        assert should_terminate_early(history, iteration=10, min_iterations=5) is True
+
 
 class TestIsMonotonicallyDiverging:
     """Tests for _is_monotonically_diverging helper."""
@@ -219,7 +263,7 @@ class TestEscapeStrategyCycling:
     """Tests for escape_local_minimum trying all strategies (Issue #1638)."""
 
     def test_escape_tries_all_strategies_on_failure(self):
-        """escape_local_minimum should cycle through all 3 strategies before giving up."""
+        """escape_local_minimum should cycle through all 4 strategies before giving up."""
         from unittest.mock import MagicMock, patch
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
@@ -232,6 +276,7 @@ class TestEscapeStrategyCycling:
         neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
         neg._escape_reverse_order = MagicMock(return_value=(False, 10))
         neg._escape_random_subset = MagicMock(return_value=(False, 10))
+        neg._escape_full_reorder = MagicMock(return_value=(False, 10))
 
         success, overflow, tried = neg.escape_local_minimum(
             overflow_history=[10, 10, 10, 10],
@@ -245,10 +290,11 @@ class TestEscapeStrategyCycling:
         )
 
         assert success is False
-        assert tried == 3
+        assert tried == 4
         assert neg._escape_shuffle_order.call_count == 1
         assert neg._escape_reverse_order.call_count == 1
         assert neg._escape_random_subset.call_count == 1
+        assert neg._escape_full_reorder.call_count == 1
 
     def test_escape_stops_on_first_success(self):
         """escape_local_minimum should stop as soon as one strategy succeeds."""
@@ -264,6 +310,7 @@ class TestEscapeStrategyCycling:
         neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
         neg._escape_reverse_order = MagicMock(return_value=(True, 5))
         neg._escape_random_subset = MagicMock(return_value=(False, 10))
+        neg._escape_full_reorder = MagicMock(return_value=(False, 10))
 
         success, overflow, tried = neg.escape_local_minimum(
             overflow_history=[10, 10, 10, 10],
@@ -282,6 +329,7 @@ class TestEscapeStrategyCycling:
         assert neg._escape_shuffle_order.call_count == 1
         assert neg._escape_reverse_order.call_count == 1
         assert neg._escape_random_subset.call_count == 0  # Not tried
+        assert neg._escape_full_reorder.call_count == 0  # Not tried
 
     def test_escape_wraps_around_strategy_index(self):
         """escape_local_minimum should wrap strategy index modulo num strategies."""
@@ -297,8 +345,9 @@ class TestEscapeStrategyCycling:
         neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
         neg._escape_reverse_order = MagicMock(return_value=(False, 10))
         neg._escape_random_subset = MagicMock(return_value=(False, 10))
+        neg._escape_full_reorder = MagicMock(return_value=(False, 10))
 
-        # Start from index 1 (reverse), should try reverse -> random -> shuffle
+        # Start from index 1 (reverse), should try reverse -> random -> full_reorder -> shuffle
         success, overflow, tried = neg.escape_local_minimum(
             overflow_history=[10, 10, 10, 10],
             net_routes={},
@@ -311,11 +360,139 @@ class TestEscapeStrategyCycling:
         )
 
         assert success is False
-        assert tried == 3
-        # All three should be called exactly once
+        assert tried == 4
+        # All four should be called exactly once
         assert neg._escape_shuffle_order.call_count == 1
         assert neg._escape_reverse_order.call_count == 1
         assert neg._escape_random_subset.call_count == 1
+        assert neg._escape_full_reorder.call_count == 1
+
+
+class TestEscapeFullReorder:
+    """Tests for the full-reorder escape strategy (Issue #1823)."""
+
+    def test_full_reorder_rips_up_all_nets(self):
+        """Full reorder should rip up ALL nets, not just conflicting ones."""
+        from unittest.mock import MagicMock, call
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_grid.get_total_overflow.return_value = 5
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # Set up mock routes for 3 nets
+        mock_route_1 = MagicMock()
+        mock_route_2 = MagicMock()
+        mock_route_3 = MagicMock()
+        net_routes = {1: [mock_route_1], 2: [mock_route_2], 3: [mock_route_3]}
+        routes_list = [mock_route_1, mock_route_2, mock_route_3]
+
+        # Mock rip_up_nets to track what gets ripped
+        ripped_nets = []
+        original_rip_up = neg.rip_up_nets
+
+        def track_rip_up(nets, nr, rl):
+            ripped_nets.extend(nets)
+            original_rip_up(nets, nr, rl)
+
+        neg.rip_up_nets = track_rip_up
+
+        # Mock route_net_negotiated to return a route
+        mock_new_route = MagicMock()
+        neg.route_net_negotiated = MagicMock(return_value=[mock_new_route])
+
+        pads_by_net = {
+            1: [MagicMock(), MagicMock()],
+            2: [MagicMock(), MagicMock()],
+            3: [MagicMock(), MagicMock()],
+        }
+
+        success, new_overflow = neg._escape_full_reorder(
+            overflow_history=[10, 10, 10, 10],
+            net_routes=net_routes,
+            routes_list=routes_list,
+            pads_by_net=pads_by_net,
+            net_order=[1, 2, 3],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+        )
+
+        # All 3 nets should have been ripped up
+        assert sorted(ripped_nets) == [1, 2, 3]
+        # All 3 nets should have been rerouted
+        assert neg.route_net_negotiated.call_count == 3
+
+    def test_full_reorder_reverses_net_order(self):
+        """Full reorder should route nets in reversed priority order."""
+        from unittest.mock import MagicMock, call
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_grid.get_total_overflow.return_value = 5
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        net_routes = {1: [MagicMock()], 2: [MagicMock()], 3: [MagicMock()]}
+        routes_list = list(net_routes[1] + net_routes[2] + net_routes[3])
+        neg.rip_up_nets = MagicMock()  # Don't actually rip up
+
+        # Track routing order
+        route_order = []
+        mock_route = MagicMock()
+
+        def track_route(pads, cost, callback, **kwargs):
+            # Identify net by matching pads object identity
+            for net_id, net_pads in pads_by_net.items():
+                if pads is net_pads:
+                    route_order.append(net_id)
+                    break
+            return [mock_route]
+
+        neg.route_net_negotiated = track_route
+
+        pads_by_net = {
+            1: [MagicMock(), MagicMock()],
+            2: [MagicMock(), MagicMock()],
+            3: [MagicMock(), MagicMock()],
+        }
+
+        neg._escape_full_reorder(
+            overflow_history=[10, 10, 10, 10],
+            net_routes=net_routes,
+            routes_list=routes_list,
+            pads_by_net=pads_by_net,
+            net_order=[1, 2, 3],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+        )
+
+        # Should route in reversed order: 3, 2, 1
+        assert route_order == [3, 2, 1]
+
+    def test_full_reorder_returns_false_on_empty_nets(self):
+        """Full reorder should return False when no nets are routed."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        neg = NegotiatedRouter(mock_grid, MagicMock(), MagicMock(), {})
+
+        success, overflow = neg._escape_full_reorder(
+            overflow_history=[10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+        )
+
+        assert success is False
+        assert overflow == 10
 
 
 class TestCalculatePresentCost:

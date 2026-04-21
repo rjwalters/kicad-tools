@@ -92,11 +92,27 @@ def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
     Detects:
     - A-B-A-B patterns (alternating between two values)
     - Complete stagnation (all same value for window iterations)
+    - Bounded oscillation (only when the window does NOT contain a new
+      global minimum, since a new minimum means the router is still
+      making progress -- Issue #1823)
     """
     if len(overflow_history) < window:
         return False
 
     recent = overflow_history[-window:]
+
+    # Issue #1823: If the recent window contains a new global minimum,
+    # the router is still making progress -- do not declare oscillation.
+    # For example, [21, 21, 8, 21] has overflow 8 as a new best, which
+    # means the router found a better configuration even if it bounced back.
+    best_overall = min(overflow_history)
+    window_min = min(recent)
+    window_has_new_minimum = window_min <= best_overall and window_min < min(
+        overflow_history[:-window]
+    ) if len(overflow_history) > window else False
+
+    if window_has_new_minimum:
+        return False
 
     # Check for exact A-B-A-B repetition pattern
     if window >= 4 and recent[0] == recent[2] and recent[1] == recent[3]:
@@ -175,16 +191,29 @@ def should_terminate_early(
 
     recent = overflow_history[-5:]
 
+    # Issue #1823: Check if the recent window contains a new global minimum.
+    # If so, skip the "no improvement" stagnation check (but still allow
+    # other termination checks like monotonic divergence).
+    best_overall = min(overflow_history)
+    recent_has_new_global_min = False
+    if min(recent) == best_overall and len(overflow_history) > 5:
+        best_before_recent = min(overflow_history[:-5])
+        if min(recent) < best_before_recent:
+            recent_has_new_global_min = True
+
     # No improvement in last 5 iterations.
     # When len(overflow_history) == 5 there is no earlier window; use the
     # first recorded value as baseline instead of float('inf') which would
     # make this check unreachable and mask stale-baseline divergence.
-    if len(overflow_history) > 5:
-        earlier = overflow_history[:-5]
-    else:
-        earlier = overflow_history[:1]
-    if min(recent) >= min(earlier):
-        return True
+    # Issue #1823: Skip this check when recent window found a new global
+    # minimum -- the router is still making progress.
+    if not recent_has_new_global_min:
+        if len(overflow_history) > 5:
+            earlier = overflow_history[:-5]
+        else:
+            earlier = overflow_history[:1]
+        if min(recent) >= min(earlier):
+            return True
 
     # Monotonic divergence: the last N values are strictly increasing and
     # all above the best-seen minimum.  This catches patterns like
@@ -195,7 +224,9 @@ def should_terminate_early(
         return True
 
     # Oscillating with no progress
-    if detect_oscillation(overflow_history, window=4):
+    # Issue #1823: Skip this check when the recent 5-iteration window
+    # contains a new global minimum -- the router recently made progress.
+    if not recent_has_new_global_min and detect_oscillation(overflow_history, window=4):
         # Only terminate if we've tried enough and aren't improving
         if iteration >= min_iterations and min(recent) == min(overflow_history):
             return True
@@ -566,6 +597,7 @@ class NegotiatedRouter:
             self._escape_shuffle_order,
             self._escape_reverse_order,
             self._escape_random_subset,
+            self._escape_full_reorder,
         ]
 
         num_strategies = len(strategies)
@@ -750,4 +782,62 @@ class NegotiatedRouter:
         # Accept escape if overflow improved and at least some nets survived
         # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
         # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
+
+    def _escape_full_reorder(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+    ) -> tuple[bool, int]:
+        """Escape strategy: rip up ALL nets and reroute in alternative order.
+
+        Issue #1823: The existing escape strategies only perturb nets passing
+        through overused cells.  If the root ordering places net A before net B,
+        and A's path blocks B's only viable route without itself being in an
+        overused cell, none of the first three strategies will fix this.
+
+        This strategy rips up every routed net and reroutes them all in a
+        completely different order (reversed net_order).  It is more expensive
+        but can escape ordering-dependent local minima.
+        """
+        all_nets = list(net_routes.keys())
+        if not all_nets:
+            return False, overflow_history[-1] if overflow_history else 0
+
+        # Rip up ALL routed nets
+        self.rip_up_nets(all_nets, net_routes, routes_list)
+
+        # Build alternative order: reverse of the priority net_order,
+        # then append any nets not in net_order.
+        net_set = set(all_nets)
+        ordered = [n for n in reversed(net_order) if n in net_set]
+        remaining = [n for n in all_nets if n not in set(net_order)]
+        random.shuffle(remaining)
+        reorder = ordered + remaining
+
+        # Reroute all nets in the alternative order with boosted cost
+        boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        for net in reorder:
+            net_pads = pads_by_net.get(net, [])
+            if net_pads and len(net_pads) >= 2:
+                routes = self.route_net_negotiated(
+                    net_pads, boosted_cost, mark_route_callback
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+
+        new_overflow = self.grid.get_total_overflow()
+        best_overflow = min(overflow_history) if overflow_history else float("inf")
+
+        # Accept if overflow improved and at least some nets survived
         return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
