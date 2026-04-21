@@ -134,6 +134,8 @@ class PCBDesignRules:
     min_via_drill: float = 0.3  # mm
     # Clearances
     min_clearance: float = 0.2  # mm
+    # Drill-to-drill spacing (including same-net vias)
+    min_drill_clearance: float = 0.102  # mm
     # Copper to edge
     copper_edge_clearance: float = 0.3  # mm
 
@@ -160,6 +162,7 @@ class PCBDesignRules:
             via_drill=self.min_via_drill,
             via_diameter=self.min_via_diameter,
             via_clearance=self.min_clearance,
+            min_drill_clearance=self.min_drill_clearance,
             grid_resolution=grid_resolution,
         )
 
@@ -323,6 +326,15 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
         min_drill_match = re.search(r"\(min_via_drill\s+([\d.]+)\)", design_text)
         if min_drill_match:
             rules.min_via_drill = float(min_drill_match.group(1))
+
+        # Parse minimum drill-to-drill clearance (KiCad 8+: min_drill)
+        min_drill_clearance_match = re.search(
+            r"\(min_drill\s+([\d.]+)\)", design_text
+        )
+        if min_drill_clearance_match:
+            rules.min_drill_clearance = float(
+                min_drill_clearance_match.group(1)
+            )
 
     return rules
 

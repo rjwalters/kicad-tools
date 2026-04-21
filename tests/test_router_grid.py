@@ -1556,6 +1556,151 @@ class TestViaToViaClearanceValidation:
         assert clearance < grid.rules.via_clearance
 
 
+class TestSameNetDrillSpacing:
+    """Tests for validate_same_net_drill_spacing() -- Issue #1782.
+
+    Verifies that same-net vias maintain minimum drill-to-drill spacing
+    to avoid un-manufacturable drill overlap.
+    """
+
+    @pytest.fixture
+    def grid(self):
+        """Create a routing grid for same-net drill spacing testing."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            min_drill_clearance=0.102,
+        )
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_same_net_vias_overlapping_drills(self, grid):
+        """Test that overlapping same-net drills are detected as violation.
+
+        Two same-net vias 0.347mm apart with 0.35mm drill diameter:
+        edge-to-edge = 0.347 - 0.175 - 0.175 = -0.003 (overlapping).
+        """
+        same_net_route = Route(net=1, net_name="NET1")
+        same_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(same_net_route)
+
+        via = Via(
+            x=10.347, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        assert is_valid is False
+        assert clearance < grid.rules.min_drill_clearance
+        assert location is not None
+
+    def test_same_net_vias_safe_distance(self, grid):
+        """Test that well-separated same-net vias pass validation."""
+        same_net_route = Route(net=1, net_name="NET1")
+        same_net_route.vias.append(
+            Via(x=5.0, y=5.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(same_net_route)
+
+        via = Via(
+            x=15.0, y=15.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        assert is_valid is True
+        assert clearance > grid.rules.min_drill_clearance
+        assert location is None
+
+    def test_different_net_vias_ignored(self, grid):
+        """Test that different-net vias are not checked by same-net drill spacing."""
+        other_net_route = Route(net=2, net_name="NET2")
+        other_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2")
+        )
+        grid.routes.append(other_net_route)
+
+        # Place a via very close but on a different net -- should be ignored
+        via = Via(
+            x=10.1, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        # No same-net vias exist, so validation passes trivially
+        assert is_valid is True
+
+    def test_self_via_not_checked(self, grid):
+        """Test that a via is not checked against itself (same position)."""
+        same_net_route = Route(net=1, net_name="NET1")
+        same_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(same_net_route)
+
+        # Exact same position -- should be skipped (self-check)
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        assert is_valid is True
+
+    def test_same_net_drill_just_below_threshold(self, grid):
+        """Test same-net vias just below min_drill_clearance threshold."""
+        same_net_route = Route(net=1, net_name="NET1")
+        same_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(same_net_route)
+
+        # Drill edge-to-edge = 0.45 - 0.175 - 0.175 = 0.1 < 0.102
+        via = Via(
+            x=10.45, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        assert is_valid is False
+        assert clearance < grid.rules.min_drill_clearance
+
+    def test_same_net_drill_at_threshold(self, grid):
+        """Test same-net vias at exactly min_drill_clearance pass."""
+        same_net_route = Route(net=1, net_name="NET1")
+        same_net_route.vias.append(
+            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+        )
+        grid.routes.append(same_net_route)
+
+        # Drill edge-to-edge = 0.453 - 0.175 - 0.175 = 0.103 > min_drill_clearance
+        via = Via(
+            x=10.453, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+        )
+
+        is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
+
+        assert is_valid is True
+        assert clearance >= grid.rules.min_drill_clearance
+
+
 class TestHeuristics:
     """Tests for heuristic classes."""
 

@@ -1923,7 +1923,73 @@ class Router:
             if not is_valid:
                 return False
 
+        # Issue #1782: Validate same-net drill-to-drill spacing
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_same_net_drill_spacing(
+                via, same_net=exclude_net
+            )
+            if not is_valid:
+                return False
+
         return True
+
+    def _merge_same_net_vias(self, route: Route) -> None:
+        """Merge vias in a new route that overlap with existing same-net vias.
+
+        Issue #1782: When routing multi-pad nets via MST edges, independent
+        sub-routes can place vias at nearby positions for the same net. If
+        the drill-to-drill distance is below the merge threshold
+        (via_diameter + min_drill_clearance), merge by keeping the midpoint
+        and updating connected segment endpoints.
+
+        Args:
+            route: The route to merge vias in (modified in place).
+        """
+        import math
+
+        merge_threshold = self.rules.via_diameter + self.rules.min_drill_clearance
+
+        # Collect all existing same-net vias from already-routed routes
+        existing_vias: list[Via] = []
+        for existing_route in self.grid.routes:
+            if existing_route.net == route.net:
+                existing_vias.extend(existing_route.vias)
+
+        if not existing_vias:
+            return
+
+        # Track which vias in the new route need merging
+        vias_to_remove: set[int] = set()
+
+        for i, new_via in enumerate(route.vias):
+            for existing_via in existing_vias:
+                distance = math.sqrt(
+                    (new_via.x - existing_via.x) ** 2
+                    + (new_via.y - existing_via.y) ** 2
+                )
+                if distance < merge_threshold and distance > 1e-6:
+                    # Merge: move the new via to the existing via's position
+                    # and update any segments that reference the old position
+                    old_x, old_y = new_via.x, new_via.y
+                    mid_x = existing_via.x
+                    mid_y = existing_via.y
+
+                    # Update segments that connect to this via
+                    for seg in route.segments:
+                        if abs(seg.x1 - old_x) < 1e-6 and abs(seg.y1 - old_y) < 1e-6:
+                            seg.x1 = mid_x
+                            seg.y1 = mid_y
+                        if abs(seg.x2 - old_x) < 1e-6 and abs(seg.y2 - old_y) < 1e-6:
+                            seg.x2 = mid_x
+                            seg.y2 = mid_y
+
+                    # Remove the new via since we're reusing the existing one
+                    vias_to_remove.add(i)
+                    break
+
+        # Remove merged vias (iterate in reverse to keep indices valid)
+        for idx in sorted(vias_to_remove, reverse=True):
+            route.vias.pop(idx)
 
     def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
         """Reconstruct the route from A* result with geometric validation.
@@ -1950,6 +2016,9 @@ class Router:
 
         # Convert path to segments and vias
         self._convert_path_to_route(path, route, start_pad, end_pad)
+
+        # Issue #1782: Merge vias that overlap with existing same-net vias
+        self._merge_same_net_vias(route)
 
         # Validate layer transitions and insert any missing vias
         route.validate_layer_transitions(

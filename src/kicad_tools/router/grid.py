@@ -1174,6 +1174,72 @@ class RoutingGrid:
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
 
+    def validate_same_net_drill_spacing(
+        self,
+        via: "Via",
+        same_net: int,
+        min_drill_clearance: float | None = None,
+    ) -> tuple[bool, float, tuple[float, float] | None]:
+        """Validate drill-to-drill spacing between same-net vias.
+
+        Issue #1782: Even same-net vias must maintain minimum drill-to-drill
+        spacing to be manufacturable. Overlapping or near-overlapping drills
+        from the same net cause fabrication defects.
+
+        Uses center-to-center distance minus both drill radii to compute
+        edge-to-edge drill clearance. Only checks vias belonging to the
+        specified net (opposite logic to validate_via_to_via_clearance which
+        *excludes* the same net).
+
+        Args:
+            via: The via to validate
+            same_net: Net ID to check against (only same-net vias are checked)
+            min_drill_clearance: Minimum required drill-to-drill spacing
+                (default: rules.min_drill_clearance)
+
+        Returns:
+            Tuple of (is_valid, actual_clearance, violation_location)
+            - is_valid: True if via meets drill spacing requirements
+            - actual_clearance: Minimum drill clearance found
+            - violation_location: (x, y) of worst violation, or None if valid
+        """
+        import math
+
+        if min_drill_clearance is None:
+            min_drill_clearance = self.rules.min_drill_clearance
+
+        drill_radius = via.drill / 2
+        min_actual_clearance = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        has_violation = False
+
+        for route in self.routes:
+            if route.net != same_net:
+                continue
+
+            for existing_via in route.vias:
+                # Skip checking against self (exact same position and drill)
+                if (
+                    abs(via.x - existing_via.x) < 1e-6
+                    and abs(via.y - existing_via.y) < 1e-6
+                ):
+                    continue
+
+                distance = math.sqrt(
+                    (via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2
+                )
+                existing_drill_radius = existing_via.drill / 2
+                clearance = distance - drill_radius - existing_drill_radius
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                if clearance < min_drill_clearance:
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
+
+        is_valid = not has_violation
+        return is_valid, min_actual_clearance, violation_loc
+
     def _point_to_segment_distance(
         self,
         px: float,
