@@ -545,13 +545,23 @@ def _make_segment_via_key(child) -> str | None:
     return None
 
 
-def _canonicalize_net_node(net_node, name_to_number: dict[str, int]):
-    """Canonicalize a ``(net ...)`` S-expression to ``(net N "name")`` format.
+def _canonicalize_net_node(
+    net_node, name_to_number: dict[str, int], *, numeric_only: bool = False
+):
+    """Canonicalize a ``(net ...)`` S-expression to canonical format.
 
     KiCad 10 may emit inline net references as ``(net "name")`` without a
     numeric ID.  If the node is in name-only format and the name appears in
-    *name_to_number*, return a new ``(net N "name")`` node.  Otherwise
-    return the original node unchanged.
+    *name_to_number*, return a corrected node.  Otherwise return the original
+    node unchanged.
+
+    Args:
+        net_node: The S-expression node to canonicalize.
+        name_to_number: Mapping from net name to net number.
+        numeric_only: When *True*, produce ``(net N)`` (required for
+            segments and vias in KiCad 9+).  When *False* (default),
+            produce ``(net N "name")`` (valid for pads and net
+            declarations).
     """
     from kicad_tools.sexp import SExp
 
@@ -563,7 +573,10 @@ def _canonicalize_net_node(net_node, name_to_number: dict[str, int]):
     # Name-only format: (net "name")
     net_name = net_node.get_string(0) or ""
     if net_name and net_name in name_to_number:
-        return SExp.list("net", name_to_number[net_name], net_name)
+        num = name_to_number[net_name]
+        if numeric_only:
+            return SExp.list("net", num)
+        return SExp.list("net", num, net_name)
     return net_node
 
 
@@ -731,7 +744,7 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
                 continue
             geo_key = _make_segment_via_key(child)
             if geo_key:
-                snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number)]
+                snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
 
     return snapshot
 
