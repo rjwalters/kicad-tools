@@ -8,11 +8,12 @@ Orchestrates the full repair pipeline:
 3. Fix vias (manufacturer compliance)
 4. [Optional] Route (if board is unrouted)
 5. Optimize traces
-6. Fix DRC violations
-7. Zone fill (requires kicad-cli)
-8. Audit / check
-9. Report generation (manufacturing report)
-10. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
+6. Zone fill (requires kicad-cli)
+7. Fix DRC violations
+8. Zone refill (recompute zones after trace nudges)
+9. Audit / check
+10. Report generation (manufacturing report)
+11. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
 
 Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
@@ -55,12 +56,18 @@ class PipelineStep(str, Enum):
     FIX_DRC = "fix-drc"
     OPTIMIZE = "optimize"
     ZONES = "zones"
+    ZONES_REFILL = "zones-refill"
     AUDIT = "audit"
     REPORT = "report"
     EXPORT = "export"
 
 
-# Ordered list of all pipeline steps
+# Ordered list of all pipeline steps.
+#
+# Zone fill runs BEFORE fix-drc so that zone copper is computed against
+# current trace positions.  After fix-drc nudges traces, a zone refill
+# pass recomputes fill polygons to respect the new trace positions,
+# eliminating zone-to-trace clearance violations.
 ALL_STEPS = [
     PipelineStep.ERC,
     PipelineStep.FIX_ERC,
@@ -68,8 +75,9 @@ ALL_STEPS = [
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
     PipelineStep.OPTIMIZE,
-    PipelineStep.FIX_DRC,
     PipelineStep.ZONES,
+    PipelineStep.FIX_DRC,
+    PipelineStep.ZONES_REFILL,
     PipelineStep.AUDIT,
     PipelineStep.REPORT,
     PipelineStep.EXPORT,
@@ -732,6 +740,56 @@ def _run_step_zones(ctx: PipelineContext, console: Console) -> PipelineResult:
     )
 
 
+def _run_step_zones_refill(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Re-fill zones after fix-drc has nudged traces.
+
+    This ensures zone copper is recomputed against post-nudge trace
+    positions, eliminating zone-to-trace clearance violations that would
+    otherwise appear in the audit step.
+    """
+    from .runner import find_kicad_cli
+
+    kicad_cli = find_kicad_cli()
+
+    if kicad_cli is None:
+        return PipelineResult(
+            step=PipelineStep.ZONES_REFILL,
+            success=True,
+            message="zones refill: skipped (kicad-cli not installed)",
+            skipped=True,
+        )
+
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.ZONES_REFILL,
+            success=True,
+            message=f"[dry-run] Would run: kct zones fill {ctx.pcb_file.name} (refill)",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Re-filling zones in {ctx.pcb_file.name} (post fix-drc)...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
+        str(ctx.pcb_file),
+    ]
+
+    if ctx.quiet:
+        cmd.append("--quiet")
+
+    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.ZONES_REFILL,
+        success=success,
+        message=f"zones refill: {message}",
+    )
+
+
 def _run_step_audit(ctx: PipelineContext, console: Console) -> PipelineResult:
     """Run final audit/check step."""
     # Use project-level audit if we have a .kicad_pro, else PCB-level check
@@ -1199,6 +1257,7 @@ STEP_RUNNERS = {
     PipelineStep.FIX_DRC: _run_step_fix_drc,
     PipelineStep.OPTIMIZE: _run_step_optimize,
     PipelineStep.ZONES: _run_step_zones,
+    PipelineStep.ZONES_REFILL: _run_step_zones_refill,
     PipelineStep.AUDIT: _run_step_audit,
     PipelineStep.REPORT: _run_step_report,
     PipelineStep.EXPORT: _run_step_export,
