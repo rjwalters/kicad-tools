@@ -104,6 +104,89 @@ EMPTY_PCB = """\
 )
 """
 
+# PCB with zone fills but no routed traces (issue #1835)
+ZONE_FILL_ONLY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (footprint "Resistor_SMD:R_0603_1608Metric"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 50)
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "VCC"))
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "zone-1")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 40) (xy 120 40) (xy 120 60) (xy 90 60)))
+    (filled_polygon
+      (layer "F.Cu")
+      (pts (xy 90.1 40.1) (xy 119.9 40.1) (xy 119.9 59.9) (xy 90.1 59.9))
+    )
+  )
+)
+"""
+
+# PCB with both zone fills and routed traces
+ZONE_FILL_WITH_TRACES_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (footprint "Resistor_SMD:R_0603_1608Metric"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 50)
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "VCC"))
+  )
+  (segment (start 100.8 50) (end 110 50) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "zone-1")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 40) (xy 120 40) (xy 120 60) (xy 90 60)))
+    (filled_polygon
+      (layer "F.Cu")
+      (pts (xy 90.1 40.1) (xy 119.9 40.1) (xy 119.9 59.9) (xy 90.1 59.9))
+    )
+  )
+)
+"""
+
 
 @pytest.fixture
 def routed_pcb(tmp_path: Path) -> Path:
@@ -127,6 +210,22 @@ def empty_pcb(tmp_path: Path) -> Path:
     pcb_file = tmp_path / "empty.kicad_pcb"
     pcb_file.write_text(EMPTY_PCB)
     return pcb_file
+
+@pytest.fixture
+def zone_fill_only_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with zone fills but no routed traces."""
+    pcb_file = tmp_path / "zone_fill_only.kicad_pcb"
+    pcb_file.write_text(ZONE_FILL_ONLY_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def zone_fill_with_traces_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with both zone fills and routed traces."""
+    pcb_file = tmp_path / "zone_fill_with_traces.kicad_pcb"
+    pcb_file.write_text(ZONE_FILL_WITH_TRACES_PCB)
+    return pcb_file
+
 
 
 @pytest.fixture
@@ -161,6 +260,23 @@ class TestDetectRoutingStatus:
         assert is_routed is False
         assert trace_count == 0
         assert net_count == 0
+
+
+    def test_zone_fill_only_not_routed(self, zone_fill_only_pcb: Path):
+        """A PCB with only zone fills (no top-level segments) is unrouted (#1835)."""
+        is_routed, trace_count, net_count = _detect_routing_status(zone_fill_only_pcb)
+        assert is_routed is False
+        assert trace_count == 0
+        assert net_count > 0
+
+    def test_zone_fill_with_traces_detected(self, zone_fill_with_traces_pcb: Path):
+        """A PCB with zone fills AND top-level segments is detected as routed."""
+        is_routed, trace_count, net_count = _detect_routing_status(
+            zone_fill_with_traces_pcb
+        )
+        assert is_routed is True
+        assert trace_count == 1
+        assert net_count > 0
 
     def test_nonexistent_file(self, tmp_path: Path):
         """Non-existent file returns unrouted with zero counts."""
