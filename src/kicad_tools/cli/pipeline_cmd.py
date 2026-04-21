@@ -7,19 +7,25 @@ Orchestrates the full repair pipeline:
 2. Fix silkscreen (manufacturer line-width compliance)
 3. Fix vias (manufacturer compliance)
 4. [Optional] Route (if board is unrouted)
-5. Optimize traces
-6. Zone fill (requires kicad-cli)
-7. Fix DRC violations
-8. Zone refill (recompute zones after trace nudges)
-9. Audit / check
-10. Report generation (manufacturing report)
-11. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
+5. Stitch (add stitching vias for plane connections on multi-layer boards)
+6. Optimize traces
+7. Zone fill (requires kicad-cli)
+8. Fix DRC violations
+9. Zone refill (recompute zones after trace nudges)
+10. Audit / check
+11. Report generation (manufacturing report)
+12. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
+
+The stitch step must run AFTER route (so traces exist) and BEFORE zones
+(so zone fill respects via clearances).  On 2-layer boards or boards
+without internal plane nets, the stitch step is skipped automatically.
 
 Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
     kct pipeline board.kicad_pcb --dry-run
     kct pipeline board.kicad_pcb --step fix-vias
     kct pipeline board.kicad_pcb --step fix-silkscreen
+    kct pipeline board.kicad_pcb --step stitch
     kct pipeline board.kicad_pcb --step erc
     kct pipeline board.kicad_pcb --step fix-erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
@@ -52,6 +58,7 @@ class PipelineStep(str, Enum):
     FIX_ERC = "fix-erc"
     FIX_SILKSCREEN = "fix-silkscreen"
     ROUTE = "route"
+    STITCH = "stitch"
     FIX_VIAS = "fix-vias"
     FIX_DRC = "fix-drc"
     OPTIMIZE = "optimize"
@@ -64,6 +71,10 @@ class PipelineStep(str, Enum):
 
 # Ordered list of all pipeline steps.
 #
+# Stitch runs AFTER route so stitching vias connect pads to planes on a
+# fully-routed board.  It runs BEFORE optimize/zones so that zone fill
+# sees the stitching vias and respects their clearance.
+#
 # Zone fill runs BEFORE fix-drc so that zone copper is computed against
 # current trace positions.  After fix-drc nudges traces, a zone refill
 # pass recomputes fill polygons to respect the new trace positions,
@@ -74,6 +85,7 @@ ALL_STEPS = [
     PipelineStep.FIX_SILKSCREEN,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
+    PipelineStep.STITCH,
     PipelineStep.OPTIMIZE,
     PipelineStep.ZONES,
     PipelineStep.FIX_DRC,
@@ -583,6 +595,81 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
         success=success,
         message=f"route: {message}",
         warning=is_partial,
+    )
+
+
+def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run stitching via placement step for multi-layer boards.
+
+    Adds stitching vias to connect surface-mount component pads to
+    internal power/ground planes.  Skips gracefully when:
+    - The board has only 2 layers (no internal planes).
+    - No plane nets are detected in the PCB zones.
+    """
+    # Skip on 2-layer boards (no internal planes to stitch to)
+    if ctx.layer_count <= 2:
+        return PipelineResult(
+            step=PipelineStep.STITCH,
+            success=True,
+            message="stitch: 2-layer board — skipped (no internal planes)",
+            skipped=True,
+        )
+
+    # Probe the PCB for plane nets before invoking the subprocess.
+    # This avoids spawning a child process just to discover there is
+    # nothing to stitch.
+    try:
+        from ..cli.stitch_cmd import find_all_plane_nets
+        from ..core.sexp_file import load_pcb as _load_pcb
+
+        sexp = _load_pcb(ctx.pcb_file)
+        plane_nets = find_all_plane_nets(sexp)
+    except Exception as exc:
+        logger.debug("Could not probe plane nets: %s", exc)
+        plane_nets = {}
+
+    if not plane_nets:
+        return PipelineResult(
+            step=PipelineStep.STITCH,
+            success=True,
+            message="stitch: no plane nets detected — skipped",
+            skipped=True,
+        )
+
+    if ctx.dry_run:
+        nets_str = ", ".join(sorted(plane_nets.keys()))
+        return PipelineResult(
+            step=PipelineStep.STITCH,
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct stitch {ctx.pcb_file.name} "
+                f"(auto-detected nets: {nets_str})"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(
+            f"  Stitching vias on {ctx.pcb_file.name} "
+            f"({len(plane_nets)} plane net(s))..."
+        )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "stitch",
+        str(ctx.pcb_file),
+    ]
+
+    if ctx.force:
+        cmd.append("--force")
+
+    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.STITCH,
+        success=success,
+        message=f"stitch: {message}",
     )
 
 
@@ -1253,6 +1340,7 @@ STEP_RUNNERS = {
     PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
     PipelineStep.ROUTE: _run_step_route,
+    PipelineStep.STITCH: _run_step_stitch,
     PipelineStep.FIX_VIAS: _run_step_fix_vias,
     PipelineStep.FIX_DRC: _run_step_fix_drc,
     PipelineStep.OPTIMIZE: _run_step_optimize,
