@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
-from .primitives import Route, Segment
+from .primitives import Route, Segment, Via
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,22 @@ COINCIDENT_THRESHOLD = 0.01  # mm -- legacy constant kept for backward compat
 _ENDPOINT_TOL = 0.05  # mm -- tolerance for matching segment endpoints to via positions
 
 
+def _expand_via_layers(surviving: Via, removed: Via) -> None:
+    """Expand the surviving via's layers to span both vias' layer ranges.
+
+    Issue #1802: When merging vias with different layer pairs (e.g.,
+    F.Cu/In1.Cu and B.Cu/F.Cu), the merged via must connect all layers
+    that either original via connected.  This converts the surviving via
+    to a through-via (or wider span) when necessary.
+    """
+    min_layer = min(surviving.layers[0].value, surviving.layers[1].value,
+                    removed.layers[0].value, removed.layers[1].value)
+    max_layer = max(surviving.layers[0].value, surviving.layers[1].value,
+                    removed.layers[0].value, removed.layers[1].value)
+    if min_layer != surviving.layers[0].value or max_layer != surviving.layers[1].value:
+        surviving.layers = (Layer(min_layer), Layer(max_layer))
+
+
 def _compute_merge_threshold(router: Autorouter) -> float:
     """Return the drill-overlap merge threshold from design rules.
 
@@ -200,6 +216,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                         route.segments, via_b.x, via_b.y,
                         via_a.x, via_a.y, _ENDPOINT_TOL,
                     )
+                    _expand_via_layers(via_a, via_b)
                     merged_indices.add(j)
 
         if merged_indices:
@@ -242,6 +259,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                                 route_b.segments, via_b.x, via_b.y,
                                 via_a.x, via_a.y, _ENDPOINT_TOL,
                             )
+                            _expand_via_layers(via_a, via_b)
                             remove_from_b.add(bj)
 
                 if remove_from_b:
