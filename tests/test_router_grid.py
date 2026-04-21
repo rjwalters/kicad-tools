@@ -356,6 +356,77 @@ class TestRoutingGridRoutes:
             cell = grid.grid[layer_idx][gy][gx]
             assert cell.net == 2
 
+    def test_mark_via_clearance_margin(self, grid):
+        """Via blocking includes +1 grid-quantization safety margin (Issue #1797).
+
+        With default rules (via_diameter=0.7, via_clearance=0.2,
+        trace_width=0.2, resolution=0.1) the geometric radius is
+        int((0.35 + 0.2 + 0.1) / 0.1) = 6 cells.  The safety margin
+        bumps this to 7, so a cell 7 cells away from the via centre
+        must be blocked.
+        """
+        via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        route = Route(net=2, net_name="NET2", segments=[], vias=[via])
+        grid.mark_route(route)
+
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        geometric_radius = int(
+            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2)
+            / grid.resolution
+        )
+        expected_radius = geometric_radius + 1  # safety margin
+
+        # Cell at expected_radius distance should be blocked
+        nx = gx + expected_radius
+        if nx < grid.cols:
+            cell = grid.grid[0][gy][nx]
+            assert cell.blocked, (
+                f"Cell at +{expected_radius} cells from via centre should be "
+                f"blocked (geometric_radius={geometric_radius})"
+            )
+
+        # Cell one beyond expected_radius should NOT be blocked
+        nx_beyond = gx + expected_radius + 1
+        if nx_beyond < grid.cols:
+            cell_beyond = grid.grid[0][gy][nx_beyond]
+            assert not cell_beyond.blocked, (
+                f"Cell at +{expected_radius + 1} cells from via centre should "
+                f"NOT be blocked"
+            )
+
+    def test_mark_unmark_via_symmetric(self, grid):
+        """Unmark_via clears the same cells that mark_via blocked (Issue #1797)."""
+        via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        route = Route(net=2, net_name="NET2", segments=[], vias=[via])
+        grid.mark_route(route)
+
+        # Verify something is blocked first
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        assert grid.grid[0][gy][gx].blocked
+
+        grid.unmark_route(route)
+
+        # All cells around the via should be unblocked
+        geometric_radius = int(
+            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2)
+            / grid.resolution
+        )
+        check_radius = geometric_radius + 1  # includes safety margin
+        for dy in range(-check_radius, check_radius + 1):
+            for dx in range(-check_radius, check_radius + 1):
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < grid.cols and 0 <= ny < grid.rows:
+                    cell = grid.grid[0][ny][nx]
+                    assert not cell.blocked, (
+                        f"Cell ({nx}, {ny}) still blocked after unmark_via"
+                    )
+
     def test_mark_and_unmark_route(self, grid):
         """Test marking and unmarking a complete route."""
         seg1 = Segment(x1=1.0, y1=1.0, x2=2.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=1)

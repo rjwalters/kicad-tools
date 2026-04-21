@@ -1513,6 +1513,10 @@ class RoutingGrid:
             (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
             / self.resolution
         )
+        # Issue #1797: Add safety margin to prevent grid-quantization
+        # clearance violations between traces and vias (mirrors the +1
+        # applied in mark_route() for segments, see Issue #1666).
+        radius += 1
 
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
@@ -1614,6 +1618,9 @@ class RoutingGrid:
             (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
             / self.resolution
         )
+        # Issue #1797: Must match _mark_via safety margin so the same
+        # cells are cleared during rip-up.
+        radius += 1
 
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
