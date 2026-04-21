@@ -565,7 +565,7 @@ class TestFallbackProximityRestore:
         from kicad_tools.core.sexp_file import load_pcb
 
         # Post-fill PCB: segment coordinates drifted beyond rounding tolerance
-        # but within proximity threshold (0.01 mm)
+        # but within proximity threshold (0.1 mm)
         pcb = self._write_pcb(
             tmp_path,
             """(kicad_pcb
@@ -633,6 +633,93 @@ class TestFallbackProximityRestore:
                         net_num = net_node.get_int(0)
                         assert net_num != 7, "Segment too far should not be proximity-matched"
                 break
+
+
+    def test_segment_restored_after_fix_drc_nudge(self, tmp_path):
+        """Segment nudged up to 0.05 mm by fix-drc must still be proximity-matched.
+
+        fix-drc's repair_clearance can nudge segments up to max_displacement=0.1 mm.
+        With the old 0.01 mm threshold, a nudge of even 0.006 mm per endpoint would
+        exceed the combined distance metric and cause 130+ segments to lose their
+        net assignments (issue #1842).  The widened 0.1 mm threshold covers this.
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        # Segment nudged 0.05 mm on start-x -- well beyond old 0.01 threshold
+        # but within new 0.1 threshold
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 18 "SCK")
+  (segment (start 100.05 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "nudge1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(18, "SCK")]
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(18)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 18, (
+                    f"Segment nudged 0.05 mm should be proximity-matched; got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No segment found in restored PCB")
+
+    def test_segment_not_restored_beyond_widened_threshold(self, tmp_path):
+        """Segment displaced > 0.1 mm must NOT be proximity-matched.
+
+        Even with the widened threshold, segments displaced beyond 0.1 mm
+        (which exceeds fix-drc max_displacement) should not match to avoid
+        cross-net mismatches.
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        # Segment displaced 0.15 mm on start-x -- beyond the 0.1 threshold
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 18 "SCK")
+  (segment (start 100.15 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "far2"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(18, "SCK")]
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(18)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                if net_node is not None:
+                    net_str = net_node.get_string(0)
+                    if net_str == "":
+                        pass  # Expected: still empty
+                    else:
+                        net_num = net_node.get_int(0)
+                        assert net_num != 18, "Segment 0.15 mm away should not be proximity-matched"
+                break
+
 
 
 # ---------------------------------------------------------------------------
