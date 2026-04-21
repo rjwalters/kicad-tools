@@ -11,6 +11,7 @@ from kicad_tools.cli.stitch_cmd import (
     TraceSegment,
     TrackSegment,
     calculate_dogleg_via_position,
+    calculate_extended_escape_position,
     calculate_via_position,
     check_via_clearance,
     extract_zone_polygons,
@@ -36,7 +37,6 @@ from kicad_tools.cli.stitch_cmd import (
     segment_to_segment_distance,
 )
 from kicad_tools.core.sexp_file import load_pcb
-
 # PCB with SMD components on GND and +3.3V nets for testing stitching
 STITCH_TEST_PCB = """(kicad_pcb
   (version 20240108)
@@ -3260,6 +3260,426 @@ class TestRunBlanketStitch:
         captured = capsys.readouterr()
         assert "stitching vias" in captured.out.lower() or "Added" in captured.out
 
+
+# Dense QFP-like PCB for testing extended escape routing.
+# Simulates a QFP-64-like package with 0.5mm pitch where power pins are
+# surrounded by signal pins on all sides, preventing both straight-line
+# and dog-leg placement.
+DENSE_QFP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (net 3 "SIG_A")
+  (net 4 "SIG_B")
+  (net 5 "SIG_C")
+  (net 6 "SIG_D")
+  (net 7 "SIG_E")
+  (net 8 "SIG_F")
+  (net 9 "SIG_G")
+  (net 10 "SIG_H")
+  (footprint "Package_QFP:QFP-64_10x10mm_P0.5mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "U1" (at 0 -7 0) (layer "F.SilkS") (uuid "ref-uuid-u1"))
+    (pad "1" smd roundrect (at -5.5 -3.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG_A"))
+    (pad "2" smd roundrect (at -5.5 -3.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 4 "SIG_B"))
+    (pad "3" smd roundrect (at -5.5 -2.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 5 "SIG_C"))
+    (pad "4" smd roundrect (at -5.5 -2.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 6 "SIG_D"))
+    (pad "5" smd roundrect (at -5.5 -1.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 7 "SIG_E"))
+    (pad "6" smd roundrect (at -5.5 -1.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 8 "SIG_F"))
+    (pad "7" smd roundrect (at -5.5 -0.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 9 "SIG_G"))
+    (pad "8" smd roundrect (at -5.5 -0.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "9" smd roundrect (at -5.5 0.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 10 "SIG_H"))
+    (pad "10" smd roundrect (at -5.5 0.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG_A"))
+    (pad "11" smd roundrect (at -5.5 1.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 4 "SIG_B"))
+    (pad "12" smd roundrect (at -5.5 1.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 5 "SIG_C"))
+    (pad "13" smd roundrect (at -5.5 2.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "VCC"))
+    (pad "14" smd roundrect (at -5.5 2.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 6 "SIG_D"))
+    (pad "15" smd roundrect (at -5.5 3.25) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 7 "SIG_E"))
+    (pad "16" smd roundrect (at -5.5 3.75) (size 1.2 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 8 "SIG_F"))
+  )
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone-gnd-uuid")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.25)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))
+    (polygon
+      (pts (xy 85 85) (xy 115 85) (xy 115 115) (xy 85 115))
+    )
+  )
+  (zone (net 2) (net_name "VCC") (layer "B.Cu") (uuid "zone-vcc-uuid")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.25)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))
+    (polygon
+      (pts (xy 85 85) (xy 115 85) (xy 115 115) (xy 85 115))
+    )
+  )
+)
+"""
+
+
+class TestExtendedEscapeRouting:
+    """Tests for extended escape routing for dense IC packages."""
+
+    @pytest.fixture
+    def dense_qfp_pcb(self, tmp_path: Path) -> Path:
+        """Create a test PCB file simulating a dense QFP-64 package."""
+        pcb_path = tmp_path / "dense_qfp.kicad_pcb"
+        pcb_path.write_text(DENSE_QFP_PCB)
+        return pcb_path
+
+    def test_calculate_extended_escape_finds_position(self):
+        """Extended escape should find a via position using multi-segment path."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+
+        # Place blocking pads at offset positions (not directly on cardinal
+        # axes from pad center) so they block some via positions but leave
+        # escape channels for traces.
+        other_net_pads = [
+            (99.5, 99.5, 0.15, 3),   # upper-left diagonal
+            (100.5, 99.5, 0.15, 4),  # upper-right diagonal
+            (99.5, 100.5, 0.15, 5),  # lower-left diagonal
+            (100.5, 100.5, 0.15, 6), # lower-right diagonal
+        ]
+
+        result = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=4.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+
+        assert result is not None, "Extended escape should find a via position"
+        via_x, via_y, waypoints = result
+        assert len(waypoints) >= 1, "Should have at least one waypoint"
+
+        # Via should be at valid distance
+        dist = math.sqrt((via_x - pad.x) ** 2 + (via_y - pad.y) ** 2)
+        assert dist > 0.5, "Via should be placed beyond immediate pad area"
+
+    def test_extended_escape_returns_valid_path_structure(self):
+        """Extended escape should return a properly structured multi-waypoint result."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.6,
+            height=0.3,
+        )
+
+        # Minimal blocking: one pad to the left that forces an L-shape.
+        # Extended escape should route around it.
+        other_net_pads = [
+            (99.2, 100.0, 0.15, 3),
+        ]
+
+        result = calculate_extended_escape_position(
+            pad=pad, offset=0.5, via_size=0.45, existing_vias=[],
+            clearance=0.2, escape_distance=4.0,
+            other_net_tracks=[], other_net_vias=[],
+            other_net_pads=other_net_pads, trace_width=0.2,
+        )
+
+        assert result is not None, "Should find a position"
+        via_x, via_y, waypoints = result
+        assert isinstance(waypoints, list)
+        assert len(waypoints) >= 1
+        # Each waypoint should be a tuple of (x, y)
+        for wp in waypoints:
+            assert len(wp) == 2
+            assert isinstance(wp[0], float) or isinstance(wp[0], int)
+            assert isinstance(wp[1], float) or isinstance(wp[1], int)
+
+    def test_extended_escape_respects_clearance(self):
+        """Extended escape via and trace path should respect clearance."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+
+        # Create blocking pads
+        other_net_pads = [
+            (100.0, 99.5, 0.15, 3),
+            (100.0, 100.5, 0.15, 4),
+            (99.0, 99.5, 0.15, 5),
+            (99.0, 100.5, 0.15, 6),
+        ]
+
+        via_size = 0.45
+        clearance = 0.2
+        via_radius = via_size / 2
+
+        result = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=via_size,
+            existing_vias=[],
+            clearance=clearance,
+            escape_distance=3.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+
+        if result is not None:
+            via_x, via_y, waypoints = result
+            # Verify via position has clearance to all other-net pads
+            for px, py, p_radius, _pnet in other_net_pads:
+                dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
+                min_dist = via_radius + p_radius + clearance
+                assert dist >= min_dist - 0.01, (
+                    f"Via at ({via_x:.2f}, {via_y:.2f}) too close to pad at "
+                    f"({px:.2f}, {py:.2f}): {dist:.3f} < {min_dist:.3f}"
+                )
+
+    def test_extended_escape_respects_max_distance(self):
+        """Extended escape should not exceed the escape_distance limit."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+
+        # Completely surround the pad with blocking pads at very tight pitch
+        # so that only a very long escape could work, beyond our limit
+        other_net_pads = []
+        for dx in [-0.3, 0.0, 0.3]:
+            for dy in [-0.3, 0.0, 0.3]:
+                if dx == 0 and dy == 0:
+                    continue
+                other_net_pads.append((100.0 + dx, 100.0 + dy, 0.15, 3))
+
+        # With a very small escape distance, it should fail
+        result = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=0.3,  # Very short, unlikely to succeed
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+
+        # With such tight surroundings and short distance, we expect None
+        assert result is None, (
+            "Extended escape should fail when escape_distance is too short"
+        )
+
+    def test_trace_segment_is_extended_escape_property(self):
+        """TraceSegment.is_extended_escape should correctly identify multi-waypoint traces."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+
+        # Straight trace
+        straight = TraceSegment(
+            pad=pad, via_x=101, via_y=100, width=0.2, layer="F.Cu"
+        )
+        assert not straight.is_extended_escape
+
+        # Dog-leg trace
+        dogleg = TraceSegment(
+            pad=pad, via_x=101, via_y=101, width=0.2, layer="F.Cu",
+            intermediate_x=101, intermediate_y=100,
+        )
+        assert not dogleg.is_extended_escape
+
+        # Extended escape trace
+        extended = TraceSegment(
+            pad=pad, via_x=103, via_y=102, width=0.2, layer="F.Cu",
+            waypoints=[(101, 100), (102, 101)],
+        )
+        assert extended.is_extended_escape
+
+        # Empty waypoints
+        empty_wp = TraceSegment(
+            pad=pad, via_x=101, via_y=100, width=0.2, layer="F.Cu",
+            waypoints=[],
+        )
+        assert not empty_wp.is_extended_escape
+
+    def test_run_stitch_uses_extended_escape_for_dense_pads(self, dense_qfp_pcb: Path):
+        """run_stitch should use extended escape when dogleg fails on dense packages."""
+        result = run_stitch(
+            pcb_path=dense_qfp_pcb,
+            net_names=["GND", "VCC"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+            escape_distance=3.0,
+        )
+
+        # Should have placed at least some vias (either via dogleg or extended escape)
+        assert len(result.vias_added) > 0, (
+            "Should place at least some vias for GND/VCC pins on dense QFP"
+        )
+
+    def test_run_stitch_extended_escape_skip_reason(self, dense_qfp_pcb: Path):
+        """Pads that fail even extended escape should report descriptive skip reasons."""
+        result = run_stitch(
+            pcb_path=dense_qfp_pcb,
+            net_names=["GND", "VCC"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+            escape_distance=0.1,  # Very short, many should fail
+        )
+
+        # Check that any skipped pads have descriptive reasons
+        for _pad, reason in result.pads_skipped:
+            assert "extended escape" in reason, (
+                f"Skip reason should mention extended escape: {reason}"
+            )
+
+    def test_existing_simple_stitch_unchanged(self, tmp_path: Path):
+        """Existing simple stitch behavior should be unchanged by escape_distance parameter."""
+        pcb_file = tmp_path / "simple.kicad_pcb"
+        pcb_file.write_text(STITCH_TEST_PCB)
+
+        # Run with default escape_distance - should work identically to before
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+            escape_distance=3.0,
+        )
+
+        # Simple capacitor pads should still be stitched via straight-line
+        assert len(result.vias_added) > 0
+        # None of the traces should be extended escape (simple components
+        # should use straight-line or at most dog-leg)
+        extended_traces = [t for t in result.traces_added if t.is_extended_escape]
+        assert len(extended_traces) == 0, (
+            "Simple components should not use extended escape routing"
+        )
+
+    def test_dogleg_regression_fine_pitch(self, tmp_path: Path):
+        """Dog-leg routing on SSOP-like components should still work without escalation."""
+        pcb_file = tmp_path / "fine_pitch.kicad_pcb"
+        pcb_file.write_text(FINE_PITCH_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+            escape_distance=3.0,
+        )
+
+        # SSOP components should still get vias placed
+        assert len(result.vias_added) > 0
+
+    def test_escape_distance_cli_option(self, tmp_path: Path, capsys):
+        """The --escape-distance CLI option should be accepted."""
+        pcb_file = tmp_path / "escape_cli.kicad_pcb"
+        pcb_file.write_text(STITCH_TEST_PCB)
+
+        exit_code = main([
+            str(pcb_file),
+            "--net", "GND",
+            "--escape-distance", "5.0",
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+    def test_output_counts_extended_escape_traces(self, dense_qfp_pcb: Path, capsys):
+        """Output summary should count extended escape traces separately."""
+        result = run_stitch(
+            pcb_path=dense_qfp_pcb,
+            net_names=["GND", "VCC"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+            escape_distance=3.0,
+        )
+
+        from kicad_tools.cli.stitch_cmd import output_result
+        output_result(result, dry_run=True)
+
+        captured = capsys.readouterr()
+        # If extended escape traces were used, the summary should mention them
+        extended_traces = [t for t in result.traces_added if t.is_extended_escape]
+        if extended_traces:
+            assert "extended escape" in captured.out.lower()
 
 # --- Filled polygon clearance tests ---
 

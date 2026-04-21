@@ -80,6 +80,8 @@ class TraceSegment:
 
     For straight traces, only pad position and via position are used.
     For dog-leg (L-shaped) traces, intermediate_x/y specify the corner point.
+    For extended escape traces, waypoints stores a list of (x, y) tuples
+    forming a multi-segment path from pad to via.
     """
 
     pad: PadInfo
@@ -90,11 +92,18 @@ class TraceSegment:
     # For dog-leg traces: the intermediate corner point
     intermediate_x: float | None = None
     intermediate_y: float | None = None
+    # For extended escape traces: list of (x, y) waypoints between pad and via
+    waypoints: list[tuple[float, float]] | None = None
 
     @property
     def is_dogleg(self) -> bool:
         """Return True if this is an L-shaped (dog-leg) trace."""
         return self.intermediate_x is not None and self.intermediate_y is not None
+
+    @property
+    def is_extended_escape(self) -> bool:
+        """Return True if this is a multi-waypoint extended escape trace."""
+        return self.waypoints is not None and len(self.waypoints) > 0
 
 
 @dataclass
@@ -1136,6 +1145,327 @@ def calculate_dogleg_via_position(
     return None
 
 
+def _check_multileg_path_clearance(
+    points: list[tuple[float, float]],
+    trace_half_width: float,
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+    other_net_pads: list[tuple[float, float, float, int]],
+    clearance: float,
+) -> bool:
+    """Check if a multi-segment trace path has adequate clearance.
+
+    The path consists of segments between consecutive points in the list.
+
+    Returns True if path is clear, False if there's a conflict.
+    """
+    for i in range(len(points) - 1):
+        leg_sx, leg_sy = points[i]
+        leg_ex, leg_ey = points[i + 1]
+
+        # Check against other-net track segments
+        for seg in other_net_tracks:
+            dist = segment_to_segment_distance(
+                leg_sx,
+                leg_sy,
+                leg_ex,
+                leg_ey,
+                seg.start_x,
+                seg.start_y,
+                seg.end_x,
+                seg.end_y,
+            )
+            min_dist = trace_half_width + seg.width / 2 + clearance
+            if dist < min_dist:
+                return False
+
+        # Check against other-net vias
+        for ovx, ovy, ov_size, _onet in other_net_vias:
+            dist = point_to_segment_distance(ovx, ovy, leg_sx, leg_sy, leg_ex, leg_ey)
+            min_dist = trace_half_width + ov_size / 2 + clearance
+            if dist < min_dist:
+                return False
+
+        # Check against other-net pads
+        for px, py, p_radius, _pnet in other_net_pads:
+            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
+            min_dist = trace_half_width + p_radius + clearance
+            if dist < min_dist:
+                return False
+
+    return True
+
+
+def calculate_extended_escape_position(
+    pad: PadInfo,
+    offset: float,
+    via_size: float,
+    existing_vias: list[tuple[float, float, int]],
+    clearance: float,
+    escape_distance: float = 3.0,
+    other_net_tracks: list[TrackSegment] | None = None,
+    other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[tuple[float, float, float, int]] | None = None,
+    trace_width: float = 0.0,
+) -> tuple[float, float, list[tuple[float, float]]] | None:
+    """Calculate an extended escape route for pads in dense IC pin fields.
+
+    When both straight-line and dog-leg placement fail (typically on dense
+    QFP/BGA packages), this function searches progressively farther from
+    the pad, using multi-segment escape traces that navigate between
+    neighboring pins.
+
+    The approach:
+    1. Identify the best escape channel direction by analyzing nearby pads
+    2. Route along that channel with increasing distance
+    3. Then break out perpendicular to find open via placement space
+
+    Args:
+        pad: The pad to place a via near
+        offset: Base distance offset from pad edge
+        via_size: Via pad diameter in mm
+        existing_vias: Same-net vias as (x, y, net_num) for via-to-via spacing
+        clearance: Minimum clearance from existing copper in mm
+        escape_distance: Maximum total escape trace length in mm (default 3.0)
+        other_net_tracks: Track segments on other nets for clearance checking
+        other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
+        other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
+        trace_width: Width of the connecting trace in mm
+
+    Returns:
+        Tuple of (via_x, via_y, waypoints) where waypoints is a list of
+        (x, y) intermediate points, or None if no valid position found.
+    """
+    if other_net_tracks is None:
+        other_net_tracks = []
+    if other_net_vias is None:
+        other_net_vias = []
+    if other_net_pads is None:
+        other_net_pads = []
+
+    via_radius = via_size / 2
+    trace_half_width = trace_width / 2
+    pad_radius = max(pad.width, pad.height) / 2
+
+    # Analyze nearby other-net pads to find escape channels
+    nearby_pads = [
+        (px, py)
+        for px, py, _r, pnet in other_net_pads
+        if pnet != pad.net_number
+        and math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2) < escape_distance * 1.5
+    ]
+
+    # Determine primary and secondary axes based on pad row orientation
+    if len(nearby_pads) >= 2:
+        xs = [px for px, _ in nearby_pads]
+        ys = [py for _, py in nearby_pads]
+        x_spread = max(xs) - min(xs)
+        y_spread = max(ys) - min(ys)
+
+        # Pads spread more horizontally -> row is horizontal
+        # Escape perpendicular (vertical) is preferred
+        if x_spread >= y_spread:
+            # Horizontal row: axial along X, escape along Y
+            axial_dirs = [(1, 0), (-1, 0)]
+            escape_dirs = [(0, 1), (0, -1)]
+        else:
+            # Vertical row: axial along Y, escape along X
+            axial_dirs = [(0, 1), (0, -1)]
+            escape_dirs = [(1, 0), (-1, 0)]
+    else:
+        axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        escape_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+
+    # Progressive axial distances for the first leg (along the pin row)
+    # These are larger than dogleg to escape past multiple neighboring pins
+    axial_distances = [0.5, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5, 3.0, 3.5, 4.0]
+    axial_distances = [d for d in axial_distances if d <= escape_distance]
+
+    # Escape offsets for the final breakout leg (perpendicular to pin row)
+    breakout_offsets = [
+        pad_radius + offset,
+        pad_radius + offset * 1.5,
+        pad_radius + offset * 2,
+        pad_radius + offset * 2.5,
+        pad_radius + offset * 3,
+    ]
+    breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
+
+    def _check_via_position(vx: float, vy: float) -> bool:
+        """Check if a via position is clear of conflicts."""
+        # Check same-net via spacing
+        for evx, evy, _vnet in existing_vias:
+            dist = math.sqrt((evx - vx) ** 2 + (evy - vy) ** 2)
+            if dist < via_size + clearance:
+                return False
+
+        # Check other-net track clearance
+        for seg in other_net_tracks:
+            dist = point_to_segment_distance(
+                vx, vy, seg.start_x, seg.start_y, seg.end_x, seg.end_y
+            )
+            if dist < via_radius + seg.width / 2 + clearance:
+                return False
+
+        # Check other-net via clearance
+        for ovx, ovy, ov_size, _onet in other_net_vias:
+            dist = math.sqrt((ovx - vx) ** 2 + (ovy - vy) ** 2)
+            if dist < via_radius + ov_size / 2 + clearance:
+                return False
+
+        # Check other-net pad clearance
+        for px, py, p_radius, _pnet in other_net_pads:
+            dist = math.sqrt((px - vx) ** 2 + (py - vy) ** 2)
+            if dist < via_radius + p_radius + clearance:
+                return False
+
+        return True
+
+    # Strategy 1: Escape-first L-shape (perpendicular out, then axial)
+    # For dense pin rows, escape perpendicular first (between pins in the row)
+    # then extend axially to find an open via position.
+    for escape_dx, escape_dy in escape_dirs:
+        for breakout in breakout_offsets:
+            waypoint_x = pad.x + escape_dx * breakout
+            waypoint_y = pad.y + escape_dy * breakout
+
+            for axial_dx, axial_dy in axial_dirs:
+                # Skip if axial is same as escape (would be straight line)
+                if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
+                    continue
+
+                for axial_dist in axial_distances:
+                    via_x = waypoint_x + axial_dx * axial_dist
+                    via_y = waypoint_y + axial_dy * axial_dist
+
+                    total_len = breakout + axial_dist
+                    if total_len > escape_distance:
+                        continue
+
+                    if not _check_via_position(via_x, via_y):
+                        continue
+
+                    path_points = [
+                        (pad.x, pad.y),
+                        (waypoint_x, waypoint_y),
+                        (via_x, via_y),
+                    ]
+
+                    if trace_width > 0:
+                        if not _check_multileg_path_clearance(
+                            path_points,
+                            trace_half_width,
+                            other_net_tracks,
+                            other_net_vias,
+                            other_net_pads,
+                            clearance,
+                        ):
+                            continue
+
+                    waypoints = [(waypoint_x, waypoint_y)]
+                    return (via_x, via_y, waypoints)
+
+    # Strategy 2: Axial-first L-shape (along row, then perpendicular out)
+    # Move along the pin row first to get past neighboring pins, then
+    # break out perpendicular.
+    for axial_dx, axial_dy in axial_dirs:
+        for axial_dist in axial_distances:
+            waypoint_x = pad.x + axial_dx * axial_dist
+            waypoint_y = pad.y + axial_dy * axial_dist
+
+            for escape_dx, escape_dy in escape_dirs:
+                if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
+                    continue
+
+                for breakout in breakout_offsets:
+                    via_x = waypoint_x + escape_dx * breakout
+                    via_y = waypoint_y + escape_dy * breakout
+
+                    total_len = axial_dist + breakout
+                    if total_len > escape_distance:
+                        continue
+
+                    if not _check_via_position(via_x, via_y):
+                        continue
+
+                    path_points = [
+                        (pad.x, pad.y),
+                        (waypoint_x, waypoint_y),
+                        (via_x, via_y),
+                    ]
+
+                    if trace_width > 0:
+                        if not _check_multileg_path_clearance(
+                            path_points,
+                            trace_half_width,
+                            other_net_tracks,
+                            other_net_vias,
+                            other_net_pads,
+                            clearance,
+                        ):
+                            continue
+
+                    waypoints = [(waypoint_x, waypoint_y)]
+                    return (via_x, via_y, waypoints)
+
+    # Strategy 3: Z-shaped (3-segment) escape for very dense areas
+    # Escape -> axial -> escape (perpendicular step out, axial travel, final breakout)
+    # This allows navigating around rows of blocking pads
+    step_distances = [0.3, 0.5, 0.7, 1.0]
+    step_distances = [d for d in step_distances if d <= escape_distance / 3]
+
+    for escape_dx, escape_dy in escape_dirs:
+        for step_dist in step_distances:
+            wp1_x = pad.x + escape_dx * step_dist
+            wp1_y = pad.y + escape_dy * step_dist
+
+            for axial_dx, axial_dy in axial_dirs:
+                if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
+                    continue
+
+                for axial_dist in axial_distances[:5]:
+                    wp2_x = wp1_x + axial_dx * axial_dist
+                    wp2_y = wp1_y + axial_dy * axial_dist
+
+                    # Final breakout perpendicular
+                    for breakout in breakout_offsets:
+                        via_x = wp2_x + escape_dx * breakout
+                        via_y = wp2_y + escape_dy * breakout
+
+                        total_len = step_dist + axial_dist + breakout
+                        if total_len > escape_distance:
+                            continue
+
+                        if not _check_via_position(via_x, via_y):
+                            continue
+
+                        path_points = [
+                            (pad.x, pad.y),
+                            (wp1_x, wp1_y),
+                            (wp2_x, wp2_y),
+                            (via_x, via_y),
+                        ]
+
+                        if trace_width > 0:
+                            if not _check_multileg_path_clearance(
+                                path_points,
+                                trace_half_width,
+                                other_net_tracks,
+                                other_net_vias,
+                                other_net_pads,
+                                clearance,
+                            ):
+                                continue
+
+                        waypoints = [
+                            (wp1_x, wp1_y),
+                            (wp2_x, wp2_y),
+                        ]
+                        return (via_x, via_y, waypoints)
+
+    return None
+
+
 def get_via_layers(pad_layer: str, target_layer: str | None) -> tuple[str, str]:
     """Determine the layers for the via.
 
@@ -1175,8 +1505,28 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
 
     For straight traces, adds a single segment.
     For dog-leg (L-shaped) traces, adds two segments: pad -> corner -> via.
+    For extended escape traces, adds multiple segments through waypoints.
     """
-    if trace.is_dogleg:
+    if trace.is_extended_escape:
+        # Extended escape trace: multiple segments through waypoints
+        # Build the full path: pad -> waypoints -> via
+        points = [(trace.pad.x, trace.pad.y)]
+        points.extend(trace.waypoints)
+        points.append((trace.via_x, trace.via_y))
+
+        for i in range(len(points) - 1):
+            seg = segment_node(
+                start_x=points[i][0],
+                start_y=points[i][1],
+                end_x=points[i + 1][0],
+                end_y=points[i + 1][1],
+                width=trace.width,
+                layer=trace.layer,
+                net=trace.pad.net_number,
+                uuid_str=str(uuid.uuid4()),
+            )
+            sexp.append(seg)
+    elif trace.is_dogleg:
         # Dog-leg trace: two segments forming an L-shape
         # First segment: pad center to intermediate corner point
         seg1 = segment_node(
@@ -1815,6 +2165,7 @@ def run_stitch(
     target_layer: str | None = None,
     trace_width: float = 0.2,
     dry_run: bool = False,
+    escape_distance: float = 3.0,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -1828,6 +2179,7 @@ def run_stitch(
         target_layer: Target plane layer (auto-detect from zones if None)
         trace_width: Width of pad-to-via trace segments in mm
         dry_run: If True, don't modify the file
+        escape_distance: Maximum escape trace length in mm for dense IC pads (default 3.0)
 
     Returns:
         StitchResult with details of what was done
@@ -1899,8 +2251,9 @@ def run_stitch(
             other_net_filled_polygons=other_net_filled_polys,
         )
 
-        # Track if we're using dog-leg routing
+        # Track if we're using dog-leg or extended escape routing
         dogleg_pos: tuple[float, float, float, float] | None = None
+        extended_pos: tuple[float, float, list[tuple[float, float]]] | None = None
 
         if via_pos is None:
             # Straight-line failed - try dog-leg (L-shaped) routing
@@ -1920,16 +2273,65 @@ def run_stitch(
             )
 
             if dogleg_pos is None:
-                result.pads_skipped.append(
-                    (pad, "no valid via location (clearance conflict, dog-leg also failed)")
+                # Dog-leg also failed - try extended escape routing
+                # This handles dense IC packages (QFP, BGA) where pads need
+                # longer multi-segment escape traces to reach open board area
+                extended_pos = calculate_extended_escape_position(
+                    pad,
+                    offset=offset,
+                    via_size=via_size,
+                    existing_vias=existing_vias,
+                    clearance=clearance,
+                    escape_distance=escape_distance,
+                    other_net_tracks=other_net_tracks,
+                    other_net_vias=other_net_vias,
+                    other_net_pads=other_net_pads,
+                    trace_width=trace_width,
                 )
-                continue
+
+                if extended_pos is None:
+                    result.pads_skipped.append(
+                        (
+                            pad,
+                            "no valid via location (clearance conflict, dog-leg and "
+                            f"extended escape up to {escape_distance}mm also failed)",
+                        )
+                    )
+                    continue
 
         # Determine via layers using per-net target layer
         pad_target_layer = net_target_layers.get(pad.net_name)
         layers = get_via_layers(pad.layer, pad_target_layer)
 
-        if dogleg_pos is not None:
+        if extended_pos is not None:
+            # Extended escape placement: (via_x, via_y, waypoints)
+            via_x, via_y, waypoints = extended_pos
+
+            placement = ViaPlacement(
+                pad=pad,
+                via_x=via_x,
+                via_y=via_y,
+                size=via_size,
+                drill=drill,
+                layers=layers,
+            )
+
+            result.vias_added.append(placement)
+
+            # Create a multi-waypoint trace segment
+            trace = TraceSegment(
+                pad=pad,
+                via_x=via_x,
+                via_y=via_y,
+                width=trace_width,
+                layer=pad.layer,
+                waypoints=waypoints,
+            )
+            result.traces_added.append(trace)
+
+            # Add to existing vias list
+            existing_vias.append((via_x, via_y, pad.net_number))
+        elif dogleg_pos is not None:
             # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
             via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
 
@@ -2147,18 +2549,23 @@ def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = F
         if len(result.pads_skipped) > 5:
             print(f"  ... ({len(result.pads_skipped) - 5} more)")
 
-    # Count dog-leg traces
+    # Count trace types
     dogleg_traces = [t for t in result.traces_added if t.is_dogleg]
-    straight_traces = len(result.traces_added) - len(dogleg_traces)
+    extended_traces = [t for t in result.traces_added if t.is_extended_escape]
+    straight_traces = len(result.traces_added) - len(dogleg_traces) - len(extended_traces)
 
     # Summary
     print(f"\n{'=' * 60}")
     print("Summary:")
     print(f"  + Added {len(result.vias_added)} stitching vias")
     print(f"  + Added {len(result.traces_added)} pad-to-via traces")
-    if dogleg_traces:
+    if dogleg_traces or extended_traces:
         print(f"    - {straight_traces} straight traces")
         print(f"    - {len(dogleg_traces)} dog-leg (L-shaped) traces for fine-pitch pads")
+        if extended_traces:
+            print(
+                f"    - {len(extended_traces)} extended escape traces for dense IC pads"
+            )
     if result.already_connected:
         print(f"  = {result.already_connected} pads already connected")
     if result.pads_skipped:
@@ -2224,6 +2631,14 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.2,
         help="Width of pad-to-via trace segments in mm (default: 0.2)",
+    )
+    parser.add_argument(
+        "--escape-distance",
+        type=float,
+        default=3.0,
+        help="Maximum escape trace length in mm for dense IC pads (default: 3.0). "
+        "When both straight-line and dog-leg placement fail, extended escape traces "
+        "up to this length are tried to navigate between dense pin fields.",
     )
     parser.add_argument(
         "--blanket",
@@ -2317,6 +2732,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_layer=args.target_layer,
                 trace_width=args.trace_width,
                 dry_run=args.dry_run,
+                escape_distance=args.escape_distance,
             )
 
         output_result(result, dry_run=args.dry_run, run_drc=args.drc)
