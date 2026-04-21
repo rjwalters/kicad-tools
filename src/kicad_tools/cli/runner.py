@@ -345,7 +345,16 @@ def _run_fill_zones_native(
     output_path: Path | None,
     kicad_cli: Path,
 ) -> KiCadCLIResult:
-    """Fill zones using the native ``kicad-cli pcb fill-zones`` subcommand."""
+    """Fill zones using the native ``kicad-cli pcb fill-zones`` subcommand.
+
+    Snapshots net declarations and per-element net assignments before
+    running the external command, then restores them afterward — mirroring
+    the protection in :func:`_run_fill_zones_via_drc`.
+    """
+    # Snapshot net state before invoking kicad-cli.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
     cmd = [str(kicad_cli), "pcb", "fill-zones"]
 
     if output_path is not None:
@@ -359,6 +368,14 @@ def _run_fill_zones_native(
         expected_path = output_path if output_path is not None else pcb_path
 
         if result.returncode == 0:
+            # Restore net declarations and per-element nets if kicad-cli
+            # rewrote them.  Guard on file existence since the output may
+            # be at a different path than the input.
+            if expected_path.exists():
+                _restore_net_declarations(
+                    expected_path, input_net_nodes, input_element_nets
+                )
+
             return KiCadCLIResult(
                 success=True,
                 output_path=expected_path,
@@ -463,6 +480,33 @@ def _has_nonzero_net(net_node) -> bool:
     return bool(net_name)
 
 
+def _has_canonical_net(net_node) -> bool:
+    """Check whether a ``(net ...)`` node is in canonical ``(net N ...)`` format.
+
+    Returns True only when the net has a numeric ID as its first child AND
+    the ID is nonzero.  Name-only format ``(net "name")`` — which kicad-cli
+    may emit as a corruption artefact — returns False so that the restore
+    logic will overwrite it with the snapshotted canonical form.
+
+    Returns True for:
+    - ``(net 1 "GND")`` — canonical format with nonzero net number
+    - ``(net 18)`` — numeric-only (valid, no name)
+
+    Returns False for:
+    - ``(net "SYNC_R")`` — name-only, missing numeric ID (corruption)
+    - ``(net "")`` — empty name-only (corruption)
+    - ``(net 0)`` or ``(net 0 "")`` — unconnected
+    - None
+    """
+    if net_node is None:
+        return False
+    net_num = net_node.get_int(0)
+    if net_num is not None:
+        return net_num != 0
+    # No numeric first child — this is name-only format, treat as needing restore
+    return False
+
+
 def _make_segment_via_key(child) -> str | None:
     """Build a geometry-based key for a segment or via S-expression node.
 
@@ -521,6 +565,108 @@ def _canonicalize_net_node(net_node, name_to_number: dict[str, int]):
     if net_name and net_name in name_to_number:
         return SExp.list("net", name_to_number[net_name], net_name)
     return net_node
+
+
+@dataclass
+class NetFormatReport:
+    """Result of :func:`validate_net_format`."""
+
+    valid: bool
+    """True when every checked element has canonical numeric net format."""
+    name_only_segments: int = 0
+    """Count of segments with name-only ``(net "name")`` format."""
+    name_only_vias: int = 0
+    """Count of vias with name-only ``(net "name")`` format."""
+    name_only_pads: int = 0
+    """Count of pads with name-only ``(net "name")`` format."""
+    empty_net_segments: int = 0
+    """Count of segments with empty ``(net "")`` format."""
+    empty_net_vias: int = 0
+    """Count of vias with empty ``(net "")`` format."""
+    empty_net_pads: int = 0
+    """Count of pads with empty ``(net "")`` format."""
+
+    @property
+    def total_corrupt(self) -> int:
+        return (
+            self.name_only_segments
+            + self.name_only_vias
+            + self.name_only_pads
+            + self.empty_net_segments
+            + self.empty_net_vias
+            + self.empty_net_pads
+        )
+
+
+def validate_net_format(pcb_path: Path) -> NetFormatReport:
+    """Validate that all segments, vias, and pads have canonical numeric net format.
+
+    Canonical format is ``(net N)`` or ``(net N "name")`` where N is a nonzero
+    integer.  Name-only format ``(net "name")`` and empty-net ``(net "")`` on
+    elements that should be connected are flagged as corrupt.
+
+    Elements with ``(net 0)`` (unconnected pads) are not flagged — those are
+    legitimately unconnected.
+
+    Args:
+        pcb_path: Path to a ``.kicad_pcb`` file.
+
+    Returns:
+        A :class:`NetFormatReport` summarising any corruption found.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        # If we can't load the file, report as valid — the caller will
+        # surface the load failure through other channels.
+        return NetFormatReport(valid=True)
+
+    report = NetFormatReport(valid=True)
+
+    def _check_net_node(net_node, element_kind: str) -> None:
+        """Classify a ``(net ...)`` node and update *report* counters."""
+        if net_node is None:
+            return
+        net_num = net_node.get_int(0)
+        if net_num is not None:
+            # Has numeric ID — canonical (even if 0, that's just unconnected)
+            return
+        # Name-only or empty-string format
+        net_name = net_node.get_string(0)
+        if net_name:
+            # Name-only corruption: (net "SYNC_R")
+            if element_kind == "segment":
+                report.name_only_segments += 1
+            elif element_kind == "via":
+                report.name_only_vias += 1
+            elif element_kind == "pad":
+                report.name_only_pads += 1
+            report.valid = False
+        elif net_name == "":
+            # Empty-string corruption: (net "")
+            if element_kind == "segment":
+                report.empty_net_segments += 1
+            elif element_kind == "via":
+                report.empty_net_vias += 1
+            elif element_kind == "pad":
+                report.empty_net_pads += 1
+            report.valid = False
+
+    # Check top-level segments and vias
+    for child in sexp.children:
+        if child.name == "segment":
+            _check_net_node(child.get("net"), "segment")
+        elif child.name == "via":
+            _check_net_node(child.get("net"), "via")
+
+    # Check pads inside footprints
+    for fp_node in (c for c in sexp.children if c.name == "footprint"):
+        for pad_node in (c for c in fp_node.children if c.name == "pad"):
+            _check_net_node(pad_node.get("net"), "pad")
+
+    return report
 
 
 def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
@@ -662,7 +808,7 @@ def _restore_net_declarations(
                 if key not in element_nets:
                     continue
                 current_net = pad_node.get("net")
-                if not _has_nonzero_net(current_net):
+                if not _has_canonical_net(current_net):
                     if current_net is not None:
                         pad_node.remove(current_net)
                     pad_node.append(element_nets[key][0])
@@ -674,7 +820,7 @@ def _restore_net_declarations(
                 geo_key = _make_segment_via_key(child)
                 if geo_key and geo_key in element_nets:
                     current_net = child.get("net")
-                    if not _has_nonzero_net(current_net):
+                    if not _has_canonical_net(current_net):
                         if current_net is not None:
                             child.remove(current_net)
                         child.append(element_nets[geo_key][0])
