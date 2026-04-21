@@ -147,17 +147,19 @@ class PipelineContext:
 
 
 def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
-    """Detect whether a PCB has been routed by counting segments and nets.
+    """Detect whether a PCB has been routed by counting top-level segments and nets.
 
-    Reads the PCB file and counts (segment ...) and (arc ...) nodes
-    to determine if routing has been performed.
+    Reads the PCB file and counts ``(segment ...)`` and ``(arc ...)`` nodes that
+    are direct children of the root ``(kicad_pcb ...)`` node (depth 1).  Segments
+    and arcs nested inside ``(zone ...)`` or ``(filled_polygon ...)`` blocks are
+    excluded so that zone fill polygons are not mistaken for routed traces.
 
     Args:
         pcb_file: Path to .kicad_pcb file
 
     Returns:
         Tuple of (is_routed, segment_count, net_count) where is_routed
-        is True if the board has routing segments.
+        is True if the board has top-level routing segments.
     """
     try:
         content = pcb_file.read_text(encoding="utf-8")
@@ -165,10 +167,31 @@ def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
         logger.warning("Could not read PCB file %s: %s", pcb_file, e)
         return False, 0, 0
 
-    # Count segment and arc nodes (routing traces)
-    # Match both "(segment " and "(segment\n" (KiCad may use either format)
-    segment_count = content.count("(segment ") + content.count("(segment\n")
-    arc_count = content.count("(arc ") + content.count("(arc\n")
+    # Count only top-level (segment ...) and (arc ...) entries.
+    # In KiCad s-expression format, routed traces live at depth 1 (direct
+    # children of the root (kicad_pcb ...) node).  Zone fills nest segments
+    # inside (zone ... (filled_polygon ...)) at depth >= 2, so we track
+    # parenthesis depth and only count matches at depth 1.
+    segment_count = 0
+    arc_count = 0
+    depth = 0
+    i = 0
+    length = len(content)
+    while i < length:
+        ch = content[i]
+        if ch == "(":
+            # Check for tokens at depth 1 (inside root kicad_pcb node)
+            if depth == 1:
+                rest = content[i : i + 12]  # longest prefix we need
+                if rest.startswith("(segment ") or rest.startswith("(segment\n"):
+                    segment_count += 1
+                elif rest.startswith("(arc ") or rest.startswith("(arc\n"):
+                    arc_count += 1
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        i += 1
+
     total_traces = segment_count + arc_count
 
     # Count nets (excluding net 0 which is the unconnected net)
