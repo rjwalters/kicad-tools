@@ -3146,14 +3146,18 @@ def _add_pipeline_parser(subparsers) -> None:
         dest="pipeline_step",
         choices=[
             "erc",
-            "fix-silkscreen",
             "fix-erc",
+            "fix-silkscreen",
             "route",
+            "stitch",
             "fix-vias",
             "fix-drc",
             "optimize",
             "zones",
+            "zones-refill",
             "audit",
+            "report",
+            "export",
         ],
         default=None,
         help="Run only this step (default: run all steps in order)",
@@ -3224,6 +3228,27 @@ def _add_pipeline_parser(subparsers) -> None:
         action="store_true",
         default=False,
         help="Continue past routing failures to zone fill, audit, and export",
+    )
+    pipeline_parser.add_argument(
+        "--no-cache",
+        dest="pipeline_no_cache",
+        action="store_true",
+        default=False,
+        help="Bypass routing cache (force fresh routing in the route step)",
+    )
+    pipeline_parser.add_argument(
+        "--clear-cache",
+        dest="pipeline_clear_cache",
+        action="store_true",
+        default=False,
+        help="Clear routing cache before the route step runs",
+    )
+    pipeline_parser.add_argument(
+        "--sch",
+        "--schematic",
+        dest="pipeline_sch",
+        default=None,
+        help="Path to root .kicad_sch file (overrides auto-discovery)",
     )
 
 
