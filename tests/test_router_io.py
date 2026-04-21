@@ -3504,6 +3504,37 @@ class TestLoadExistingRoutes:
         assert len(router1.pads) == len(router2.pads)
         assert len(router1.nets) == len(router2.nets)
 
+    def test_existing_routes_populated(self, tmp_path):
+        """When load_existing_routes=True, router.existing_routes is populated."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), validate_drc=False, load_existing_routes=True
+        )
+        assert len(router.existing_routes) > 0, (
+            "existing_routes should be populated when load_existing_routes=True"
+        )
+        # Verify existing routes have vias and/or segments
+        total_vias = sum(len(r.vias) for r in router.existing_routes)
+        total_segs = sum(len(r.segments) for r in router.existing_routes)
+        assert total_vias + total_segs > 0
+
+    def test_existing_routes_empty_by_default(self, tmp_path):
+        """When load_existing_routes=False (default), existing_routes is empty."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(str(pcb_file), validate_drc=False)
+        assert len(router.existing_routes) == 0
+
+    def test_existing_routes_not_in_router_routes(self, tmp_path):
+        """Pre-existing routes must NOT appear in router.routes."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), validate_drc=False, load_existing_routes=True
+        )
+        # router.routes should remain empty (no new routes added)
+        assert len(router.routes) == 0
+        # But existing_routes should have content
+        assert len(router.existing_routes) > 0
+
 
 class TestMergeRoutesViaConflicts:
     """Tests for merge_routes_into_pcb with co-located via detection."""

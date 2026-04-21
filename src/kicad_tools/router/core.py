@@ -340,6 +340,9 @@ class Autorouter:
         self.nets: dict[int, list[tuple[str, str]]] = {}
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Pre-existing routes loaded as obstacles for DRC/merge but NOT
+        # emitted by to_sexp() or subject to rip-up/reroute.
+        self.existing_routes: list[Route] = []
 
         # Physics integration
         self._stackup = stackup

@@ -269,6 +269,49 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                     ]
                     total_merged += len(remove_from_b)
 
+    # --- Phase 3: merge new-route vias against pre-existing vias ---
+    # Pre-existing vias survive; conflicting new vias are removed/relocated.
+    existing_routes: list[Route] = getattr(router, "existing_routes", [])
+    if existing_routes:
+        # Build lookup of existing vias grouped by net.
+        existing_net_vias: dict[int, list["Via"]] = defaultdict(list)
+        for eroute in existing_routes:
+            for evia in eroute.vias:
+                existing_net_vias[eroute.net].append(evia)
+
+        for route in router.routes:
+            ev_list = existing_net_vias.get(route.net)
+            if not ev_list:
+                continue
+
+            remove_indices: set[int] = set()
+            for ni, new_via in enumerate(route.vias):
+                if ni in remove_indices:
+                    continue
+                for existing_via in ev_list:
+                    dist = math.sqrt(
+                        (new_via.x - existing_via.x) ** 2
+                        + (new_via.y - existing_via.y) ** 2
+                    )
+                    if dist < merge_threshold:
+                        # Keep existing via, remove new via.  Reconnect
+                        # the new route's segments to the existing via pos.
+                        _reconnect_segments(
+                            route.segments, new_via.x, new_via.y,
+                            existing_via.x, existing_via.y, _ENDPOINT_TOL,
+                        )
+                        # Expand existing via layers to cover new via layers
+                        _expand_via_layers(existing_via, new_via)
+                        remove_indices.add(ni)
+                        break  # new_via already merged, move on
+
+            if remove_indices:
+                route.vias = [
+                    v for idx, v in enumerate(route.vias)
+                    if idx not in remove_indices
+                ]
+                total_merged += len(remove_indices)
+
     return total_merged
 
 
