@@ -386,6 +386,256 @@ class TestRestoreNetDeclarations:
 
 
 # ---------------------------------------------------------------------------
+# _make_segment_via_key coordinate rounding (issue #1822)
+# ---------------------------------------------------------------------------
+
+
+class TestMakeSegmentViaKeyRounding:
+    """Verify coordinate rounding absorbs float drift in key generation."""
+
+    def test_identical_keys_within_rounding_threshold(self):
+        """Coordinates differing by < 0.00005 must produce identical keys.
+
+        With precision=4, round(100.00004, 4) == round(100.0, 4) == 100.0.
+        """
+        from kicad_tools.cli.runner import _make_segment_via_key
+
+        seg_a = SExp.list(
+            "segment",
+            SExp.list("start", 100.0, 200.0),
+            SExp.list("end", 300.0, 400.0),
+            SExp.list("layer", "F.Cu"),
+        )
+        seg_b = SExp.list(
+            "segment",
+            SExp.list("start", 100.00004, 200.0),
+            SExp.list("end", 300.0, 399.99996),
+            SExp.list("layer", "F.Cu"),
+        )
+        key_a = _make_segment_via_key(seg_a)
+        key_b = _make_segment_via_key(seg_b)
+        assert key_a is not None
+        assert key_a == key_b
+
+    def test_distinct_keys_beyond_rounding_threshold(self):
+        """Coordinates differing by > 0.001 must produce distinct keys."""
+        from kicad_tools.cli.runner import _make_segment_via_key
+
+        seg_a = SExp.list(
+            "segment",
+            SExp.list("start", 100.0, 200.0),
+            SExp.list("end", 300.0, 400.0),
+            SExp.list("layer", "F.Cu"),
+        )
+        seg_b = SExp.list(
+            "segment",
+            SExp.list("start", 100.005, 200.0),
+            SExp.list("end", 300.0, 400.0),
+            SExp.list("layer", "F.Cu"),
+        )
+        key_a = _make_segment_via_key(seg_a)
+        key_b = _make_segment_via_key(seg_b)
+        assert key_a is not None
+        assert key_b is not None
+        assert key_a != key_b
+
+    def test_via_rounding(self):
+        """Via coordinates must also be rounded for consistent keys."""
+        from kicad_tools.cli.runner import _make_segment_via_key
+
+        via_a = SExp.list(
+            "via",
+            SExp.list("at", 50.0, 75.0),
+            SExp.list("size", 0.8),
+            SExp.list("layers", "F.Cu", "B.Cu"),
+        )
+        via_b = SExp.list(
+            "via",
+            SExp.list("at", 50.00004, 74.99996),
+            SExp.list("size", 0.8),
+            SExp.list("layers", "F.Cu", "B.Cu"),
+        )
+        key_a = _make_segment_via_key(via_a)
+        key_b = _make_segment_via_key(via_b)
+        assert key_a is not None
+        assert key_a == key_b
+
+
+# ---------------------------------------------------------------------------
+# Restore with drifted coordinates (issue #1822)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreWithDriftedCoordinates:
+    """Verify restore succeeds when kicad-cli drifts coordinates slightly."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_drifted_segment_restored_by_rounded_key(self, tmp_path):
+        """Segment at (100.0001, 200.0) with (net "") should be restored
+        when snapshot was taken at (100.0, 200.0)."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "VCC")
+  (segment (start 100.0001 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "drift1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(5, "VCC")]
+        # Snapshot taken at exact coordinates (before kicad-cli drift)
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(5)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 5, f"Expected (net 5) but got {net_node}"
+                break
+        else:
+            pytest.fail("No segment found in restored PCB")
+
+    def test_drifted_via_restored_by_rounded_key(self, tmp_path):
+        """Via at (50.00005, 75.0) with (net "") should match snapshot at (50.0, 75.0)."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 3 "GND")
+  (via (at 50.00005 75.0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "") (uuid "vdrift"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(3, "GND")]
+        element_nets = {
+            "via:50.0,75.0:0.8:F.Cu,B.Cu": [_net_node(3)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "via":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 3, f"Expected (net 3) but got {net_node}"
+                break
+        else:
+            pytest.fail("No via found in restored PCB")
+
+
+# ---------------------------------------------------------------------------
+# Fallback proximity restore for wholly unmatched elements (issue #1822)
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackProximityRestore:
+    """Verify the fallback mechanism for segments/vias with no snapshot match."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_unmatched_segment_restored_by_proximity(self, tmp_path):
+        """A segment with (net "") and no exact key match should be restored
+        via spatial proximity to a nearby snapshotted segment on the same layer."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        # Post-fill PCB: segment coordinates drifted beyond rounding tolerance
+        # but within proximity threshold (0.01 mm)
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 7 "MOSI")
+  (segment (start 100.009 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "prox1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(7, "MOSI")]
+        # Snapshot at exact coords -- key won't match due to rounding difference
+        # (100.009 rounds to 100.009, not 100.0)
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(7)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 7, f"Expected (net 7) but got {net_node}"
+                break
+        else:
+            pytest.fail("No segment found in restored PCB")
+
+    def test_unmatched_segment_not_restored_beyond_threshold(self, tmp_path):
+        """A segment too far from any snapshot should NOT be proximity-matched."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        # Segment at (200, 200) -- far from snapshot at (100, 200)
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 7 "MOSI")
+  (segment (start 200 200) (end 300 400) (width 0.25) (layer "F.Cu") (net "") (uuid "far1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(7, "MOSI")]
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(7)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                # Should still be empty -- too far for proximity match
+                if net_node is not None:
+                    net_str = net_node.get_string(0)
+                    if net_str == "":
+                        pass  # Expected: still empty
+                    else:
+                        net_num = net_node.get_int(0)
+                        assert net_num != 7, "Segment too far should not be proximity-matched"
+                break
+
+
+# ---------------------------------------------------------------------------
 # _run_fill_zones_native snapshot/restore
 # ---------------------------------------------------------------------------
 
