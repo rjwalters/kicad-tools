@@ -1983,6 +1983,24 @@ class Router:
                             seg.x2 = mid_x
                             seg.y2 = mid_y
 
+                    # Issue #1802: expand surviving via layers to cover
+                    # all layers from both vias (cross-layer-pair merge)
+                    min_layer = min(
+                        existing_via.layers[0].value,
+                        existing_via.layers[1].value,
+                        new_via.layers[0].value,
+                        new_via.layers[1].value,
+                    )
+                    max_layer = max(
+                        existing_via.layers[0].value,
+                        existing_via.layers[1].value,
+                        new_via.layers[0].value,
+                        new_via.layers[1].value,
+                    )
+                    if (min_layer != existing_via.layers[0].value
+                            or max_layer != existing_via.layers[1].value):
+                        existing_via.layers = (Layer(min_layer), Layer(max_layer))
+
                     # Remove the new via since we're reusing the existing one
                     vias_to_remove.add(i)
                     break

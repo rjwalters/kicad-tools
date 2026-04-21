@@ -12,6 +12,7 @@ from kicad_tools.router.drc_nudge import (
     COINCIDENT_THRESHOLD,
     DRCNudgeResult,
     _compute_merge_threshold,
+    _expand_via_layers,
     _merge_same_net_vias,
     _nudge_segment,
     _perpendicular_unit,
@@ -250,6 +251,99 @@ class TestCrossRouteMerge:
 
         merged = _merge_same_net_vias(router)
         assert merged == 0
+
+
+# ---------------------------------------------------------------------------
+# Cross-layer-pair via merge tests (Issue #1802)
+# ---------------------------------------------------------------------------
+
+class TestExpandViaLayers:
+    """Unit tests for _expand_via_layers helper."""
+
+    def test_same_layers_no_change(self):
+        """Vias with identical layers should not be modified."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        _expand_via_layers(via_a, via_b)
+        assert via_a.layers == (Layer.F_CU, Layer.B_CU)
+
+    def test_different_layers_expanded(self):
+        """Surviving via should span all layers from both vias."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
+        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.B_CU, Layer.F_CU), net=1)
+        _expand_via_layers(via_a, via_b)
+        assert via_a.layers[0] == Layer.F_CU
+        assert via_a.layers[1] == Layer.B_CU
+
+    def test_inner_layers_expanded(self):
+        """Merge of two inner-layer vias expands to cover both spans."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
+        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.IN1_CU, Layer.IN2_CU), net=1)
+        _expand_via_layers(via_a, via_b)
+        assert via_a.layers[0] == Layer.F_CU
+        assert via_a.layers[1] == Layer.IN2_CU
+
+
+class TestCrossLayerPairMerge:
+    """Integration tests for cross-layer-pair via merging (Issue #1802)."""
+
+    def test_intra_route_different_layers_merged(self):
+        """Vias within one route with different layer pairs should be merged."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
+        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0,
+                      width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[seg], vias=[via_a, via_b])
+        router = _StubAutorouter(routes=[route])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        assert len(route.vias) == 1
+        # Surviving via should span F.Cu to B.Cu (through-via)
+        assert route.vias[0].layers[0] == Layer.F_CU
+        assert route.vias[0].layers[1] == Layer.B_CU
+
+    def test_cross_route_different_layers_merged(self):
+        """Cross-route vias with different layer pairs should be merged."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.IN1_CU, Layer.F_CU), net=1)
+        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg_b = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0,
+                        width=0.2, layer=Layer.F_CU, net=1)
+        route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
+        route_b = Route(net=1, net_name="Net1", segments=[seg_b], vias=[via_b])
+        router = _StubAutorouter(routes=[route_a, route_b])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        assert len(route_a.vias) == 1
+        assert len(route_b.vias) == 0
+        # Surviving via should span F.Cu to B.Cu
+        assert route_a.vias[0].layers[0] == Layer.F_CU
+        assert route_a.vias[0].layers[1] == Layer.B_CU
+
+    def test_same_layer_pair_still_works(self):
+        """Same layer pair merges still work as before (no regression)."""
+        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via_a, via_b])
+        router = _StubAutorouter(routes=[route])
+
+        merged = _merge_same_net_vias(router)
+        assert merged == 1
+        assert len(route.vias) == 1
+        assert route.vias[0].layers == (Layer.F_CU, Layer.B_CU)
 
 
 # ---------------------------------------------------------------------------
