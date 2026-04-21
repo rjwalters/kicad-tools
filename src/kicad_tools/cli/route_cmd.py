@@ -898,6 +898,15 @@ def route_with_layer_escalation(
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
 
+    # Post-optimization DRC nudge pass
+    if final_result.router.routes:
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(final_result.router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
+
     # Save output
     if args.dry_run:
         if not quiet:
@@ -1287,6 +1296,15 @@ def route_with_rule_relaxation(
                 optimized_route = optimizer.optimize_route(route)
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
+
+    # Post-optimization DRC nudge pass
+    if final_result.router.routes:
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(final_result.router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
 
     # Save output
     if args.dry_run:
@@ -1695,6 +1713,15 @@ def route_with_combined_escalation(
                 optimized_route = optimizer.optimize_route(route)
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
+
+    # Post-optimization DRC nudge pass
+    if final_result.router.routes:
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(final_result.router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
 
     # Save output
     if args.dry_run:
@@ -3172,6 +3199,15 @@ def main(argv: list[str] | None = None) -> int:
                 optimized_route = optimizer.optimize_route(route)
                 optimized_routes.append(optimized_route)
             router.routes = optimized_routes
+
+    # Post-optimization DRC nudge pass
+    if router.routes:
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
 
         # Get post-optimization statistics
         post_segments = sum(len(r.segments) for r in router.routes)
