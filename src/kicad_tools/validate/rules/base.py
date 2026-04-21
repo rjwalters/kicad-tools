@@ -16,6 +16,12 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+# Manufacturing tolerance for DRC comparisons (in mm).
+# Clearance shortfalls below this threshold are within floating-point
+# rounding and fabrication precision and should not be flagged.
+DRC_TOLERANCE: float = 0.005
+
+
 class DRCRule(ABC):
     """Abstract base class for DRC rule implementations.
 

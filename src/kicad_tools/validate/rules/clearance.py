@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
-from .base import DRCRule
+from .base import DRC_TOLERANCE, DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -427,7 +427,7 @@ class ClearanceRule(DRCRule):
                 clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
 
                 # Check against minimum
-                if clearance < min_clearance:
+                if clearance + DRC_TOLERANCE < min_clearance:
                     violation = self._create_violation(
                         elem1, elem2, clearance, min_clearance, layer_name, loc_x, loc_y
                     )
