@@ -108,6 +108,8 @@ Methods whose body is trivially a single `return <literal>` but whose docstring/
 
 Current hermit finds `TODO`/`FIXME` comments but treats them as reminders rather than recognizing that the hardcoded return makes the surrounding code inert.
 
+**Default recommendation**: When creating proposals for stub theater findings, prefer "finish the feature" over "remove the code." Stubs often indicate an unfinished feature whose dependencies may now exist. Check whether the data/APIs the stub was waiting for have since been implemented. Only propose removal when the feature is clearly abandoned or the surrounding code has no users.
+
 ```bash
 # Find Python methods whose body is ONLY a return literal
 rg "def \w+\(self" -A 5 --type py | \\
@@ -143,8 +145,13 @@ Classes where `__init__` is `pass`/empty/missing AND no methods assign to `self.
 
 Current hermit flags "one-method classes" but not "zero-state classes." A class with multiple methods passes the one-method heuristic even when it has no instance state.
 
+**Exclusion criteria** -- the following patterns are NOT stateless ceremony and must be skipped:
+- **Internal method dispatch**: Classes where methods call `self.other_method()` are using the class for method organization/dispatch, not state. These are intentional namespace designs.
+- **Large method count (10+)**: Classes with 10 or more methods are using the class as a namespace. Suggesting conversion to 10+ module-level functions is impractical and noisy.
+- **Dispatch-table pattern**: Classes that build dicts/lists of `self.method` references (e.g., `{"key": self.handle_create, ...}`) are intentional dispatch tables.
+
 ```bash
-# Find Python classes with no instance state
+# Find Python classes with no instance state (excludes dispatch-table classes)
 python3 -c "
 import ast, sys, os
 for root, dirs, files in os.walk('.'):
@@ -164,8 +171,41 @@ for root, dirs, files in os.walk('.'):
                     for t in n.targets)
                 for n in ast.walk(node)
             )
-            if not has_self_assign:
-                print(f'{path}:{node.lineno}: {node.name} (no instance state)')
+            if has_self_assign:
+                continue  # Has instance state -- not a stateless ceremony
+            # Exclusion 1: Internal method dispatch (self.method() calls)
+            has_self_method_call = any(
+                isinstance(n, ast.Call) and
+                isinstance(getattr(n, 'func', None), ast.Attribute) and
+                isinstance(getattr(n.func, 'value', None), ast.Name) and
+                n.func.value.id == 'self'
+                for n in ast.walk(node)
+            )
+            if has_self_method_call:
+                continue  # Uses internal dispatch -- likely a namespace
+            # Exclusion 2: Method count threshold (10+ methods = namespace)
+            method_count = sum(
+                1 for n in ast.walk(node)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            if method_count >= 10:
+                continue  # Too many methods to practically convert
+            # Exclusion 3: Dispatch-table pattern (self.method refs inside dict/list/set)
+            has_dispatch_table = False
+            for n in ast.walk(node):
+                if not isinstance(n, (ast.Dict, ast.List, ast.Set)):
+                    continue
+                for val in ast.walk(n):
+                    if (isinstance(val, ast.Attribute) and
+                        isinstance(getattr(val, 'value', None), ast.Name) and
+                        val.value.id == 'self'):
+                        has_dispatch_table = True
+                        break
+                if has_dispatch_table:
+                    break
+            if has_dispatch_table:
+                continue  # Builds dispatch table from self.method references
+            print(f'{path}:{node.lineno}: {node.name} (no instance state)')
 "
 
 # TypeScript: classes with no property assignments

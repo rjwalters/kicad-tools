@@ -105,7 +105,6 @@ ${BOLD}TRACKED FILE LOCATIONS:${NC}
     .github/workflows/*.yml        GitHub workflows
     CLAUDE.md                       Top-level docs
     .loom/CLAUDE.md, .loom/README.md
-    .codex/config.toml             Codex configuration
     loom                           CLI wrapper
 
 ${BOLD}NOT TRACKED (runtime/user files):${NC}
@@ -193,11 +192,6 @@ collect_tracked_files() {
     fi
     if [[ -f "$root/.loom/README.md" ]]; then
         files+=(".loom/README.md")
-    fi
-
-    # .codex/config.toml
-    if [[ -f "$root/.codex/config.toml" ]]; then
-        files+=(".codex/config.toml")
     fi
 
     # CLI wrapper
