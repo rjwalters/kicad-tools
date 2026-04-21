@@ -113,6 +113,35 @@ class StitchResult:
     fallback_nets: list[str] = field(default_factory=list)
 
 
+@dataclass
+class FilledPolygon:
+    """A filled polygon from a zone fill with bounding box for fast pre-filtering.
+
+    Represents the actual copper pour geometry from a zone fill (as opposed to
+    the zone boundary polygon). These are created by KiCad's zone fill
+    algorithm and account for clearances, thermal reliefs, etc.
+    """
+
+    net_number: int
+    net_name: str
+    layer: str
+    points: list[tuple[float, float]]
+    # Bounding box for fast pre-filtering
+    min_x: float = 0.0
+    min_y: float = 0.0
+    max_x: float = 0.0
+    max_y: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.points:
+            xs = [p[0] for p in self.points]
+            ys = [p[1] for p in self.points]
+            self.min_x = min(xs)
+            self.max_x = max(xs)
+            self.min_y = min(ys)
+            self.max_y = max(ys)
+
+
 def get_net_map(sexp: SExp) -> dict[int, str]:
     """Build a mapping of net number to net name."""
     net_map = {}
@@ -803,8 +832,13 @@ def calculate_via_position(
                 # Check trace path against other-net filled polygons
                 if other_net_filled_polygons:
                     if not _check_segment_filled_polygon_clearance(
-                        pad.x, pad.y, via_x, via_y,
-                        trace_half_width, other_net_filled_polygons, clearance,
+                        pad.x,
+                        pad.y,
+                        via_x,
+                        via_y,
+                        trace_half_width,
+                        other_net_filled_polygons,
+                        clearance,
                     ):
                         continue
 
@@ -878,8 +912,13 @@ def _check_dogleg_path_clearance(
         # Check against other-net filled polygons (zone fill copper)
         if other_net_filled_polygons:
             if not _check_segment_filled_polygon_clearance(
-                leg_sx, leg_sy, leg_ex, leg_ey,
-                trace_half_width, other_net_filled_polygons, clearance,
+                leg_sx,
+                leg_sy,
+                leg_ex,
+                leg_ey,
+                trace_half_width,
+                other_net_filled_polygons,
+                clearance,
             ):
                 return False
 
@@ -1064,8 +1103,11 @@ def calculate_dogleg_via_position(
                     # Check other-net filled polygon clearance at via position
                     if other_net_filled_polygons:
                         if not _check_point_filled_polygon_clearance(
-                            via_x, via_y, via_radius,
-                            other_net_filled_polygons, clearance,
+                            via_x,
+                            via_y,
+                            via_radius,
+                            other_net_filled_polygons,
+                            clearance,
                         ):
                             conflict = True
                     if conflict:
@@ -1177,35 +1219,6 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
 
 
 @dataclass
-class FilledPolygon:
-    """A filled polygon from a zone fill with bounding box for fast pre-filtering.
-
-    Represents the actual copper pour geometry from a zone fill (as opposed to
-    the zone boundary polygon). These are created by KiCad's zone fill
-    algorithm and account for clearances, thermal reliefs, etc.
-    """
-
-    net_number: int
-    net_name: str
-    layer: str
-    points: list[tuple[float, float]]
-    # Bounding box for fast pre-filtering
-    min_x: float = 0.0
-    min_y: float = 0.0
-    max_x: float = 0.0
-    max_y: float = 0.0
-
-    def __post_init__(self) -> None:
-        if self.points:
-            xs = [p[0] for p in self.points]
-            ys = [p[1] for p in self.points]
-            self.min_x = min(xs)
-            self.max_x = max(xs)
-            self.min_y = min(ys)
-            self.max_y = max(ys)
-
-
-@dataclass
 class ZonePolygon:
     """A zone boundary polygon with its net and layer."""
 
@@ -1273,9 +1286,7 @@ def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
             points.append((x, y))
 
         if len(points) >= 3:
-            polygons.append(
-                ZonePolygon(net_name=net_name, layer=zone_layer, points=points)
-            )
+            polygons.append(ZonePolygon(net_name=net_name, layer=zone_layer, points=points))
 
     return polygons
 
@@ -1455,8 +1466,14 @@ def _check_segment_filled_polygon_clearance(
         for i in range(n):
             j = (i + 1) % n
             dist = segment_to_segment_distance(
-                sx, sy, ex, ey,
-                fp.points[i][0], fp.points[i][1], fp.points[j][0], fp.points[j][1],
+                sx,
+                sy,
+                ex,
+                ey,
+                fp.points[i][0],
+                fp.points[i][1],
+                fp.points[j][0],
+                fp.points[j][1],
             )
             if dist < required:
                 return False
@@ -1599,9 +1616,7 @@ def check_via_clearance(
 
     # Check against other-net track segments
     for seg in other_net_tracks:
-        dist = point_to_segment_distance(
-            x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
-        )
+        dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
         min_dist = via_radius + seg.width / 2 + clearance
         if dist < min_dist:
             return False
