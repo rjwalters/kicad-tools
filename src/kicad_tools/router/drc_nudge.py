@@ -135,6 +135,7 @@ def _segment_to_segment_distance(
 # ---------------------------------------------------------------------------
 
 COINCIDENT_THRESHOLD = 0.01  # mm -- legacy constant kept for backward compat
+_ENDPOINT_TOL = 0.05  # mm -- tolerance for matching segment endpoints to via positions
 
 
 def _compute_merge_threshold(router: Autorouter) -> float:
@@ -196,7 +197,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                 if dist < merge_threshold:
                     _reconnect_segments(
                         route.segments, via_b.x, via_b.y,
-                        via_a.x, via_a.y, merge_threshold,
+                        via_a.x, via_a.y, _ENDPOINT_TOL,
                     )
                     merged_indices.add(j)
 
@@ -238,7 +239,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                             # Keep via_a, remove via_b, reconnect route_b segments
                             _reconnect_segments(
                                 route_b.segments, via_b.x, via_b.y,
-                                via_a.x, via_a.y, merge_threshold,
+                                via_a.x, via_a.y, _ENDPOINT_TOL,
                             )
                             remove_from_b.add(bj)
 
