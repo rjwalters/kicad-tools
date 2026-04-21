@@ -787,3 +787,232 @@ class TestRunFillZonesNativeProtection:
 
             assert result.success is False
             mock_restore.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #1845: snapshot includes (net 0) segments
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotIncludesNetZero:
+    """Verify ``_snapshot_element_nets`` captures (net 0) segments."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_net_zero_segment_is_snapshotted(self, tmp_path):
+        """A segment with (net 0) must appear in the snapshot."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 0) (uuid "z1"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        key = "seg:10.0,20.0:30.0,40.0:F.Cu"
+        assert key in snapshot, "Snapshot must include (net 0) segments"
+        net_node = snapshot[key][0]
+        assert net_node.get_int(0) == 0, "Snapshot must preserve (net 0)"
+
+    def test_nonzero_segment_still_snapshotted(self, tmp_path):
+        """Nonzero net segments must still be captured."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "VCC")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 5) (uuid "a1"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        key = "seg:10.0,20.0:30.0,40.0:F.Cu"
+        assert key in snapshot
+        assert snapshot[key][0].get_int(0) == 5
+
+
+# ---------------------------------------------------------------------------
+# Issue #1845: proximity uses max(start, end) metric
+# ---------------------------------------------------------------------------
+
+
+class TestProximityMaxMetric:
+    """Verify proximity uses max single-endpoint distance, not sum."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_both_endpoints_shifted_within_threshold(self, tmp_path):
+        """Segment with both endpoints shifted 0.06mm should match.
+
+        Old metric (sum): hypot(0.06,0) + hypot(0.06,0) = 0.12 > 0.1 (FAIL).
+        New metric (max): max(hypot(0.06,0), hypot(0.06,0)) = 0.06 < 0.1 (PASS).
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 9 "MISO")
+  (segment (start 100.06 200.0) (end 300.06 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "shift1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(9, "MISO")]
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(9)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 9, (
+                    "Both endpoints shifted 0.06mm should match with max() metric"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+
+# ---------------------------------------------------------------------------
+# Issue #1845: remaining (net "") assigned to (net 0)
+# ---------------------------------------------------------------------------
+
+
+class TestAssignEmptyNetsToZero:
+    """Verify remaining (net \"\") segments are assigned (net 0)."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_empty_net_segment_becomes_net_zero(self, tmp_path):
+        """A segment with (net \"\") and no snapshot match should become (net 0)."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 999 999) (end 998 998) (width 0.25) (layer "F.Cu") (net "") (uuid "new1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(1, "GND")]
+        # No snapshot entry for this segment at all
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(1)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                net_num = net_node.get_int(0)
+                assert net_num == 0, (
+                    f"Unmatched (net \"\") segment should become (net 0), got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_canonical_net_not_overwritten_to_zero(self, tmp_path):
+        """A segment with a valid net should NOT be changed to (net 0)."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "VCC")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 5) (uuid "ok1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(5, "VCC")]
+        element_nets = {}
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 5, "Valid net should be preserved"
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_net_zero_restored_from_snapshot(self, tmp_path):
+        """A segment originally (net 0) corrupted to (net \"\") should restore to (net 0)."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net "") (uuid "z2"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(1, "GND")]
+        # Snapshot captured this segment with (net 0) — original assignment
+        element_nets = {
+            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(0)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 0, (
+                    "Segment originally (net 0) should be restored to (net 0)"
+                )
+                break
+        else:
+            pytest.fail("No segment found")

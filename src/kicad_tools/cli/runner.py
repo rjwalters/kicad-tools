@@ -706,6 +706,7 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
     An empty dict is returned if the file cannot be read.
     """
     from kicad_tools.core.sexp_file import load_pcb
+    from kicad_tools.sexp import SExp
 
     try:
         sexp = load_pcb(str(pcb_path))
@@ -740,15 +741,20 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
             key = f"{fp_ref}:{pad_number}"
             snapshot[key] = [_canonicalize_net_node(net_node, name_to_number)]
 
-    # Snapshot segments and vias at the top level, keyed by geometry
+    # Snapshot segments and vias at the top level, keyed by geometry.
+    # Include ALL segments/vias — even (net 0) — so that zone fill
+    # corruption to (net "") can be restored to the original net.
     for child in sexp.children:
         if child.name in ("segment", "via"):
             net_node = child.get("net")
-            if not _has_nonzero_net(net_node):
-                continue
             geo_key = _make_segment_via_key(child)
             if geo_key:
-                snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
+                if _has_nonzero_net(net_node):
+                    snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
+                else:
+                    # Preserve (net 0) assignment so restore can distinguish
+                    # "originally unconnected" from "newly created by fill".
+                    snapshot[geo_key] = [SExp.list("net", 0)]
 
     return snapshot
 
@@ -822,7 +828,15 @@ def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -
             best_dist = PROXIMITY_THRESHOLD
             best_net = None
             for bsx, bsy, bex, bey, net_nodes in bucket:
-                dist = math.hypot(sx - bsx, sy - bsy) + math.hypot(ex - bex, ey - bey)
+                # Use the worst (max) single-endpoint distance rather
+                # than the sum of both.  The combined metric is too
+                # restrictive: when zone fill shifts both endpoints
+                # slightly, the sum can exceed the threshold even though
+                # each individual shift is small.  Using max() ensures
+                # *both* endpoints are within the threshold individually.
+                start_dist = math.hypot(sx - bsx, sy - bsy)
+                end_dist = math.hypot(ex - bex, ey - bey)
+                dist = max(start_dist, end_dist)
                 if dist < best_dist:
                     best_dist = dist
                     best_net = net_nodes
@@ -857,6 +871,38 @@ def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -
             child.append(best_net[0])
             changed = True
 
+    return changed
+
+
+def _assign_empty_nets_to_zero(output_sexp) -> bool:
+    """Replace remaining (net "") on segments/vias with (net 0).
+
+    After key-based and proximity-based restore passes, any segments or
+    vias still carrying (net "") are new geometry created by kicad-cli
+    zone fill that had no snapshot entry.  Rather than leaving the empty
+    string (which causes DRC errors), assign them (net 0) (the
+    unconnected net) — a valid KiCad net that will not trigger DRC
+    empty-net violations.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        # Check for (net "") — empty string net
+        net_str = net_node.get_string(0)
+        if net_str is not None and net_str == "":
+            # Also check there is no numeric value (pure empty string)
+            if net_node.get_int(0) is None:
+                child.remove(net_node)
+                child.append(SExp.list("net", 0))
+                changed = True
     return changed
 
 
@@ -956,6 +1002,14 @@ def _restore_net_declarations(
         # or geometry created by kicad-cli during fill.  Use spatial proximity
         # to find the nearest snapshotted element on the same layer.
         if _fallback_restore_by_proximity(output_sexp, element_nets):
+            modified = True
+
+        # --- Final pass: assign remaining (net "") to (net 0) ---
+        # After key-based restore and proximity fallback, any segments/vias
+        # still carrying (net "") are new geometry created by zone fill
+        # with no snapshot entry.  Assign them (net 0) (unconnected) to
+        # prevent DRC errors from empty-string net corruption.
+        if _assign_empty_nets_to_zero(output_sexp):
             modified = True
 
     if modified:
