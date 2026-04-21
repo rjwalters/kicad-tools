@@ -354,7 +354,8 @@ class ReportDataCollector:
 
         Returns:
             Dictionary with net status data including totals, completion
-            percentage, and names of incomplete/unrouted nets.
+            percentage, names of incomplete/unrouted nets, and per-type
+            breakdowns (signal, zone-connected, single-pad).
         """
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -365,13 +366,52 @@ class ReportDataCollector:
         if result.total_nets > 0:
             completion_percent = round(100.0 * result.complete_count / result.total_nets, 1)
 
-        # Collect names of nets that are not fully routed (incomplete or unrouted),
-        # sorted alphabetically and capped to keep JSON snapshots manageable.
-        incomplete_net_names = sorted(n.net_name for n in result.nets if n.status != "complete")[
-            : self._INCOMPLETE_NET_NAMES_CAP
+        # Classify nets by type for richer reporting.
+        # Zone-connected: plane nets that the trace-level analyzer may mark
+        # incomplete but are actually connected via copper zones.
+        zone_connected_nets = sorted(
+            n.net_name for n in result.nets if n.is_plane_net and n.status != "complete"
+        )
+        # Also include plane nets that *are* complete (they are still zone-connected).
+        all_zone_nets = sorted(n.net_name for n in result.nets if n.is_plane_net)
+
+        # Single-pad nets: nets with exactly one pad (no routing needed).
+        single_pad_nets = sorted(n.net_name for n in result.nets if n.total_pads == 1)
+
+        # Signal nets: everything that is not a plane net and not a single-pad net.
+        signal_nets = [
+            n for n in result.nets if not n.is_plane_net and n.total_pads != 1
         ]
+        signal_net_count = len(signal_nets)
+        signal_complete_count = sum(1 for n in signal_nets if n.status == "complete")
+        signal_completion_percent = 0.0
+        if signal_net_count > 0:
+            signal_completion_percent = round(
+                100.0 * signal_complete_count / signal_net_count, 1
+            )
+
+        # Collect names of nets that are not fully routed (incomplete or unrouted),
+        # excluding zone-connected and single-pad nets since those are reported
+        # separately.  Fall back to the full list for backward compatibility.
+        zone_set = set(all_zone_nets)
+        single_set = set(single_pad_nets)
+        incomplete_net_names = sorted(
+            n.net_name
+            for n in result.nets
+            if n.status != "complete"
+        )[: self._INCOMPLETE_NET_NAMES_CAP]
+
+        # Signal-only incomplete list for the new template section.
+        signal_incomplete_net_names = sorted(
+            n.net_name
+            for n in result.nets
+            if n.status != "complete"
+            and n.net_name not in zone_set
+            and n.net_name not in single_set
+        )[: self._INCOMPLETE_NET_NAMES_CAP]
 
         return {
+            # Existing keys (backward compatible)
             "total_nets": result.total_nets,
             "complete_count": result.complete_count,
             "incomplete_count": result.incomplete_count,
@@ -379,6 +419,15 @@ class ReportDataCollector:
             "total_unconnected_pads": result.total_unconnected_pads,
             "completion_percent": completion_percent,
             "incomplete_net_names": incomplete_net_names,
+            # New keys for per-type breakdown
+            "signal_net_count": signal_net_count,
+            "signal_complete_count": signal_complete_count,
+            "signal_completion_percent": signal_completion_percent,
+            "signal_incomplete_net_names": signal_incomplete_net_names,
+            "zone_connected_count": len(all_zone_nets),
+            "zone_connected_nets": all_zone_nets,
+            "single_pad_count": len(single_pad_nets),
+            "single_pad_nets": single_pad_nets,
         }
 
     def collect_analysis(self, pcb: Any) -> dict[str, Any]:

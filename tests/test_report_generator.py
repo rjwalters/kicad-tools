@@ -1659,3 +1659,199 @@ class TestReportAutoCollect:
             )
 
         assert version_dir == output_dir / "v2"
+
+
+# ---------------------------------------------------------------------------
+# TestNetClassification - template rendering of net type breakdown
+# ---------------------------------------------------------------------------
+
+
+class TestNetClassification:
+    """Tests for signal/zone/single-pad net classification in report output."""
+
+    def test_signal_completion_primary_metric(self, tmp_path: Path) -> None:
+        """Signal Net Completion renders as the primary metric."""
+        data = _full_data(
+            net_status={
+                "total_nets": 23,
+                "complete_count": 4,
+                "completion_percent": 17.4,
+                "incomplete_count": 19,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 95,
+                "incomplete_net_names": ["GND", "+3.3V", "+3.3VA", "SPI_NSS"],
+                "signal_net_count": 16,
+                "signal_complete_count": 15,
+                "signal_completion_percent": 93.8,
+                "signal_incomplete_net_names": ["MISO"],
+                "zone_connected_count": 3,
+                "zone_connected_nets": ["+3.3V", "+3.3VA", "GND"],
+                "single_pad_count": 4,
+                "single_pad_nets": ["LATCH", "SPI_NSS", "TEST1", "TEST2"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Signal completion is the primary metric
+        assert "Signal Net Completion" in content
+        assert "93.8%" in content
+        assert "15/16" in content
+        # Overall completion still present
+        assert "Overall Completion" in content
+        assert "17.4%" in content
+
+    def test_zone_connected_nets_section(self, tmp_path: Path) -> None:
+        """Zone-connected nets render with names when present."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 7,
+                "completion_percent": 70.0,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 6,
+                "incomplete_net_names": ["GND", "+3.3V", "SDA"],
+                "signal_net_count": 8,
+                "signal_complete_count": 7,
+                "signal_completion_percent": 87.5,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["+3.3V", "GND"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "Zone-Connected Nets" in content
+        assert "- +3.3V" in content
+        assert "- GND" in content
+        # Single-pad section should not appear
+        assert "Single-Pad Nets" not in content
+
+    def test_single_pad_nets_section(self, tmp_path: Path) -> None:
+        """Single-pad nets render when present."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 9,
+                "completion_percent": 90.0,
+                "incomplete_count": 1,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 2,
+                "incomplete_net_names": ["SDA"],
+                "signal_net_count": 7,
+                "signal_complete_count": 6,
+                "signal_completion_percent": 85.7,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 3,
+                "single_pad_nets": ["LATCH", "SPI_NSS", "TEST"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "Single-Pad Nets" in content
+        assert "3 (no routing needed)" in content
+        assert "- LATCH" in content
+        assert "- SPI_NSS" in content
+        # Zone section should not appear
+        assert "### Zone-Connected Nets" not in content
+
+    def test_no_zone_or_single_pad_nets(self, tmp_path: Path) -> None:
+        """When no zone or single-pad nets exist, those sections are omitted."""
+        data = _full_data(
+            net_status={
+                "total_nets": 5,
+                "complete_count": 4,
+                "completion_percent": 80.0,
+                "incomplete_count": 1,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 2,
+                "incomplete_net_names": ["SDA"],
+                "signal_net_count": 5,
+                "signal_complete_count": 4,
+                "signal_completion_percent": 80.0,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Routing Status" in content
+        assert "Signal Net Completion" in content
+        assert "### Zone-Connected Nets" not in content
+        assert "### Single-Pad Nets" not in content
+
+    def test_signal_incomplete_nets_listed(self, tmp_path: Path) -> None:
+        """Unrouted signal nets section shows only signal nets."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 5,
+                "completion_percent": 50.0,
+                "incomplete_count": 5,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 10,
+                "incomplete_net_names": ["GND", "MISO", "MOSI", "SCL", "SDA"],
+                "signal_net_count": 8,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 62.5,
+                "signal_incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" in content
+        assert "- MISO" in content
+        assert "- MOSI" in content
+        assert "- SCL" in content
+        # GND should NOT be in the unrouted signal nets list
+        # (it should be in zone-connected)
+        # GND should appear in zone-connected section
+        assert "### Zone-Connected Nets" in content
+        assert "- GND" in content
+        assert "- VCC" in content
+
+    def test_backward_compat_old_net_status_keys(self, tmp_path: Path) -> None:
+        """Old net_status dict without new keys still renders correctly."""
+        data = _full_data(
+            net_status={
+                "total_nets": 61,
+                "complete_count": 58,
+                "completion_percent": 95.5,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 5,
+                "incomplete_net_names": ["GND", "SDA", "VCC"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Routing Status" in content
+        assert "95.5%" in content
+        # Signal line should NOT appear (key not present)
+        assert "Signal Net Completion" not in content
+        # Old incomplete nets list should still render
+        assert "### Incomplete Nets" in content
+        assert "- GND" in content

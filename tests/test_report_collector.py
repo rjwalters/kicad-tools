@@ -888,3 +888,196 @@ class TestBOMSerialization:
         assert "R2" in d["refs"]
         assert d["lcsc"] == "C25744"
         assert len(d["items"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Net classification in collect_net_status
+# ---------------------------------------------------------------------------
+
+
+class TestCollectNetStatusClassification:
+    """Tests for net type classification (signal/zone/single-pad) in collect_net_status."""
+
+    def _make_classified_result(self):
+        """Build a mock NetStatusResult with zone, single-pad, and signal nets."""
+        from kicad_tools.analysis.net_status import NetStatus, NetStatusResult
+
+        nets = []
+
+        # Zone-connected net (plane net, incomplete by trace but connected by zone)
+        gnd = NetStatus(net_number=1, net_name="GND", total_pads=10)
+        gnd.is_plane_net = True
+        gnd.plane_layer = "B.Cu"
+        gnd.connected_pads = [object()] * 5
+        gnd.unconnected_pads = [object()] * 5  # incomplete by trace
+        nets.append(gnd)
+
+        # Zone-connected net (complete)
+        vcc = NetStatus(net_number=2, net_name="+3.3V", total_pads=6)
+        vcc.is_plane_net = True
+        vcc.plane_layer = "F.Cu"
+        vcc.connected_pads = [object()] * 6
+        nets.append(vcc)
+
+        # Single-pad net
+        nss = NetStatus(net_number=3, net_name="SPI_NSS", total_pads=1)
+        nss.connected_pads = [object()]
+        nets.append(nss)
+
+        # Signal net (complete)
+        sda = NetStatus(net_number=4, net_name="SDA", total_pads=2)
+        sda.connected_pads = [object(), object()]
+        nets.append(sda)
+
+        # Signal net (complete)
+        scl = NetStatus(net_number=5, net_name="SCL", total_pads=2)
+        scl.connected_pads = [object(), object()]
+        nets.append(scl)
+
+        # Signal net (incomplete)
+        miso = NetStatus(net_number=6, net_name="MISO", total_pads=3)
+        miso.connected_pads = [object()]
+        miso.unconnected_pads = [object(), object()]
+        nets.append(miso)
+
+        return NetStatusResult(nets=nets, total_nets=6)
+
+    def test_new_keys_present(self, tmp_path):
+        """collect_net_status returns all new classification keys."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        new_keys = {
+            "signal_net_count",
+            "signal_complete_count",
+            "signal_completion_percent",
+            "signal_incomplete_net_names",
+            "zone_connected_count",
+            "zone_connected_nets",
+            "single_pad_count",
+            "single_pad_nets",
+        }
+        for key in new_keys:
+            assert key in status, f"Missing key: {key}"
+
+    def test_signal_completion_excludes_zone_and_single_pad(self, tmp_path):
+        """Signal completion percentage excludes zone-connected and single-pad nets."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        # Signal nets: SDA (complete), SCL (complete), MISO (incomplete) = 3 total
+        assert status["signal_net_count"] == 3
+        assert status["signal_complete_count"] == 2
+        # 2/3 = 66.7%
+        assert status["signal_completion_percent"] == 66.7
+
+    def test_zone_connected_nets_identified(self, tmp_path):
+        """Zone-connected nets include all plane nets."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["zone_connected_count"] == 2
+        assert "+3.3V" in status["zone_connected_nets"]
+        assert "GND" in status["zone_connected_nets"]
+
+    def test_single_pad_nets_identified(self, tmp_path):
+        """Single-pad nets are correctly identified."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["single_pad_count"] == 1
+        assert "SPI_NSS" in status["single_pad_nets"]
+
+    def test_signal_incomplete_excludes_zone_and_single_pad(self, tmp_path):
+        """signal_incomplete_net_names excludes zone-connected and single-pad nets."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        # Only MISO is an incomplete signal net
+        assert status["signal_incomplete_net_names"] == ["MISO"]
+        # GND is incomplete but zone-connected, should not be in signal list
+        assert "GND" not in status["signal_incomplete_net_names"]
+
+    def test_backward_compat_keys_preserved(self, tmp_path):
+        """Existing keys (total_nets, complete_count, etc.) are unchanged."""
+        mock_result = self._make_classified_result()
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["total_nets"] == 6
+        # complete: +3.3V, SPI_NSS (1 pad = complete), SDA, SCL = 4
+        assert status["complete_count"] == 4
+        # incomplete: GND, MISO = 2
+        assert status["incomplete_count"] == 2
+        assert status["unrouted_count"] == 0
+
+    def test_no_zone_or_single_pad_nets(self, tmp_path):
+        """When all nets are signal nets, zone/single-pad counts are zero."""
+        mock_result = _make_net_status_result(
+            complete_names=["SDA", "SCL"],
+            incomplete_names=["MISO"],
+            unrouted_names=[],
+        )
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["zone_connected_count"] == 0
+        assert status["zone_connected_nets"] == []
+        assert status["single_pad_count"] == 0
+        assert status["single_pad_nets"] == []
+        assert status["signal_net_count"] == 3
+        assert status["signal_complete_count"] == 2

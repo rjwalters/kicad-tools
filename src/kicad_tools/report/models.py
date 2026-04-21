@@ -42,7 +42,10 @@ class ReportData:
     net_status: dict | None = None
     """Net completion: {total_nets, complete_count, incomplete_count,
     unrouted_count, total_unconnected_pads, completion_percent,
-    incomplete_net_names}."""
+    incomplete_net_names, signal_net_count, signal_complete_count,
+    signal_completion_percent, signal_incomplete_net_names,
+    zone_connected_count, zone_connected_nets, single_pad_count,
+    single_pad_nets}."""
 
     cost: dict | None = None
     """Cost estimate: {pcb_cost, component_cost (nullable),
