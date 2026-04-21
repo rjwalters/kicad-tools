@@ -623,25 +623,50 @@ def _auto_skip_pour_nets(
 
         from kicad_tools.router.net_class import classify_and_apply_rules
 
-        pcb_text_for_nets = pcb_path.read_text()
+        pcb_text = pcb_path.read_text()
         net_names: dict[int, str] = {}
-        for m in _re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text_for_nets):
+        for m in _re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
             net_num, name = int(m.group(1)), m.group(2)
             if net_num > 0:
                 net_names[net_num] = name
-        del pcb_text_for_nets  # free memory
 
         if net_names:
             net_class_map = classify_and_apply_rules(net_names)
+            # Only auto-skip pour nets that actually have zones in the PCB.
+            # Nets classified as pour by name (e.g. +5V) but without a zone
+            # must still be routed as signals.
+            nets_with_zones: set[str] = set()
+            # Match traditional KiCad 7/8 format: (zone ... (net_name "GND") ...)
+            for zm in _re.finditer(
+                r'\(zone\s+.*?\(net_name\s+"([^"]+)"\)',
+                pcb_text,
+                _re.DOTALL,
+            ):
+                nets_with_zones.add(zm.group(1))
+            # Match KiCad 9 name-only format: (zone ... (net "GND") ...)
+            for zm in _re.finditer(r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', pcb_text):
+                nets_with_zones.add(zm.group(1))
+            del pcb_text  # free memory
+
             auto_skip = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net and name not in skip_nets
+                if routing.is_pour_net and name not in skip_nets and name in nets_with_zones
             ]
             if auto_skip:
                 skip_nets.extend(auto_skip)
                 if not quiet:
-                    print(f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)")
+                    print(
+                        f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)"
+                    )
+            # Warn about pour nets without zones
+            no_zone = [
+                name
+                for name, routing in net_class_map.items()
+                if routing.is_pour_net and name not in skip_nets and name not in nets_with_zones
+            ]
+            if no_zone and not quiet:
+                print(f"Routing: {', '.join(sorted(no_zone))} (power nets without zones)")
             return auto_skip
     except Exception:
         pass  # Fall back to user-supplied skip_nets only
@@ -984,8 +1009,7 @@ def route_with_layer_escalation(
                 f"on {final_result.layer_count} layers"
             )
             _multi_pad_ids = {
-                n for n, p in final_result.router.nets.items()
-                if n > 0 and len(p) >= 2
+                n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
             }
             show_routing_summary(
                 final_result.router,
@@ -1379,8 +1403,7 @@ def route_with_rule_relaxation(
                 f"at tier {final_result.tier}"
             )
             _multi_pad_ids = {
-                n for n, p in final_result.router.nets.items()
-                if n > 0 and len(p) >= 2
+                n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
             }
             show_routing_summary(
                 final_result.router,
@@ -1806,8 +1829,7 @@ def route_with_combined_escalation(
                 f"at {final_result.layer_count} layers, tier {final_result.tier}"
             )
             _multi_pad_ids = {
-                n for n, p in final_result.router.nets.items()
-                if n > 0 and len(p) >= 2
+                n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
             }
             show_routing_summary(
                 final_result.router,
@@ -3254,7 +3276,10 @@ def main(argv: list[str] | None = None) -> int:
     # Show preview if requested
     if args.preview:
         response = show_preview(
-            router, net_map, nets_to_route, quiet=quiet,
+            router,
+            net_map,
+            nets_to_route,
+            quiet=quiet,
             nets_to_route_ids=multi_pad_net_ids,
         )
         if response != "y":
@@ -3308,7 +3333,8 @@ def main(argv: list[str] | None = None) -> int:
         clearance_violations = validate_routes(router)
         if clearance_violations:
             seg_seg_violation_count = sum(
-                1 for v in clearance_violations
+                1
+                for v in clearance_violations
                 if v.obstacle_type == "segment" and not v.component_inherent
             )
             if not quiet:
@@ -3466,7 +3492,9 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print("Suggestions:")
             print(f"  - Auto-repair DRC violations: kct fix-drc {output_path} --max-passes 20")
-            print(f"  - Try Monte Carlo routing: kct route {args.pcb} --strategy monte-carlo --mc-trials 10")
+            print(
+                f"  - Try Monte Carlo routing: kct route {args.pcb} --strategy monte-carlo --mc-trials 10"
+            )
             print("  - Increase board area")
             print("  - Reduce component density")
             print("  - Try 4-layer routing: kct route --layers 4")
@@ -3484,7 +3512,10 @@ def main(argv: list[str] | None = None) -> int:
             # Use JSON format if requested
             if args.format == "json":
                 print_routing_diagnostics_json(
-                    router, net_map, nets_to_route, current_strategy=args.strategy,
+                    router,
+                    net_map,
+                    nets_to_route,
+                    current_strategy=args.strategy,
                     nets_to_route_ids=multi_pad_net_ids,
                 )
             else:
