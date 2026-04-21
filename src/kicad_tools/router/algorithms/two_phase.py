@@ -49,6 +49,7 @@ class TwoPhaseRouter:
         route_net: callable,
         route_net_with_corridor: callable,
         mark_route: callable,
+        pour_nets_without_zones: set[str] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -63,6 +64,7 @@ class TwoPhaseRouter:
         self._route_net = route_net
         self._route_net_with_corridor = route_net_with_corridor
         self._mark_route = mark_route
+        self._pour_nets_without_zones = pour_nets_without_zones or set()
 
     def route_all(
         self,
@@ -96,10 +98,14 @@ class TwoPhaseRouter:
         net_order = [n for n in net_order if n != 0]
 
         # Issue #1295: Filter out pour nets — they are connected via zone fills.
+        # Issue #1841: Exclude pour nets without zones (they route as signals).
         pour_nets = []
         signal_nets = []
         for n in net_order:
             net_name = self.net_names.get(n, "")
+            if net_name in self._pour_nets_without_zones:
+                signal_nets.append(n)
+                continue
             net_class = (self.net_class_map or {}).get(net_name)
             if net_class and net_class.is_pour_net:
                 pour_nets.append(n)

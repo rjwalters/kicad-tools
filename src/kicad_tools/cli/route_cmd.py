@@ -606,7 +606,7 @@ def _auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
     quiet: bool = False,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Detect pour nets in the PCB and add them to the skip list.
 
     Reads net definitions from the PCB file and classifies them.  Nets
@@ -621,7 +621,12 @@ def _auto_skip_pour_nets(
         quiet: Suppress informational output.
 
     Returns:
-        List of net names that were auto-skipped (subset of *skip_nets*).
+        Tuple of (auto_skipped, no_zone_nets):
+        - auto_skipped: Net names that were auto-skipped (have zones).
+        - no_zone_nets: Pour net names that lack zones and must be
+          routed as signals.  Pass these to the autorouter's
+          ``_pour_nets_without_zones`` attribute so that
+          ``_filter_pour_nets()`` does not re-skip them (Issue #1841).
     """
     try:
         import re as _re
@@ -672,10 +677,10 @@ def _auto_skip_pour_nets(
             ]
             if no_zone and not quiet:
                 print(f"Routing: {', '.join(sorted(no_zone))} (power nets without zones)")
-            return auto_skip
+            return auto_skip, no_zone
     except Exception:
         pass  # Fall back to user-supplied skip_nets only
-    return []
+    return [], []
 
 
 def route_with_layer_escalation(
@@ -735,7 +740,7 @@ def route_with_layer_escalation(
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Auto-classify pour nets and extend skip_nets
-    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -787,6 +792,9 @@ def route_with_layer_escalation(
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
+
+        # Issue #1841: Tell the autorouter which pour nets lack zones
+        router._pour_nets_without_zones = set(_no_zone)
 
         # Count nets to route
         multi_pad_nets = [
@@ -1086,7 +1094,7 @@ def route_with_rule_relaxation(
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Auto-classify pour nets and extend skip_nets
-    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -1163,6 +1171,9 @@ def route_with_rule_relaxation(
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
+
+        # Issue #1841: Tell the autorouter which pour nets lack zones
+        router._pour_nets_without_zones = set(_no_zone)
 
         # Count nets to route
         multi_pad_nets = [
@@ -1479,7 +1490,7 @@ def route_with_combined_escalation(
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Auto-classify pour nets and extend skip_nets
-    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -1564,6 +1575,9 @@ def route_with_combined_escalation(
                     print(f"  Error loading PCB: {e}")
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
+
+            # Issue #1841: Tell the autorouter which pour nets lack zones
+            router._pour_nets_without_zones = set(_no_zone)
 
             # Count nets to route
             multi_pad_nets = [
@@ -2592,7 +2606,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Auto-classify pour nets and extend skip_nets
-    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
 
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
@@ -2746,6 +2760,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"  Fine zones: {len(router.fine_zones)} "
                 f"(sub-grid escape routing enabled)"
             )
+
+    # Issue #1841: Tell the autorouter which pour nets lack zones
+    router._pour_nets_without_zones = set(_no_zone)
 
     # Set up Ctrl+C handling to save partial results
     _interrupt_state["router"] = router

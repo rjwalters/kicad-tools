@@ -645,7 +645,7 @@ class TestAutoSkipPourNetsHelper:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GND" in auto_skipped
@@ -664,7 +664,7 @@ class TestAutoSkipPourNetsHelper:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_no_ground, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_no_ground, skip_nets, quiet=True)
 
         assert auto_skipped == []
         assert skip_nets == []
@@ -674,7 +674,7 @@ class TestAutoSkipPourNetsHelper:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_multi_pour, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_multi_pour, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GNDA" in skip_nets
@@ -694,7 +694,7 @@ class TestAutoSkipZoneAwareness:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_pour_no_zone, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_pour_no_zone, skip_nets, quiet=True)
 
         assert "+5V" not in skip_nets
         assert auto_skipped == []
@@ -704,7 +704,7 @@ class TestAutoSkipZoneAwareness:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GND" in auto_skipped
@@ -716,7 +716,7 @@ class TestAutoSkipZoneAwareness:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GND" in auto_skipped
@@ -772,7 +772,7 @@ class TestAutoSkipZoneAwarenessTraditionalFormat:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_traditional_gnd, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_traditional_gnd, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GND" in auto_skipped
@@ -782,7 +782,7 @@ class TestAutoSkipZoneAwarenessTraditionalFormat:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped = _auto_skip_pour_nets(pcb_traditional_mixed, skip_nets, quiet=True)
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_traditional_mixed, skip_nets, quiet=True)
 
         assert "GND" in skip_nets
         assert "GND" in auto_skipped
@@ -802,3 +802,86 @@ class TestAutoSkipZoneAwarenessTraditionalFormat:
         assert "Routing:" in out
         assert "+5V" in out
         assert "power nets without zones" in out
+
+
+# ===========================================================================
+# Tests for _is_pour_net / _filter_pour_nets with pour_nets_without_zones
+# (Issue #1841)
+# ===========================================================================
+
+
+class TestFilterPourNetsWithoutZones:
+    """Verify _filter_pour_nets respects _pour_nets_without_zones.
+
+    Issue #1841: Pour nets without zones (e.g. GNDA on chorus-test-revA)
+    were incorrectly re-filtered by _filter_pour_nets inside the autorouter
+    even though _auto_skip_pour_nets had already classified them as
+    'route as signal'.
+    """
+
+    def _make_autorouter(self):
+        """Create a minimal Autorouter with GNDA and GND nets."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        router = Autorouter(width=50, height=40)
+        net_names = {1: "GND", 2: "GNDA", 3: "SPI_CLK"}
+        net_class_map = classify_and_apply_rules(net_names)
+        router.net_class_map = net_class_map
+        router.net_names = net_names
+        router.nets = {1: [], 2: [], 3: []}
+        return router
+
+    def test_is_pour_net_true_by_default(self) -> None:
+        """GNDA is a pour net by default (has is_pour_net=True in net class)."""
+        router = self._make_autorouter()
+        assert router._is_pour_net(2) is True  # GNDA
+
+    def test_is_pour_net_false_when_in_without_zones(self) -> None:
+        """GNDA returns False from _is_pour_net when marked as no-zone."""
+        router = self._make_autorouter()
+        router._pour_nets_without_zones = {"GNDA"}
+        assert router._is_pour_net(2) is False  # GNDA
+        # GND (not in the set) remains a pour net
+        assert router._is_pour_net(1) is True  # GND
+
+    def test_filter_pour_nets_keeps_no_zone_nets(self) -> None:
+        """_filter_pour_nets should NOT remove GNDA when it has no zone."""
+        router = self._make_autorouter()
+        router._pour_nets_without_zones = {"GNDA"}
+
+        net_order = [1, 2, 3]  # GND, GNDA, SPI_CLK
+        filtered = router._filter_pour_nets(net_order)
+
+        # GND (has is_pour_net, NOT in _pour_nets_without_zones) -> filtered out
+        assert 1 not in filtered
+        # GNDA (has is_pour_net, IS in _pour_nets_without_zones) -> kept
+        assert 2 in filtered
+        # SPI_CLK (not a pour net) -> kept
+        assert 3 in filtered
+
+    def test_filter_pour_nets_removes_all_when_no_override(self) -> None:
+        """Without _pour_nets_without_zones set, all pour nets are filtered."""
+        router = self._make_autorouter()
+        # _pour_nets_without_zones defaults to empty set
+
+        net_order = [1, 2, 3]  # GND, GNDA, SPI_CLK
+        filtered = router._filter_pour_nets(net_order)
+
+        assert 1 not in filtered  # GND filtered
+        assert 2 not in filtered  # GNDA filtered
+        assert 3 in filtered      # SPI_CLK kept
+
+    def test_auto_skip_returns_no_zone_list(self, pcb_mixed_zone: Path) -> None:
+        """_auto_skip_pour_nets returns (skipped, no_zone) where no_zone
+        contains power nets without zones."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped, no_zone = _auto_skip_pour_nets(
+            pcb_mixed_zone, skip_nets, quiet=True
+        )
+
+        assert "GND" in auto_skipped
+        assert "+5V" in no_zone
+        assert "+5V" not in auto_skipped
