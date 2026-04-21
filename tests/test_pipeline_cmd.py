@@ -4088,30 +4088,6 @@ class TestStitchStep:
         assert "stitch" in cmd
         assert str(four_layer_pcb_with_zones) in cmd
 
-    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
-    def test_stitch_forwards_force_flag(self, mock_run, four_layer_pcb_with_zones: Path):
-        """Stitch step forwards --force flag to subprocess."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
-        console = MagicMock()
-        ctx = PipelineContext(
-            pcb_file=four_layer_pcb_with_zones, layers="4", quiet=True, force=True
-        )
-        _run_step_stitch(ctx, console)
-        cmd = mock_run.call_args[0][0]
-        assert "--force" in cmd
-
-    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
-    def test_stitch_no_force_flag_by_default(self, mock_run, four_layer_pcb_with_zones: Path):
-        """Stitch step does not pass --force when force is False."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
-        console = MagicMock()
-        ctx = PipelineContext(
-            pcb_file=four_layer_pcb_with_zones, layers="4", quiet=True, force=False
-        )
-        _run_step_stitch(ctx, console)
-        cmd = mock_run.call_args[0][0]
-        assert "--force" not in cmd
-
     def test_step_stitch_accepted_by_argparse(self, routed_pcb: Path):
         """--step stitch is accepted by the CLI argument parser."""
         result = main(["--step", "stitch", "--dry-run", "--quiet", str(routed_pcb)])

@@ -661,9 +661,6 @@ def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
         str(ctx.pcb_file),
     ]
 
-    if ctx.force:
-        cmd.append("--force")
-
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
     return PipelineResult(
