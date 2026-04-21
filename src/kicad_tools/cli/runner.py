@@ -507,11 +507,15 @@ def _has_canonical_net(net_node) -> bool:
     return False
 
 
-def _make_segment_via_key(child) -> str | None:
+def _make_segment_via_key(child, *, precision: int = 4) -> str | None:
     """Build a geometry-based key for a segment or via S-expression node.
 
     Uses ``(start, end, layer)`` for segments and ``(position, size, layers)``
     for vias, which are stable across kicad-cli UUID regeneration.
+
+    Coordinates are rounded to *precision* decimal places (default 4) so that
+    minor floating-point drift introduced by kicad-cli re-serialization still
+    produces identical keys.
 
     Returns None if required geometry fields are missing.
     """
@@ -521,10 +525,10 @@ def _make_segment_via_key(child) -> str | None:
         layer_node = child.get("layer")
         if start_node is None or end_node is None or layer_node is None:
             return None
-        sx = start_node.get_float(0) or 0.0
-        sy = start_node.get_float(1) or 0.0
-        ex = end_node.get_float(0) or 0.0
-        ey = end_node.get_float(1) or 0.0
+        sx = round(start_node.get_float(0) or 0.0, precision)
+        sy = round(start_node.get_float(1) or 0.0, precision)
+        ex = round(end_node.get_float(0) or 0.0, precision)
+        ey = round(end_node.get_float(1) or 0.0, precision)
         layer = layer_node.get_string(0) or ""
         return f"seg:{sx},{sy}:{ex},{ey}:{layer}"
     elif child.name == "via":
@@ -533,9 +537,9 @@ def _make_segment_via_key(child) -> str | None:
         layers_node = child.get("layers")
         if at_node is None or size_node is None:
             return None
-        ax = at_node.get_float(0) or 0.0
-        ay = at_node.get_float(1) or 0.0
-        sz = size_node.get_float(0) or 0.0
+        ax = round(at_node.get_float(0) or 0.0, precision)
+        ay = round(at_node.get_float(1) or 0.0, precision)
+        sz = round(size_node.get_float(0) or 0.0, precision)
         layer_strs = []
         if layers_node is not None:
             for c in layers_node.children:
@@ -749,6 +753,113 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
     return snapshot
 
 
+def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -> bool:
+    """Second-pass restore for segments/vias still carrying ``(net "")``.
+
+    After the primary geometry-key restore, some elements may remain
+    unmatched due to coordinate drift exceeding the rounding tolerance or
+    new geometry created by kicad-cli during zone fill.
+
+    This function builds per-layer spatial indices from the *element_nets*
+    snapshot and assigns each remaining ``(net "")`` element the net of the
+    nearest snapshotted element on the same layer, provided the distance is
+    within a generous tolerance (0.01 mm -- well above floating-point drift
+    but small enough to avoid cross-net mismatches on dense boards).
+
+    Returns True if any element was modified.
+    """
+    import math
+
+    PROXIMITY_THRESHOLD = 0.01  # mm
+
+    # Parse snapshot keys into spatial buckets by (element_type, layer_key).
+    # segment keys: "seg:sx,sy:ex,ey:layer"
+    # via keys:     "via:ax,ay:sz:layer1,layer2,..."
+    spatial_index: dict[tuple[str, str], list[tuple[float, float, float, float, list]]] = {}
+    for key, net_nodes in element_nets.items():
+        parts = key.split(":")
+        if len(parts) < 4:
+            continue
+        etype = parts[0]
+        if etype == "seg":
+            try:
+                sx, sy = float(parts[1].split(",")[0]), float(parts[1].split(",")[1])
+                ex, ey = float(parts[2].split(",")[0]), float(parts[2].split(",")[1])
+            except (ValueError, IndexError):
+                continue
+            layer_key = parts[3]
+            bucket = spatial_index.setdefault(("segment", layer_key), [])
+            bucket.append((sx, sy, ex, ey, net_nodes))
+        elif etype == "via":
+            try:
+                ax, ay = float(parts[1].split(",")[0]), float(parts[1].split(",")[1])
+            except (ValueError, IndexError):
+                continue
+            layer_key = parts[3]  # comma-joined layers string
+            bucket = spatial_index.setdefault(("via", layer_key), [])
+            bucket.append((ax, ay, 0.0, 0.0, net_nodes))
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        current_net = child.get("net")
+        if _has_canonical_net(current_net):
+            continue
+        # This element still has a bad net -- attempt proximity match.
+        if child.name == "segment":
+            start_node = child.get("start")
+            end_node = child.get("end")
+            layer_node = child.get("layer")
+            if start_node is None or end_node is None or layer_node is None:
+                continue
+            sx = start_node.get_float(0) or 0.0
+            sy = start_node.get_float(1) or 0.0
+            ex = end_node.get_float(0) or 0.0
+            ey = end_node.get_float(1) or 0.0
+            layer_key = layer_node.get_string(0) or ""
+            bucket = spatial_index.get(("segment", layer_key), [])
+            best_dist = PROXIMITY_THRESHOLD
+            best_net = None
+            for bsx, bsy, bex, bey, net_nodes in bucket:
+                dist = math.hypot(sx - bsx, sy - bsy) + math.hypot(ex - bex, ey - bey)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_net = net_nodes
+        elif child.name == "via":
+            at_node = child.get("at")
+            if at_node is None:
+                continue
+            ax = at_node.get_float(0) or 0.0
+            ay = at_node.get_float(1) or 0.0
+            # Build the layers string to match the bucket key
+            layers_node = child.get("layers")
+            layer_strs = []
+            if layers_node is not None:
+                for c in layers_node.children:
+                    if c.is_atom and isinstance(c.value, str):
+                        layer_strs.append(c.value)
+            layer_key = ",".join(layer_strs)
+            bucket = spatial_index.get(("via", layer_key), [])
+            best_dist = PROXIMITY_THRESHOLD
+            best_net = None
+            for bax, bay, _, _, net_nodes in bucket:
+                dist = math.hypot(ax - bax, ay - bay)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_net = net_nodes
+        else:
+            continue
+
+        if best_net is not None:
+            if current_net is not None:
+                child.remove(current_net)
+            child.append(best_net[0])
+            changed = True
+
+    return changed
+
+
 def _restore_net_declarations(
     target_pcb: Path,
     net_nodes: list,
@@ -838,6 +949,14 @@ def _restore_net_declarations(
                             child.remove(current_net)
                         child.append(element_nets[geo_key][0])
                         modified = True
+
+        # --- Fallback pass for remaining unmatched (net "") elements ---
+        # After the primary key-based restore, some segments/vias may still
+        # have (net "") due to coordinate drift beyond the rounding threshold
+        # or geometry created by kicad-cli during fill.  Use spatial proximity
+        # to find the nearest snapshotted element on the same layer.
+        if _fallback_restore_by_proximity(output_sexp, element_nets):
+            modified = True
 
     if modified:
         save_pcb(output_sexp, target_pcb)
