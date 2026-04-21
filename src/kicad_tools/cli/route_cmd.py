@@ -633,15 +633,38 @@ def _auto_skip_pour_nets(
 
         if net_names:
             net_class_map = classify_and_apply_rules(net_names)
+            # Only auto-skip pour nets that actually have zones in the PCB.
+            # Nets classified as pour by name (e.g. +5V) but without a zone
+            # must still be routed as signals.
+            pcb_text_for_zones = pcb_path.read_text()
+            nets_with_zones: set[str] = set()
+            for zm in _re.finditer(
+                r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', pcb_text_for_zones
+            ):
+                nets_with_zones.add(zm.group(1))
+            del pcb_text_for_zones
+
             auto_skip = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net and name not in skip_nets
+                if routing.is_pour_net
+                and name not in skip_nets
+                and name in nets_with_zones
             ]
             if auto_skip:
                 skip_nets.extend(auto_skip)
                 if not quiet:
                     print(f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)")
+            # Warn about pour nets without zones
+            no_zone = [
+                name
+                for name, routing in net_class_map.items()
+                if routing.is_pour_net
+                and name not in skip_nets
+                and name not in nets_with_zones
+            ]
+            if no_zone and not quiet:
+                print(f"Routing: {', '.join(sorted(no_zone))} (power nets without zones)")
             return auto_skip
     except Exception:
         pass  # Fall back to user-supplied skip_nets only

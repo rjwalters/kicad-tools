@@ -5,6 +5,7 @@ automatically detect pour nets (GND, GNDA, VSS, etc.) and either pass
 net_class_map to the RoutingOrchestrator or extend skip_nets.
 
 Issue #1292: Wire net_class_map into CLI route command for pour-net skipping.
+Issue #1807: Only auto-skip power nets that have corresponding zones in PCB.
 """
 
 import contextlib
@@ -17,7 +18,7 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# Minimal PCB with a GND net, a signal net, and an outline
+# Minimal PCB with a GND net (with zone), a signal net, and an outline
 POUR_NET_PCB = """\
 (kicad_pcb
   (version 20240108)
@@ -60,6 +61,93 @@ POUR_NET_PCB = """\
     (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
     (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SPI_CLK"))
   )
+
+  (zone (net "GND") (layer "F.Cu") (tstamp "00000000-0000-0000-0000-000000000001"))
+)
+"""
+
+# Minimal PCB with a GND net but NO zone (power net without zone)
+POUR_NET_NO_ZONE_PCB = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "SPI_CLK")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "+5V"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SPI_CLK"))
+  )
+)
+"""
+
+# PCB with GND (has zone) and +5V (no zone) -- mixed scenario
+MIXED_ZONE_PCB = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+5V")
+  (net 3 "SPI_CLK")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SPI_CLK"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "+5V"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SPI_CLK"))
+  )
+
+  (zone (net "GND") (layer "F.Cu") (tstamp "00000000-0000-0000-0000-000000000001"))
 )
 """
 
@@ -99,7 +187,7 @@ NO_GROUND_PCB = """\
 )
 """
 
-# PCB with multiple pour nets
+# PCB with multiple pour nets (both with zones)
 MULTI_POUR_PCB = """\
 (kicad_pcb
   (version 20240108)
@@ -143,6 +231,9 @@ MULTI_POUR_PCB = """\
     (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GNDA"))
     (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SPI_CLK"))
   )
+
+  (zone (net "GND") (layer "F.Cu") (tstamp "00000000-0000-0000-0000-000000000002"))
+  (zone (net "GNDA") (layer "B.Cu") (tstamp "00000000-0000-0000-0000-000000000003"))
 )
 """
 
@@ -173,6 +264,22 @@ def pcb_multi_pour(tmp_path: Path) -> Path:
     """Write a PCB file with multiple pour nets."""
     p = tmp_path / "board_multi.kicad_pcb"
     p.write_text(MULTI_POUR_PCB)
+    return p
+
+
+@pytest.fixture
+def pcb_pour_no_zone(tmp_path: Path) -> Path:
+    """Write a PCB file with a power net (+5V) but no zone for it."""
+    p = tmp_path / "board_no_zone.kicad_pcb"
+    p.write_text(POUR_NET_NO_ZONE_PCB)
+    return p
+
+
+@pytest.fixture
+def pcb_mixed_zone(tmp_path: Path) -> Path:
+    """Write a PCB with GND (has zone) and +5V (no zone)."""
+    p = tmp_path / "board_mixed.kicad_pcb"
+    p.write_text(MIXED_ZONE_PCB)
     return p
 
 
@@ -451,3 +558,76 @@ class TestAutoSkipPourNetsHelper:
         assert "GND" in skip_nets
         assert "GNDA" in skip_nets
         assert len(auto_skipped) == 2
+
+
+# ===========================================================================
+# Tests for zone-awareness in _auto_skip_pour_nets (Issue #1807)
+# ===========================================================================
+
+
+class TestAutoSkipZoneAwareness:
+    """Verify _auto_skip_pour_nets only skips power nets that have zones."""
+
+    def test_power_net_without_zone_is_not_skipped(self, pcb_pour_no_zone: Path) -> None:
+        """+5V (power net) without a zone should NOT be added to skip_nets."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_pour_no_zone, skip_nets, quiet=True)
+
+        assert "+5V" not in skip_nets
+        assert auto_skipped == []
+
+    def test_mixed_zone_gnd_skipped_5v_routed(self, pcb_mixed_zone: Path) -> None:
+        """GND (has zone) is skipped; +5V (no zone) is routed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GND" in auto_skipped
+        assert "+5V" not in skip_nets
+        assert "+5V" not in auto_skipped
+
+    def test_power_net_with_zone_still_skipped(self, pcb_with_gnd: Path) -> None:
+        """GND with a zone in the PCB should still be auto-skipped."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GND" in auto_skipped
+
+    def test_info_message_for_zoneless_power_nets(self, pcb_mixed_zone: Path, capsys) -> None:
+        """With quiet=False, an info message lists power nets being routed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=False)
+
+        out = capsys.readouterr().out
+        assert "Routing:" in out
+        assert "+5V" in out
+        assert "power nets without zones" in out
+
+    def test_no_info_message_when_quiet(self, pcb_mixed_zone: Path, capsys) -> None:
+        """With quiet=True, no informational message is printed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=True)
+
+        out = capsys.readouterr().out
+        assert "Routing:" not in out
+
+    def test_no_info_message_when_all_have_zones(self, pcb_with_gnd: Path, capsys) -> None:
+        """When all power nets have zones, no 'Routing:' message is printed."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=False)
+
+        out = capsys.readouterr().out
+        assert "Routing:" not in out
