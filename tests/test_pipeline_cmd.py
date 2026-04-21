@@ -4112,3 +4112,102 @@ class TestStitchStep:
         result = _run_step_stitch(ctx, console)
         assert result.success is True
         assert result.skipped is True
+
+
+class TestCacheFlagForwarding:
+    """Tests for --no-cache and --clear-cache flag forwarding to route step."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_no_cache_forwarded_to_route(self, mock_run, unrouted_pcb: Path):
+        """--no-cache flag is forwarded to the route subprocess command."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, no_cache=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--no-cache" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_clear_cache_forwarded_to_route(self, mock_run, unrouted_pcb: Path):
+        """--clear-cache flag is forwarded to the route subprocess command."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, clear_cache=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--clear-cache" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_both_cache_flags_forwarded(self, mock_run, unrouted_pcb: Path):
+        """Both --no-cache and --clear-cache flags forwarded together."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, no_cache=True, clear_cache=True
+        )
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--no-cache" in cmd_args
+        assert "--clear-cache" in cmd_args
+
+    def test_dry_run_includes_no_cache(self, unrouted_pcb: Path):
+        """--dry-run output includes --no-cache when set."""
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, dry_run=True, no_cache=True
+        )
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert "--no-cache" in results[0].message
+
+    def test_dry_run_includes_clear_cache(self, unrouted_pcb: Path):
+        """--dry-run output includes --clear-cache when set."""
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, dry_run=True, clear_cache=True
+        )
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert "--clear-cache" in results[0].message
+
+    def test_cache_flags_ignored_when_route_skipped(self, routed_pcb: Path):
+        """Cache flags cause no error when route step is skipped (already routed)."""
+        ctx = PipelineContext(
+            pcb_file=routed_pcb, quiet=True, no_cache=True, clear_cache=True
+        )
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+
+    def test_no_cache_cli_flag_parsed(self, unrouted_pcb: Path):
+        """--no-cache is accepted by the CLI argument parser."""
+        result = main(["--no-cache", "--dry-run", "--quiet", str(unrouted_pcb)])
+        assert result == 0
+
+    def test_clear_cache_cli_flag_parsed(self, unrouted_pcb: Path):
+        """--clear-cache is accepted by the CLI argument parser."""
+        result = main(["--clear-cache", "--dry-run", "--quiet", str(unrouted_pcb)])
+        assert result == 0
+
+    def test_both_cache_flags_cli_parsed(self, unrouted_pcb: Path):
+        """Both --no-cache and --clear-cache accepted together via CLI."""
+        result = main(
+            ["--no-cache", "--clear-cache", "--dry-run", "--quiet", str(unrouted_pcb)]
+        )
+        assert result == 0

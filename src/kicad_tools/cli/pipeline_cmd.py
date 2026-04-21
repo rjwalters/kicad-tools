@@ -123,6 +123,8 @@ class PipelineContext:
     is_project: bool = False
     commit: bool = False
     best_effort: bool = False
+    no_cache: bool = False
+    clear_cache: bool = False
     max_displacement: float = 2.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
@@ -544,6 +546,11 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     route_layers = ctx.layers or "auto"
 
     if ctx.dry_run:
+        cache_flags = ""
+        if ctx.no_cache:
+            cache_flags += " --no-cache"
+        if ctx.clear_cache:
+            cache_flags += " --clear-cache"
         if is_routed:
             return PipelineResult(
                 step=PipelineStep.ROUTE,
@@ -551,6 +558,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
                 message=(
                     f"[dry-run] Would re-route (--force): {ctx.pcb_file.name} "
                     f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
+                    f"{cache_flags}"
                 ),
             )
         return PipelineResult(
@@ -559,6 +567,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             message=(
                 f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
                 f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
+                f"{cache_flags}"
             ),
         )
 
@@ -584,6 +593,10 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
 
     if ctx.quiet:
         cmd.append("--quiet")
+    if ctx.no_cache:
+        cmd.append("--no-cache")
+    if ctx.clear_cache:
+        cmd.append("--clear-cache")
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
@@ -1562,6 +1575,8 @@ Examples:
     kct pipeline board.kicad_pcb --commit              # Commit changes after success
     kct pipeline board.kicad_pcb --mfr jlcpcb --commit # Pipeline + auto-commit
     kct pipeline board.kicad_pcb --best-effort         # Continue past routing failures
+    kct pipeline board.kicad_pcb --no-cache            # Bypass routing cache
+    kct pipeline board.kicad_pcb --clear-cache         # Clear cache before routing
         """,
     )
 
@@ -1633,6 +1648,18 @@ Examples:
             "Continue past routing failures to zone fill, DRC, audit, report, and export. "
             "Exit code 2 indicates partial success (routing incomplete but downstream steps ran)"
         ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        default=False,
+        help="Bypass routing cache (force fresh routing in the route step)",
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        default=False,
+        help="Clear routing cache before the route step runs",
     )
     parser.add_argument(
         "--max-displacement",
@@ -1731,6 +1758,8 @@ Examples:
         is_project=is_project,
         commit=args.commit,
         best_effort=args.best_effort,
+        no_cache=args.no_cache,
+        clear_cache=args.clear_cache,
         max_displacement=args.max_displacement,
     )
 
