@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
-from .base import DRCRule
+from .base import DRC_TOLERANCE, DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -72,7 +72,7 @@ class DimensionRules(DRCRule):
         min_width = design_rules.min_trace_width_mm
 
         for segment in pcb.segments:
-            if segment.width < min_width:
+            if segment.width + DRC_TOLERANCE < min_width:
                 # Get net name if available
                 net = pcb.get_net(segment.net_number)
                 net_name = net.name if net else f"net:{segment.net_number}"
@@ -107,7 +107,7 @@ class DimensionRules(DRCRule):
             net_name = net.name if net else f"net:{via.net_number}"
 
             # Check drill diameter
-            if via.drill < min_drill:
+            if via.drill + DRC_TOLERANCE < min_drill:
                 results.add(
                     DRCViolation(
                         rule_id="dimension_via_drill",
@@ -122,7 +122,7 @@ class DimensionRules(DRCRule):
                 )
 
             # Check via outer diameter
-            if via.size < min_diameter:
+            if via.size + DRC_TOLERANCE < min_diameter:
                 results.add(
                     DRCViolation(
                         rule_id="dimension_via_diameter",
@@ -138,7 +138,7 @@ class DimensionRules(DRCRule):
 
             # Check annular ring: (outer diameter - drill) / 2
             annular_ring = (via.size - via.drill) / 2
-            if annular_ring < min_annular:
+            if annular_ring + DRC_TOLERANCE < min_annular:
                 results.add(
                     DRCViolation(
                         rule_id="dimension_annular_ring",
@@ -207,7 +207,7 @@ class DimensionRules(DRCRule):
                 # Edge-to-edge distance
                 edge_distance = center_distance - (drill1 / 2) - (drill2 / 2)
 
-                if edge_distance < min_clearance:
+                if edge_distance + DRC_TOLERANCE < min_clearance:
                     # Downgrade to warning when both holes belong to the
                     # same footprint (e.g. dense connector pads).  These
                     # are intentional by design and should not block builds.
