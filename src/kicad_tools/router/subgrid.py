@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .grid import RoutingGrid
+    from .io import FineZone
     from .rules import DesignRules
 
 from .layers import Layer
@@ -226,6 +227,7 @@ class SubGridRouter:
         grid_tolerance: float | None = None,
         escape_search_radius: int | None = None,
         clearance_weight: float = 2.5,
+        fine_zones: list[FineZone] | None = None,
     ):
         self.grid = grid
         self.rules = rules
@@ -239,6 +241,7 @@ class SubGridRouter:
             min_search_mm = 0.3  # minimum physical search distance
             self.escape_search_radius = max(3, math.ceil(min_search_mm / grid.resolution))
         self.clearance_weight = clearance_weight
+        self.fine_zones: list[FineZone] = fine_zones or []
 
     def analyze_pads(
         self,
@@ -499,6 +502,132 @@ class SubGridRouter:
                 min_dist = dist
         return min_dist
 
+    def _get_pad_fine_resolution(self, pad: Pad) -> float | None:
+        """Return the fine-zone resolution for a pad, or None if not in a fine zone.
+
+        When a pad falls inside one or more fine zones, the finest (smallest)
+        resolution is returned so that escape candidates are generated on the
+        densest applicable grid.
+
+        Args:
+            pad: The pad to check.
+
+        Returns:
+            Fine resolution in mm, or None if the pad is outside all fine zones.
+        """
+        best: float | None = None
+        for zone in self.fine_zones:
+            if zone.contains(pad.x, pad.y):
+                if best is None or zone.resolution < best:
+                    best = zone.resolution
+        return best
+
+    def _generate_fine_grid_candidates(
+        self,
+        sgp: SubGridPad,
+        fine_resolution: float,
+    ) -> list[tuple[float, int, int, float, float]]:
+        """Generate escape candidates on a fine grid, bridging to the coarse grid.
+
+        For pads inside a fine zone, this generates candidate escape points on
+        the fine grid (``fine_resolution`` spacing) within the search radius,
+        then maps each fine-grid candidate to the nearest coarse-grid cell.
+        This ensures the escape segment terminates at a point the main A*
+        router can reach on the coarse grid.
+
+        Args:
+            sgp: The off-grid pad to generate candidates for.
+            fine_resolution: Fine grid resolution in mm.
+
+        Returns:
+            List of ``(score, gx, gy, snap_x, snap_y)`` tuples where
+            ``(gx, gy)`` is the coarse grid cell and ``(snap_x, snap_y)``
+            is the fine-grid world point used as the escape endpoint.
+        """
+        pad = sgp.pad
+
+        # Physical search distance: use the same minimum as the coarse search
+        # but expressed in fine-grid cells.
+        min_search_mm = 0.3
+        fine_radius = max(3, math.ceil(min_search_mm / fine_resolution))
+
+        # The fine grid is centred on the pad's nearest coarse-grid point
+        # (sgp.snap_x, sgp.snap_y) and extends ``fine_radius`` fine cells
+        # in each direction.
+        candidates: list[tuple[float, int, int, float, float]] = []
+
+        for dy in range(-fine_radius, fine_radius + 1):
+            for dx in range(-fine_radius, fine_radius + 1):
+                # Fine-grid candidate in world coordinates
+                fx = sgp.snap_x + dx * fine_resolution
+                fy = sgp.snap_y + dy * fine_resolution
+
+                # Distance from pad center to this fine-grid point
+                dist = math.sqrt((pad.x - fx) ** 2 + (pad.y - fy) ** 2)
+
+                # Map the fine candidate back to the nearest coarse grid cell
+                # so the main router can connect to it.
+                gx, gy = self.grid.world_to_grid(fx, fy)
+
+                if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+                    continue
+
+                # The escape segment terminates at the fine-grid point (fx, fy),
+                # but the coarse grid cell (gx, gy) is what gets unblocked for
+                # the A* router.  Check accessibility on the coarse grid.
+                if pad.through_hole:
+                    check_layers = list(range(self.grid.num_layers))
+                else:
+                    check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+                accessible = False
+                for layer_idx in check_layers:
+                    cell = self.grid.grid[layer_idx][gy][gx]
+                    if not cell.blocked:
+                        accessible = True
+                        break
+                    elif not cell.pad_blocked:
+                        accessible = True
+                        break
+                if not accessible:
+                    continue
+
+                # Score: distance + escape direction bonus (same logic as coarse)
+                score = dist
+
+                if sgp.escape_direction != (0.0, 0.0):
+                    ex, ey = sgp.escape_direction
+                    cdx = fx - pad.x
+                    cdy = fy - pad.y
+                    cdist = math.sqrt(cdx * cdx + cdy * cdy)
+                    if cdist > 0.001:
+                        dot = (cdx / cdist) * ex + (cdy / cdist) * ey
+                        score -= dot * fine_resolution * 0.5
+
+                # Penalty for being too far (use fine resolution for threshold)
+                if dist > fine_resolution * fine_radius:
+                    score += dist * 2
+
+                # Clearance-aware scoring
+                if self.clearance_weight > 0:
+                    required_clearance = self.rules.trace_clearance
+                    neighbor_clearance = self._min_clearance_to_neighbors(
+                        fx, fy,
+                        self.rules.trace_width / 2 if self.rules.min_trace_width is None
+                        else self.rules.min_trace_width / 2,
+                        pad.net, check_layers[0],
+                    )
+                    threshold = required_clearance * 2
+                    if neighbor_clearance < threshold:
+                        clearance_penalty = (
+                            (threshold - neighbor_clearance) * self.clearance_weight
+                        )
+                        score += clearance_penalty
+
+                candidates.append((score, gx, gy, fx, fy))
+
+        return candidates
+
     def _find_escape_for_pad(self, sgp: SubGridPad) -> SubGridEscape | None:
         """Find the best escape point for a single off-grid pad.
 
@@ -628,8 +757,42 @@ class SubGridRouter:
 
                 candidates.append((score, gx, gy, snap_x, snap_y))
 
+        # Issue #1828: When the pad falls within a fine zone, generate
+        # additional candidates on the fine grid.  Fine-grid candidates
+        # produce shorter escape segments that better match dense IC pin
+        # spacing (e.g. 0.05mm vs 0.17mm coarse).  Each fine-grid candidate
+        # is mapped back to the nearest coarse grid cell so the main A*
+        # router can connect to it.
+        fine_res = self._get_pad_fine_resolution(pad)
+        if fine_res is not None and fine_res < self.grid.resolution:
+            fine_candidates = self._generate_fine_grid_candidates(sgp, fine_res)
+            candidates.extend(fine_candidates)
+            logger.debug(
+                "Fine-zone escape for %s.%s: %d fine candidates + %d coarse candidates "
+                "(fine_res=%.4fmm)",
+                pad.ref, pad.pin,
+                len(fine_candidates),
+                len(candidates) - len(fine_candidates),
+                fine_res,
+            )
+
         if not candidates:
             return None
+
+        # Deduplicate candidates that share the same coarse grid cell.
+        # When fine-grid candidates map to the same (gx, gy) as a coarse
+        # candidate, keep only the one with the best (lowest) score.
+        # However, different snap points for the same grid cell ARE useful
+        # if they produce different escape segment geometry, so we deduplicate
+        # by the full (gx, gy, snap_x_rounded, snap_y_rounded) key.
+        seen: dict[tuple[int, int, int, int], tuple[float, int, int, float, float]] = {}
+        for cand in candidates:
+            score, gx, gy, sx, sy = cand
+            # Round snap points to fine-grid precision to merge near-duplicates
+            key = (gx, gy, round(sx * 10000), round(sy * 10000))
+            if key not in seen or score < seen[key][0]:
+                seen[key] = cand
+        candidates = list(seen.values())
 
         # Sort candidates by score (lowest = best)
         candidates.sort(key=lambda c: c[0])

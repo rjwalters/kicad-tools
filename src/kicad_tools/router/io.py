@@ -483,6 +483,18 @@ class FineZone:
         rows = int(self.height / self.resolution) + 1
         return cols * rows
 
+    def contains(self, x: float, y: float) -> bool:
+        """Check if a point (x, y) falls within this fine zone.
+
+        Args:
+            x: X coordinate in mm (world units)
+            y: Y coordinate in mm (world units)
+
+        Returns:
+            True if the point is inside the zone bounding box.
+        """
+        return self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max
+
 
 @dataclass
 class MultiResolutionGridPlan:
