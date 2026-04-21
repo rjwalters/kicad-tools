@@ -703,7 +703,7 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-vias, route, etc."""
+        """Steps execute in the correct order: zones before fix-drc, refill after fix-drc."""
         expected = [
             PipelineStep.ERC,
             PipelineStep.FIX_ERC,
@@ -711,8 +711,9 @@ class TestPipelineStepOrder:
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
             PipelineStep.OPTIMIZE,
-            PipelineStep.FIX_DRC,
             PipelineStep.ZONES,
+            PipelineStep.FIX_DRC,
+            PipelineStep.ZONES_REFILL,
             PipelineStep.AUDIT,
             PipelineStep.REPORT,
             PipelineStep.EXPORT,
@@ -729,6 +730,24 @@ class TestPipelineStepOrder:
     def test_fix_silkscreen_in_all_steps(self):
         """PipelineStep.FIX_SILKSCREEN is present in ALL_STEPS."""
         assert PipelineStep.FIX_SILKSCREEN in ALL_STEPS
+
+    def test_zones_before_fix_drc(self):
+        """ZONES runs before FIX_DRC to fill zone copper before trace nudging."""
+        zones_idx = ALL_STEPS.index(PipelineStep.ZONES)
+        fix_drc_idx = ALL_STEPS.index(PipelineStep.FIX_DRC)
+        assert zones_idx < fix_drc_idx
+
+    def test_zones_refill_after_fix_drc(self):
+        """ZONES_REFILL runs after FIX_DRC to recompute zones for nudged traces."""
+        fix_drc_idx = ALL_STEPS.index(PipelineStep.FIX_DRC)
+        refill_idx = ALL_STEPS.index(PipelineStep.ZONES_REFILL)
+        assert refill_idx == fix_drc_idx + 1
+
+    def test_zones_refill_before_audit(self):
+        """ZONES_REFILL runs before AUDIT so the audit sees correct zone copper."""
+        refill_idx = ALL_STEPS.index(PipelineStep.ZONES_REFILL)
+        audit_idx = ALL_STEPS.index(PipelineStep.AUDIT)
+        assert refill_idx < audit_idx
 
 
 class TestPipelineLayerAutoDetection:
@@ -2950,6 +2969,51 @@ class TestZonesRunByDefault:
         """--zones CLI flag no longer exists."""
         with pytest.raises(SystemExit):
             main(["--zones", "dummy.kicad_pcb"])
+
+
+class TestZonesRefill:
+    """Tests for the zones-refill step that runs after fix-drc."""
+
+    def test_zones_refill_in_all_steps(self):
+        """ZONES_REFILL is present in ALL_STEPS."""
+        assert PipelineStep.ZONES_REFILL in ALL_STEPS
+
+    def test_zones_refill_enum_value(self):
+        """ZONES_REFILL has the expected string value."""
+        assert PipelineStep.ZONES_REFILL.value == "zones-refill"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_step_zones_refill_as_targeted_single_step(self, mock_run, routed_pcb: Path):
+        """--step zones-refill executes the zone refill step in isolation."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main(["--step", "zones-refill", str(routed_pcb), "--quiet"])
+        assert result == 0
+
+    def test_zones_refill_dry_run(self, routed_pcb: Path):
+        """Dry-run for zones-refill returns expected message."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_zones_refill
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True)
+        console = Console(quiet=True)
+        result = _run_step_zones_refill(ctx, console)
+
+        assert result.success is True
+        assert "refill" in result.message.lower()
+        assert result.step == PipelineStep.ZONES_REFILL
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_full_pipeline_runs_zones_refill(self, mock_run, routed_pcb: Path):
+        """Full pipeline includes zones-refill step after fix-drc."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx)
+
+        # Verify ZONES_REFILL appears in results
+        refill_results = [r for r in results if r.step == PipelineStep.ZONES_REFILL]
+        assert len(refill_results) == 1
 
 
 class TestFixDrcLocalReroute:
