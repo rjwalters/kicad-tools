@@ -25,8 +25,87 @@ import argparse
 import fnmatch
 import json
 import sys
+from pathlib import Path
 
 from kicad_tools.schema import Schematic
+from kicad_tools.schema.hierarchy import build_hierarchy
+
+
+def _collect_labels_from_schematic(sch, label_type, sheet_name, sheet_file):
+    """Collect labels of the specified type from a single schematic.
+
+    Args:
+        sch: Loaded Schematic object
+        label_type: One of "all", "local", "global", "hierarchical", "power"
+        sheet_name: Name of the sheet (for location tracking)
+        sheet_file: Filename of the sheet
+
+    Returns:
+        List of label dicts with sheet info included
+    """
+    labels = []
+
+    if label_type in ["all", "local"]:
+        for lbl in sch.labels:
+            labels.append(
+                {
+                    "type": "local",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "uuid": lbl.uuid,
+                    "sheet": sheet_name,
+                    "sheet_file": sheet_file,
+                }
+            )
+
+    if label_type in ["all", "global"]:
+        for lbl in sch.global_labels:
+            labels.append(
+                {
+                    "type": "global",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "shape": lbl.shape,
+                    "uuid": lbl.uuid,
+                    "sheet": sheet_name,
+                    "sheet_file": sheet_file,
+                }
+            )
+
+    if label_type in ["all", "hierarchical"]:
+        for lbl in sch.hierarchical_labels:
+            labels.append(
+                {
+                    "type": "hierarchical",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "shape": lbl.shape,
+                    "uuid": lbl.uuid,
+                    "sheet": sheet_name,
+                    "sheet_file": sheet_file,
+                }
+            )
+
+    if label_type in ["all", "power"]:
+        for sym in sch.symbols:
+            if sym.lib_id.startswith("power:"):
+                labels.append(
+                    {
+                        "type": "power",
+                        "text": sym.value,
+                        "position": sym.position,
+                        "rotation": sym.rotation,
+                        "lib_id": sym.lib_id,
+                        "uuid": sym.uuid,
+                        "sheet": sheet_name,
+                        "sheet_file": sheet_file,
+                    }
+                )
+
+    return labels
 
 
 def main(argv=None):
@@ -58,60 +137,17 @@ def main(argv=None):
         print(f"Error loading schematic: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Collect labels by type
-    labels = []
+    # Collect labels from root schematic
+    root_file = Path(args.schematic).name
+    labels = _collect_labels_from_schematic(sch, args.type, "/", root_file)
 
-    if args.type in ["all", "local"]:
-        for lbl in sch.labels:
-            labels.append(
-                {
-                    "type": "local",
-                    "text": lbl.text,
-                    "position": lbl.position,
-                    "rotation": lbl.rotation,
-                    "uuid": lbl.uuid,
-                }
-            )
-
-    if args.type in ["all", "global"]:
-        for lbl in sch.global_labels:
-            labels.append(
-                {
-                    "type": "global",
-                    "text": lbl.text,
-                    "position": lbl.position,
-                    "rotation": lbl.rotation,
-                    "shape": lbl.shape,
-                    "uuid": lbl.uuid,
-                }
-            )
-
-    if args.type in ["all", "hierarchical"]:
-        for lbl in sch.hierarchical_labels:
-            labels.append(
-                {
-                    "type": "hierarchical",
-                    "text": lbl.text,
-                    "position": lbl.position,
-                    "rotation": lbl.rotation,
-                    "shape": lbl.shape,
-                    "uuid": lbl.uuid,
-                }
-            )
-
-    if args.type in ["all", "power"]:
-        for sym in sch.symbols:
-            if sym.lib_id.startswith("power:"):
-                labels.append(
-                    {
-                        "type": "power",
-                        "text": sym.value,
-                        "position": sym.position,
-                        "rotation": sym.rotation,
-                        "lib_id": sym.lib_id,
-                        "uuid": sym.uuid,
-                    }
-                )
+    # Traverse hierarchy to collect labels from child sheets
+    try:
+        root_node = build_hierarchy(args.schematic)
+        _collect_labels_recursive(root_node, args.type, labels)
+    except Exception:
+        # If hierarchy traversal fails, we still have root labels
+        pass
 
     # Apply pattern filter
     if args.pattern:
@@ -129,6 +165,30 @@ def main(argv=None):
         output_table(labels)
 
 
+def _collect_labels_recursive(node, label_type, labels):
+    """Recursively collect labels from child sheets in the hierarchy.
+
+    Args:
+        node: HierarchyNode from build_hierarchy
+        label_type: Label type filter
+        labels: List to append results to (mutated in place)
+    """
+    for child in node.children:
+        try:
+            child_sch = Schematic.load(child.path)
+        except Exception:
+            continue
+
+        sheet_name = child.get_path_string()
+        sheet_file = Path(child.path).name
+        labels.extend(
+            _collect_labels_from_schematic(child_sch, label_type, sheet_name, sheet_file)
+        )
+
+        # Recurse into grandchildren
+        _collect_labels_recursive(child, label_type, labels)
+
+
 def output_table(labels):
     """Output as formatted table."""
     if not labels:
@@ -142,13 +202,22 @@ def output_table(labels):
     text_width = max(len(lbl["text"]) for lbl in labels)
     text_width = max(text_width, 4)
 
-    print(f"{'Type':<{type_width}}  {'Text':<{text_width}}  {'Position':<20}  Shape/Lib")
-    print("-" * (type_width + text_width + 40))
+    sheet_width = max(len(lbl["sheet"]) for lbl in labels)
+    sheet_width = max(sheet_width, 5)
+
+    print(
+        f"{'Type':<{type_width}}  {'Text':<{text_width}}  "
+        f"{'Sheet':<{sheet_width}}  {'Position':<20}  Shape/Lib"
+    )
+    print("-" * (type_width + text_width + sheet_width + 40))
 
     for lbl in labels:
         pos = f"({lbl['position'][0]:.1f}, {lbl['position'][1]:.1f})"
         extra = lbl.get("shape", lbl.get("lib_id", ""))
-        print(f"{lbl['type']:<{type_width}}  {lbl['text']:<{text_width}}  {pos:<20}  {extra}")
+        print(
+            f"{lbl['type']:<{type_width}}  {lbl['text']:<{text_width}}  "
+            f"{lbl['sheet']:<{sheet_width}}  {pos:<20}  {extra}"
+        )
 
     print(f"\nTotal: {len(labels)} labels")
 
@@ -171,11 +240,12 @@ def output_json(labels):
 
 def output_csv(labels):
     """Output as CSV."""
-    print("Type,Text,X,Y,Rotation,Shape,UUID")
+    print("Type,Text,Sheet,Sheet File,X,Y,Rotation,Shape,UUID")
     for lbl in labels:
         shape = lbl.get("shape", lbl.get("lib_id", ""))
         print(
-            f"{lbl['type']},{lbl['text']},{lbl['position'][0]},{lbl['position'][1]},"
+            f"{lbl['type']},{lbl['text']},{lbl['sheet']},{lbl['sheet_file']},"
+            f"{lbl['position'][0]},{lbl['position'][1]},"
             f"{lbl['rotation']},{shape},{lbl['uuid']}"
         )
 
