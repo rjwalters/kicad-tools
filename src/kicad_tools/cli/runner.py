@@ -549,6 +549,17 @@ def _make_segment_via_key(child, *, precision: int = 4) -> str | None:
     return None
 
 
+def _get_element_uuid(child) -> str | None:
+    """Extract the UUID string from a segment or via S-expression node.
+
+    Returns the UUID value if a ``(uuid ...)`` child exists, else None.
+    """
+    uuid_node = child.get("uuid")
+    if uuid_node is None:
+        return None
+    return uuid_node.get_string(0)
+
+
 def _canonicalize_net_node(
     net_node, name_to_number: dict[str, int], *, numeric_only: bool = False
 ):
@@ -699,8 +710,15 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
 
     - **Pads**: keyed by ``"<reference>:<pad_number>"`` using the footprint's
       reference designator, which is stable across kicad-cli UUID regeneration.
-    - **Segments**: keyed by ``"seg:<sx>,<sy>:<ex>,<ey>:<layer>"`` (geometry).
-    - **Vias**: keyed by ``"via:<x>,<y>:<size>:<layers>"`` (geometry).
+    - **Segments/Vias (UUID)**: keyed by ``"uuid:<uuid>"`` when the element
+      carries a ``(uuid ...)`` node.  UUID-based keys are immune to coordinate
+      drift from DRC displacement (up to 0.5 mm for drill clearance repair).
+    - **Segments (geometry)**: keyed by ``"seg:<sx>,<sy>:<ex>,<ey>:<layer>"``.
+    - **Vias (geometry)**: keyed by ``"via:<x>,<y>:<size>:<layers>"``.
+
+    Both UUID and geometry keys are stored for each element so that the
+    restore pass can try UUID first (handles displacement) then fall back
+    to geometry (handles UUID regeneration by kicad-cli).
 
     Net nodes are canonicalized to ``(net N "name")`` format using the PCB
     header net declarations, so that restoring always writes the full format
@@ -746,20 +764,28 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
             key = f"{fp_ref}:{pad_number}"
             snapshot[key] = [_canonicalize_net_node(net_node, name_to_number)]
 
-    # Snapshot segments and vias at the top level, keyed by geometry.
-    # Include ALL segments/vias — even (net 0) — so that zone fill
-    # corruption to (net "") can be restored to the original net.
+    # Snapshot segments and vias at the top level, keyed by both UUID and
+    # geometry.  Include ALL segments/vias — even (net 0) — so that zone
+    # fill corruption to (net "") can be restored to the original net.
     for child in sexp.children:
         if child.name in ("segment", "via"):
             net_node = child.get("net")
+            if _has_nonzero_net(net_node):
+                canonical = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
+            else:
+                # Preserve (net 0) assignment so restore can distinguish
+                # "originally unconnected" from "newly created by fill".
+                canonical = [SExp.list("net", 0)]
+
+            # Store under geometry key (handles UUID regeneration).
             geo_key = _make_segment_via_key(child)
             if geo_key:
-                if _has_nonzero_net(net_node):
-                    snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
-                else:
-                    # Preserve (net 0) assignment so restore can distinguish
-                    # "originally unconnected" from "newly created by fill".
-                    snapshot[geo_key] = [SExp.list("net", 0)]
+                snapshot[geo_key] = canonical
+
+            # Store under UUID key (handles coordinate displacement).
+            elem_uuid = _get_element_uuid(child)
+            if elem_uuid:
+                snapshot[f"uuid:{elem_uuid}"] = canonical
 
     return snapshot
 
@@ -774,14 +800,14 @@ def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -
     This function builds per-layer spatial indices from the *element_nets*
     snapshot and assigns each remaining ``(net "")`` element the net of the
     nearest snapshotted element on the same layer, provided the distance is
-    within a generous tolerance (0.1 mm -- matching the fix-drc max_displacement
+    within a generous tolerance (0.5 mm -- matching the drill clearance max_displacement
     and still well below typical minimum trace clearance of 0.15 mm+).
 
     Returns True if any element was modified.
     """
     import math
 
-    PROXIMITY_THRESHOLD = 0.1  # mm — must cover fix-drc max_displacement (0.1 mm)
+    PROXIMITY_THRESHOLD = 0.5  # mm — must cover drill clearance max_displacement (0.5 mm)
 
     # Parse snapshot keys into spatial buckets by (element_type, layer_key).
     # segment keys: "seg:sx,sy:ex,ey:layer"
@@ -1062,17 +1088,34 @@ def _restore_net_declarations(
                     pad_node.append(element_nets[key][0])
                     modified = True
 
-        # Restore segment and via nets at the top level (keyed by geometry)
+        # Restore segment and via nets at the top level.
+        # Try UUID-based key first (immune to coordinate displacement),
+        # then fall back to geometry-based key (handles UUID regeneration).
         for child in output_sexp.children:
             if child.name in ("segment", "via"):
-                geo_key = _make_segment_via_key(child)
-                if geo_key and geo_key in element_nets:
-                    current_net = child.get("net")
-                    if not _has_canonical_net(current_net):
-                        if current_net is not None:
-                            child.remove(current_net)
-                        child.append(element_nets[geo_key][0])
-                        modified = True
+                current_net = child.get("net")
+                if _has_canonical_net(current_net):
+                    continue
+
+                # Try UUID-based lookup first.
+                snapshot_net = None
+                elem_uuid = _get_element_uuid(child)
+                if elem_uuid:
+                    uuid_key = f"uuid:{elem_uuid}"
+                    if uuid_key in element_nets:
+                        snapshot_net = element_nets[uuid_key]
+
+                # Fall back to geometry-based lookup.
+                if snapshot_net is None:
+                    geo_key = _make_segment_via_key(child)
+                    if geo_key and geo_key in element_nets:
+                        snapshot_net = element_nets[geo_key]
+
+                if snapshot_net is not None:
+                    if current_net is not None:
+                        child.remove(current_net)
+                    child.append(snapshot_net[0])
+                    modified = True
 
         # --- Fallback pass for remaining unmatched (net "") elements ---
         # After the primary key-based restore, some segments/vias may still
