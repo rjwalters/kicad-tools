@@ -800,7 +800,7 @@ def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -
     This function builds per-layer spatial indices from the *element_nets*
     snapshot and assigns each remaining ``(net "")`` element the net of the
     nearest snapshotted element on the same layer, provided the distance is
-    within a generous tolerance (0.1 mm -- matching the fix-drc max_displacement
+    within a generous tolerance (0.5 mm -- matching the drill clearance max_displacement
     and still well below typical minimum trace clearance of 0.15 mm+).
 
     Returns True if any element was modified.
