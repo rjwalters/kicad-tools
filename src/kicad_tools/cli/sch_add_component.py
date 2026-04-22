@@ -370,6 +370,12 @@ def run_add_component(args) -> int:
 
     # 1. Embed library symbol if needed
     if need_embed and lib_sym is not None:
+        # KiCad schematics embed symbols with the fully-qualified lib_id
+        # (e.g. "Connector_Generic:Conn_01x04") while .kicad_sym files
+        # use bare names ("Conn_01x04").  Rename before embedding so that
+        # add_symbol / add_power can later look the symbol up by lib_id.
+        if lib_sym.name != args.lib_id:
+            lib_sym.name = args.lib_id
         sch.embed_lib_symbol(lib_sym)
 
     # 2. Place the symbol

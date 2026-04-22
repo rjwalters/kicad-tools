@@ -811,6 +811,11 @@ class LibrarySymbol:
         """
         children: list[SExp] = [SExp(value=self.name)]
 
+        # KiCad uses the fully-qualified lib_id (e.g. "Connector_Generic:Conn_01x04")
+        # for the top-level symbol name, but the *short* name (after the colon)
+        # for the unit sub-symbol names (e.g. "Conn_01x04_0_1").
+        short_name = self.name.split(":", 1)[1] if ":" in self.name else self.name
+
         # Add properties with position and effects
         prop_y_offset = 0.0
         for prop_name, prop_value in self.properties.items():
@@ -832,7 +837,7 @@ class LibrarySymbol:
 
         # Add _0_1 sub-symbol for graphical shapes (body decoration)
         if self.graphics:
-            gfx_name = f"{self.name}_0_1"
+            gfx_name = f"{short_name}_0_1"
             gfx_children: list[SExp] = [SExp(value=gfx_name)]
             for graphic in self.graphics:
                 gfx_children.append(graphic.to_sexp_node())
@@ -840,7 +845,7 @@ class LibrarySymbol:
 
         # Add unit symbols with their pins
         for unit_idx in range(1, self.units + 1):
-            unit_name = f"{self.name}_{unit_idx}_1"
+            unit_name = f"{short_name}_{unit_idx}_1"
             unit_children: list[SExp] = [SExp(value=unit_name)]
 
             # Add pins for this unit
@@ -1112,7 +1117,13 @@ class LibraryManager:
 
         # Check loaded libraries
         if lib_name in self.libraries:
-            return self.libraries[lib_name].get_symbol(sym_name)
+            result = self.libraries[lib_name].get_symbol(sym_name)
+            if result is not None:
+                return result
+            # Symbol not in the already-loaded library (e.g. a partial
+            # library built from embedded schematic symbols).  Fall through
+            # to search paths so we can load the full on-disk library and
+            # merge in the missing symbol.
 
         # Try to find and load the library
         for search_path in self.search_paths:
