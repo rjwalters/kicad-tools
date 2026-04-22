@@ -34,7 +34,7 @@ from kicad_tools.sexp import SExp
 class WireIssue:
     """Describes a wire that should be cleaned up."""
 
-    reason: str  # "zero_length" or "dangling"
+    reason: str  # "zero_length", "dangling", or "duplicate"
     wire_sexp: SExp
     start: tuple[float, float]
     end: tuple[float, float]
@@ -136,11 +136,31 @@ def find_cleanup_candidates(schematic: Schematic) -> list[WireIssue]:
         else:
             non_zero_wires.append(ws)
 
-    # Phase 2: dangling wires (endpoints not connected to anything else)
-    connection_points = _build_connection_map(schematic, non_zero_wires)
-    endpoint_counts = _wire_endpoint_counts(non_zero_wires)
-
+    # Phase 2: duplicate wires (same endpoints, order-insensitive)
+    seen: dict[tuple[tuple[float, float], tuple[float, float]], SExp] = {}
+    unique_wires = []
     for ws in non_zero_wires:
+        start, end = _wire_start_end(ws)
+        # Normalize endpoint order so (A->B) and (B->A) produce the same key
+        key = (min(start, end), max(start, end))
+        if key in seen:
+            issues.append(
+                WireIssue(
+                    reason="duplicate",
+                    wire_sexp=ws,
+                    start=start,
+                    end=end,
+                )
+            )
+        else:
+            seen[key] = ws
+            unique_wires.append(ws)
+
+    # Phase 3: dangling wires (endpoints not connected to anything else)
+    connection_points = _build_connection_map(schematic, unique_wires)
+    endpoint_counts = _wire_endpoint_counts(unique_wires)
+
+    for ws in unique_wires:
         start, end = _wire_start_end(ws)
 
         dangling_ends = 0
@@ -204,6 +224,7 @@ def run_cleanup_wires(args) -> int:
     # Build output data
     zero_count = sum(1 for i in issues if i.reason == "zero_length")
     dangling_count = sum(1 for i in issues if i.reason == "dangling")
+    duplicate_count = sum(1 for i in issues if i.reason == "duplicate")
 
     if args.format == "json":
         data = {
@@ -211,6 +232,7 @@ def run_cleanup_wires(args) -> int:
             "removed": len(issues) if not args.dry_run else 0,
             "zero_length": zero_count,
             "dangling": dangling_count,
+            "duplicate": duplicate_count,
             "issues": [
                 {
                     "reason": i.reason,
@@ -240,12 +262,15 @@ def run_cleanup_wires(args) -> int:
     print(f"Wires to clean up: {len(issues)}")
     if zero_count:
         print(f"  Zero-length: {zero_count}")
+    if duplicate_count:
+        print(f"  Duplicate: {duplicate_count}")
     if dangling_count:
         print(f"  Dangling: {dangling_count}")
     print()
 
+    reason_labels = {"zero_length": "zero-length", "dangling": "dangling", "duplicate": "duplicate"}
     for issue in issues:
-        label = "zero-length" if issue.reason == "zero_length" else "dangling"
+        label = reason_labels.get(issue.reason, issue.reason)
         print(
             f"  [{label}] ({issue.start[0]:.2f}, {issue.start[1]:.2f}) -> "
             f"({issue.end[0]:.2f}, {issue.end[1]:.2f})"
