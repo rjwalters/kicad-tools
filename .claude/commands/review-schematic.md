@@ -246,3 +246,103 @@ Automated checks (preflight): <N> errors, <N> warnings
 - **Be actionable**: Every finding should suggest what to do about it.
 - **Avoid false positives**: If you are uncertain whether something is an issue, classify it as INFO rather than WARNING or CRITICAL. Do not guess at pin positions or connection status -- defer to the automated tools for anything requiring geometric computation.
 - **Context file**: If the user provided an additional context file (e.g., IC pinout reference, design requirements), incorporate that information into your checks. Look for a second argument after the schematic path.
+
+---
+
+## Phase 5: Tool Reflection
+
+After producing the consolidated report, reflect on the tools used during this review session. This phase identifies broken tools, missing capabilities, and false positives so the project can improve its automation over time.
+
+### 5.1 Collect tool observations
+
+Review every `kicad-tools` command you ran (or attempted to run) during this review. For each, note:
+
+- Did it succeed or fail?
+- Was the output correct and useful?
+- Did you need a tool that doesn't exist?
+- Did a tool produce a false positive or miss something the manual review caught?
+- Did you have to read raw `.kicad_sch` S-expressions to check something a tool should have handled?
+
+### 5.2 Categorize observations
+
+Classify each observation into one of:
+
+- **TOOL_FAILURE**: A command errored, crashed, or produced clearly wrong output
+- **CAPABILITY_GAP**: You needed a tool or feature that doesn't exist in `kicad-tools` (e.g., had to manually parse S-expressions for something that should be automated)
+- **FALSE_POSITIVE**: A tool flagged something that the manual review determined is not actually an issue (e.g., `preflight` flags single-pin nets that are valid cross-sheet globals)
+- **IMPROVEMENT**: A tool works but its output could be better, or it's missing a useful option
+
+### 5.3 File gap issues
+
+For each **TOOL_FAILURE** or **CAPABILITY_GAP**, file a GitHub issue using the project's loom pattern:
+
+1. First check for duplicates:
+```bash
+./.loom/scripts/check-duplicate.sh "<issue title>" "<issue body summary>"
+```
+
+2. If no duplicate found (exit code 0), create the issue:
+```bash
+gh issue create --title "<title>" --body "$(cat <<'EOF'
+## Problem Statement
+
+<What was attempted and what failed or was missing>
+
+## Observed During
+
+Schematic review of <project name> using `/review-schematic`
+
+## Impact
+
+<How this affects review quality -- e.g., "Reviewer had to manually parse S-expressions to verify pin connections">
+
+## Recommended Enhancement
+
+<Specific tool improvement or new command needed>
+
+## Acceptance Criteria
+
+- [ ] <What "done" looks like>
+EOF
+)"
+```
+
+3. Add labels:
+```bash
+gh issue edit <number> --add-label "loom:architect"
+gh issue edit <number> --add-label "tier:goal-supporting"
+```
+
+For **FALSE_POSITIVE** and **IMPROVEMENT** observations, note them in the output but do not file issues unless the impact is significant.
+
+### 5.4 Print reflection summary
+
+Append this section to the end of the Phase 4 report:
+
+```
+============================================================
+TOOL REFLECTION
+============================================================
+| Category | Count | Issues Filed |
+|----------|-------|-------------|
+| Tool failures | N | #nnn, #nnn |
+| Capability gaps | N | #nnn, #nnn |
+| False positives | N | (noted) |
+| Improvements | N | (noted) |
+
+Details:
+  [CATEGORY] <tool or feature>: <what happened>
+    -> Filed #nnn / Noted
+
+============================================================
+```
+
+If no tool issues were observed, print:
+
+```
+============================================================
+TOOL REFLECTION
+============================================================
+No tool issues observed during this review session.
+============================================================
+```
