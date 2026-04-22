@@ -628,7 +628,6 @@ def _add_sch_parser(subparsers) -> None:
     sch_set_label_dir.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
-
     # sch add-no-connect
     sch_add_nc = sch_subparsers.add_parser("add-no-connect", help="Add no-connect markers to pins")
     sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
@@ -692,7 +691,7 @@ def _add_sch_parser(subparsers) -> None:
     )
 
     # sch add-wire
-    sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add a wire segment to the schematic")
+    sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add wire segments to the schematic")
     sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")
     sch_add_wire.add_argument(
         "--from",
@@ -701,16 +700,21 @@ def _add_sch_parser(subparsers) -> None:
         required=True,
         dest="start",
         metavar=("X", "Y"),
-        help="Wire start coordinates",
+        help="Start coordinate",
     )
     sch_add_wire.add_argument(
         "--to",
         nargs=2,
         type=float,
+        action="append",
         required=True,
-        dest="end",
         metavar=("X", "Y"),
-        help="Wire end coordinates",
+        help="End coordinate (repeatable for multi-segment wires)",
+    )
+    sch_add_wire.add_argument(
+        "--junction",
+        action="store_true",
+        help="Auto-insert junctions where endpoints land on existing wire midpoints",
     )
     sch_add_wire.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
