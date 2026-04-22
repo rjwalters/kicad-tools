@@ -40,7 +40,6 @@ from kicad_tools.sexp import SExp
 
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 
-
 def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
     """Extract start and end points from a wire S-expression node."""
     pts_node = wire_sexp.find("pts")
@@ -58,7 +57,6 @@ def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, 
 
     return (x1, y1), (x2, y2)
 
-
 def _wire_endpoint_counts(
     wire_sexps: list[SExp],
 ) -> dict[tuple[int, int], int]:
@@ -70,7 +68,6 @@ def _wire_endpoint_counts(
             key = (int(pt[0] * 10), int(pt[1] * 10))
             counts[key] = counts.get(key, 0) + 1
     return counts
-
 
 def find_wire_by_endpoints(
     schematic: Schematic,
@@ -110,7 +107,6 @@ def find_wire_by_endpoints(
 
     return None
 
-
 def find_nearest_wire(
     schematic: Schematic,
     point: tuple[float, float],
@@ -132,7 +128,6 @@ def find_nearest_wire(
                 best_wire = wire_sexp
 
     return best_wire
-
 
 def remove_wire_and_orphan_junctions(
     schematic: Schematic,
@@ -177,8 +172,8 @@ def remove_wire_and_orphan_junctions(
                 if schematic.sexp.remove(junc_sexp):
                     junctions_removed += 1
 
-    if junctions_removed or True:  # Wire was removed, always invalidate
-        schematic.invalidate_cache()
+    # Wire was removed, always invalidate
+    schematic.invalidate_cache()
 
     return True, junctions_removed
 
@@ -196,7 +191,6 @@ def _parse_coordinate(value: str) -> tuple[float, float]:
         raise argparse.ArgumentTypeError(
             f"Invalid coordinate values: {value!r}"
         )
-
 
 def run_remove_wire(args) -> int:
     """Execute the remove-wire command."""
@@ -345,7 +339,6 @@ def run_remove_wire(args) -> int:
 
     return 0
 
-
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Remove a specific wire segment from a KiCad schematic",
@@ -388,7 +381,6 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     return run_remove_wire(args)
-
 
 if __name__ == "__main__":
     sys.exit(main())
