@@ -5,9 +5,9 @@ adjacent traces and impedance discontinuities from geometry changes.
 
 Example:
     >>> from kicad_tools.schema.pcb import PCB
-    >>> from kicad_tools.analysis import SignalIntegrityAnalyzer
+    >>> from kicad_tools.analysis import TraceIntegrityAnalyzer
     >>> pcb = PCB.load("board.kicad_pcb")
-    >>> analyzer = SignalIntegrityAnalyzer()
+    >>> analyzer = TraceIntegrityAnalyzer()
     >>> crosstalk = analyzer.analyze_crosstalk(pcb)
     >>> for risk in crosstalk:
     ...     print(f"{risk.risk_level}: {risk.aggressor_net} ↔ {risk.victim_net}")
@@ -66,7 +66,7 @@ HIGH_SPEED_NET_PATTERNS = [
 
 
 @dataclass
-class CrosstalkRisk:
+class TraceCrosstalkRisk:
     """Crosstalk risk between two nets.
 
     Attributes:
@@ -171,7 +171,7 @@ class _TrackRun:
         )
 
 
-class SignalIntegrityAnalyzer:
+class TraceIntegrityAnalyzer:
     """Analyze signal integrity concerns on a PCB.
 
     Detects crosstalk risk between adjacent traces and impedance
@@ -213,7 +213,7 @@ class SignalIntegrityAnalyzer:
             self._patterns.extend(high_speed_patterns)
         self._compiled_patterns = [re.compile(p) for p in self._patterns]
 
-    def analyze_crosstalk(self, board: PCB) -> list[CrosstalkRisk]:
+    def analyze_crosstalk(self, board: PCB) -> list[TraceCrosstalkRisk]:
         """Find traces with crosstalk risk.
 
         Identifies high-speed nets and finds adjacent parallel traces
@@ -223,7 +223,7 @@ class SignalIntegrityAnalyzer:
             board: PCB object to analyze.
 
         Returns:
-            List of CrosstalkRisk objects for concerning trace pairs,
+            List of TraceCrosstalkRisk objects for concerning trace pairs,
             sorted by risk level (highest first).
         """
         # Get high-speed net numbers
@@ -232,7 +232,7 @@ class SignalIntegrityAnalyzer:
             return []
 
         net_names = {net.number: net.name for net in board.nets.values()}
-        risks: list[CrosstalkRisk] = []
+        risks: list[TraceCrosstalkRisk] = []
         analyzed_pairs: set[tuple[int, int]] = set()
 
         # Build track runs for each high-speed net on each layer
@@ -507,7 +507,7 @@ class SignalIntegrityAnalyzer:
         spacing: float,
         net1_name: str,
         net_names: dict[int, str],
-    ) -> CrosstalkRisk:
+    ) -> TraceCrosstalkRisk:
         """Calculate crosstalk coupling between parallel tracks.
 
         Uses a simplified coupling model where coupling increases with
@@ -521,7 +521,7 @@ class SignalIntegrityAnalyzer:
             net_names: Mapping of net numbers to names.
 
         Returns:
-            CrosstalkRisk assessment.
+            TraceCrosstalkRisk assessment.
         """
         net2_name = net_names.get(run2.net_number, run2.net_name)
         parallel_length = min(run1.total_length, run2.total_length)
@@ -553,7 +553,7 @@ class SignalIntegrityAnalyzer:
                 target_spacing = 0.5
             suggestion = f"Increase spacing to {target_spacing:.2f}mm or add ground guard trace"
 
-        return CrosstalkRisk(
+        return TraceCrosstalkRisk(
             aggressor_net=net1_name,
             victim_net=net2_name,
             parallel_length_mm=parallel_length,
@@ -731,3 +731,13 @@ class SignalIntegrityAnalyzer:
                 return result
 
         return None
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases (deprecated)
+# ---------------------------------------------------------------------------
+SignalIntegrityAnalyzer = TraceIntegrityAnalyzer
+"""Deprecated alias for :class:`TraceIntegrityAnalyzer`."""
+
+CrosstalkRisk = TraceCrosstalkRisk
+"""Deprecated alias for :class:`TraceCrosstalkRisk`."""

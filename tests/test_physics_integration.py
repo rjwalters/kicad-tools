@@ -82,19 +82,19 @@ class TestRouterPhysicsIntegration:
             assert widths["F.Cu"] != widths["In1.Cu"]
 
 
-class TestCrosstalkRiskDataclass:
-    """Tests for CrosstalkRisk dataclass."""
+class TestPlacementCrosstalkRiskDataclass:
+    """Tests for PlacementCrosstalkRisk dataclass."""
 
     @pytest.fixture
     def crosstalk_risk_class(self):
-        """Import CrosstalkRisk, skipping if dependencies unavailable."""
+        """Import PlacementCrosstalkRisk, skipping if dependencies unavailable."""
         pytest.importorskip("yaml")
-        from kicad_tools.optim.signal_integrity import CrosstalkRisk
+        from kicad_tools.optim.signal_integrity import PlacementCrosstalkRisk
 
-        return CrosstalkRisk
+        return PlacementCrosstalkRisk
 
     def test_crosstalk_risk_structure(self, crosstalk_risk_class):
-        """Test CrosstalkRisk dataclass structure."""
+        """Test PlacementCrosstalkRisk dataclass structure."""
         risk = crosstalk_risk_class(
             aggressor_net="CLK",
             victim_net="ADC_IN",

@@ -477,7 +477,7 @@ class TestFaultTolerance:
         assert result["thermal"] is not None
 
     def test_si_failure_produces_null(self):
-        """If SignalIntegrityAnalyzer.analyze_crosstalk raises, SI is None."""
+        """If TraceIntegrityAnalyzer.analyze_crosstalk raises, SI is None."""
         pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("test_project.kicad_pcb fixture not found")
@@ -488,7 +488,7 @@ class TestFaultTolerance:
         collector = ReportDataCollector(pcb_path)
 
         with patch(
-            "kicad_tools.analysis.signal_integrity.SignalIntegrityAnalyzer.analyze_crosstalk",
+            "kicad_tools.analysis.signal_integrity.TraceIntegrityAnalyzer.analyze_crosstalk",
             side_effect=RuntimeError("boom"),
         ):
             result = collector.collect_analysis(pcb)

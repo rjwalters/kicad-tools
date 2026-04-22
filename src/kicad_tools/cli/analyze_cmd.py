@@ -36,7 +36,7 @@ from kicad_tools.analysis import (
     CongestionAnalyzer,
     RiskLevel,
     Severity,
-    SignalIntegrityAnalyzer,
+    TraceIntegrityAnalyzer,
     ThermalAnalyzer,
     ThermalSeverity,
     TraceLengthAnalyzer,
@@ -634,7 +634,7 @@ def _run_signal_integrity_analysis(args: argparse.Namespace) -> int:
         return 1
 
     # Run analysis
-    analyzer = SignalIntegrityAnalyzer()
+    analyzer = TraceIntegrityAnalyzer()
 
     crosstalk_risks = []
     impedance_discs = []

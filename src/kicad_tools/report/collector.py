@@ -464,9 +464,9 @@ class ReportDataCollector:
 
         # Signal integrity
         try:
-            from kicad_tools.analysis.signal_integrity import SignalIntegrityAnalyzer
+            from kicad_tools.analysis.signal_integrity import TraceIntegrityAnalyzer
 
-            si = SignalIntegrityAnalyzer()
+            si = TraceIntegrityAnalyzer()
             crosstalk = si.analyze_crosstalk(pcb)
             impedance = si.analyze_impedance(pcb)
             result["signal_integrity"] = {

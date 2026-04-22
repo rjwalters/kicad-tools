@@ -14,7 +14,7 @@ Example::
         classify_nets,
         analyze_placement_for_si,
         get_si_score,
-        SignalIntegrityAnalyzer,
+        PlacementSIAnalyzer,
     )
     from kicad_tools.schema.pcb import PCB
 
@@ -33,7 +33,7 @@ Example::
     print(f"Signal integrity score: {score:.1f}/100")
 
     # Use physics-aware analyzer for more accurate crosstalk
-    analyzer = SignalIntegrityAnalyzer(pcb)
+    analyzer = PlacementSIAnalyzer(pcb)
     if analyzer.physics_available:
         risk = analyzer.get_crosstalk_risk("CLK", "ADC_IN")
         print(f"Crosstalk risk: {risk}")
@@ -56,8 +56,8 @@ __all__ = [
     "SignalClass",
     "NetClassification",
     "SignalIntegrityHint",
-    "CrosstalkRisk",
-    "SignalIntegrityAnalyzer",
+    "PlacementCrosstalkRisk",
+    "PlacementSIAnalyzer",
     "classify_nets",
     "analyze_placement_for_si",
     "get_si_score",
@@ -116,7 +116,7 @@ class SignalIntegrityHint:
 
 
 @dataclass
-class CrosstalkRisk:
+class PlacementCrosstalkRisk:
     """Result of crosstalk risk analysis between two nets.
 
     Provides both physics-based calculations (when available) and
@@ -138,13 +138,13 @@ class CrosstalkRisk:
         """Human-readable representation."""
         mode = "calculated" if self.calculated else "estimated"
         return (
-            f"CrosstalkRisk({self.aggressor_net} → {self.victim_net}): "
+            f"PlacementCrosstalkRisk({self.aggressor_net} → {self.victim_net}): "
             f"NEXT={self.next_percent:.1f}%, FEXT={self.fext_percent:.1f}% "
             f"({mode}, {self.risk_level})"
         )
 
 
-class SignalIntegrityAnalyzer:
+class PlacementSIAnalyzer:
     """Physics-aware signal integrity analyzer.
 
     Uses the physics module for accurate crosstalk and impedance
@@ -153,11 +153,11 @@ class SignalIntegrityAnalyzer:
 
     Example::
 
-        from kicad_tools.optim.signal_integrity import SignalIntegrityAnalyzer
+        from kicad_tools.optim.signal_integrity import PlacementSIAnalyzer
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load("board.kicad_pcb")
-        analyzer = SignalIntegrityAnalyzer(pcb)
+        analyzer = PlacementSIAnalyzer(pcb)
 
         if analyzer.physics_available:
             print("Using physics-based analysis")
@@ -215,7 +215,7 @@ class SignalIntegrityAnalyzer:
         victim_net: str,
         layer: str = "F.Cu",
         rise_time_ns: float = 1.0,
-    ) -> CrosstalkRisk:
+    ) -> PlacementCrosstalkRisk:
         """Analyze crosstalk risk between two nets.
 
         Uses physics calculations when available, otherwise falls back
@@ -228,7 +228,7 @@ class SignalIntegrityAnalyzer:
             rise_time_ns: Signal rise time in nanoseconds
 
         Returns:
-            CrosstalkRisk with analysis results
+            PlacementCrosstalkRisk with analysis results
         """
         if self.physics_available:
             return self._physics_crosstalk(aggressor_net, victim_net, layer, rise_time_ns)
@@ -241,7 +241,7 @@ class SignalIntegrityAnalyzer:
         victim_net: str,
         layer: str,
         rise_time_ns: float,
-    ) -> CrosstalkRisk:
+    ) -> PlacementCrosstalkRisk:
         """Calculate crosstalk using physics module.
 
         Args:
@@ -251,7 +251,7 @@ class SignalIntegrityAnalyzer:
             rise_time_ns: Signal rise time
 
         Returns:
-            CrosstalkRisk with physics-based values
+            PlacementCrosstalkRisk with physics-based values
         """
         # Estimate geometry from net positions
         spacing, parallel_length = self._estimate_net_geometry(aggressor_net, victim_net)
@@ -269,7 +269,7 @@ class SignalIntegrityAnalyzer:
                 rise_time_ns=rise_time_ns,
             )
 
-            return CrosstalkRisk(
+            return PlacementCrosstalkRisk(
                 aggressor_net=aggressor_net,
                 victim_net=victim_net,
                 parallel_length_mm=parallel_length,
@@ -289,7 +289,7 @@ class SignalIntegrityAnalyzer:
         self,
         aggressor_net: str,
         victim_net: str,
-    ) -> CrosstalkRisk:
+    ) -> PlacementCrosstalkRisk:
         """Estimate crosstalk using heuristic rules.
 
         Uses distance-based approximation when physics module is unavailable.
@@ -299,7 +299,7 @@ class SignalIntegrityAnalyzer:
             victim_net: Victim net name
 
         Returns:
-            CrosstalkRisk with heuristic estimates
+            PlacementCrosstalkRisk with heuristic estimates
         """
         spacing, parallel_length = self._estimate_net_geometry(aggressor_net, victim_net)
 
@@ -342,7 +342,7 @@ class SignalIntegrityAnalyzer:
                 f"or route on different layers"
             )
 
-        return CrosstalkRisk(
+        return PlacementCrosstalkRisk(
             aggressor_net=aggressor_net,
             victim_net=victim_net,
             parallel_length_mm=parallel_length,
@@ -1029,3 +1029,13 @@ def add_si_constraints(
                 modified += 1
 
     return modified
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases (deprecated)
+# ---------------------------------------------------------------------------
+SignalIntegrityAnalyzer = PlacementSIAnalyzer
+"""Deprecated alias for :class:`PlacementSIAnalyzer`."""
+
+CrosstalkRisk = PlacementCrosstalkRisk
+"""Deprecated alias for :class:`PlacementCrosstalkRisk`."""
