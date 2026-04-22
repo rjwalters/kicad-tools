@@ -34,6 +34,8 @@ from .signal_integrity import (
     ImpedanceDiscontinuity,
     RiskLevel,
     SignalIntegrityAnalyzer,
+    TraceCrosstalkRisk,
+    TraceIntegrityAnalyzer,
 )
 from .thermal import (
     PowerEstimator,
@@ -68,6 +70,8 @@ __all__ = [
     "RoutingComplexity",
     "Severity",
     "SignalIntegrityAnalyzer",
+    "TraceCrosstalkRisk",
+    "TraceIntegrityAnalyzer",
     "ThermalAnalyzer",
     "ThermalHotspot",
     "ThermalSeverity",

@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from kicad_tools.analysis.congestion import CongestionAnalyzer, Severity
-from kicad_tools.analysis.signal_integrity import RiskLevel, SignalIntegrityAnalyzer
+from kicad_tools.analysis.signal_integrity import RiskLevel, TraceIntegrityAnalyzer
 from kicad_tools.analysis.thermal import ThermalAnalyzer, ThermalSeverity
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
@@ -344,7 +344,7 @@ def _analyze_signal_integrity(pcb: PCB) -> tuple[float, list[PlacementIssue]]:
     Returns:
         Tuple of (si_score, issues)
     """
-    analyzer = SignalIntegrityAnalyzer()
+    analyzer = TraceIntegrityAnalyzer()
 
     # Analyze crosstalk
     crosstalk_risks = analyzer.analyze_crosstalk(pcb)

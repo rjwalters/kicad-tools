@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.analysis import (
-    CrosstalkRisk,
     ImpedanceDiscontinuity,
     RiskLevel,
-    SignalIntegrityAnalyzer,
+    TraceCrosstalkRisk,
+    TraceIntegrityAnalyzer,
 )
 from kicad_tools.schema.pcb import PCB
 
@@ -196,12 +196,12 @@ class TestRiskLevel:
         assert RiskLevel.HIGH.value == "high"
 
 
-class TestCrosstalkRisk:
-    """Tests for CrosstalkRisk dataclass."""
+class TestTraceCrosstalkRisk:
+    """Tests for TraceCrosstalkRisk dataclass."""
 
     def test_to_dict_basic(self):
         """Test basic to_dict conversion."""
-        risk = CrosstalkRisk(
+        risk = TraceCrosstalkRisk(
             aggressor_net="CLK",
             victim_net="DATA0",
             parallel_length_mm=15.0,
@@ -225,7 +225,7 @@ class TestCrosstalkRisk:
 
     def test_to_dict_serializable(self):
         """Test that to_dict output is JSON serializable."""
-        risk = CrosstalkRisk(
+        risk = TraceCrosstalkRisk(
             aggressor_net="NET1",
             victim_net="NET2",
             parallel_length_mm=10.0,
@@ -282,18 +282,18 @@ class TestImpedanceDiscontinuity:
         assert isinstance(json_str, str)
 
 
-class TestSignalIntegrityAnalyzer:
-    """Tests for SignalIntegrityAnalyzer class."""
+class TestTraceIntegrityAnalyzer:
+    """Tests for TraceIntegrityAnalyzer class."""
 
     def test_analyzer_init_defaults(self):
         """Test analyzer initialization with defaults."""
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
         assert analyzer.min_parallel_length == 3.0
         assert analyzer.max_coupling_distance == 0.5
 
     def test_analyzer_init_custom(self):
         """Test analyzer initialization with custom values."""
-        analyzer = SignalIntegrityAnalyzer(
+        analyzer = TraceIntegrityAnalyzer(
             min_parallel_length=5.0,
             max_coupling_distance=1.0,
         )
@@ -303,7 +303,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_crosstalk_returns_list(self, high_speed_pcb: Path):
         """Test that analyze_crosstalk returns a list."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         risks = analyzer.analyze_crosstalk(pcb)
 
@@ -312,7 +312,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_crosstalk_finds_issues(self, high_speed_pcb: Path):
         """Test that analyzer finds crosstalk issues in high-speed PCB."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer(
+        analyzer = TraceIntegrityAnalyzer(
             min_parallel_length=1.0,
             max_coupling_distance=1.0,
         )
@@ -326,7 +326,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_crosstalk_sorted_by_risk(self, high_speed_pcb: Path):
         """Test that risks are sorted by severity."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer(
+        analyzer = TraceIntegrityAnalyzer(
             min_parallel_length=1.0,
             max_coupling_distance=1.0,
         )
@@ -342,7 +342,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_impedance_returns_list(self, impedance_pcb: Path):
         """Test that analyze_impedance returns a list."""
         pcb = PCB.load(str(impedance_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         discs = analyzer.analyze_impedance(pcb)
 
@@ -351,7 +351,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_impedance_finds_width_changes(self, impedance_pcb: Path):
         """Test that analyzer finds width change discontinuities."""
         pcb = PCB.load(str(impedance_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         discs = analyzer.analyze_impedance(pcb)
 
@@ -363,7 +363,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_impedance_finds_vias(self, impedance_pcb: Path):
         """Test that analyzer finds via discontinuities."""
         pcb = PCB.load(str(impedance_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         discs = analyzer.analyze_impedance(pcb)
 
@@ -375,7 +375,7 @@ class TestSignalIntegrityAnalyzer:
     def test_analyze_clean_pcb(self, clean_pcb: Path):
         """Test analyzing a clean PCB with no SI issues."""
         pcb = PCB.load(str(clean_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         crosstalk = analyzer.analyze_crosstalk(pcb)
         impedance = analyzer.analyze_impedance(pcb)
@@ -387,7 +387,7 @@ class TestSignalIntegrityAnalyzer:
     def test_crosstalk_risk_fields(self, high_speed_pcb: Path):
         """Test that crosstalk risks have required fields."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer(
+        analyzer = TraceIntegrityAnalyzer(
             min_parallel_length=1.0,
             max_coupling_distance=1.0,
         )
@@ -407,7 +407,7 @@ class TestSignalIntegrityAnalyzer:
     def test_impedance_disc_fields(self, impedance_pcb: Path):
         """Test that impedance discontinuities have required fields."""
         pcb = PCB.load(str(impedance_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         discs = analyzer.analyze_impedance(pcb)
 
@@ -565,7 +565,7 @@ class TestHighSpeedNetDetection:
     def test_detect_clock_nets(self, high_speed_pcb: Path):
         """Test detection of clock nets."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         high_speed = analyzer._identify_high_speed_nets(pcb)
 
@@ -582,7 +582,7 @@ class TestHighSpeedNetDetection:
     def test_detect_usb_nets(self, high_speed_pcb: Path):
         """Test detection of USB nets."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer()
+        analyzer = TraceIntegrityAnalyzer()
 
         high_speed = analyzer._identify_high_speed_nets(pcb)
 
@@ -598,7 +598,7 @@ class TestHighSpeedNetDetection:
     def test_custom_patterns(self, high_speed_pcb: Path):
         """Test analyzer with custom high-speed patterns."""
         pcb = PCB.load(str(high_speed_pcb))
-        analyzer = SignalIntegrityAnalyzer(
+        analyzer = TraceIntegrityAnalyzer(
             high_speed_patterns=[r"DATA\d+"],
         )
 
