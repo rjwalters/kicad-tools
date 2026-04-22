@@ -261,7 +261,7 @@ class TestPlaceRouteOptimizer:
 
     def test_optimizer_can_be_created(self, minimal_pcb: Path):
         """Test that PlaceRouteOptimizer can be instantiated."""
-        from kicad_tools.optimize.place_route import PlaceRouteOptimizer
+        from kicad_tools.optim.place_route import PlaceRouteOptimizer
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(minimal_pcb))
@@ -272,7 +272,7 @@ class TestPlaceRouteOptimizer:
 
     def test_optimizer_result_dataclass(self):
         """Test OptimizationResult dataclass structure."""
-        from kicad_tools.optimize.place_route import OptimizationResult
+        from kicad_tools.optim.place_route import OptimizationResult
 
         result = OptimizationResult(
             success=True,

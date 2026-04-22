@@ -6,7 +6,7 @@ routing automatically.
 
 Example:
     >>> from kicad_tools.schema.pcb import PCB
-    >>> from kicad_tools.optimize import PlaceRouteOptimizer
+    >>> from kicad_tools.optim import PlaceRouteOptimizer
     >>>
     >>> pcb = PCB.load("board.kicad_pcb")
     >>> optimizer = PlaceRouteOptimizer.from_pcb(pcb, manufacturer="jlcpcb")
@@ -20,9 +20,10 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kicad_tools.optim.workflow import OptimizationResult
 
 if TYPE_CHECKING:
     from kicad_tools.placement.analyzer import PlacementAnalyzer
@@ -34,66 +35,7 @@ if TYPE_CHECKING:
     from kicad_tools.validate.checker import DRCChecker
     from kicad_tools.validate.violations import DRCResults
 
-
-@dataclass
-class OptimizationResult:
-    """Result of a place-route-DRC optimization run.
-
-    Attributes:
-        success: Whether optimization achieved DRC-clean routing
-        pcb_path: Path to the PCB file (modified if optimization applied)
-        routes: List of routes from the autorouter (if routing succeeded)
-        placement_conflicts: Remaining placement conflicts (if any)
-        drc_results: DRC check results (if DRC was run)
-        iterations: Number of iterations performed
-        message: Human-readable status message
-
-    Example:
-        >>> result = optimizer.optimize()
-        >>> if result.success:
-        ...     print(f"Done in {result.iterations} iterations")
-        ... else:
-        ...     print(f"Failed: {result.message}")
-        ...     for conflict in result.placement_conflicts or []:
-        ...         print(f"  - {conflict}")
-    """
-
-    success: bool
-    pcb_path: Path | None = None
-    routes: list[Route] | None = None
-    placement_conflicts: list[Conflict] | None = None
-    drc_results: DRCResults | None = None
-    iterations: int = 0
-    message: str = ""
-
-    @property
-    def has_placement_conflicts(self) -> bool:
-        """Check if there are unresolved placement conflicts."""
-        return bool(self.placement_conflicts)
-
-    @property
-    def has_drc_violations(self) -> bool:
-        """Check if there are DRC violations."""
-        if self.drc_results is None:
-            return False
-        return not self.drc_results.passed
-
-    @property
-    def routing_complete(self) -> bool:
-        """Check if routing produced any routes."""
-        return self.routes is not None and len(self.routes) > 0
-
-    def __str__(self) -> str:
-        status = "SUCCESS" if self.success else "FAILED"
-        parts = [f"OptimizationResult({status}"]
-        if self.iterations > 0:
-            parts.append(f", iterations={self.iterations}")
-        if self.routes:
-            parts.append(f", routes={len(self.routes)}")
-        if self.message:
-            parts.append(f", message={self.message!r}")
-        parts.append(")")
-        return "".join(parts)
+__all__ = ["PlaceRouteOptimizer"]
 
 
 class PlaceRouteOptimizer:
@@ -110,7 +52,7 @@ class PlaceRouteOptimizer:
 
     Example:
         >>> from kicad_tools.schema.pcb import PCB
-        >>> from kicad_tools.optimize import PlaceRouteOptimizer
+        >>> from kicad_tools.optim import PlaceRouteOptimizer
         >>>
         >>> # Simple usage with factory method
         >>> optimizer = PlaceRouteOptimizer.from_pcb(
@@ -465,7 +407,7 @@ class PlaceRouteOptimizer:
 
             # Success!
             if self.verbose:
-                print(f"\n✓ Optimization converged in {iteration + 1} iterations!")
+                print(f"\nOptimization converged in {iteration + 1} iterations!")
                 print(f"  Routes: {len(routes)}")
 
             return OptimizationResult(

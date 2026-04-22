@@ -1,11 +1,11 @@
-"""Tests for kicad_tools.optimize.place_route module."""
+"""Tests for kicad_tools.optim.place_route module."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from kicad_tools.optimize import OptimizationResult, PlaceRouteOptimizer
+from kicad_tools.optim import OptimizationResult, PlaceRouteOptimizer
 
 # =============================================================================
 # Test PCB fixtures
