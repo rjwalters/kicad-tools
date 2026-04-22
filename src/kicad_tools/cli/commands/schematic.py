@@ -17,7 +17,7 @@ def run_sch_command(args) -> int:
         )
         print(
             "          add-no-connect, add-component, add-wire, add-junction,"
-            " cleanup-wires, disconnect"
+            " cleanup-wires, remove-wire, disconnect"
         )
         return 1
 
@@ -301,6 +301,26 @@ def run_sch_command(args) -> int:
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
         return cleanup_main(sub_argv) or 0
+
+    elif args.sch_command == "remove-wire":
+        from ..sch_remove_wire import main as remove_wire_main
+
+        sub_argv = [str(schematic_path)]
+        if args.from_pt:
+            sub_argv.extend(["--from", args.from_pt])
+        if args.to_pt:
+            sub_argv.extend(["--to", args.to_pt])
+        if args.near:
+            sub_argv.extend(["--near", args.near])
+        if args.tolerance != 1.27:
+            sub_argv.extend(["--tolerance", str(args.tolerance)])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return remove_wire_main(sub_argv) or 0
 
     elif args.sch_command == "disconnect":
         from ..sch_disconnect import main as disconnect_main

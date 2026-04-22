@@ -748,6 +748,39 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_cleanup.add_argument("--format", choices=["text", "json"], default="text")
 
+    # sch remove-wire
+    sch_remove_wire = sch_subparsers.add_parser(
+        "remove-wire", help="Remove a specific wire segment"
+    )
+    sch_remove_wire.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_remove_wire.add_argument(
+        "--from",
+        dest="from_pt",
+        help="Start endpoint X,Y of wire to remove",
+    )
+    sch_remove_wire.add_argument(
+        "--to",
+        dest="to_pt",
+        help="End endpoint X,Y of wire to remove",
+    )
+    sch_remove_wire.add_argument(
+        "--near",
+        help="Find and remove wire nearest to this point X,Y",
+    )
+    sch_remove_wire.add_argument(
+        "--tolerance",
+        type=float,
+        default=1.27,
+        help="Coordinate matching tolerance in mm (default: 1.27)",
+    )
+    sch_remove_wire.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_remove_wire.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_remove_wire.add_argument("--format", choices=["text", "json"], default="text")
+
     # sch disconnect
     sch_disconnect = sch_subparsers.add_parser(
         "disconnect", help="Disconnect a pin from its net"
