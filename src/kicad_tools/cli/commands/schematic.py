@@ -341,11 +341,11 @@ def run_sch_command(args) -> int:
 
         sub_argv = [str(schematic_path)]
         if args.from_pt:
-            sub_argv.extend(["--from", args.from_pt])
+            sub_argv.extend(["--from", str(args.from_pt[0]), str(args.from_pt[1])])
         if args.to_pt:
-            sub_argv.extend(["--to", args.to_pt])
+            sub_argv.extend(["--to", str(args.to_pt[0]), str(args.to_pt[1])])
         if args.near:
-            sub_argv.extend(["--near", args.near])
+            sub_argv.extend(["--near", str(args.near[0]), str(args.near[1])])
         if args.tolerance != 1.27:
             sub_argv.extend(["--tolerance", str(args.tolerance)])
         if args.dry_run:
