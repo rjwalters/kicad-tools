@@ -591,6 +591,61 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_rename_signal.add_argument("--format", choices=["text", "json"], default="text")
 
+    # sch add-no-connect
+    sch_add_nc = sch_subparsers.add_parser(
+        "add-no-connect", help="Add no-connect markers to pins"
+    )
+    sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_nc.add_argument("--ref", help="Symbol reference (e.g., U1)")
+    sch_add_nc.add_argument("--pin", help="Pin number to mark")
+    sch_add_nc.add_argument(
+        "--auto", action="store_true", help="Auto-detect and mark all unconnected pins"
+    )
+    sch_add_nc.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_nc.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    sch_add_nc.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_nc.add_argument("--backup", action="store_true", help="Create backup before modifying")
+
+    # sch cleanup-wires
+    sch_cleanup = sch_subparsers.add_parser(
+        "cleanup-wires", help="Remove zero-length and dangling wires"
+    )
+    sch_cleanup.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_cleanup.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_cleanup.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_cleanup.add_argument("--format", choices=["text", "json"], default="text")
+
+    # sch disconnect
+    sch_disconnect = sch_subparsers.add_parser(
+        "disconnect", help="Disconnect a pin from its net"
+    )
+    sch_disconnect.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_disconnect.add_argument("--ref", required=True, help="Symbol reference (e.g., U1)")
+    sch_disconnect.add_argument("--pin", required=True, help="Pin number to disconnect")
+    sch_disconnect.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_disconnect.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_disconnect.add_argument(
+        "--add-nc", action="store_true", help="Add no-connect marker after disconnecting"
+    )
+    sch_disconnect.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_disconnect.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
 
 def _add_pcb_parser(subparsers) -> None:
     """Add PCB subcommand parser with its subcommands."""
