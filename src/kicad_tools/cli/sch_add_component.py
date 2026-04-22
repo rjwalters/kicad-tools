@@ -33,8 +33,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import uuid as uuid_mod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
