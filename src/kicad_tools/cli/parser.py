@@ -424,6 +424,13 @@ def _add_sch_parser(subparsers) -> None:
     # sch hierarchy
     sch_hierarchy = sch_subparsers.add_parser("hierarchy", help="Show hierarchy tree")
     sch_hierarchy.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_hierarchy.add_argument(
+        "hierarchy_command",
+        nargs="?",
+        default="tree",
+        choices=["tree", "list", "labels", "path", "stats", "validate"],
+        help="Hierarchy subcommand (default: tree)",
+    )
     sch_hierarchy.add_argument("--format", choices=["tree", "json"], default="tree")
     sch_hierarchy.add_argument("--depth", type=int, help="Maximum depth to show")
 

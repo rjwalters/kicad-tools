@@ -31,7 +31,7 @@ def run_sch_command(args) -> int:
     elif args.sch_command == "hierarchy":
         from ..sch_hierarchy import main as hierarchy_main
 
-        sub_argv = [str(schematic_path), "tree"]
+        sub_argv = [str(schematic_path), args.hierarchy_command]
         if args.format != "tree":
             sub_argv.extend(["--format", args.format])
         if args.depth:
