@@ -289,6 +289,11 @@ tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" LOOM_WORKSPACE "$
 tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" LOOM_ROLE "shepherd-sh"
 tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" LOOM_ISSUE "$ISSUE"
 tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" LOOM_ON_DEMAND "true"
+# Clear CLAUDECODE to prevent nested session guard from blocking worker
+# sessions.  If the tmux server was started from a Claude Code session,
+# CLAUDECODE would leak into the shepherd and its worker subprocesses,
+# potentially triggering the nested-session guard.  See issue #3208.
+tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" CLAUDECODE ""
 
 # Send the shepherd command to the session
 tmux -L "$TMUX_SOCKET" send-keys -t "$FULL_SESSION_NAME" "$SHEPHERD_CMD" C-m

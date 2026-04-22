@@ -1549,6 +1549,12 @@ main() {
             break
         fi
     done
+    if [[ "${SKIP_PERMISSIONS_MODE}" == "true" ]]; then
+        log_info "Skip-permissions mode: ON (--dangerously-skip-permissions detected)"
+    fi
+    if [[ -n "${CLAUDECODE:-}" ]]; then
+        log_warn "CLAUDECODE is set (value='${CLAUDECODE}') — nested session guard may trigger"
+    fi
 
     # Run pre-flight checks
     if ! run_preflight_checks; then
