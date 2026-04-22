@@ -60,15 +60,6 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     Returns list of dicts with keys: reference, prefix, number, unit_suffix,
     position_y, position_x, lib_id.
     """
-    # Match symbol instance blocks (not lib_symbols)
-    symbol_pattern = re.compile(
-        r'\(symbol\n'
-        r'\t\t\(lib_id "([^"]+)"\)'
-        r'.*?'
-        r'\(at ([\d.]+) ([\d.]+)',
-        re.DOTALL,
-    )
-
     ref_pattern = re.compile(r'\(property "Reference" "([^"]+)"')
     symbols = []
 
