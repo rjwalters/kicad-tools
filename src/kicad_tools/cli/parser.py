@@ -538,6 +538,27 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch set-value
+    sch_set_val = sch_subparsers.add_parser(
+        "set-value", help="Set value property for symbols"
+    )
+    sch_set_val.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_val.add_argument("--ref", help="Symbol reference (e.g., U4, R1)")
+    sch_set_val.add_argument(
+        "--value", help="Value to assign (e.g., AP2204K-3.3TRG1)"
+    )
+    sch_set_val.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (ref -> value)",
+    )
+    sch_set_val.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_val.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
         "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"
