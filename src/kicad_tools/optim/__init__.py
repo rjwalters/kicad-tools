@@ -154,6 +154,7 @@ from kicad_tools.optim.thermal import (
     detect_thermal_constraints,
     get_thermal_summary,
 )
+from kicad_tools.optim.place_route import PlaceRouteOptimizer
 from kicad_tools.optim.workflow import (
     OptimizationResult,
     OptimizationWorkflow,
@@ -272,6 +273,8 @@ __all__ = [
     "WorkflowConfig",
     "RoutabilityInfo",
     "RoutabilityComparison",
+    # Place-route-DRC optimization
+    "PlaceRouteOptimizer",
     # Zone-based placement
     "PlacementZone",
     "assign_zone",

@@ -815,7 +815,7 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format
     for better overall results.
     """
     from kicad_tools.cli.progress import spinner
-    from kicad_tools.optimize.place_route import PlaceRouteOptimizer
+    from kicad_tools.optim.place_route import PlaceRouteOptimizer
     from kicad_tools.schema.pcb import PCB
 
     # For JSON output, suppress text output

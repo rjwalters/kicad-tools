@@ -35,7 +35,10 @@ if TYPE_CHECKING:
     from kicad_tools.optim.evolutionary import EvolutionaryPlacementOptimizer
     from kicad_tools.optim.keepout import KeepoutZone
     from kicad_tools.optim.placement import PlacementOptimizer
+    from kicad_tools.placement.conflict import Conflict
+    from kicad_tools.router.primitives import Route
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.violations import DRCResults
 
 __all__ = ["OptimizationResult", "OptimizationWorkflow"]
 
@@ -61,7 +64,11 @@ class RoutabilityComparison:
 @dataclass
 class OptimizationResult:
     """
-    Result of a placement optimization run.
+    Result of an optimization run.
+
+    This is the unified result type for both placement-only optimization
+    (via OptimizationWorkflow) and integrated place-route-DRC optimization
+    (via PlaceRouteOptimizer).
 
     Attributes:
         success: Whether optimization completed successfully.
@@ -75,6 +82,10 @@ class OptimizationResult:
         routability: Routability comparison (if checked).
         output_path: Path where optimized PCB was saved (if saved).
         message: Human-readable status message.
+        pcb_path: Path to the PCB file (used by PlaceRouteOptimizer).
+        routes: List of routes from the autorouter (if routing was performed).
+        placement_conflicts: Remaining placement conflicts (if any).
+        drc_results: DRC check results (if DRC was run).
     """
 
     success: bool = False
@@ -88,6 +99,41 @@ class OptimizationResult:
     routability: RoutabilityComparison | None = None
     output_path: Path | None = None
     message: str = ""
+
+    # Routing-specific fields (used by PlaceRouteOptimizer)
+    pcb_path: Path | None = None
+    routes: list[Route] | None = None
+    placement_conflicts: list[Conflict] | None = None
+    drc_results: DRCResults | None = None
+
+    @property
+    def has_placement_conflicts(self) -> bool:
+        """Check if there are unresolved placement conflicts."""
+        return bool(self.placement_conflicts)
+
+    @property
+    def has_drc_violations(self) -> bool:
+        """Check if there are DRC violations."""
+        if self.drc_results is None:
+            return False
+        return not self.drc_results.passed
+
+    @property
+    def routing_complete(self) -> bool:
+        """Check if routing produced any routes."""
+        return self.routes is not None and len(self.routes) > 0
+
+    def __str__(self) -> str:
+        status = "SUCCESS" if self.success else "FAILED"
+        parts = [f"OptimizationResult({status}"]
+        if self.iterations > 0:
+            parts.append(f", iterations={self.iterations}")
+        if self.routes:
+            parts.append(f", routes={len(self.routes)}")
+        if self.message:
+            parts.append(f", message={self.message!r}")
+        parts.append(")")
+        return "".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
