@@ -931,11 +931,10 @@ class TestKiCad10NetFormat:
         assert '(net "+3V3")' in result_content or '(net 2 "+3V3")' in result_content
 
     def test_snapshot_canonicalizes_name_only_to_number_format(self, tmp_path):
-        """_snapshot_element_nets canonicalizes (net "name") to (net N "name") format.
+        """_snapshot_element_nets canonicalizes net format per element type.
 
-        When the PCB header has (net 1 "GND") and an element has (net "GND"),
-        the snapshot should store the canonicalized (net 1 "GND") node so that
-        restore writes back the full format.
+        - Pads: (net "name") -> (net N "name")  (dual-atom valid for pads)
+        - Segments: (net "name") -> (net N)       (numeric-only for KiCad 9)
         """
         from kicad_tools.cli.runner import _snapshot_element_nets
 
@@ -978,19 +977,20 @@ class TestKiCad10NetFormat:
         assert pad2_net.get_int(0) == 2
         assert pad2_net.get_string(1) == "VCC"
 
-        # Verify segment snapshot is canonicalized
+        # Verify segment snapshot is canonicalized to numeric-only (net N)
+        # Segments use numeric_only=True because KiCad 9 rejects dual-atom
+        # format on segments/vias.
         seg_keys = [k for k in snapshot if k.startswith("seg:")]
         assert len(seg_keys) == 1
         seg_net = snapshot[seg_keys[0]][0]
         assert seg_net.get_int(0) == 1
-        assert seg_net.get_string(1) == "GND"
+        assert seg_net.get_string(1) is None
 
     def test_restore_writes_number_format_for_kicad10_input(self, tmp_path):
-        """After snapshot+restore cycle, pad net nodes use (net N "name") format.
+        """After snapshot+restore cycle, net format matches element type.
 
-        Even when the input PCB uses KiCad 10 name-only (net "GND") format,
-        the restored output should have (net 1 "GND") so downstream parsers
-        can read the net number directly.
+        Pads: (net N "name") — dual-atom valid for pads.
+        Segments/vias: (net N) — numeric-only required by KiCad 9.
         """
         from kicad_tools.cli.runner import (
             _restore_net_declarations,
@@ -1074,7 +1074,7 @@ class TestKiCad10NetFormat:
                             f"got number={net_num} but no name"
                         )
 
-        # Check segments
+        # Check segments — must be numeric-only (net N) for KiCad 9
         for child in output_sexp.children:
             if child.name == "segment":
                 net_node = child.get("net")
@@ -1082,8 +1082,9 @@ class TestKiCad10NetFormat:
                     net_num = net_node.get_int(0)
                     if net_num and net_num != 0:
                         net_name = net_node.get_string(1)
-                        assert net_name is not None, (
-                            f'Restored segment net should have (net N "name") format'
+                        assert net_name is None, (
+                            f"Restored segment net should have (net N) format "
+                            f"(numeric-only), got trailing name {net_name!r}"
                         )
 
     def test_pad_from_sexp_name_only_format(self):

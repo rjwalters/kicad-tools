@@ -156,6 +156,24 @@ class TestCanonicalizeNetNode:
         result = _canonicalize_net_node(original, {"X": 5}, numeric_only=True)
         assert result is original
 
+    def test_dual_atom_stripped_when_numeric_only(self):
+        """numeric_only=True strips trailing name from (net N "name")."""
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        node = _canonicalize_net_node(
+            _net_node(79, "GNDA"), {"GNDA": 79}, numeric_only=True
+        )
+        assert node.get_int(0) == 79
+        assert node.get_string(1) is None
+
+    def test_dual_atom_preserved_when_not_numeric_only(self):
+        """Default mode preserves (net N "name") format."""
+        from kicad_tools.cli.runner import _canonicalize_net_node
+
+        original = _net_node(79, "GNDA")
+        result = _canonicalize_net_node(original, {"GNDA": 79})
+        assert result is original
+
     def test_none_returns_none(self):
         from kicad_tools.cli.runner import _canonicalize_net_node
 
@@ -1012,6 +1030,239 @@ class TestAssignEmptyNetsToZero:
                 assert net_node is not None
                 assert net_node.get_int(0) == 0, (
                     "Segment originally (net 0) should be restored to (net 0)"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+
+# ---------------------------------------------------------------------------
+# _strip_dual_atom_nets
+# ---------------------------------------------------------------------------
+
+
+class TestStripDualAtomNets:
+    """Verify ``_strip_dual_atom_nets`` strips trailing names from segments/vias."""
+
+    def test_segment_dual_atom_stripped(self):
+        """(net 5 \"GND\") on a segment becomes (net 5)."""
+        from kicad_tools.cli.runner import _strip_dual_atom_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net 5 "GND") (uuid "s1")))'
+        )
+        changed = _strip_dual_atom_nets(tree)
+        assert changed is True
+        seg = [c for c in tree.children if c.name == "segment"][0]
+        net_node = seg.get("net")
+        assert net_node.get_int(0) == 5
+        assert net_node.get_string(1) is None
+
+    def test_via_dual_atom_stripped(self):
+        """(net 3 \"VCC\") on a via becomes (net 3)."""
+        from kicad_tools.cli.runner import _strip_dual_atom_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (via (at 10 20) (size 0.6) (drill 0.3) '
+            '(layers "F.Cu" "B.Cu") (net 3 "VCC") (uuid "v1")))'
+        )
+        changed = _strip_dual_atom_nets(tree)
+        assert changed is True
+        via = [c for c in tree.children if c.name == "via"][0]
+        net_node = via.get("net")
+        assert net_node.get_int(0) == 3
+        assert net_node.get_string(1) is None
+
+    def test_pad_dual_atom_preserved(self):
+        """(net 5 \"GND\") on a pad is left unchanged (valid in KiCad 9)."""
+        from kicad_tools.cli.runner import _strip_dual_atom_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (pad "1" smd rect (at 0 0) (size 1 1) '
+            '(layers "F.Cu") (net 5 "GND")))'
+        )
+        changed = _strip_dual_atom_nets(tree)
+        assert changed is False
+
+    def test_numeric_only_unchanged(self):
+        """(net 5) on a segment is left unchanged."""
+        from kicad_tools.cli.runner import _strip_dual_atom_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net 5) (uuid "s2")))'
+        )
+        changed = _strip_dual_atom_nets(tree)
+        assert changed is False
+
+    def test_no_segments_returns_false(self):
+        """A PCB with no segments/vias returns False."""
+        from kicad_tools.cli.runner import _strip_dual_atom_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp('(kicad_pcb (net 0 "") (net 1 "GND"))')
+        changed = _strip_dual_atom_nets(tree)
+        assert changed is False
+
+
+# ---------------------------------------------------------------------------
+# _resolve_name_only_nets
+# ---------------------------------------------------------------------------
+
+
+class TestResolveNameOnlyNets:
+    """Verify ``_resolve_name_only_nets`` resolves name-only nets on segments/vias."""
+
+    def test_name_only_segment_resolved(self):
+        """(net \"GND\") on a segment becomes (net 2)."""
+        from kicad_tools.cli.runner import _resolve_name_only_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (net 0 "") (net 2 "GND") '
+            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net "GND") (uuid "s1")))'
+        )
+        changed = _resolve_name_only_nets(tree)
+        assert changed is True
+        seg = [c for c in tree.children if c.name == "segment"][0]
+        net_node = seg.get("net")
+        assert net_node.get_int(0) == 2
+        assert net_node.get_string(1) is None
+
+    def test_name_only_via_resolved(self):
+        """(net \"VCC\") on a via becomes (net 3)."""
+        from kicad_tools.cli.runner import _resolve_name_only_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (net 0 "") (net 3 "VCC") '
+            '(via (at 10 20) (size 0.6) (drill 0.3) '
+            '(layers "F.Cu" "B.Cu") (net "VCC") (uuid "v1")))'
+        )
+        changed = _resolve_name_only_nets(tree)
+        assert changed is True
+        via = [c for c in tree.children if c.name == "via"][0]
+        net_node = via.get("net")
+        assert net_node.get_int(0) == 3
+
+    def test_unknown_name_left_unchanged(self):
+        """(net \"MYSTERY\") with no matching declaration is left unchanged."""
+        from kicad_tools.cli.runner import _resolve_name_only_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (net 0 "") (net 1 "GND") '
+            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net "MYSTERY") (uuid "s2")))'
+        )
+        changed = _resolve_name_only_nets(tree)
+        assert changed is False
+
+    def test_numeric_net_not_touched(self):
+        """(net 5) on a segment is left unchanged."""
+        from kicad_tools.cli.runner import _resolve_name_only_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (net 0 "") (net 5 "VCC") '
+            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net 5) (uuid "s3")))'
+        )
+        changed = _resolve_name_only_nets(tree)
+        assert changed is False
+
+    def test_no_net_declarations_returns_false(self):
+        """A PCB with no net declarations returns False."""
+        from kicad_tools.cli.runner import _resolve_name_only_nets
+        from kicad_tools.sexp.parser import parse_string as load_sexp
+
+        tree = load_sexp(
+            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            '(layer "F.Cu") (net "GND") (uuid "s4")))'
+        )
+        changed = _resolve_name_only_nets(tree)
+        assert changed is False
+
+
+# ---------------------------------------------------------------------------
+# Integration: _restore_net_declarations end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreNetDeclarationsStripsFormats:
+    """Verify the full pipeline strips dual-atom and name-only formats."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_dual_atom_stripped_in_pipeline(self, tmp_path):
+        """A segment with (net 5 \"GND\") is stripped to (net 5) by the full pipeline."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 5 "GND") (uuid "d1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(5, "GND")]
+        _restore_net_declarations(pcb, net_nodes, element_nets=None)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 5
+                assert net_node.get_string(1) is None, (
+                    "Dual-atom format should be stripped from segments"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_name_only_resolved_in_pipeline(self, tmp_path):
+        """A segment with (net \"GND\") is resolved to (net 2) by the full pipeline."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 2 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net "GND") (uuid "n1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(2, "GND")]
+        _restore_net_declarations(pcb, net_nodes, element_nets=None)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 2
+                assert net_node.get_string(1) is None, (
+                    "Name-only format should be resolved to numeric-only"
                 )
                 break
         else:
