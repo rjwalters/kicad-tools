@@ -18,7 +18,7 @@ def run_sch_command(args) -> int:
         print(
             "          set-label-direction, add-no-connect, add-component,"
             " add-wire, add-junction,"
-            " cleanup-wires, remove-wire, disconnect"
+            " add-label, cleanup-wires, remove-wire, disconnect"
         )
         return 1
 
@@ -305,6 +305,24 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return add_junc_main(sub_argv) or 0
+
+    elif args.sch_command == "add-label":
+        from ..sch_add_label import main as add_label_main
+
+        sub_argv = [str(schematic_path), "--type", args.type, "--name", args.name]
+        sub_argv.extend(["--at", str(args.at[0]), str(args.at[1])])
+        if args.shape:
+            sub_argv.extend(["--shape", args.shape])
+        if args.rotation:
+            sub_argv.extend(["--rotation", str(args.rotation)])
+        if args.connects:
+            for conn in args.connects:
+                sub_argv.extend(["--connect", conn])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_label_main(sub_argv) or 0
 
     elif args.sch_command == "cleanup-wires":
         from ..sch_cleanup_wires import main as cleanup_main

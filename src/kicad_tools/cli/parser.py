@@ -741,6 +741,51 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch add-label
+    sch_add_label = sch_subparsers.add_parser(
+        "add-label", help="Add a label (local, global, or hierarchical) to the schematic"
+    )
+    sch_add_label.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_label.add_argument(
+        "--type",
+        required=True,
+        choices=["global", "local", "hierarchical"],
+        help="Label type",
+    )
+    sch_add_label.add_argument(
+        "--name", required=True, help="Label text / net name"
+    )
+    sch_add_label.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Placement coordinates",
+    )
+    sch_add_label.add_argument(
+        "--shape",
+        choices=["input", "output", "bidirectional", "tri_state", "passive"],
+        default=None,
+        help="Label shape (global and hierarchical only)",
+    )
+    sch_add_label.add_argument(
+        "--rotation", type=float, default=0, help="Rotation in degrees (default: 0)"
+    )
+    sch_add_label.add_argument(
+        "--connect",
+        action="append",
+        dest="connects",
+        metavar="X,Y",
+        help="Draw wire from label to target coordinates (e.g., 120,80). Repeatable.",
+    )
+    sch_add_label.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_label.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch cleanup-wires
     sch_cleanup = sch_subparsers.add_parser(
         "cleanup-wires", help="Remove zero-length and dangling wires"
