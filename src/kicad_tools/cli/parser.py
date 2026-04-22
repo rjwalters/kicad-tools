@@ -504,6 +504,27 @@ def _add_sch_parser(subparsers) -> None:
     sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
     sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    # sch set-footprint
+    sch_set_fp = sch_subparsers.add_parser(
+        "set-footprint", help="Set footprint assignments for symbols"
+    )
+    sch_set_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_fp.add_argument("--ref", help="Symbol reference (e.g., U2, R1)")
+    sch_set_fp.add_argument(
+        "--footprint", help="Footprint to assign (e.g., Package_TO_SOT_SMD:SOT-23-5)"
+    )
+    sch_set_fp.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (ref -> footprint)",
+    )
+    sch_set_fp.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_fp.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
         "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"

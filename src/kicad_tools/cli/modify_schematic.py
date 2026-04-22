@@ -75,6 +75,8 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
             # Value property spans multiple lines - just capture the quoted value
             value_match = re.search(r'\(property "Value" "([^"]*)"', block)
 
+            footprint_match = re.search(r'\(property "Footprint" "([^"]*)"', block)
+
             info = {
                 "lib_id": lib_id_match.group(1) if lib_id_match else "",
                 "position": (float(pos_match.group(1)), float(pos_match.group(2)))
@@ -82,6 +84,7 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
                 else (0, 0),
                 "uuid": uuid_match.group(1) if uuid_match else "",
                 "value": value_match.group(1) if value_match else "",
+                "footprint": footprint_match.group(1) if footprint_match else "",
             }
 
             return (match.start(), match.end(), info)
@@ -134,6 +137,33 @@ def set_value_text(text: str, reference: str, new_value: str) -> tuple[str, bool
     modified = text[:start] + new_block + text[end:]
 
     return modified, True, f"Changed {reference} value: '{old_value}' -> '{new_value}'"
+
+
+def set_footprint_text(text: str, reference: str, new_footprint: str) -> tuple[str, bool, str]:
+    """
+    Set a symbol's Footprint property using text replacement.
+
+    Returns (modified_text, success, message).
+    """
+    result = find_symbol_text_range(text, reference)
+
+    if not result:
+        return text, False, f"Symbol '{reference}' not found"
+
+    start, end, info = result
+    block = text[start:end]
+    old_footprint = info["footprint"]
+
+    # Replace the footprint property in this block
+    footprint_pattern = re.compile(r'(\(property "Footprint" )"[^"]*"')
+    new_block = footprint_pattern.sub(rf'\g<1>"{new_footprint}"', block, count=1)
+
+    if new_block == block:
+        return text, False, f"Could not find Footprint property on {reference}"
+
+    modified = text[:start] + new_block + text[end:]
+
+    return modified, True, f"Changed {reference} footprint: '{old_footprint}' -> '{new_footprint}'"
 
 
 def set_lib_id_text(text: str, reference: str, new_lib_id: str) -> tuple[str, bool, str]:
@@ -539,6 +569,12 @@ def main():
         "--set-lib-id", nargs=2, metavar=("REF", "LIB_ID"), help="Change symbol library reference"
     )
     ops.add_argument(
+        "--set-footprint",
+        nargs=2,
+        metavar=("REF", "FOOTPRINT"),
+        help="Set symbol footprint property",
+    )
+    ops.add_argument(
         "--add-lib-symbol",
         type=Path,
         metavar="FILE",
@@ -606,6 +642,7 @@ def main():
         args.delete,
         args.set_value,
         args.set_lib_id,
+        args.set_footprint,
         args.add_lib_symbol,
         args.regen_uuids,
     ]
@@ -664,6 +701,22 @@ def main():
         else:
             modified_text, success, msg = set_lib_id_text(modified_text, ref, lib_id)
             results.append(("Set Lib ID", success, msg))
+            if success:
+                modified = True
+
+    if args.set_footprint:
+        ref, footprint = args.set_footprint
+        if args.dry_run:
+            result = find_symbol_text_range(modified_text, ref)
+            if result:
+                _, _, info = result
+                msg = f"Would change {ref} footprint: '{info['footprint']}' -> '{footprint}'"
+                results.append(("Set Footprint", True, msg))
+            else:
+                results.append(("Set Footprint", False, f"Symbol '{ref}' not found"))
+        else:
+            modified_text, success, msg = set_footprint_text(modified_text, ref, footprint)
+            results.append(("Set Footprint", success, msg))
             if success:
                 modified = True
 
