@@ -443,6 +443,19 @@ def _add_sch_parser(subparsers) -> None:
     sch_validate.add_argument("--strict", action="store_true", help="Exit with error on warnings")
     sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
 
+    # sch preflight
+    sch_preflight = sch_subparsers.add_parser(
+        "preflight", help="Pre-layout validation (footprint resolution, pin/pad, nets)"
+    )
+    sch_preflight.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_preflight.add_argument("--format", choices=["text", "json"], default="text")
+    sch_preflight.add_argument(
+        "--strict", action="store_true", help="Exit with error on warnings"
+    )
+    sch_preflight.add_argument(
+        "-q", "--quiet", action="store_true", help="Only show errors"
+    )
+
     # sch wires
     sch_wires = sch_subparsers.add_parser("wires", help="List wire segments and junctions")
     sch_wires.add_argument("schematic", help="Path to .kicad_sch file")
