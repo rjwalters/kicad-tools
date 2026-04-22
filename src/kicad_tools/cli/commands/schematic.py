@@ -18,7 +18,7 @@ def run_sch_command(args) -> int:
         print(
             "          set-label-direction, add-no-connect, add-component,"
             " add-wire, add-junction,"
-            " add-label, cleanup-wires, remove-wire, disconnect"
+            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate"
         )
         return 1
 
@@ -373,5 +373,22 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return disconnect_main(sub_argv) or 0
+
+    elif args.sch_command == "re-annotate":
+        from ..sch_re_annotate import run_re_annotate
+
+        prefix_list = None
+        if args.prefix:
+            prefix_list = [p.strip() for p in args.prefix.split(",")]
+
+        return run_re_annotate(
+            schematic_path=schematic_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", False),
+            prefixes=prefix_list,
+            start_from=getattr(args, "start_from", 1),
+            per_sheet=getattr(args, "per_sheet", False),
+            format=getattr(args, "format", "text"),
+        )
 
     return 1
