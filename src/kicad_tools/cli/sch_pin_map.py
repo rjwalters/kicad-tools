@@ -16,7 +16,6 @@ import argparse
 import json
 import sys
 from collections import defaultdict
-from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
