@@ -612,7 +612,7 @@ class TestRemoveWire:
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
         original_content = path.read_text()
 
-        result = main([str(path), "--from", "100,50", "--to", "150,50", "--dry-run"])
+        result = main([str(path), "--from", "100", "50", "--to", "150", "50", "--dry-run"])
 
         assert result == 0
         assert path.read_text() == original_content
@@ -623,7 +623,7 @@ class TestRemoveWire:
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
 
-        result = main([str(path), "--from", "100,50", "--to", "150,50", "--backup"])
+        result = main([str(path), "--from", "100", "50", "--to", "150", "50", "--backup"])
 
         assert result == 0
         backups = list(tmp_path.glob("*.backup-*"))
@@ -637,7 +637,7 @@ class TestRemoveWire:
         sch_before = Schematic.load(path)
         initial_count = len(list(sch_before.sexp.find_all("wire")))
 
-        result = main([str(path), "--from", "100,50", "--to", "150,50"])
+        result = main([str(path), "--from", "100", "50", "--to", "150", "50"])
         assert result == 0
 
         sch_after = Schematic.load(path)
@@ -651,21 +651,21 @@ class TestRemoveWire:
         sch_before = Schematic.load(path)
         initial_count = len(list(sch_before.sexp.find_all("wire")))
 
-        result = main([str(path), "--near", "149,50"])
+        result = main([str(path), "--near", "149", "50"])
         assert result == 0
 
         sch_after = Schematic.load(path)
         assert len(list(sch_after.sexp.find_all("wire"))) == initial_count - 1
 
     def test_zero_length_wire_match(self, tmp_path):
-        """--from X,Y --to X,Y can match and remove a zero-length wire."""
+        """--from X Y --to X Y can match and remove a zero-length wire."""
         from kicad_tools.cli.sch_remove_wire import main
 
         path = _write_sch(tmp_path, SCHEMATIC_WITH_ZERO_LENGTH_WIRE_REMOVE)
         sch_before = Schematic.load(path)
         initial_count = len(list(sch_before.sexp.find_all("wire")))
 
-        result = main([str(path), "--from", "100,50", "--to", "100,50"])
+        result = main([str(path), "--from", "100", "50", "--to", "100", "50"])
         assert result == 0
 
         sch_after = Schematic.load(path)
@@ -678,7 +678,7 @@ class TestRemoveWire:
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
 
         result = main([
-            str(path), "--from", "100,50", "--to", "150,50", "--near", "125,50"
+            str(path), "--from", "100", "50", "--to", "150", "50", "--near", "125", "50"
         ])
         assert result == 1
 
@@ -688,7 +688,7 @@ class TestRemoveWire:
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
 
-        result = main([str(path), "--from", "999,999", "--to", "888,888"])
+        result = main([str(path), "--from", "999", "999", "--to", "888", "888"])
         assert result == 1
 
     def test_json_output(self, tmp_path, capsys):
@@ -699,7 +699,7 @@ class TestRemoveWire:
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
         result = main([
-            str(path), "--from", "100,50", "--to", "150,50",
+            str(path), "--from", "100", "50", "--to", "150", "50",
             "--format", "json"
         ])
         assert result == 0

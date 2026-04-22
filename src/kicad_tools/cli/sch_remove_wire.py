@@ -3,22 +3,22 @@
 Remove a specific wire segment from a KiCad schematic.
 
 Supports two matching modes:
-  --from X1,Y1 --to X2,Y2   Match a wire by its exact endpoints
-  --near X,Y                 Match the nearest wire to a point
+  --from X1 Y1 --to X2 Y2   Match a wire by its exact endpoints
+  --near X Y                 Match the nearest wire to a point
 
 After removal, orphaned junctions (at points with fewer than 3 remaining
 wire endpoints) are automatically cleaned up.
 
 Usage:
-    kct sch remove-wire board.kicad_sch --from 100,50 --to 150,50
-    kct sch remove-wire board.kicad_sch --near 125,50
-    kct sch remove-wire board.kicad_sch --from 100,50 --to 150,50 --dry-run
-    kct sch remove-wire board.kicad_sch --near 125,50 --backup
+    kct sch remove-wire board.kicad_sch --from 100 50 --to 150 50
+    kct sch remove-wire board.kicad_sch --near 125 50
+    kct sch remove-wire board.kicad_sch --from 100 50 --to 150 50 --dry-run
+    kct sch remove-wire board.kicad_sch --near 125 50 --backup
 
 Options:
-    --from X,Y               Start endpoint of the wire to remove
-    --to X,Y                 End endpoint of the wire to remove
-    --near X,Y               Find and remove the wire nearest to this point
+    --from X Y               Start endpoint of the wire to remove
+    --to X Y                 End endpoint of the wire to remove
+    --near X Y               Find and remove the wire nearest to this point
     --tolerance <mm>         Coordinate matching tolerance (default: 1.27 mm)
     --dry-run                Show what would change without modifying
     --backup                 Create backup before modifying
@@ -183,17 +183,6 @@ def remove_wire_and_orphan_junctions(
     return True, junctions_removed
 
 
-def _parse_coordinate(value: str) -> tuple[float, float]:
-    """Parse a comma-separated coordinate pair like '100,50' or '100.5,50.3'."""
-    parts = value.split(",")
-    if len(parts) != 2:
-        raise argparse.ArgumentTypeError(f"Expected X,Y coordinate pair, got: {value!r}")
-    try:
-        return (float(parts[0]), float(parts[1]))
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid coordinate values: {value!r}")
-
-
 def run_remove_wire(args) -> int:
     """Execute the remove-wire command."""
     schematic_path = Path(args.schematic)
@@ -337,20 +326,26 @@ def main(argv=None):
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument(
         "--from",
+        nargs=2,
+        type=float,
         dest="from_pt",
-        type=_parse_coordinate,
-        help="Start endpoint (X,Y) of wire to remove",
+        metavar=("X", "Y"),
+        help="Start endpoint of wire to remove",
     )
     parser.add_argument(
         "--to",
+        nargs=2,
+        type=float,
         dest="to_pt",
-        type=_parse_coordinate,
-        help="End endpoint (X,Y) of wire to remove",
+        metavar=("X", "Y"),
+        help="End endpoint of wire to remove",
     )
     parser.add_argument(
         "--near",
-        type=_parse_coordinate,
-        help="Find and remove wire nearest to this point (X,Y)",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Find and remove wire nearest to this point",
     )
     parser.add_argument(
         "--tolerance",

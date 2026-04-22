@@ -802,17 +802,26 @@ def _add_sch_parser(subparsers) -> None:
     sch_remove_wire.add_argument("schematic", help="Path to .kicad_sch file")
     sch_remove_wire.add_argument(
         "--from",
+        nargs=2,
+        type=float,
         dest="from_pt",
-        help="Start endpoint X,Y of wire to remove",
+        metavar=("X", "Y"),
+        help="Start endpoint of wire to remove",
     )
     sch_remove_wire.add_argument(
         "--to",
+        nargs=2,
+        type=float,
         dest="to_pt",
-        help="End endpoint X,Y of wire to remove",
+        metavar=("X", "Y"),
+        help="End endpoint of wire to remove",
     )
     sch_remove_wire.add_argument(
         "--near",
-        help="Find and remove wire nearest to this point X,Y",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Find and remove wire nearest to this point",
     )
     sch_remove_wire.add_argument(
         "--tolerance",
