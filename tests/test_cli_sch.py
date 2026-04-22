@@ -964,6 +964,33 @@ class TestSchCheckConnections:
             assert "pins" in data
             assert "summary" in data
 
+    def test_argv_parameter(
+        self, minimal_schematic: Path, minimal_symbol_library: Path, capsys
+    ):
+        """Test calling main() with an explicit argv list (CLI runner path)."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        try:
+            main([str(minimal_schematic), "--lib", str(minimal_symbol_library)])
+        except SystemExit as e:
+            assert e.code in (0, 1)
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_argv_parameter_no_library(self, minimal_schematic: Path, capsys, tmp_path):
+        """Test calling main() with argv when no libraries are found."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        empty_dir = tmp_path / "empty_lib"
+        empty_dir.mkdir()
+        with pytest.raises(SystemExit) as exc_info:
+            main([str(minimal_schematic), "--lib-path", str(empty_dir)])
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "No symbol libraries loaded" in captured.err
+
 
 class TestSchFindUnconnected:
     """Tests for sch_find_unconnected.py CLI."""
@@ -1006,6 +1033,31 @@ class TestSchFindUnconnected:
         if captured.out.strip():
             data = json.loads(captured.out)
             assert isinstance(data, (list, dict))
+
+    def test_argv_parameter(self, minimal_schematic: Path, capsys):
+        """Test calling main() with an explicit argv list (CLI runner path)."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        try:
+            main([str(minimal_schematic)])
+        except SystemExit as e:
+            assert e.code in (0, 1)
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_argv_parameter_json(self, minimal_schematic: Path, capsys):
+        """Test calling main() with argv and --format json."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        with contextlib.suppress(SystemExit):
+            main([str(minimal_schematic), "--format", "json"])
+
+        captured = capsys.readouterr()
+        if captured.out.strip():
+            data = json.loads(captured.out)
+            assert isinstance(data, dict)
+            assert "unconnected_pins" in data
 
 
 class TestSchRenameSignal:

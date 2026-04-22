@@ -168,7 +168,7 @@ def check_symbol_connections(
     return results
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Check pin connections using library pin positions",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -187,7 +187,7 @@ def main():
         "--verbose", "-v", action="store_true", help="Show all pins, not just unconnected"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Load schematic
     try:
