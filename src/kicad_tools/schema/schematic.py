@@ -522,6 +522,93 @@ class Schematic:
         self.invalidate_cache()
         return wire
 
+    def add_label(
+        self,
+        text: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+    ) -> Label:
+        """Add a local net label to the schematic.
+
+        Args:
+            text: Label text (net name).
+            position: ``(x, y)`` placement.
+            rotation: Rotation in degrees (default 0).
+
+        Returns:
+            The created :class:`Label`.
+        """
+        label = Label(
+            text=text,
+            position=position,
+            rotation=rotation,
+            uuid=str(uuid_mod.uuid4()),
+        )
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, label.to_sexp())
+        self.invalidate_cache()
+        return label
+
+    def add_global_label(
+        self,
+        text: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+        shape: str = "input",
+    ) -> GlobalLabel:
+        """Add a global label to the schematic.
+
+        Args:
+            text: Label text (net name).
+            position: ``(x, y)`` placement.
+            rotation: Rotation in degrees (default 0).
+            shape: Label shape (input, output, bidirectional, tri_state, passive).
+
+        Returns:
+            The created :class:`GlobalLabel`.
+        """
+        label = GlobalLabel(
+            text=text,
+            position=position,
+            rotation=rotation,
+            shape=shape,
+            uuid=str(uuid_mod.uuid4()),
+        )
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, label.to_sexp())
+        self.invalidate_cache()
+        return label
+
+    def add_hierarchical_label(
+        self,
+        text: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+        shape: str = "input",
+    ) -> HierarchicalLabel:
+        """Add a hierarchical label to the schematic.
+
+        Args:
+            text: Label text (net name).
+            position: ``(x, y)`` placement.
+            rotation: Rotation in degrees (default 0).
+            shape: Label shape (input, output, bidirectional, tri_state, passive).
+
+        Returns:
+            The created :class:`HierarchicalLabel`.
+        """
+        label = HierarchicalLabel(
+            text=text,
+            position=position,
+            rotation=rotation,
+            shape=shape,
+            uuid=str(uuid_mod.uuid4()),
+        )
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, label.to_sexp())
+        self.invalidate_cache()
+        return label
+
     def add_junction(
         self,
         position: tuple[float, float],

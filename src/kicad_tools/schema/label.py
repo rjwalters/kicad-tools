@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import uuid as uuid_mod
+
 from kicad_tools.sexp import SExp
 
 
@@ -24,6 +26,30 @@ class Label:
     position: tuple[float, float]
     rotation: float = 0
     uuid: str = ""
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (label "NAME" (at X Y ROT) (fields_autoplaced yes)
+              (effects (font (size 1.27 1.27)) (justify left bottom))
+              (uuid "..."))
+        """
+        label_uuid = self.uuid or str(uuid_mod.uuid4())
+        effects = SExp.list(
+            "effects",
+            SExp.list("font", SExp.list("size", 1.27, 1.27)),
+            SExp.list("justify", "left", "bottom"),
+        )
+        return SExp.list(
+            "label",
+            self.text,
+            SExp.list("at", self.position[0], self.position[1], self.rotation),
+            SExp.list("fields_autoplaced", "yes"),
+            effects,
+            SExp.list("uuid", label_uuid),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Label:
@@ -60,6 +86,33 @@ class HierarchicalLabel:
     rotation: float = 0
     shape: str = "input"  # input, output, bidirectional, tri_state, passive
     uuid: str = ""
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (hierarchical_label "NAME" (shape SHAPE) (at X Y ROT)
+              (fields_autoplaced yes)
+              (effects (font (size 1.27 1.27)) (justify right))
+              (uuid "..."))
+        """
+        label_uuid = self.uuid or str(uuid_mod.uuid4())
+        justify = "right" if self.rotation == 180 else "left"
+        effects = SExp.list(
+            "effects",
+            SExp.list("font", SExp.list("size", 1.27, 1.27)),
+            SExp.list("justify", justify),
+        )
+        return SExp.list(
+            "hierarchical_label",
+            self.text,
+            SExp.list("shape", self.shape),
+            SExp.list("at", self.position[0], self.position[1], self.rotation),
+            SExp.list("fields_autoplaced", "yes"),
+            effects,
+            SExp.list("uuid", label_uuid),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> HierarchicalLabel:
@@ -100,6 +153,33 @@ class GlobalLabel:
     rotation: float = 0
     shape: str = "input"
     uuid: str = ""
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (global_label "NAME" (shape SHAPE) (at X Y ROT)
+              (fields_autoplaced yes)
+              (effects (font (size 1.27 1.27)) (justify left))
+              (uuid "..."))
+        """
+        label_uuid = self.uuid or str(uuid_mod.uuid4())
+        justify = "right" if self.rotation == 180 else "left"
+        effects = SExp.list(
+            "effects",
+            SExp.list("font", SExp.list("size", 1.27, 1.27)),
+            SExp.list("justify", justify),
+        )
+        return SExp.list(
+            "global_label",
+            self.text,
+            SExp.list("shape", self.shape),
+            SExp.list("at", self.position[0], self.position[1], self.rotation),
+            SExp.list("fields_autoplaced", "yes"),
+            effects,
+            SExp.list("uuid", label_uuid),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> GlobalLabel:
