@@ -106,6 +106,72 @@ SCHEMATIC_WITH_DANGLING_WIRE = """\
 """
 
 
+SCHEMATIC_WITH_DUPLICATE_WIRES = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000005")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 116.84 149.86) (xy 116.84 142.24))
+    (stroke (width 0) (type default))
+    (uuid "dup-wire-1")
+  )
+  (wire (pts (xy 116.84 142.24) (xy 116.84 149.86))
+    (stroke (width 0) (type default))
+    (uuid "dup-wire-2")
+  )
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "unique-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 116.84 149.86 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (label "NET3" (at 116.84 142.24 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-3")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+SCHEMATIC_WITH_SAME_ORDER_DUPLICATE_WIRES = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000006")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "dup-same-1")
+  )
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "dup-same-2")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -237,6 +303,73 @@ class TestCleanupWires:
         data = json.loads(captured.out)
         assert "issues" in data
         assert data["zero_length"] == 1
+
+    def test_finds_duplicate_wires_reversed_endpoints(self, tmp_path):
+        """Duplicate wires with reversed endpoint order are detected."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_DUPLICATE_WIRES)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        duplicates = [i for i in issues if i.reason == "duplicate"]
+        assert len(duplicates) == 1
+        # The second wire (reversed endpoints) should be the duplicate
+        assert duplicates[0].start == (116.84, 142.24)
+        assert duplicates[0].end == (116.84, 149.86)
+
+    def test_finds_duplicate_wires_same_order(self, tmp_path):
+        """Duplicate wires with identical endpoint order are detected."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_SAME_ORDER_DUPLICATE_WIRES)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        duplicates = [i for i in issues if i.reason == "duplicate"]
+        assert len(duplicates) == 1
+
+    def test_remove_duplicate_wires(self, tmp_path):
+        """Duplicate wires are removed, keeping exactly one copy."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates, remove_wires
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_DUPLICATE_WIRES)
+        sch = Schematic.load(path)
+
+        initial_wire_count = len(list(sch.sexp.find_all("wire")))
+        issues = find_cleanup_candidates(sch)
+        removed = remove_wires(sch, issues)
+
+        assert removed == 1
+        final_wire_count = len(list(sch.sexp.find_all("wire")))
+        assert final_wire_count == initial_wire_count - 1
+
+    def test_duplicate_wires_dry_run_json(self, tmp_path, capsys):
+        """JSON output includes duplicate wire count."""
+        import json
+
+        from kicad_tools.cli.sch_cleanup_wires import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_DUPLICATE_WIRES)
+        result = main([str(path), "--dry-run", "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["duplicate"] == 1
+        assert any(i["reason"] == "duplicate" for i in data["issues"])
+
+    def test_duplicate_wires_dry_run_text(self, tmp_path, capsys):
+        """Text output reports duplicate wires in dry-run mode."""
+        from kicad_tools.cli.sch_cleanup_wires import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_DUPLICATE_WIRES)
+        result = main([str(path), "--dry-run"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Duplicate: 1" in captured.out
+        assert "[duplicate]" in captured.out
 
 
 # ---------------------------------------------------------------------------
