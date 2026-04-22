@@ -13,8 +13,10 @@ import pytest
 from kicad_tools.cli.sch_add_label import (
     _point_on_wire_midpoint,
     _snap,
-    main as add_label_main,
     parse_connect_target,
+)
+from kicad_tools.cli.sch_add_label import (
+    main as add_label_main,
 )
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.label import GlobalLabel, HierarchicalLabel, Label
@@ -104,8 +106,11 @@ class TestLabelToSexp:
 
     def test_global_label_round_trip(self):
         label = GlobalLabel(
-            text="I2S_BCLK", position=(100.0, 80.0), rotation=180,
-            shape="output", uuid="test-uuid-gl"
+            text="I2S_BCLK",
+            position=(100.0, 80.0),
+            rotation=180,
+            shape="output",
+            uuid="test-uuid-gl",
         )
         sexp = label.to_sexp()
         assert sexp.name == "global_label"
@@ -118,8 +123,7 @@ class TestLabelToSexp:
 
     def test_hierarchical_label_round_trip(self):
         label = HierarchicalLabel(
-            text="CLK", position=(50.0, 60.0), rotation=0,
-            shape="input", uuid="test-uuid-hl"
+            text="CLK", position=(50.0, 60.0), rotation=0, shape="input", uuid="test-uuid-hl"
         )
         sexp = label.to_sexp()
         assert sexp.name == "hierarchical_label"
@@ -152,13 +156,20 @@ class TestLabelToSexp:
 class TestPlaceGlobalLabel:
     def test_place_global_label(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "I2S_BCLK",
-            "--at", "100", "80",
-            "--shape", "output",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "I2S_BCLK",
+                "--at",
+                "100",
+                "80",
+                "--shape",
+                "output",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -169,12 +180,18 @@ class TestPlaceGlobalLabel:
 
     def test_global_label_default_shape(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "VCC",
-            "--at", "100", "80",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "VCC",
+                "--at",
+                "100",
+                "80",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -190,12 +207,18 @@ class TestPlaceGlobalLabel:
 class TestPlaceLocalLabel:
     def test_place_local_label(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "local",
-            "--name", "SDA",
-            "--at", "100", "80",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "local",
+                "--name",
+                "SDA",
+                "--at",
+                "100",
+                "80",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -205,13 +228,20 @@ class TestPlaceLocalLabel:
 
     def test_local_label_rejects_shape(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "local",
-            "--name", "SDA",
-            "--at", "100", "80",
-            "--shape", "output",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "local",
+                "--name",
+                "SDA",
+                "--at",
+                "100",
+                "80",
+                "--shape",
+                "output",
+            ]
+        )
         assert result == 1  # Error: --shape not valid for local
 
 
@@ -223,13 +253,20 @@ class TestPlaceLocalLabel:
 class TestPlaceHierarchicalLabel:
     def test_place_hierarchical_label(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "hierarchical",
-            "--name", "CLK",
-            "--at", "100", "80",
-            "--shape", "input",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "hierarchical",
+                "--name",
+                "CLK",
+                "--at",
+                "100",
+                "80",
+                "--shape",
+                "input",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -247,13 +284,20 @@ class TestPlaceHierarchicalLabel:
 class TestConnect:
     def test_connect_adds_wire(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "100.33", "80.01",
-            "--connect", "120.65,80.01",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -266,13 +310,20 @@ class TestConnect:
         sch_path = _write_sch(tmp_path)
         # Existing wire goes from (100, 50) to (150, 50)
         # Target (125, 50) is at the midpoint -> should create junction
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "125.73", "40.64",
-            "--connect", "125.73,49.53",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "125.73",
+                "40.64",
+                "--connect",
+                "125.73,49.53",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -280,14 +331,22 @@ class TestConnect:
 
     def test_multiple_connects(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "100.33", "80.01",
-            "--connect", "120.65,80.01",
-            "--connect", "80.01,80.01",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "120.65,80.01",
+                "--connect",
+                "80.01,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -305,13 +364,19 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "100", "80",
-            "--dry-run",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "100",
+                "80",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         assert sch_path.read_text() == original_content
@@ -326,13 +391,19 @@ class TestBackup:
     def test_backup_creates_file(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
 
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "100", "80",
-            "--backup",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "100",
+                "80",
+                "--backup",
+            ]
+        )
         assert result == 0
 
         backup_files = list(tmp_path.glob("*.backup-*"))
@@ -346,12 +417,18 @@ class TestBackup:
 
 class TestErrors:
     def test_schematic_not_found(self, tmp_path: Path):
-        result = add_label_main([
-            str(tmp_path / "nonexistent.kicad_sch"),
-            "--type", "global",
-            "--name", "SIG",
-            "--at", "100", "80",
-        ])
+        result = add_label_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--type",
+                "global",
+                "--name",
+                "SIG",
+                "--at",
+                "100",
+                "80",
+            ]
+        )
         assert result == 1
 
 
@@ -366,13 +443,20 @@ class TestRoundTrip:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "I2S_BCLK",
-            "--at", "100", "80",
-            "--shape", "output",
-        ])
+        result = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "I2S_BCLK",
+                "--at",
+                "100",
+                "80",
+                "--shape",
+                "output",
+            ]
+        )
         assert result == 0
 
         sch_after = Schematic.load(sch_path)
@@ -386,21 +470,33 @@ class TestRoundTrip:
         sch_path = _write_sch(tmp_path)
 
         # Place first label
-        result1 = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "VCC",
-            "--at", "100", "80",
-        ])
+        result1 = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "VCC",
+                "--at",
+                "100",
+                "80",
+            ]
+        )
         assert result1 == 0
 
         # Place second label with same name
-        result2 = add_label_main([
-            str(sch_path),
-            "--type", "global",
-            "--name", "VCC",
-            "--at", "120", "80",
-        ])
+        result2 = add_label_main(
+            [
+                str(sch_path),
+                "--type",
+                "global",
+                "--name",
+                "VCC",
+                "--at",
+                "120",
+                "80",
+            ]
+        )
         assert result2 == 0
 
         sch = Schematic.load(sch_path)

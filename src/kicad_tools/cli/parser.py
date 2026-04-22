@@ -752,9 +752,7 @@ def _add_sch_parser(subparsers) -> None:
         choices=["global", "local", "hierarchical"],
         help="Label type",
     )
-    sch_add_label.add_argument(
-        "--name", required=True, help="Label text / net name"
-    )
+    sch_add_label.add_argument("--name", required=True, help="Label text / net name")
     sch_add_label.add_argument(
         "--at",
         nargs=2,

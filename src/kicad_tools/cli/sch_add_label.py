@@ -84,23 +84,17 @@ def _point_on_wire_midpoint(
 def parse_connect_target(spec: str) -> tuple[float, float]:
     """Parse a --connect argument like '120,80' into (x, y) coordinates."""
     if "," not in spec:
-        raise ValueError(
-            f"Invalid --connect format: '{spec}'. Expected 'x,y' (e.g., '120,80')"
-        )
+        raise ValueError(f"Invalid --connect format: '{spec}'. Expected 'x,y' (e.g., '120,80')")
 
     parts = spec.split(",")
     if len(parts) != 2:
-        raise ValueError(
-            f"Invalid --connect format: '{spec}'. Expected exactly 'x,y'"
-        )
+        raise ValueError(f"Invalid --connect format: '{spec}'. Expected exactly 'x,y'")
 
     try:
         x = float(parts[0].strip())
         y = float(parts[1].strip())
     except ValueError:
-        raise ValueError(
-            f"Invalid coordinate values in --connect: '{spec}'. Expected numeric x,y"
-        )
+        raise ValueError(f"Invalid coordinate values in --connect: '{spec}'. Expected numeric x,y")
 
     return (x, y)
 
@@ -156,8 +150,7 @@ def run_add_label(args) -> int:
         planned.append(
             PlannedAction(
                 tag,
-                f"Place local label '{name}' at ({at_x:.2f}, {at_y:.2f})"
-                f" rotation={rotation}",
+                f"Place local label '{name}' at ({at_x:.2f}, {at_y:.2f}) rotation={rotation}",
             )
         )
     else:
@@ -186,8 +179,7 @@ def run_add_label(args) -> int:
         planned.append(
             PlannedAction(
                 "wire",
-                f"Wire from ({at_x:.2f}, {at_y:.2f})"
-                f" to ({target[0]:.2f}, {target[1]:.2f})",
+                f"Wire from ({at_x:.2f}, {at_y:.2f}) to ({target[0]:.2f}, {target[1]:.2f})",
             )
         )
 
@@ -197,8 +189,7 @@ def run_add_label(args) -> int:
                 planned.append(
                     PlannedAction(
                         "junction",
-                        f"Junction at ({target[0]:.2f}, {target[1]:.2f})"
-                        f" (wire intersection)",
+                        f"Junction at ({target[0]:.2f}, {target[1]:.2f}) (wire intersection)",
                     )
                 )
                 break
@@ -217,9 +208,7 @@ def run_add_label(args) -> int:
 
     # Create backup if requested
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
@@ -270,9 +259,7 @@ def main(argv=None):
         choices=["global", "local", "hierarchical"],
         help="Label type",
     )
-    parser.add_argument(
-        "--name", required=True, help="Label text / net name"
-    )
+    parser.add_argument("--name", required=True, help="Label text / net name")
     parser.add_argument(
         "--at",
         nargs=2,
@@ -297,12 +284,8 @@ def main(argv=None):
         metavar="X,Y",
         help="Draw wire from label to target coordinates (e.g., 120,80). Repeatable.",
     )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_add_label(args)
