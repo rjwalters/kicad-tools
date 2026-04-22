@@ -697,16 +697,16 @@ class TestFallbackProximityRestore:
             pytest.fail("No segment found in restored PCB")
 
     def test_segment_not_restored_beyond_widened_threshold(self, tmp_path):
-        """Segment displaced > 0.1 mm must NOT be proximity-matched.
+        """Segment displaced > 0.5 mm must NOT be proximity-matched.
 
-        Even with the widened threshold, segments displaced beyond 0.1 mm
-        (which exceeds fix-drc max_displacement) should not match to avoid
-        cross-net mismatches.
+        The proximity threshold is 0.5 mm (to cover drill clearance
+        max_displacement).  Segments displaced beyond that should not match
+        to avoid cross-net mismatches.
         """
         from kicad_tools.cli.runner import _restore_net_declarations
         from kicad_tools.core.sexp_file import load_pcb
 
-        # Segment displaced 0.15 mm on start-x -- beyond the 0.1 threshold
+        # Segment displaced 0.6 mm on start-x -- beyond the 0.5 threshold
         pcb = self._write_pcb(
             tmp_path,
             """(kicad_pcb
@@ -714,7 +714,7 @@ class TestFallbackProximityRestore:
   (generator "test")
   (net 0 "")
   (net 18 "SCK")
-  (segment (start 100.15 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "far2"))
+  (segment (start 100.6 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "far2"))
 )""",
         )
 
@@ -735,7 +735,7 @@ class TestFallbackProximityRestore:
                         pass  # Expected: still empty
                     else:
                         net_num = net_node.get_int(0)
-                        assert net_num != 18, "Segment 0.15 mm away should not be proximity-matched"
+                        assert net_num != 18, "Segment 0.6 mm away should not be proximity-matched"
                 break
 
 
@@ -1267,3 +1267,283 @@ class TestRestoreNetDeclarationsStripsFormats:
                 break
         else:
             pytest.fail("No segment found")
+
+
+# ---------------------------------------------------------------------------
+# Issue #1848: UUID-based matching for displaced segments
+# ---------------------------------------------------------------------------
+
+
+class TestUuidBasedMatching:
+    """Verify UUID-based snapshot/restore handles DRC displacement."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_snapshot_includes_uuid_keys(self, tmp_path):
+        """Snapshot must include uuid:<value> keys for elements with UUIDs."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "VCC")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 5) (uuid "abc-123"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        # Both geometry and UUID keys should be present
+        assert "seg:10.0,20.0:30.0,40.0:F.Cu" in snapshot
+        assert "uuid:abc-123" in snapshot
+        assert snapshot["uuid:abc-123"][0].get_int(0) == 5
+
+    def test_snapshot_uuid_key_for_via(self, tmp_path):
+        """Via with UUID must also get a uuid: key in the snapshot."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 3 "GND")
+  (via (at 50 75) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 3) (uuid "via-uuid-1"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        assert "uuid:via-uuid-1" in snapshot
+        assert snapshot["uuid:via-uuid-1"][0].get_int(0) == 3
+
+    def test_displaced_segment_restored_by_uuid(self, tmp_path):
+        """Segment displaced 0.3mm by DRC should be restored via UUID match.
+
+        This displacement exceeds the old 0.1mm proximity threshold but the
+        UUID is stable, so the segment must be restored correctly.
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 18 "SCK")
+  (segment (start 100.3 200.0) (end 300.3 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "displaced-1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(18, "SCK")]
+        # Snapshot has UUID key from pre-displacement coordinates
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(18)],
+            "uuid:displaced-1": [_net_node(18)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 18, (
+                    f"Segment displaced 0.3mm should be restored via UUID; got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_displaced_via_restored_by_uuid(self, tmp_path):
+        """Via displaced beyond geometry match threshold restored via UUID."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 7 "MOSI")
+  (via (at 50.4 75.0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "") (uuid "via-disp-1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(7, "MOSI")]
+        element_nets = {
+            "via:50.0,75.0:0.8:F.Cu,B.Cu": [_net_node(7)],
+            "uuid:via-disp-1": [_net_node(7)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "via":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 7, (
+                    f"Via displaced 0.4mm should be restored via UUID; got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No via found")
+
+    def test_segment_without_uuid_falls_back_to_geometry(self, tmp_path):
+        """Segment without UUID should still be restored by geometry key."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 5 "VCC")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net ""))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(5, "VCC")]
+        element_nets = {
+            "seg:10.0,20.0:30.0,40.0:F.Cu": [_net_node(5)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 5, (
+                    "Segment without UUID should fall back to geometry key"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_net_zero_segment_snapshot_with_uuid(self, tmp_path):
+        """A (net 0) segment with UUID should have both keys in snapshot."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 0) (uuid "zero-seg"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        assert "uuid:zero-seg" in snapshot
+        assert snapshot["uuid:zero-seg"][0].get_int(0) == 0
+        assert "seg:10.0,20.0:30.0,40.0:F.Cu" in snapshot
+
+
+# ---------------------------------------------------------------------------
+# Issue #1848: widened proximity threshold covers drill clearance displacement
+# ---------------------------------------------------------------------------
+
+
+class TestWidenedProximityThreshold:
+    """Verify proximity threshold covers drill clearance max_displacement (0.5mm)."""
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_segment_displaced_0_3mm_restored_by_proximity(self, tmp_path):
+        """Segment displaced 0.3mm (within 0.5mm threshold) should be proximity-matched.
+
+        This displacement exceeds the old 0.1mm threshold but is within the
+        new 0.5mm threshold needed for drill clearance repair.
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 12 "SCLK")
+  (segment (start 100.3 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "drill-disp-1"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(12, "SCLK")]
+        # Only geometry key in snapshot (no UUID key) to test proximity
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(12)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 12, (
+                    f"Segment displaced 0.3mm should be proximity-matched with widened threshold; got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No segment found")
+
+    def test_segment_displaced_0_5mm_not_restored_by_proximity(self, tmp_path):
+        """Segment displaced exactly at threshold boundary should NOT match.
+
+        The threshold is strict less-than, so 0.5mm displacement should not match.
+        """
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 12 "SCLK")
+  (segment (start 100.5 200.0) (end 300.0 400.0) (width 0.25) (layer "F.Cu") (net "") (uuid "at-thresh"))
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(12, "SCLK")]
+        element_nets = {
+            "seg:100.0,200.0:300.0,400.0:F.Cu": [_net_node(12)],
+        }
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                if net_node is not None:
+                    net_num = net_node.get_int(0)
+                    # Should be (net 0) from assign-empty-nets-to-zero, not (net 12)
+                    assert net_num != 12, (
+                        "Segment at exactly 0.5mm should NOT be proximity-matched"
+                    )
+                break
