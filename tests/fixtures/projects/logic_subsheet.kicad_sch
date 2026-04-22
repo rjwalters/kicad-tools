@@ -28,4 +28,16 @@
 		(effects (font (size 1.27 1.27)) (justify left))
 		(uuid "hlabel-out")
 	)
+	(global_label "CLK"
+		(shape input)
+		(at 75 30 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "glabel-clk-logic")
+	)
+	(global_label "RESET"
+		(shape input)
+		(at 75 70 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "glabel-reset-logic")
+	)
 )
