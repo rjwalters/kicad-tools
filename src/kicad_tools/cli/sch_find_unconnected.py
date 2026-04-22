@@ -197,7 +197,7 @@ def analyze_schematic(
     return unconnected, issues
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Find unconnected pins in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -211,7 +211,7 @@ def main():
     parser.add_argument("--include-power", action="store_true", help="Include power symbols")
     parser.add_argument("--include-dnp", action="store_true", help="Include DNP symbols")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         sch = Schematic.load(args.schematic)
