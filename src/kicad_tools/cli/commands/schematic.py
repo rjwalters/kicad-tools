@@ -10,13 +10,12 @@ def run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print(
-            "Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins,"
-        )
+        print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins,")
         print(
             "          connections, unconnected, set-footprint, replace,"
-            " sync-hierarchy, rename-signal"
+            " sync-hierarchy, rename-signal,"
         )
+        print("          add-no-connect, cleanup-wires, disconnect")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -199,5 +198,57 @@ def run_sch_command(args) -> int:
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
         return rename_signal_main(sub_argv) or 0
+
+    elif args.sch_command == "add-no-connect":
+        from ..sch_add_no_connect import main as add_nc_main
+
+        sub_argv = [str(schematic_path)]
+        if args.ref:
+            sub_argv.extend(["--ref", args.ref])
+        if args.pin:
+            sub_argv.extend(["--pin", args.pin])
+        if args.auto:
+            sub_argv.append("--auto")
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_nc_main(sub_argv) or 0
+
+    elif args.sch_command == "cleanup-wires":
+        from ..sch_cleanup_wires import main as cleanup_main
+
+        sub_argv = [str(schematic_path)]
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return cleanup_main(sub_argv) or 0
+
+    elif args.sch_command == "disconnect":
+        from ..sch_disconnect import main as disconnect_main
+
+        sub_argv = [str(schematic_path), "--ref", args.ref, "--pin", args.pin]
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.add_nc:
+            sub_argv.append("--add-nc")
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return disconnect_main(sub_argv) or 0
 
     return 1
