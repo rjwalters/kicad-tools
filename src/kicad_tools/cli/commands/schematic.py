@@ -283,9 +283,12 @@ def run_sch_command(args) -> int:
     elif args.sch_command == "add-wire":
         from ..sch_add_wire import main as add_wire_main
 
-        sub_argv = [str(schematic_path)]
-        sub_argv.extend(["--from", str(args.start[0]), str(args.start[1])])
-        sub_argv.extend(["--to", str(args.end[0]), str(args.end[1])])
+        sub_argv = [str(schematic_path), "--from", str(args.start[0]), str(args.start[1])]
+        if args.to:
+            for to_pair in args.to:
+                sub_argv.extend(["--to", str(to_pair[0]), str(to_pair[1])])
+        if args.junction:
+            sub_argv.append("--junction")
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.backup:
