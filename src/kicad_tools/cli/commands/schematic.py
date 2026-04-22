@@ -15,7 +15,7 @@ def run_sch_command(args) -> int:
             "          connections, unconnected, set-footprint, set-value, replace,"
             " sync-hierarchy, rename-signal,"
         )
-        print("          add-no-connect, cleanup-wires, disconnect")
+        print("          add-no-connect, add-component, cleanup-wires, disconnect")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -233,6 +233,36 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return add_nc_main(sub_argv) or 0
+
+    elif args.sch_command == "add-component":
+        from ..sch_add_component import main as add_comp_main
+
+        sub_argv = [str(schematic_path), "--lib-id", args.lib_id]
+        if args.reference:
+            sub_argv.extend(["--reference", args.reference])
+        if args.value:
+            sub_argv.extend(["--value", args.value])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        sub_argv.extend(["--at", str(args.at[0]), str(args.at[1])])
+        if args.rotation:
+            sub_argv.extend(["--rotation", str(args.rotation)])
+        if args.mirror:
+            sub_argv.extend(["--mirror", args.mirror])
+        if args.connects:
+            for conn in args.connects:
+                sub_argv.extend(["--connect", conn])
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_comp_main(sub_argv) or 0
 
     elif args.sch_command == "cleanup-wires":
         from ..sch_cleanup_wires import main as cleanup_main

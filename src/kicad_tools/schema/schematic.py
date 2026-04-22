@@ -522,6 +522,27 @@ class Schematic:
         self.invalidate_cache()
         return wire
 
+    def add_junction(
+        self,
+        position: tuple[float, float],
+    ) -> Junction:
+        """Add a junction marker to the schematic.
+
+        Args:
+            position: ``(x, y)`` placement.
+
+        Returns:
+            The created :class:`Junction`.
+        """
+        junc = Junction(
+            position=position,
+            uuid=str(uuid_mod.uuid4()),
+        )
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, junc.to_sexp())
+        self.invalidate_cache()
+        return junc
+
     def embed_lib_symbol(self, lib_sym: LibrarySymbol) -> None:
         """Insert a library symbol definition into ``lib_symbols``.
 

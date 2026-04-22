@@ -638,6 +638,53 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_add_nc.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    # sch add-component
+    sch_add_comp = sch_subparsers.add_parser(
+        "add-component", help="Add a component symbol to the schematic"
+    )
+    sch_add_comp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_comp.add_argument(
+        "--lib-id", required=True, help="Library symbol ID (e.g., Device:R, power:GND)"
+    )
+    sch_add_comp.add_argument("--reference", help="Symbol reference (e.g., R1, U1)")
+    sch_add_comp.add_argument("--value", help="Component value (e.g., 10k, 100nF)")
+    sch_add_comp.add_argument(
+        "--footprint", help="Footprint name (e.g., Resistor_SMD:R_0402_1005Metric)"
+    )
+    sch_add_comp.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Placement coordinates",
+    )
+    sch_add_comp.add_argument(
+        "--rotation", type=float, default=0, help="Rotation in degrees (default: 0)"
+    )
+    sch_add_comp.add_argument(
+        "--mirror", choices=["x", "y"], default="", help="Mirror mode (x or y)"
+    )
+    sch_add_comp.add_argument(
+        "--connect",
+        action="append",
+        dest="connects",
+        metavar="PIN:X,Y",
+        help="Connect pin to coordinates (e.g., 1:120,80). Repeatable.",
+    )
+    sch_add_comp.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_comp.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_add_comp.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_comp.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch cleanup-wires
     sch_cleanup = sch_subparsers.add_parser(
         "cleanup-wires", help="Remove zero-length and dangling wires"
