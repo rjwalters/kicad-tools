@@ -775,6 +775,7 @@ EOF
 **After creation:**
 - Never touch PR labels after creation
 - Use "Closes #N" syntax (not "Issue #N" or "Addresses #N") for auto-close
+- PRs are merged by Champion using `./.loom/scripts/merge-pr.sh` -- never use `gh pr merge`
 
 ## Working Style
 

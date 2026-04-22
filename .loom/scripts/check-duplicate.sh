@@ -30,9 +30,14 @@
 set -euo pipefail
 
 # Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
-if command -v loom-forge &>/dev/null; then
+# Validate loom-forge actually works (not just on PATH) — editable pip installs
+# can leave a broken binary after worktree cleanup (see issue #3205)
+if command -v loom-forge &>/dev/null && loom-forge --version &>/dev/null; then
     FORGE="loom-forge"
 else
+    if command -v loom-forge &>/dev/null; then
+        echo "WARNING: loom-forge is on PATH but non-functional, falling back to gh" >&2
+    fi
     FORGE="gh"
 fi
 
