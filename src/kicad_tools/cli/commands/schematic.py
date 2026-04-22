@@ -10,7 +10,9 @@ def run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
+        print(
+            "Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins,"
+        )
         print(
             "          connections, unconnected, set-footprint, replace,"
             " sync-hierarchy, rename-signal"
@@ -60,6 +62,18 @@ def run_sch_command(args) -> int:
         if args.quiet:
             sub_argv.append("--quiet")
         return validate_main(sub_argv) or 0
+
+    elif args.sch_command == "preflight":
+        from ..sch_preflight import main as preflight_main
+
+        sub_argv = [str(schematic_path)]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.strict:
+            sub_argv.append("--strict")
+        if args.quiet:
+            sub_argv.append("--quiet")
+        return preflight_main(sub_argv) or 0
 
     elif args.sch_command == "wires":
         from ..sch_list_wires import main as wires_main
