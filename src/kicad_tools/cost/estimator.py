@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kicad_tools.parts import PartsCache
     from kicad_tools.schema.bom import BOM, BOMItem
     from kicad_tools.schema.pcb import PCB
 
@@ -240,7 +241,12 @@ _PRICING_DIR = Path(__file__).parent / "pricing"
 class ManufacturingCostEstimator:
     """Estimate PCB manufacturing costs for a given manufacturer."""
 
-    def __init__(self, manufacturer: str = "jlcpcb", use_lcsc_pricing: bool = True):
+    def __init__(
+        self,
+        manufacturer: str = "jlcpcb",
+        use_lcsc_pricing: bool = True,
+        parts_cache: "PartsCache | None" = None,
+    ):
         """
         Initialize cost estimator.
 
@@ -248,9 +254,14 @@ class ManufacturingCostEstimator:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, etc.)
             use_lcsc_pricing: If True, fetch real pricing from LCSC for parts
                 with LCSC part numbers. Set to False for offline use or testing.
+            parts_cache: Optional PartsCache instance for looking up part
+                metadata (e.g. basic vs extended classification). When None,
+                parts without LCSC lookup data are conservatively assumed
+                to be extended.
         """
         self.manufacturer = manufacturer.lower()
         self.use_lcsc_pricing = use_lcsc_pricing
+        self._parts_cache = parts_cache
         self.pricing = self._load_pricing()
 
     def _load_pricing(self) -> dict:
@@ -728,10 +739,18 @@ class ManufacturingCostEstimator:
         return default_prices.get(prefix, pricing.get("default_price", 0.01))
 
     def _is_basic_part(self, lcsc: str) -> bool:
-        """Check if LCSC part is a basic part (no setup fee)."""
-        # In reality, this would need an API lookup
-        # Basic parts are typically common passives
-        return True  # Assume basic for estimation
+        """Check if LCSC part is a basic part (no setup fee).
+
+        Queries the parts cache when available.  Falls back to ``False``
+        (extended) when the part is not in the cache so that cost estimates
+        are conservative -- overestimating by $3 per unknown part is safer
+        than silently omitting the fee.
+        """
+        if self._parts_cache is not None:
+            part = self._parts_cache.get(lcsc, ignore_expiry=True)
+            if part is not None:
+                return part.is_basic
+        return False  # Conservative: assume extended when unknown
 
     def _estimate_assembly_cost(
         self,
