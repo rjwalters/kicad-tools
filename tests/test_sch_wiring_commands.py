@@ -1,4 +1,4 @@
-"""Tests for schematic wiring commands: add-no-connect, cleanup-wires, disconnect."""
+"""Tests for schematic wiring commands: add-no-connect, cleanup-wires, disconnect, remove-wire."""
 
 from __future__ import annotations
 
@@ -391,3 +391,322 @@ class TestDisconnect:
         at_node = node.find("at")
         assert at_node.get_float(0) == 150.0
         assert at_node.get_float(1) == 75.0
+
+
+# ---------------------------------------------------------------------------
+# remove-wire tests
+# ---------------------------------------------------------------------------
+
+# Schematic with a junction at a 3-way intersection
+SCHEMATIC_WITH_JUNCTION = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000010")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-j1")
+  )
+  (wire (pts (xy 150 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-j2")
+  )
+  (wire (pts (xy 150 50) (xy 150 100))
+    (stroke (width 0) (type default))
+    (uuid "wire-j3")
+  )
+  (junction (at 150 50) (diameter 0) (color 0 0 0 0)
+    (uuid "junc-1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+# Schematic with a junction at a 4-way intersection
+SCHEMATIC_WITH_4WAY_JUNCTION = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000011")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-4w1")
+  )
+  (wire (pts (xy 150 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-4w2")
+  )
+  (wire (pts (xy 150 50) (xy 150 100))
+    (stroke (width 0) (type default))
+    (uuid "wire-4w3")
+  )
+  (wire (pts (xy 150 50) (xy 150 0))
+    (stroke (width 0) (type default))
+    (uuid "wire-4w4")
+  )
+  (junction (at 150 50) (diameter 0) (color 0 0 0 0)
+    (uuid "junc-4w")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+# Schematic with a zero-length wire for edge case testing
+SCHEMATIC_WITH_ZERO_LENGTH_WIRE_REMOVE = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000012")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 100 50))
+    (stroke (width 0) (type default))
+    (uuid "zero-wire-rm")
+  )
+  (wire (pts (xy 200 50) (xy 250 50))
+    (stroke (width 0) (type default))
+    (uuid "normal-wire-rm")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+class TestRemoveWire:
+    """Tests for the remove-wire command."""
+
+    def test_find_wire_by_endpoints_exact(self, tmp_path):
+        """Wire is found by exact endpoint coordinates."""
+        from kicad_tools.cli.sch_remove_wire import find_wire_by_endpoints
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        wire = find_wire_by_endpoints(sch, (100.0, 50.0), (150.0, 50.0))
+        assert wire is not None
+
+    def test_find_wire_order_insensitive(self, tmp_path):
+        """Wire matching is order-insensitive (--from A --to B matches B->A)."""
+        from kicad_tools.cli.sch_remove_wire import find_wire_by_endpoints
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        # Reversed order should still match
+        wire = find_wire_by_endpoints(sch, (150.0, 50.0), (100.0, 50.0))
+        assert wire is not None
+
+    def test_find_nearest_wire(self, tmp_path):
+        """Nearest wire is found by proximity to a point."""
+        from kicad_tools.cli.sch_remove_wire import _wire_start_end, find_nearest_wire
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        # Point near (150, 50) should find the horizontal wire
+        wire = find_nearest_wire(sch, (149.0, 50.0))
+        assert wire is not None
+        start, end = _wire_start_end(wire)
+        # The nearest endpoint is (150, 50) which belongs to wire-1
+        assert (start == (100.0, 50.0) and end == (150.0, 50.0)) or (
+            start == (150.0, 50.0) and end == (100.0, 50.0)
+        )
+
+    def test_tolerance_matching(self, tmp_path):
+        """Wire at (100, 50) matches query for (100.5, 50.5) within tolerance."""
+        from kicad_tools.cli.sch_remove_wire import find_wire_by_endpoints
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        # Slightly off coordinates within default 1.27mm tolerance
+        wire = find_wire_by_endpoints(sch, (100.5, 50.5), (150.5, 50.5))
+        assert wire is not None
+
+    def test_no_match_returns_none(self, tmp_path):
+        """Query for non-existent coordinates returns None."""
+        from kicad_tools.cli.sch_remove_wire import find_wire_by_endpoints
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        wire = find_wire_by_endpoints(sch, (999.0, 999.0), (888.0, 888.0))
+        assert wire is None
+
+    def test_remove_wire_decreases_count(self, tmp_path):
+        """Removing a wire decreases wire count by 1."""
+        from kicad_tools.cli.sch_remove_wire import (
+            find_wire_by_endpoints,
+            remove_wire_and_orphan_junctions,
+        )
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch = Schematic.load(path)
+
+        initial_count = len(list(sch.sexp.find_all("wire")))
+        wire = find_wire_by_endpoints(sch, (100.0, 50.0), (150.0, 50.0))
+        assert wire is not None
+
+        removed, _ = remove_wire_and_orphan_junctions(sch, wire)
+        assert removed is True
+        assert len(list(sch.sexp.find_all("wire"))) == initial_count - 1
+
+    def test_orphan_junction_cleanup(self, tmp_path):
+        """Junction is removed when only 2 wires remain at that point."""
+        from kicad_tools.cli.sch_remove_wire import (
+            find_wire_by_endpoints,
+            remove_wire_and_orphan_junctions,
+        )
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_JUNCTION)
+        sch = Schematic.load(path)
+
+        # Initially 1 junction
+        assert len(list(sch.sexp.find_all("junction"))) == 1
+
+        # Remove one wire from the 3-way junction -> only 2 wires remain
+        wire = find_wire_by_endpoints(sch, (150.0, 50.0), (150.0, 100.0))
+        assert wire is not None
+
+        _, junctions_removed = remove_wire_and_orphan_junctions(sch, wire)
+        assert junctions_removed == 1
+        assert len(list(sch.sexp.find_all("junction"))) == 0
+
+    def test_junction_preserved_at_3plus_way(self, tmp_path):
+        """Junction at 4-way intersection is NOT removed when one wire is deleted."""
+        from kicad_tools.cli.sch_remove_wire import (
+            find_wire_by_endpoints,
+            remove_wire_and_orphan_junctions,
+        )
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_4WAY_JUNCTION)
+        sch = Schematic.load(path)
+
+        assert len(list(sch.sexp.find_all("junction"))) == 1
+
+        # Remove one wire from the 4-way junction -> 3 wires remain
+        wire = find_wire_by_endpoints(sch, (150.0, 50.0), (150.0, 0.0))
+        assert wire is not None
+
+        _, junctions_removed = remove_wire_and_orphan_junctions(sch, wire)
+        assert junctions_removed == 0
+        assert len(list(sch.sexp.find_all("junction"))) == 1
+
+    def test_dry_run_no_modification(self, tmp_path):
+        """Dry run mode does not modify the file."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        original_content = path.read_text()
+
+        result = main([str(path), "--from", "100,50", "--to", "150,50", "--dry-run"])
+
+        assert result == 0
+        assert path.read_text() == original_content
+
+    def test_backup_created(self, tmp_path):
+        """Backup flag creates a copy before modifying."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+
+        result = main([str(path), "--from", "100,50", "--to", "150,50", "--backup"])
+
+        assert result == 0
+        backups = list(tmp_path.glob("*.backup-*"))
+        assert len(backups) == 1
+
+    def test_cli_round_trip_endpoints(self, tmp_path):
+        """CLI with --from/--to removes a wire and decreases count by 1."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch_before = Schematic.load(path)
+        initial_count = len(list(sch_before.sexp.find_all("wire")))
+
+        result = main([str(path), "--from", "100,50", "--to", "150,50"])
+        assert result == 0
+
+        sch_after = Schematic.load(path)
+        assert len(list(sch_after.sexp.find_all("wire"))) == initial_count - 1
+
+    def test_cli_round_trip_near(self, tmp_path):
+        """CLI with --near removes the nearest wire."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        sch_before = Schematic.load(path)
+        initial_count = len(list(sch_before.sexp.find_all("wire")))
+
+        result = main([str(path), "--near", "149,50"])
+        assert result == 0
+
+        sch_after = Schematic.load(path)
+        assert len(list(sch_after.sexp.find_all("wire"))) == initial_count - 1
+
+    def test_zero_length_wire_match(self, tmp_path):
+        """--from X,Y --to X,Y can match and remove a zero-length wire."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_ZERO_LENGTH_WIRE_REMOVE)
+        sch_before = Schematic.load(path)
+        initial_count = len(list(sch_before.sexp.find_all("wire")))
+
+        result = main([str(path), "--from", "100,50", "--to", "100,50"])
+        assert result == 0
+
+        sch_after = Schematic.load(path)
+        assert len(list(sch_after.sexp.find_all("wire"))) == initial_count - 1
+
+    def test_mutual_exclusivity_error(self, tmp_path):
+        """Passing both --from/--to and --near produces an error."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+
+        result = main([
+            str(path), "--from", "100,50", "--to", "150,50", "--near", "125,50"
+        ])
+        assert result == 1
+
+    def test_no_match_returns_error(self, tmp_path):
+        """Query for non-existent coordinates returns exit code 1."""
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+
+        result = main([str(path), "--from", "999,999", "--to", "888,888"])
+        assert result == 1
+
+    def test_json_output(self, tmp_path, capsys):
+        """JSON output mode produces valid JSON."""
+        import json
+
+        from kicad_tools.cli.sch_remove_wire import main
+
+        path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        result = main([
+            str(path), "--from", "100,50", "--to", "150,50",
+            "--format", "json"
+        ])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["removed"] is True
+        assert "wire" in data
+        assert data["wire"]["start"] == [100.0, 50.0]
+        assert data["wire"]["end"] == [150.0, 50.0]
