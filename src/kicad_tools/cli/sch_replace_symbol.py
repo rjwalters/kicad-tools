@@ -32,7 +32,7 @@ from pathlib import Path
 from kicad_tools.operations.symbol_ops import replace_symbol_lib_id
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Replace a symbol in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show changes without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Validate input
     if not Path(args.schematic).exists():
