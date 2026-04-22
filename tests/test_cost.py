@@ -1460,3 +1460,125 @@ class TestLCSCPricingIntegration:
 
         # Should call price_at_quantity with 60 * 5 = 300
         mock_part.price_at_quantity.assert_called_with(300)
+
+
+class TestIsBasicPartWithCache:
+    """Tests for _is_basic_part() with and without a PartsCache."""
+
+    def _make_bom_group(self, lcsc="", value="10k", footprint="0402", ref="R1", qty=1, dnp=False):
+        """Create a mock BOM group."""
+        mock_item = MagicMock()
+        mock_item.reference = ref
+        mock_item.dnp = dnp
+
+        group = MagicMock()
+        group.value = value
+        group.footprint = footprint
+        group.lcsc = lcsc
+        group.mpn = ""
+        group.quantity = qty
+        group.references = ref
+        group.items = [mock_item] * qty
+        return group
+
+    def test_no_cache_returns_false(self):
+        """Without a parts cache, _is_basic_part should return False (conservative)."""
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False)
+        assert estimator._is_basic_part("C123456") is False
+
+    def test_cache_returns_basic_true(self):
+        """Cache hit with is_basic=True should return True."""
+        mock_cache = MagicMock()
+        mock_part = MagicMock()
+        mock_part.is_basic = True
+        mock_cache.get.return_value = mock_part
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        assert estimator._is_basic_part("C123456") is True
+        mock_cache.get.assert_called_once_with("C123456", ignore_expiry=True)
+
+    def test_cache_returns_basic_false(self):
+        """Cache hit with is_basic=False should return False."""
+        mock_cache = MagicMock()
+        mock_part = MagicMock()
+        mock_part.is_basic = False
+        mock_cache.get.return_value = mock_part
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        assert estimator._is_basic_part("C999999") is False
+
+    def test_cache_miss_returns_false(self):
+        """Cache miss (part not found) should return False (conservative)."""
+        mock_cache = MagicMock()
+        mock_cache.get.return_value = None
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        assert estimator._is_basic_part("C000001") is False
+
+    def test_assembly_cost_counts_extended_parts(self):
+        """_estimate_assembly_cost should produce nonzero extended_fee for extended parts."""
+        mock_cache = MagicMock()
+        # Two parts: one basic, one extended
+        basic_part = MagicMock()
+        basic_part.is_basic = True
+        extended_part = MagicMock()
+        extended_part.is_basic = False
+
+        def cache_get(lcsc, ignore_expiry=False):
+            lookup = {"C100": basic_part, "C200": extended_part}
+            return lookup.get(lcsc.upper())
+
+        mock_cache.get.side_effect = cache_get
+
+        mock_bom = MagicMock()
+        group_basic = self._make_bom_group(lcsc="C100", ref="R1", qty=10)
+        group_extended = self._make_bom_group(lcsc="C200", ref="U1", qty=1, footprint="LQFP-48")
+        mock_bom.grouped.return_value = [group_basic, group_extended]
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        assembly = estimator._estimate_assembly_cost(mock_bom, pcb=None, quantity=5)
+
+        # extended_fee ($3.00 for 1 extended part) is folded into setup_cost.
+        # Base setup = setup_fee ($8.0) + stencil_fee ($1.5) = $9.5
+        # With 1 extended part: setup_cost = $9.5 + $3.0 = $12.5
+        assert assembly.setup_cost == 12.5
+
+    def test_component_cost_fallback_is_basic_false_for_extended(self):
+        """Fallback path (no LCSC hit) should set is_basic=False for extended parts."""
+        mock_cache = MagicMock()
+        extended_part = MagicMock()
+        extended_part.is_basic = False
+        mock_cache.get.return_value = extended_part
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(lcsc="C200", ref="U1", qty=1, footprint="LQFP-48")
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        costs = estimator._estimate_component_costs(mock_bom, quantity=1)
+
+        assert len(costs) == 1
+        assert costs[0].is_basic is False
+
+    def test_use_lcsc_pricing_false_still_uses_cache_for_is_basic(self):
+        """Even with use_lcsc_pricing=False, cache should be used for is_basic classification."""
+        mock_cache = MagicMock()
+        basic_part = MagicMock()
+        basic_part.is_basic = True
+        mock_cache.get.return_value = basic_part
+
+        estimator = ManufacturingCostEstimator(
+            use_lcsc_pricing=False, parts_cache=mock_cache
+        )
+        # _is_basic_part should still query the cache
+        assert estimator._is_basic_part("C100") is True
