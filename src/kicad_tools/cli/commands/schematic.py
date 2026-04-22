@@ -16,7 +16,8 @@ def run_sch_command(args) -> int:
             " sync-hierarchy, rename-signal,"
         )
         print(
-            "          add-no-connect, add-component, add-wire, add-junction,"
+            "          set-label-direction, add-no-connect, add-component,"
+            " add-wire, add-junction,"
             " cleanup-wires, remove-wire, disconnect"
         )
         return 1
@@ -214,6 +215,18 @@ def run_sch_command(args) -> int:
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
         return rename_signal_main(sub_argv) or 0
+
+    elif args.sch_command == "set-label-direction":
+        from ..sch_set_label_direction import main as set_label_dir_main
+
+        sub_argv = [str(schematic_path), "--name", args.name, "--shape", args.shape]
+        if args.sheet:
+            sub_argv.extend(["--sheet", args.sheet])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return set_label_dir_main(sub_argv) or 0
 
     elif args.sch_command == "add-no-connect":
         from ..sch_add_no_connect import main as add_nc_main

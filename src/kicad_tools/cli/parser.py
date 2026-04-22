@@ -607,6 +607,28 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_rename_signal.add_argument("--format", choices=["text", "json"], default="text")
 
+    # sch set-label-direction
+    sch_set_label_dir = sch_subparsers.add_parser(
+        "set-label-direction", help="Change shape (direction) of global/hierarchical labels"
+    )
+    sch_set_label_dir.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_set_label_dir.add_argument("--name", required=True, help="Label name to match")
+    sch_set_label_dir.add_argument(
+        "--shape",
+        required=True,
+        choices=("input", "output", "bidirectional", "tri_state", "passive"),
+        help="New shape value",
+    )
+    sch_set_label_dir.add_argument(
+        "--sheet", help="Restrict to a specific sheet (name or path substring)"
+    )
+    sch_set_label_dir.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_label_dir.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch add-no-connect
     sch_add_nc = sch_subparsers.add_parser("add-no-connect", help="Add no-connect markers to pins")
     sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
