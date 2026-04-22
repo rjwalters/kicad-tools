@@ -847,6 +847,34 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch re-annotate
+    sch_reannotate = sch_subparsers.add_parser(
+        "re-annotate", help="Renumber reference designators sequentially"
+    )
+    sch_reannotate.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_reannotate.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying"
+    )
+    sch_reannotate.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_reannotate.add_argument(
+        "--prefix",
+        help="Comma-separated list of prefixes to renumber (e.g., R,C,U)",
+    )
+    sch_reannotate.add_argument(
+        "--start-from",
+        type=int,
+        default=1,
+        help="Starting number for each prefix (default: 1)",
+    )
+    sch_reannotate.add_argument(
+        "--per-sheet",
+        action="store_true",
+        help="Restart numbering per sheet instead of continuous",
+    )
+    sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
+
 
 def _add_pcb_parser(subparsers) -> None:
     """Add PCB subcommand parser with its subcommands."""
