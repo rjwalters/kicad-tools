@@ -456,12 +456,8 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_preflight.add_argument("schematic", help="Path to .kicad_sch file")
     sch_preflight.add_argument("--format", choices=["text", "json"], default="text")
-    sch_preflight.add_argument(
-        "--strict", action="store_true", help="Exit with error on warnings"
-    )
-    sch_preflight.add_argument(
-        "-q", "--quiet", action="store_true", help="Only show errors"
-    )
+    sch_preflight.add_argument("--strict", action="store_true", help="Exit with error on warnings")
+    sch_preflight.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
 
     # sch wires
     sch_wires = sch_subparsers.add_parser("wires", help="List wire segments and junctions")
@@ -541,19 +537,13 @@ def _add_sch_parser(subparsers) -> None:
     sch_set_fp.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
-    sch_set_fp.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    sch_set_fp.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     # sch set-value
-    sch_set_val = sch_subparsers.add_parser(
-        "set-value", help="Set value property for symbols"
-    )
+    sch_set_val = sch_subparsers.add_parser("set-value", help="Set value property for symbols")
     sch_set_val.add_argument("schematic", help="Path to .kicad_sch file")
     sch_set_val.add_argument("--ref", help="Symbol reference (e.g., U4, R1)")
-    sch_set_val.add_argument(
-        "--value", help="Value to assign (e.g., AP2204K-3.3TRG1)"
-    )
+    sch_set_val.add_argument("--value", help="Value to assign (e.g., AP2204K-3.3TRG1)")
     sch_set_val.add_argument(
         "--map",
         dest="map_file",
@@ -562,9 +552,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_set_val.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
-    sch_set_val.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    sch_set_val.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
@@ -620,9 +608,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_rename_signal.add_argument("--format", choices=["text", "json"], default="text")
 
     # sch add-no-connect
-    sch_add_nc = sch_subparsers.add_parser(
-        "add-no-connect", help="Add no-connect markers to pins"
-    )
+    sch_add_nc = sch_subparsers.add_parser("add-no-connect", help="Add no-connect markers to pins")
     sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
     sch_add_nc.add_argument("--ref", help="Symbol reference (e.g., U1)")
     sch_add_nc.add_argument("--pin", help="Pin number to mark")
@@ -675,9 +661,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_comp.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Library search path"
     )
-    sch_add_comp.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
+    sch_add_comp.add_argument("--lib", action="append", dest="libs", help="Specific library file")
     sch_add_comp.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
     )
@@ -686,9 +670,7 @@ def _add_sch_parser(subparsers) -> None:
     )
 
     # sch add-wire
-    sch_add_wire = sch_subparsers.add_parser(
-        "add-wire", help="Add a wire segment to the schematic"
-    )
+    sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add a wire segment to the schematic")
     sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")
     sch_add_wire.add_argument(
         "--from",
@@ -716,9 +698,7 @@ def _add_sch_parser(subparsers) -> None:
     )
 
     # sch add-junction
-    sch_add_junc = sch_subparsers.add_parser(
-        "add-junction", help="Add a junction to the schematic"
-    )
+    sch_add_junc = sch_subparsers.add_parser("add-junction", help="Add a junction to the schematic")
     sch_add_junc.add_argument("schematic", help="Path to .kicad_sch file")
     sch_add_junc.add_argument(
         "--at",
@@ -743,9 +723,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_cleanup.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
     )
-    sch_cleanup.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    sch_cleanup.add_argument("--backup", action="store_true", help="Create backup before modifying")
     sch_cleanup.add_argument("--format", choices=["text", "json"], default="text")
 
     # sch remove-wire
@@ -782,18 +760,14 @@ def _add_sch_parser(subparsers) -> None:
     sch_remove_wire.add_argument("--format", choices=["text", "json"], default="text")
 
     # sch disconnect
-    sch_disconnect = sch_subparsers.add_parser(
-        "disconnect", help="Disconnect a pin from its net"
-    )
+    sch_disconnect = sch_subparsers.add_parser("disconnect", help="Disconnect a pin from its net")
     sch_disconnect.add_argument("schematic", help="Path to .kicad_sch file")
     sch_disconnect.add_argument("--ref", required=True, help="Symbol reference (e.g., U1)")
     sch_disconnect.add_argument("--pin", required=True, help="Pin number to disconnect")
     sch_disconnect.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Library search path"
     )
-    sch_disconnect.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
+    sch_disconnect.add_argument("--lib", action="append", dest="libs", help="Specific library file")
     sch_disconnect.add_argument(
         "--add-nc", action="store_true", help="Add no-connect marker after disconnecting"
     )

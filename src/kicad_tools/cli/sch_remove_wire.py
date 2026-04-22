@@ -40,6 +40,7 @@ from kicad_tools.sexp import SExp
 
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 
+
 def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
     """Extract start and end points from a wire S-expression node."""
     pts_node = wire_sexp.find("pts")
@@ -57,6 +58,7 @@ def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, 
 
     return (x1, y1), (x2, y2)
 
+
 def _wire_endpoint_counts(
     wire_sexps: list[SExp],
 ) -> dict[tuple[int, int], int]:
@@ -68,6 +70,7 @@ def _wire_endpoint_counts(
             key = (int(pt[0] * 10), int(pt[1] * 10))
             counts[key] = counts.get(key, 0) + 1
     return counts
+
 
 def find_wire_by_endpoints(
     schematic: Schematic,
@@ -107,6 +110,7 @@ def find_wire_by_endpoints(
 
     return None
 
+
 def find_nearest_wire(
     schematic: Schematic,
     point: tuple[float, float],
@@ -128,6 +132,7 @@ def find_nearest_wire(
                 best_wire = wire_sexp
 
     return best_wire
+
 
 def remove_wire_and_orphan_junctions(
     schematic: Schematic,
@@ -182,15 +187,12 @@ def _parse_coordinate(value: str) -> tuple[float, float]:
     """Parse a comma-separated coordinate pair like '100,50' or '100.5,50.3'."""
     parts = value.split(",")
     if len(parts) != 2:
-        raise argparse.ArgumentTypeError(
-            f"Expected X,Y coordinate pair, got: {value!r}"
-        )
+        raise argparse.ArgumentTypeError(f"Expected X,Y coordinate pair, got: {value!r}")
     try:
         return (float(parts[0]), float(parts[1]))
     except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Invalid coordinate values: {value!r}"
-        )
+        raise argparse.ArgumentTypeError(f"Invalid coordinate values: {value!r}")
+
 
 def run_remove_wire(args) -> int:
     """Execute the remove-wire command."""
@@ -229,9 +231,7 @@ def run_remove_wire(args) -> int:
 
     # Find the target wire
     if has_endpoints:
-        wire = find_wire_by_endpoints(
-            sch, args.from_pt, args.to_pt, tolerance=args.tolerance
-        )
+        wire = find_wire_by_endpoints(sch, args.from_pt, args.to_pt, tolerance=args.tolerance)
         if wire is None:
             msg = (
                 f"No wire found matching endpoints "
@@ -278,21 +278,14 @@ def run_remove_wire(args) -> int:
             print("DRY RUN - No changes will be made")
             print("=" * 60)
             if has_near:
-                print(
-                    f"Nearest wire to ({args.near[0]:.2f}, {args.near[1]:.2f}):"
-                )
-            print(
-                f"  Wire: ({start[0]:.2f}, {start[1]:.2f}) -> "
-                f"({end[0]:.2f}, {end[1]:.2f})"
-            )
+                print(f"Nearest wire to ({args.near[0]:.2f}, {args.near[1]:.2f}):")
+            print(f"  Wire: ({start[0]:.2f}, {start[1]:.2f}) -> ({end[0]:.2f}, {end[1]:.2f})")
             print("  Would be removed")
         return 0
 
     # Create backup if requested
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
 
     # Execute removal
@@ -325,19 +318,15 @@ def run_remove_wire(args) -> int:
         print(json.dumps(data, indent=2))
     else:
         if has_near:
-            print(
-                f"Selected nearest wire to ({args.near[0]:.2f}, {args.near[1]:.2f}):"
-            )
-        print(
-            f"Removed wire: ({start[0]:.2f}, {start[1]:.2f}) -> "
-            f"({end[0]:.2f}, {end[1]:.2f})"
-        )
+            print(f"Selected nearest wire to ({args.near[0]:.2f}, {args.near[1]:.2f}):")
+        print(f"Removed wire: ({start[0]:.2f}, {start[1]:.2f}) -> ({end[0]:.2f}, {end[1]:.2f})")
         if junctions_removed:
             print(f"Removed {junctions_removed} orphaned junction(s)")
         if args.backup:
             print(f"Backup created: {backup_path}")
 
     return 0
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -369,18 +358,13 @@ def main(argv=None):
         default=POINT_TOLERANCE,
         help=f"Coordinate matching tolerance in mm (default: {POINT_TOLERANCE})",
     )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
-    parser.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Output format"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
 
     args = parser.parse_args(argv)
     return run_remove_wire(args)
+
 
 if __name__ == "__main__":
     sys.exit(main())
