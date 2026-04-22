@@ -685,6 +685,56 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch add-wire
+    sch_add_wire = sch_subparsers.add_parser(
+        "add-wire", help="Add a wire segment to the schematic"
+    )
+    sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_wire.add_argument(
+        "--from",
+        nargs=2,
+        type=float,
+        required=True,
+        dest="start",
+        metavar=("X", "Y"),
+        help="Wire start coordinates",
+    )
+    sch_add_wire.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        required=True,
+        dest="end",
+        metavar=("X", "Y"),
+        help="Wire end coordinates",
+    )
+    sch_add_wire.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_wire.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
+    # sch add-junction
+    sch_add_junc = sch_subparsers.add_parser(
+        "add-junction", help="Add a junction to the schematic"
+    )
+    sch_add_junc.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_junc.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Junction coordinates",
+    )
+    sch_add_junc.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_junc.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch cleanup-wires
     sch_cleanup = sch_subparsers.add_parser(
         "cleanup-wires", help="Remove zero-length and dangling wires"

@@ -146,6 +146,33 @@ def _point_on_wire_midpoint(
     return dist < tolerance
 
 
+def _point_on_wire_segment(
+    point: tuple[float, float],
+    wire_start: tuple[float, float],
+    wire_end: tuple[float, float],
+    tolerance: float = 0.1,
+) -> bool:
+    """Check if a point lies on a wire segment (including endpoints)."""
+    x, y = point
+    x1, y1 = wire_start
+    x2, y2 = wire_end
+
+    # Bounding box check
+    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
+        return False
+    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
+        return False
+
+    # Perpendicular distance check
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length < tolerance:
+        # Wire is basically a point -- check distance to that point
+        return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5 < tolerance
+
+    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
+    return dist < tolerance
+
+
 def run_add_component(args) -> int:
     """Execute the add-component command."""
     schematic_path = Path(args.schematic)
@@ -307,9 +334,9 @@ def run_add_component(args) -> int:
                 )
             )
 
-            # Check if target intersects existing wires at midpoints
+            # Check if target intersects existing wires (endpoint or midpoint)
             for wire in sch.wires:
-                if _point_on_wire_midpoint(cs.target, wire.start, wire.end):
+                if _point_on_wire_segment(cs.target, wire.start, wire.end):
                     planned.append(
                         PlannedAction(
                             "junction",
@@ -360,41 +387,33 @@ def run_add_component(args) -> int:
             mirror=mirror,
         )
 
-    # 3. Add wire connections
+    # 3. Add wire connections (reuse pin_positions computed during planning)
     if connect_specs:
-        # Re-resolve pin positions using the library symbol
-        if need_embed and lib_sym is not None:
-            pin_src = lib_sym
-        else:
-            lib_sym_sexp = sch.get_lib_symbol(args.lib_id)
-            if lib_sym_sexp is not None:
-                pin_src = LibrarySymbol.from_sexp(lib_sym_sexp)
-            else:
-                pin_src = lib_sym  # fallback
+        # Record wires that existed before we start adding, so we can
+        # correctly detect pre-existing wires for junction insertion.
+        pre_existing_wire_count = len(sch.wires)
 
-        if pin_src is not None:
-            pin_positions = pin_src.get_all_pin_positions(
-                instance_pos=position,
-                instance_rot=rotation,
-                mirror=mirror,
-            )
+        for cs in connect_specs:
+            pin_pos = pin_positions.get(cs.pin_number)
+            if pin_pos is None:
+                continue
 
-            for cs in connect_specs:
-                pin_pos = pin_positions.get(cs.pin_number)
-                if pin_pos is None:
-                    continue
+            pin_pos = (_snap(pin_pos[0]), _snap(pin_pos[1]))
 
-                pin_pos = (_snap(pin_pos[0]), _snap(pin_pos[1]))
-                sch.add_wire(pin_pos, cs.target)
+            # Skip duplicate: don't add a wire if start == end
+            if (
+                abs(pin_pos[0] - cs.target[0]) < 0.01
+                and abs(pin_pos[1] - cs.target[1]) < 0.01
+            ):
+                continue
 
-                # Add junction if target intersects an existing wire midpoint
-                for wire in sch.wires:
-                    # Skip the wire we just added (last wire in the list)
-                    if wire is sch.wires[-1]:
-                        continue
-                    if _point_on_wire_midpoint(cs.target, wire.start, wire.end):
-                        sch.add_junction(cs.target)
-                        break
+            sch.add_wire(pin_pos, cs.target)
+
+            # Add junction if target intersects a pre-existing wire segment
+            for wire in sch.wires[:pre_existing_wire_count]:
+                if _point_on_wire_segment(cs.target, wire.start, wire.end):
+                    sch.add_junction(cs.target)
+                    break
 
     # 4. Save
     sch.save()

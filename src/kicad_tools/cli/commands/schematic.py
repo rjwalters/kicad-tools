@@ -15,7 +15,10 @@ def run_sch_command(args) -> int:
             "          connections, unconnected, set-footprint, set-value, replace,"
             " sync-hierarchy, rename-signal,"
         )
-        print("          add-no-connect, add-component, cleanup-wires, disconnect")
+        print(
+            "          add-no-connect, add-component, add-wire, add-junction,"
+            " cleanup-wires, disconnect"
+        )
         return 1
 
     schematic_path = Path(args.schematic)
@@ -263,6 +266,29 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return add_comp_main(sub_argv) or 0
+
+    elif args.sch_command == "add-wire":
+        from ..sch_add_wire import main as add_wire_main
+
+        sub_argv = [str(schematic_path)]
+        sub_argv.extend(["--from", str(args.start[0]), str(args.start[1])])
+        sub_argv.extend(["--to", str(args.end[0]), str(args.end[1])])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_wire_main(sub_argv) or 0
+
+    elif args.sch_command == "add-junction":
+        from ..sch_add_junction import main as add_junc_main
+
+        sub_argv = [str(schematic_path)]
+        sub_argv.extend(["--at", str(args.at[0]), str(args.at[1])])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_junc_main(sub_argv) or 0
 
     elif args.sch_command == "cleanup-wires":
         from ..sch_cleanup_wires import main as cleanup_main

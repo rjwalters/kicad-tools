@@ -15,11 +15,14 @@ from kicad_tools.cli.sch_add_component import (
     ConnectSpec,
     _is_power_symbol,
     _point_on_wire_midpoint,
+    _point_on_wire_segment,
     _snap,
     main as add_component_main,
     parse_connect,
     run_add_component,
 )
+from kicad_tools.cli.sch_add_junction import main as add_junction_main
+from kicad_tools.cli.sch_add_wire import main as add_wire_main
 from kicad_tools.schema import Schematic
 
 # ---------------------------------------------------------------------------
@@ -138,6 +141,20 @@ class TestUtilityFunctions:
         assert _point_on_wire_midpoint((100, 50), (100, 50), (150, 50)) is False
         # Point off the wire
         assert _point_on_wire_midpoint((125, 60), (100, 50), (150, 50)) is False
+
+    def test_point_on_wire_segment_midpoint(self):
+        # Point at midpoint of horizontal wire
+        assert _point_on_wire_segment((125, 50), (100, 50), (150, 50)) is True
+
+    def test_point_on_wire_segment_endpoint(self):
+        # Point at start endpoint -- should return True (unlike midpoint)
+        assert _point_on_wire_segment((100, 50), (100, 50), (150, 50)) is True
+        # Point at end endpoint
+        assert _point_on_wire_segment((150, 50), (100, 50), (150, 50)) is True
+
+    def test_point_on_wire_segment_off_wire(self):
+        # Point off the wire
+        assert _point_on_wire_segment((125, 60), (100, 50), (150, 50)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +486,182 @@ class TestAddJunction:
         sch2 = Schematic.load(out_path)
         assert len(sch2.junctions) == 1
         assert sch2.junctions[0].position == (125.0, 50.0)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate wire regression test
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateWireRegression:
+    def test_connect_produces_exactly_one_wire_per_pin(self, tmp_path: Path):
+        """Each --connect spec should produce exactly one wire, not duplicates."""
+        sch_path = _write_sch(tmp_path)
+        sch_before = Schematic.load(sch_path)
+        original_wire_count = len(sch_before.wires)
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Exactly 1 new wire should be added (original + 1)
+        assert len(sch.wires) == original_wire_count + 1
+
+    def test_two_connects_produce_exactly_two_wires(self, tmp_path: Path):
+        """Two --connect specs should produce exactly two new wires."""
+        sch_path = _write_sch(tmp_path)
+        sch_before = Schematic.load(sch_path)
+        original_wire_count = len(sch_before.wires)
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--connect", "1:120.65,80.01",
+            "--connect", "2:80.01,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Exactly 2 new wires should be added (original + 2)
+        assert len(sch.wires) == original_wire_count + 2
+
+
+# ---------------------------------------------------------------------------
+# Junction at wire endpoint test
+# ---------------------------------------------------------------------------
+
+
+class TestJunctionAtEndpoint:
+    def test_junction_at_wire_endpoint(self, tmp_path: Path):
+        """Connecting to an existing wire endpoint should also create a junction."""
+        # Use a schematic with a wire on the 1.27 grid so snapping is exact.
+        # 100.33 = 79 * 1.27, 49.53 = 39 * 1.27, 149.86 = 118 * 1.27
+        sch_content = SCHEMATIC_WITH_LIB.replace(
+            "(wire (pts (xy 100 50) (xy 150 50))",
+            "(wire (pts (xy 100.33 49.53) (xy 149.86 49.53))",
+        )
+        sch_path = _write_sch(tmp_path, content=sch_content)
+        # Place component and connect pin 2 to the wire start endpoint
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "40.64",
+            "--connect", "2:100.33,49.53",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # A junction should be created at the wire endpoint
+        assert len(sch.junctions) >= 1
+        # Verify the junction is near the target point
+        found = any(
+            abs(j.position[0] - 100.33) < 0.1 and abs(j.position[1] - 49.53) < 0.1
+            for j in sch.junctions
+        )
+        assert found, f"Expected junction near (100.33, 49.53), got {sch.junctions}"
+
+
+# ---------------------------------------------------------------------------
+# Standalone sch add-wire command
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneAddWire:
+    def test_add_wire(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        sch_before = Schematic.load(sch_path)
+        original_wire_count = len(sch_before.wires)
+
+        result = add_wire_main([
+            str(sch_path),
+            "--from", "100", "80",
+            "--to", "120", "80",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        assert len(sch.wires) == original_wire_count + 1
+
+    def test_add_wire_dry_run(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        original_content = sch_path.read_text()
+
+        result = add_wire_main([
+            str(sch_path),
+            "--from", "100", "80",
+            "--to", "120", "80",
+            "--dry-run",
+        ])
+        assert result == 0
+        assert sch_path.read_text() == original_content
+
+    def test_add_wire_zero_length_rejected(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+
+        result = add_wire_main([
+            str(sch_path),
+            "--from", "100", "80",
+            "--to", "100", "80",
+        ])
+        assert result == 1
+
+    def test_add_wire_schematic_not_found(self, tmp_path: Path):
+        result = add_wire_main([
+            str(tmp_path / "nonexistent.kicad_sch"),
+            "--from", "100", "80",
+            "--to", "120", "80",
+        ])
+        assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# Standalone sch add-junction command
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneAddJunction:
+    def test_add_junction(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+
+        result = add_junction_main([
+            str(sch_path),
+            "--at", "125", "50",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        assert len(sch.junctions) == 1
+
+    def test_add_junction_dry_run(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        original_content = sch_path.read_text()
+
+        result = add_junction_main([
+            str(sch_path),
+            "--at", "125", "50",
+            "--dry-run",
+        ])
+        assert result == 0
+        assert sch_path.read_text() == original_content
+
+    def test_add_junction_schematic_not_found(self, tmp_path: Path):
+        result = add_junction_main([
+            str(tmp_path / "nonexistent.kicad_sch"),
+            "--at", "125", "50",
+        ])
+        assert result == 1
