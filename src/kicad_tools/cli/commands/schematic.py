@@ -11,7 +11,10 @@ def run_sch_command(args) -> int:
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
-        print("          connections, unconnected, replace, sync-hierarchy, rename-signal")
+        print(
+            "          connections, unconnected, set-footprint, replace,"
+            " sync-hierarchy, rename-signal"
+        )
         return 1
 
     schematic_path = Path(args.schematic)
@@ -121,6 +124,19 @@ def run_sch_command(args) -> int:
         if args.include_dnp:
             sub_argv.append("--include-dnp")
         return unconnected_main(sub_argv) or 0
+
+    elif args.sch_command == "set-footprint":
+        from ..sch_set_footprint import run_set_footprint
+
+        map_path = Path(args.map_file) if getattr(args, "map_file", None) else None
+        return run_set_footprint(
+            schematic_path=schematic_path,
+            ref=getattr(args, "ref", None),
+            footprint=getattr(args, "footprint", None),
+            map_path=map_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", True),
+        )
 
     elif args.sch_command == "replace":
         from ..sch_replace_symbol import main as replace_main
