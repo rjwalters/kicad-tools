@@ -111,26 +111,41 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
     except Exception as e:
         summary["components"] = {"error": str(e)}
 
-    # Load root schematic for connectivity info
+    # Load all schematics in the hierarchy for connectivity info
     try:
-        sch = Schematic.load(schematic_path)
+        total_wires = 0
+        total_junctions = 0
+        total_labels = 0
+        total_global_labels = 0
+        total_hierarchical_labels = 0
+        label_names: set[str] = set()
+
+        for node in all_nodes:
+            try:
+                sch = Schematic.load(node.path)
+                total_wires += len(list(sch.wires))
+                total_junctions += len(list(sch.junctions))
+                total_labels += len(list(sch.labels))
+                total_global_labels += len(list(sch.global_labels))
+                total_hierarchical_labels += len(list(sch.hierarchical_labels))
+
+                if verbose:
+                    for lbl in sch.labels:
+                        label_names.add(lbl.text)
+                    for lbl in sch.global_labels:
+                        label_names.add(lbl.text)
+            except Exception:
+                continue
 
         summary["connectivity"] = {
-            "wires": len(list(sch.wires)),
-            "junctions": len(list(sch.junctions)),
-            "labels": len(list(sch.labels)),
-            "global_labels": len(list(sch.global_labels)),
-            "hierarchical_labels": len(list(sch.hierarchical_labels)),
+            "wires": total_wires,
+            "junctions": total_junctions,
+            "labels": total_labels,
+            "global_labels": total_global_labels,
+            "hierarchical_labels": total_hierarchical_labels,
         }
 
         if verbose:
-            # Get unique label names
-            label_names = set()
-            for lbl in sch.labels:
-                label_names.add(lbl.text)
-            for lbl in sch.global_labels:
-                label_names.add(lbl.text)
-
             summary["connectivity"]["unique_signals"] = sorted(label_names)[:20]
 
     except Exception:

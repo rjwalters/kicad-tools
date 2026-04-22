@@ -521,6 +521,227 @@ class TestSchSummary:
         captured = capsys.readouterr()
         assert len(captured.out) > 0
 
+    def test_hierarchical_connectivity_aggregation(self, tmp_path: Path):
+        """Test that connectivity counts aggregate across all sheets in hierarchy.
+
+        Regression test for #1888: sch summary showed zero connectivity counts
+        for hierarchical projects because it only counted the root sheet.
+        """
+        from kicad_tools.cli.sch_summary import gather_summary
+
+        # Create a child schematic with wires, labels, and junctions
+        child_sch = tmp_path / "child.kicad_sch"
+        child_sch.write_text(
+            """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000010")
+  (paper "A4")
+  (lib_symbols)
+  (hierarchical_label "IN"
+    (shape input)
+    (at 50 50 180)
+    (effects (font (size 1.27 1.27)) (justify right))
+    (uuid "hlabel-in")
+  )
+  (wire
+    (pts (xy 50 50) (xy 80 50))
+    (stroke (width 0) (type default))
+    (uuid "child-wire-1")
+  )
+  (wire
+    (pts (xy 80 50) (xy 80 80))
+    (stroke (width 0) (type default))
+    (uuid "child-wire-2")
+  )
+  (wire
+    (pts (xy 80 80) (xy 120 80))
+    (stroke (width 0) (type default))
+    (uuid "child-wire-3")
+  )
+  (junction
+    (at 80 50)
+    (diameter 0)
+    (uuid "child-junction-1")
+  )
+  (label "NET1"
+    (at 90 50 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "child-label-1")
+  )
+  (label "NET2"
+    (at 100 80 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "child-label-2")
+  )
+  (global_label "POWER"
+    (shape input)
+    (at 120 80 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "child-global-1")
+    (property "Intersheetrefs" "${INTERSHEET_REFS}"
+      (at 120 80 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+  )
+)"""
+        )
+
+        # Create a root schematic referencing the child
+        root_sch = tmp_path / "root.kicad_sch"
+        root_sch.write_text(
+            """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (sheet
+    (at 130 40) (size 40 30)
+    (stroke (width 0.1524) (type solid))
+    (fill (color 255 255 194 1.0))
+    (uuid "sheet-child-uuid")
+    (property "Sheetname" "Child"
+      (at 130 39 0)
+      (effects (font (size 1.27 1.27)) (justify left bottom))
+    )
+    (property "Sheetfile" "child.kicad_sch"
+      (at 130 71 0)
+      (effects (font (size 1.27 1.27)) (justify left top) hide)
+    )
+    (pin "IN" input
+      (at 130 50 180)
+      (effects (font (size 1.27 1.27)) (justify left))
+      (uuid "sheet-pin-in")
+    )
+  )
+  (wire
+    (pts (xy 100 50) (xy 130 50))
+    (stroke (width 0) (type default))
+    (uuid "root-wire-1")
+  )
+  (junction
+    (at 100 50)
+    (diameter 0)
+    (uuid "root-junction-1")
+  )
+  (label "SIG"
+    (at 110 50 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "root-label-1")
+  )
+)"""
+        )
+
+        summary = gather_summary(str(root_sch))
+        conn = summary["connectivity"]
+
+        # Root has 1 wire, child has 3 => total 4
+        assert conn["wires"] == 4
+        # Root has 1 junction, child has 1 => total 2
+        assert conn["junctions"] == 2
+        # Root has 1 label, child has 2 => total 3
+        assert conn["labels"] == 3
+        # Root has 0 global labels, child has 1 => total 1
+        assert conn["global_labels"] == 1
+        # Root has 0 hierarchical labels, child has 1 => total 1
+        assert conn["hierarchical_labels"] == 1
+
+    def test_hierarchical_connectivity_verbose_signals(self, tmp_path: Path):
+        """Test that verbose unique signals aggregate across all sheets."""
+        from kicad_tools.cli.sch_summary import gather_summary
+
+        # Create a child schematic with labels
+        child_sch = tmp_path / "child.kicad_sch"
+        child_sch.write_text(
+            """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000010")
+  (paper "A4")
+  (lib_symbols)
+  (label "CHILD_NET"
+    (at 90 50 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "child-label-1")
+  )
+  (global_label "SHARED_POWER"
+    (shape input)
+    (at 120 80 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "child-global-1")
+    (property "Intersheetrefs" "${INTERSHEET_REFS}"
+      (at 120 80 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+  )
+)"""
+        )
+
+        # Create root schematic referencing child
+        root_sch = tmp_path / "root.kicad_sch"
+        root_sch.write_text(
+            """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (sheet
+    (at 130 40) (size 40 30)
+    (stroke (width 0.1524) (type solid))
+    (fill (color 255 255 194 1.0))
+    (uuid "sheet-child-uuid")
+    (property "Sheetname" "Child"
+      (at 130 39 0)
+      (effects (font (size 1.27 1.27)) (justify left bottom))
+    )
+    (property "Sheetfile" "child.kicad_sch"
+      (at 130 71 0)
+      (effects (font (size 1.27 1.27)) (justify left top) hide)
+    )
+  )
+  (label "ROOT_NET"
+    (at 110 50 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "root-label-1")
+  )
+)"""
+        )
+
+        summary = gather_summary(str(root_sch), verbose=True)
+        conn = summary["connectivity"]
+
+        assert "unique_signals" in conn
+        signals = conn["unique_signals"]
+        # Should include labels from both root and child
+        assert "ROOT_NET" in signals
+        assert "CHILD_NET" in signals
+        assert "SHARED_POWER" in signals
+
+    def test_existing_hierarchical_fixture_aggregation(self, hierarchical_schematic: Path):
+        """Test connectivity aggregation with the existing hierarchical fixture.
+
+        The hierarchical_main.kicad_sch has 5 wires, 2 junctions, and 1 global_label
+        in the root sheet, plus hierarchical labels in child sheets.
+        """
+        from kicad_tools.cli.sch_summary import gather_summary
+
+        summary = gather_summary(str(hierarchical_schematic))
+        conn = summary["connectivity"]
+
+        # Root sheet: 5 wires, 2 junctions, 1 global_label
+        # Child sheets have hierarchical_labels but no wires
+        assert conn["wires"] == 5
+        assert conn["junctions"] == 2
+        assert conn["global_labels"] == 1
+        # hierarchical_labels: logic_subsheet has 3, output_subsheet has 1
+        assert conn["hierarchical_labels"] == 4
+
 
 class TestSchListWires:
     """Tests for sch_list_wires.py CLI."""
