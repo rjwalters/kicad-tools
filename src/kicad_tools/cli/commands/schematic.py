@@ -10,7 +10,7 @@ def run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins,")
+        print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,")
         print(
             "          connections, unconnected, set-footprint, set-value, replace,"
             " sync-hierarchy, rename-signal,"
@@ -109,6 +109,16 @@ def run_sch_command(args) -> int:
         if args.format != "table":
             sub_argv.extend(["--format", args.format])
         return pins_main(sub_argv) or 0
+
+    elif args.sch_command == "pin-map":
+        from ..sch_pin_map import main as pin_map_main
+
+        sub_argv = [str(schematic_path)]
+        if args.ref:
+            sub_argv.extend(["--ref", args.ref])
+        if args.format != "json":
+            sub_argv.extend(["--format", args.format])
+        return pin_map_main(sub_argv) or 0
 
     elif args.sch_command == "connections":
         from ..sch_check_connections import main as connections_main
