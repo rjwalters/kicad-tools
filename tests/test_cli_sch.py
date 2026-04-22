@@ -169,6 +169,90 @@ class TestSchListLabels:
         # Minimal schematic has NET1 label
         assert "NET1" in captured.out or "No labels" in captured.out
 
+    def test_hierarchy_global_labels_across_sheets(self, hierarchical_schematic: Path, capsys):
+        """Test that global labels from child sheets are included."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "global", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Root has SIGNAL_OUT, Logic has CLK+RESET, Output has CLK
+        texts = [lbl["text"] for lbl in data]
+        assert "SIGNAL_OUT" in texts
+        assert "CLK" in texts
+        assert "RESET" in texts
+        # CLK appears in both Logic and Output sheets
+        clk_labels = [lbl for lbl in data if lbl["text"] == "CLK"]
+        assert len(clk_labels) == 2
+
+    def test_hierarchy_labels_include_sheet_info(self, hierarchical_schematic: Path, capsys):
+        """Test that each label entry includes sheet name and file."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "global", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        for lbl in data:
+            assert "sheet" in lbl, "Label entry should include 'sheet' field"
+            assert "sheet_file" in lbl, "Label entry should include 'sheet_file' field"
+
+        # Check specific sheet assignments
+        root_labels = [lbl for lbl in data if lbl["sheet"] == "/"]
+        assert any(lbl["text"] == "SIGNAL_OUT" for lbl in root_labels)
+
+        logic_labels = [lbl for lbl in data if lbl["sheet"] == "/Logic"]
+        assert any(lbl["text"] == "CLK" for lbl in logic_labels)
+        assert any(lbl["text"] == "RESET" for lbl in logic_labels)
+
+    def test_hierarchy_all_label_types(self, hierarchical_schematic: Path, capsys):
+        """Test that --type all collects all label types from all sheets."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "all", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        types_found = {lbl["type"] for lbl in data}
+        # Should find global labels (root + children), hierarchical (children),
+        # power symbols (root), and local labels (output child)
+        assert "global" in types_found
+        assert "hierarchical" in types_found
+        assert "power" in types_found
+        assert "local" in types_found
+
+    def test_hierarchy_csv_includes_sheet_columns(self, hierarchical_schematic: Path, capsys):
+        """Test that CSV output includes Sheet and Sheet File columns."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "global", "--format", "csv"])
+
+        captured = capsys.readouterr()
+        lines = captured.out.strip().split("\n")
+        assert "Sheet" in lines[0]
+        assert "Sheet File" in lines[0]
+
+    def test_hierarchy_table_includes_sheet_column(self, hierarchical_schematic: Path, capsys):
+        """Test that table output includes Sheet column."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "global"])
+
+        captured = capsys.readouterr()
+        assert "Sheet" in captured.out
+
+    def test_hierarchy_filter_works_across_sheets(self, hierarchical_schematic: Path, capsys):
+        """Test that --filter pattern works across all sheets."""
+        from kicad_tools.cli.sch_list_labels import main
+
+        main([str(hierarchical_schematic), "--type", "global", "--filter", "CLK", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data) == 2  # CLK in Logic and Output
+        assert all(lbl["text"] == "CLK" for lbl in data)
+
 
 class TestSchHierarchy:
     """Tests for sch_hierarchy.py CLI."""
