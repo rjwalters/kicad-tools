@@ -27,6 +27,7 @@ def find_kicad_cli() -> Path | None:
     locations = [
         # macOS
         "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        str(Path.home() / "Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"),
         "/opt/homebrew/bin/kicad-cli",
         "/usr/local/bin/kicad-cli",
         # Linux

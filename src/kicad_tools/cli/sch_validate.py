@@ -26,6 +26,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
 
@@ -66,13 +67,10 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
     issues = []
 
     try:
-        # Find kicad-cli
-        result = subprocess.run(
-            ["which", "kicad-cli"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        # Find kicad-cli using the shared lookup that checks PATH
+        # and platform-specific installation locations (e.g. macOS app bundle)
+        kicad_cli_path = find_kicad_cli()
+        if kicad_cli_path is None:
             issues.append(
                 ValidationIssue(
                     severity="warning",
@@ -82,7 +80,7 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
             )
             return issues
 
-        kicad_cli = result.stdout.strip()
+        kicad_cli = str(kicad_cli_path)
 
         # Run ERC
         import tempfile
