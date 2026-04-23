@@ -487,6 +487,104 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue]:
+    """Check for symbols missing the ``instances`` block.
+
+    In KiCad 8+, every placed symbol must have an ``(instances ...)`` child
+    node that registers it to a project path.  Without this block the
+    component is invisible to the netlist exporter and BOM generator despite
+    being visually present on the schematic.
+
+    The check skips:
+    - Power symbols (``lib_id`` starting with ``power:``)
+    - Symbols with both ``in_bom=no`` and ``on_board=no`` (graphical-only)
+
+    Multi-unit symbols are deduplicated by UUID prefix so that a missing
+    ``instances`` block on a two-unit IC produces a single warning, not one
+    per unit.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                # Track UUIDs already flagged to deduplicate multi-unit ICs.
+                # Multi-unit symbols share the same base UUID (only the first
+                # unit carries the instances block in the raw file, but after
+                # parsing each unit becomes a separate SymbolInstance sharing
+                # the same lib_id + reference).  Deduplicate by reference +
+                # lib_id so we report once per logical component.
+                seen: set[tuple[str, str]] = set()
+
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip graphical-only symbols (not in BOM and not on board)
+                    if not sym.in_bom and not sym.on_board:
+                        continue
+
+                    # Deduplicate multi-unit symbols
+                    dedup_key = (sym.reference, sym.lib_id)
+                    if dedup_key in seen:
+                        continue
+
+                    # Check for instances block in raw S-expression
+                    has_instances = False
+                    if sym._sexp is not None:
+                        if sym._sexp.find("instances") is not None:
+                            has_instances = True
+                    else:
+                        # Programmatically-created symbol without _sexp:
+                        # skip with info if desired, but don't flag as missing
+                        continue
+
+                    if not has_instances:
+                        seen.add(dedup_key)
+                        ref = sym.reference or "?"
+                        val = sym.value or "?"
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="project_instances",
+                                message=(
+                                    f"Missing project instances block: "
+                                    f"{ref} ({val}) - will be absent from "
+                                    f"netlist and BOM"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+                    else:
+                        # Mark as seen even when instances are present, so
+                        # other units of the same IC don't get flagged.
+                        seen.add(dedup_key)
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="project_instances",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="project_instances",
+                message=f"Project instances check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -514,6 +612,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Global label directions
     result.checks_run.append("global_label_directions")
     result.issues.extend(check_global_label_directions(schematic_path))
+
+    # Missing project instances
+    result.checks_run.append("project_instances")
+    result.issues.extend(check_missing_project_instances(schematic_path))
 
     return result
 
