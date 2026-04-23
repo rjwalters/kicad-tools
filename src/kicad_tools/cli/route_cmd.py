@@ -2217,8 +2217,10 @@ def main(argv: list[str] | None = None) -> int:
         default=0.95,
         help=(
             "Minimum routing completion rate for success (default: 0.95 = 95%%). "
-            "Only used with --auto-layers. If no layer count achieves this, "
-            "the best result is saved."
+            "Controls the exit code threshold: routing above this rate returns "
+            "exit code 0 (success), below returns exit code 2 (partial). "
+            "Also used with --auto-layers to control layer escalation. "
+            "If no layer count achieves this, the best result is saved."
         ),
     )
     parser.add_argument(
@@ -3489,6 +3491,8 @@ def main(argv: list[str] | None = None) -> int:
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
+    completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
+    meets_threshold = completion_ratio >= args.min_completion
 
     # Build summary suffix for net breakdown (Issue #812)
     summary_parts = []
@@ -3507,6 +3511,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"SUCCESS: All signal nets routed!{summary_suffix}")
                 if not drc_ran and not args.skip_drc and not args.dry_run:
                     print("  Note: Run 'kct check' to validate before manufacturing")
+        elif meets_threshold and not all_nets_routed and drc_passed:
+            pct = completion_ratio * 100
+            print(
+                f"SUCCESS: Routed {stats['nets_routed']}/{nets_to_route} signal nets "
+                f"({pct:.0f}%, meets {args.min_completion * 100:.0f}% threshold){summary_suffix}"
+            )
+            if not drc_ran and not args.skip_drc and not args.dry_run:
+                print("  Note: Run 'kct check' to validate before manufacturing")
         elif all_nets_routed and not drc_passed:
             print("ROUTING FAILED: DRC violations detected")
             print("=" * 60)
@@ -3577,25 +3589,32 @@ def main(argv: list[str] | None = None) -> int:
         _export_failed_nets(router, net_map, args.export_failed_nets, quiet=quiet)
 
     # Exit codes:
-    # 0 = All nets routed AND (DRC passed OR DRC not run)
+    # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
     # 1 = Fatal failure — no nets routed, no useful output
-    # 2 = Partial routing — some nets routed, output file exists with traces
+    # 2 = Partial routing — some nets routed but below --min-completion threshold
     #     (also used for SIGINT partial save, handled earlier in the function)
-    # 3 = All nets routed but DRC violations detected
-    # 4 = Seg-seg clearance violations remain after routing (Issue #1666)
-    if seg_seg_violation_count > 0:
-        return 4
-    elif all_nets_routed and drc_passed:
-        return 0
-    elif not all_nets_routed:
-        # Partial routing: some nets were routed — pipeline should continue
-        if stats["nets_routed"] > 0:
-            return 2
+    # 3 = Meets threshold but DRC violations detected (includes seg-seg violations)
+    # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
+    #
+    # The --min-completion flag (default 0.95) controls the success threshold.
+    # With --min-completion 0.80, routing 85% of nets returns exit code 0.
+    completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
+    meets_threshold = completion_ratio >= args.min_completion
+
+    if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure
         return 1
-    else:
-        # All nets routed but DRC failed
+    elif meets_threshold and drc_passed and seg_seg_violation_count == 0:
+        return 0
+    elif meets_threshold and (not drc_passed or seg_seg_violation_count > 0):
+        # Meets completion threshold but has DRC or clearance violations
         return 3
+    elif not meets_threshold and seg_seg_violation_count > 0:
+        # Below threshold AND has seg-seg clearance violations
+        return 4
+    else:
+        # Partial routing: some nets routed but below threshold
+        return 2
 
 
 if __name__ == "__main__":

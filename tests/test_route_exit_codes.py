@@ -1,11 +1,12 @@
-"""Tests for route command exit codes (issue #1301, #1413, #1454).
+"""Tests for route command exit codes (issue #1301, #1413, #1454, #1946).
 
-Exit code semantics:
-  0 = All nets routed AND (DRC passed OR DRC not run)
+Exit code semantics (updated for --min-completion threshold support):
+  0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
   1 = Fatal failure -- no nets routed, no useful output
-  2 = Partial routing -- some nets routed, output file exists with traces
+  2 = Partial routing -- some nets routed but below --min-completion threshold
       (also used for SIGINT partial save)
-  3 = All nets routed but DRC violations detected
+  3 = Meets threshold but DRC violations detected (includes seg-seg violations)
+  4 = Below threshold AND seg-seg clearance violations remain (Issue #1666)
 """
 
 from io import StringIO
@@ -28,36 +29,45 @@ def _make_minimal_pcb(tmp_path):
 class TestRouteExitCodeLogic:
     """Direct unit tests for the exit code decision logic.
 
-    These tests verify the branching logic that maps (all_nets_routed, drc_passed)
+    These tests verify the branching logic that maps routing state
     to exit codes, matching the exact logic in route_cmd.py main().
     """
 
     @staticmethod
-    def _compute_exit_code(nets_routed, nets_to_route, drc_errors):
+    def _compute_exit_code(
+        nets_routed, nets_to_route, drc_errors, min_completion=0.95, seg_seg_violations=0
+    ):
         """Replicate the exit code logic from route_cmd.py main().
 
         This must stay in sync with the real code:
-            all_nets_routed = stats["nets_routed"] == nets_to_route
-            drc_passed = drc_errors <= 0
-            if all_nets_routed and drc_passed: return 0
-            elif not all_nets_routed:
-                if nets_routed > 0: return 2
-                return 1
-            else: return 3
+            completion_ratio = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
+            meets_threshold = completion_ratio >= min_completion
+            if nets_routed == 0 and nets_to_route > 0: return 1
+            elif meets_threshold and drc_passed and seg_seg == 0: return 0
+            elif meets_threshold and (not drc_passed or seg_seg > 0): return 3
+            elif not meets_threshold and seg_seg > 0: return 4
+            else: return 2
         """
-        all_nets_routed = nets_routed == nets_to_route
         drc_passed = drc_errors <= 0
+        completion_ratio = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
+        meets_threshold = completion_ratio >= min_completion
 
-        if all_nets_routed and drc_passed:
-            return 0
-        elif not all_nets_routed:
-            # Partial routing: some nets routed — pipeline should continue
-            if nets_routed > 0:
-                return 2
-            # Nothing was routed — fatal failure
+        if nets_routed == 0 and nets_to_route > 0:
             return 1
-        else:
+        elif meets_threshold and drc_passed and seg_seg_violations == 0:
+            return 0
+        elif meets_threshold and (not drc_passed or seg_seg_violations > 0):
             return 3
+        elif not meets_threshold and seg_seg_violations > 0:
+            return 4
+        else:
+            return 2
+
+    # ------------------------------------------------------------------
+    # Legacy tests (default min_completion=0.95, no seg-seg violations)
+    # These verify backward compatibility with the old exit code behavior
+    # when all nets are routed (100% >= 95% threshold).
+    # ------------------------------------------------------------------
 
     @pytest.mark.parametrize(
         "nets_routed, nets_to_route, drc_errors, expected_exit",
@@ -139,7 +149,7 @@ class TestRouteExitCodeLogic:
             )
 
     def test_partial_routing_always_exit_2_regardless_of_drc(self):
-        """When some nets are routed (but not all), exit code is always 2 regardless of DRC."""
+        """When some nets are routed (but below threshold), exit code is always 2 regardless of DRC."""
         for drc_errors in [-1, 0, 1, 5]:
             exit_code = self._compute_exit_code(
                 nets_routed=2, nets_to_route=5, drc_errors=drc_errors
@@ -149,17 +159,23 @@ class TestRouteExitCodeLogic:
             )
 
     def test_exit_codes_are_exhaustive(self):
-        """Every (all_nets_routed, drc_passed) combination maps to a valid exit code."""
-        valid_exit_codes = {0, 1, 2, 3}
+        """Every combination of inputs maps to a valid exit code."""
+        valid_exit_codes = {0, 1, 2, 3, 4}
         for nets_routed in [0, 3, 5]:
             for nets_to_route in [0, 5]:
                 for drc_errors in [-1, 0, 1, 10]:
-                    exit_code = self._compute_exit_code(nets_routed, nets_to_route, drc_errors)
-                    assert exit_code in valid_exit_codes, (
-                        f"Unexpected exit code {exit_code} for "
-                        f"nets_routed={nets_routed}, nets_to_route={nets_to_route}, "
-                        f"drc_errors={drc_errors}"
-                    )
+                    for seg_seg in [0, 3]:
+                        for min_comp in [0.0, 0.5, 0.95, 1.0]:
+                            exit_code = self._compute_exit_code(
+                                nets_routed, nets_to_route, drc_errors,
+                                min_completion=min_comp, seg_seg_violations=seg_seg,
+                            )
+                            assert exit_code in valid_exit_codes, (
+                                f"Unexpected exit code {exit_code} for "
+                                f"nets_routed={nets_routed}, nets_to_route={nets_to_route}, "
+                                f"drc_errors={drc_errors}, seg_seg={seg_seg}, "
+                                f"min_completion={min_comp}"
+                            )
 
     def test_exit_code_2_distinct_from_1_and_3(self):
         """Exit code 2 (partial) is distinct from 1 (fatal) and 3 (DRC-only)."""
@@ -171,6 +187,108 @@ class TestRouteExitCodeLogic:
         assert fatal == 1
         assert drc_only == 3
         assert len({partial, fatal, drc_only}) == 3, "All three exit codes must be distinct"
+
+    # ------------------------------------------------------------------
+    # Threshold-based exit code tests (issue #1946)
+    # ------------------------------------------------------------------
+
+    def test_min_completion_controls_success_threshold(self):
+        """--min-completion 0.80 returns exit 0 when 85% of nets are routed."""
+        # 17/20 = 85% >= 80% threshold -> success
+        exit_code = self._compute_exit_code(
+            nets_routed=17, nets_to_route=20, drc_errors=0, min_completion=0.80
+        )
+        assert exit_code == 0, "85% completion with 80% threshold should return 0"
+
+    def test_min_completion_returns_partial_below_threshold(self):
+        """--min-completion 0.95 returns exit 2 when only 85% routed."""
+        # 17/20 = 85% < 95% threshold -> partial
+        exit_code = self._compute_exit_code(
+            nets_routed=17, nets_to_route=20, drc_errors=0, min_completion=0.95
+        )
+        assert exit_code == 2, "85% completion with 95% threshold should return 2"
+
+    def test_min_completion_exact_boundary(self):
+        """Exactly at the threshold returns success (>=)."""
+        # 4/5 = 0.80 exactly == 0.80 threshold -> success
+        exit_code = self._compute_exit_code(
+            nets_routed=4, nets_to_route=5, drc_errors=0, min_completion=0.80
+        )
+        assert exit_code == 0, "Exact threshold match should return 0"
+
+    def test_min_completion_just_below_boundary(self):
+        """Just below the threshold returns partial."""
+        # 3/5 = 0.60 < 0.80 threshold -> partial
+        exit_code = self._compute_exit_code(
+            nets_routed=3, nets_to_route=5, drc_errors=0, min_completion=0.80
+        )
+        assert exit_code == 2, "Below threshold should return 2"
+
+    def test_min_completion_zero_always_succeeds(self):
+        """--min-completion 0.0 should return 0 if any nets routed."""
+        exit_code = self._compute_exit_code(
+            nets_routed=1, nets_to_route=20, drc_errors=0, min_completion=0.0
+        )
+        assert exit_code == 0, "--min-completion 0.0 with any routed nets should return 0"
+
+    def test_min_completion_one_requires_all(self):
+        """--min-completion 1.0 should require all nets routed."""
+        exit_code = self._compute_exit_code(
+            nets_routed=19, nets_to_route=20, drc_errors=0, min_completion=1.0
+        )
+        assert exit_code == 2, "--min-completion 1.0 with 19/20 should return 2"
+
+        exit_code = self._compute_exit_code(
+            nets_routed=20, nets_to_route=20, drc_errors=0, min_completion=1.0
+        )
+        assert exit_code == 0, "--min-completion 1.0 with 20/20 should return 0"
+
+    def test_min_completion_zero_still_fatal_if_no_nets_routed(self):
+        """Even with --min-completion 0.0, zero nets routed is fatal."""
+        exit_code = self._compute_exit_code(
+            nets_routed=0, nets_to_route=20, drc_errors=0, min_completion=0.0
+        )
+        assert exit_code == 1, "Zero nets routed is always fatal regardless of threshold"
+
+    # ------------------------------------------------------------------
+    # Seg-seg violation priority tests (issue #1946)
+    # ------------------------------------------------------------------
+
+    def test_seg_seg_violations_above_threshold_return_3(self):
+        """Seg-seg violations when above threshold return exit 3 (DRC failure)."""
+        exit_code = self._compute_exit_code(
+            nets_routed=20, nets_to_route=20, drc_errors=0,
+            min_completion=0.95, seg_seg_violations=5,
+        )
+        assert exit_code == 3, "Seg-seg violations above threshold should return 3"
+
+    def test_seg_seg_violations_below_threshold_return_4(self):
+        """Seg-seg violations when below threshold return exit 4."""
+        exit_code = self._compute_exit_code(
+            nets_routed=10, nets_to_route=20, drc_errors=0,
+            min_completion=0.95, seg_seg_violations=5,
+        )
+        assert exit_code == 4, "Seg-seg violations below threshold should return 4"
+
+    def test_seg_seg_violations_do_not_mask_partial_routing(self):
+        """Seg-seg violations below threshold return 4, not hiding the partial status."""
+        # Previously this returned 4 even when the real issue was partial routing.
+        # Now exit 4 explicitly means both partial AND seg-seg violations.
+        exit_code = self._compute_exit_code(
+            nets_routed=17, nets_to_route=20, drc_errors=0,
+            min_completion=0.95, seg_seg_violations=3,
+        )
+        assert exit_code == 4, (
+            "Below threshold with seg-seg violations should return 4"
+        )
+
+    def test_seg_seg_above_threshold_with_drc_errors_returns_3(self):
+        """Above threshold with both DRC errors and seg-seg violations returns 3."""
+        exit_code = self._compute_exit_code(
+            nets_routed=20, nets_to_route=20, drc_errors=5,
+            min_completion=0.95, seg_seg_violations=3,
+        )
+        assert exit_code == 3, "Above threshold with violations should return 3"
 
 
 class TestRouteExitCodeIntegration:
@@ -227,28 +345,19 @@ class TestRouteExitCodeDocumentation:
         assert "return 0" in source, "route_cmd.main() must contain 'return 0' for success"
         assert "return 1" in source, "route_cmd.main() must contain 'return 1' for fatal failure"
 
-    def test_drc_failure_does_not_return_1(self):
-        """The DRC-only failure path returns 3, not 1."""
+    def test_source_documents_threshold_semantics(self):
+        """The exit code comments document --min-completion threshold behavior."""
         import inspect
 
         from kicad_tools.cli import route_cmd
 
         source = inspect.getsource(route_cmd.main)
-
-        # Find the exit code block and verify the DRC failure branch
-        # Look for the comment "All nets routed but DRC failed" followed by return 3
-        assert "# All nets routed but DRC failed" in source
-        # Find the line after the comment
-        lines = source.split("\n")
-        for i, line in enumerate(lines):
-            if "# All nets routed but DRC failed" in line:
-                # Next non-blank line should have return 3
-                for j in range(i + 1, min(i + 3, len(lines))):
-                    if "return" in lines[j]:
-                        assert "return 3" in lines[j], (
-                            f"DRC-only failure should return 3, found: {lines[j].strip()}"
-                        )
-                        break
+        assert "min_completion" in source, (
+            "route_cmd.main() must reference min_completion in exit code logic"
+        )
+        assert "meets_threshold" in source, (
+            "route_cmd.main() must use meets_threshold variable"
+        )
 
 
 # ---------------------------------------------------------------------------
