@@ -1025,6 +1025,134 @@ class TestLibraryManager:
         manager = LibraryManager()
         assert manager.get_symbol("Device:NonExistent") is None
 
+    def test_load_embedded_single_symbol(self):
+        """Test loading embedded symbols from a schematic."""
+
+        class FakeSchematic:
+            @property
+            def lib_symbols(self):
+                return parse_string(
+                    """(lib_symbols
+                    (symbol "Device:R"
+                        (property "Reference" "R")
+                        (symbol "Device:R_1_1"
+                            (pin passive line (at -2.54 0 0) (length 2.54)
+                                (name "1") (number "1"))
+                            (pin passive line (at 2.54 0 180) (length 2.54)
+                                (name "2") (number "2"))
+                        )
+                    )
+                )"""
+                )
+
+        manager = LibraryManager()
+        manager.load_embedded(FakeSchematic())
+
+        # Should be resolvable by full lib_id
+        sym = manager.get_symbol("Device:R")
+        assert sym is not None
+        assert len(sym.pins) == 2
+
+    def test_load_embedded_multiple_libraries(self):
+        """Test loading embedded symbols from multiple libraries."""
+
+        class FakeSchematic:
+            @property
+            def lib_symbols(self):
+                return parse_string(
+                    """(lib_symbols
+                    (symbol "Device:R"
+                        (property "Reference" "R")
+                        (symbol "Device:R_1_1"
+                            (pin passive line (at 0 0 0) (length 2.54)
+                                (name "1") (number "1"))
+                        )
+                    )
+                    (symbol "power:GND"
+                        (property "Reference" "#PWR")
+                        (symbol "power:GND_1_1"
+                            (pin power_in line (at 0 0 0) (length 0)
+                                (name "GND") (number "1"))
+                        )
+                    )
+                )"""
+                )
+
+        manager = LibraryManager()
+        manager.load_embedded(FakeSchematic())
+
+        assert manager.get_symbol("Device:R") is not None
+        assert manager.get_symbol("power:GND") is not None
+
+    def test_load_embedded_no_lib_symbols(self):
+        """Test load_embedded with schematic that has no lib_symbols."""
+
+        class FakeSchematic:
+            @property
+            def lib_symbols(self):
+                return None
+
+        manager = LibraryManager()
+        # Should not raise
+        manager.load_embedded(FakeSchematic())
+        assert len(manager.libraries) == 0
+
+    def test_load_embedded_no_colon_in_name(self):
+        """Test loading embedded symbol without library prefix."""
+
+        class FakeSchematic:
+            @property
+            def lib_symbols(self):
+                return parse_string(
+                    """(lib_symbols
+                    (symbol "MySymbol"
+                        (property "Reference" "U")
+                        (symbol "MySymbol_1_1"
+                            (pin input line (at 0 0 0) (length 2.54)
+                                (name "IN") (number "1"))
+                        )
+                    )
+                )"""
+                )
+
+        manager = LibraryManager()
+        manager.load_embedded(FakeSchematic())
+
+        # Symbol without colon uses its name as both lib name and symbol name
+        assert "MySymbol" in manager.libraries
+        sym = manager.get_symbol("MySymbol")
+        assert sym is not None
+
+    def test_load_embedded_does_not_overwrite_existing(self):
+        """Test that load_embedded does not overwrite symbols loaded from disk."""
+        manager = LibraryManager()
+        # Pre-load a symbol
+        existing_sym = LibrarySymbol(name="R", properties={"Reference": "R"}, pins=[])
+        lib = SymbolLibrary(path="Device.kicad_sym", symbols={"R": existing_sym})
+        manager.add_library("Device", lib)
+
+        class FakeSchematic:
+            @property
+            def lib_symbols(self):
+                return parse_string(
+                    """(lib_symbols
+                    (symbol "Device:C"
+                        (property "Reference" "C")
+                        (symbol "Device:C_1_1"
+                            (pin passive line (at 0 0 0) (length 2.54)
+                                (name "1") (number "1"))
+                        )
+                    )
+                )"""
+                )
+
+        manager.load_embedded(FakeSchematic())
+
+        # Existing symbol should still be there
+        assert manager.get_symbol("Device:R") is existing_sym
+        # New embedded symbol should also be available
+        assert manager.get_symbol("Device:C") is not None
+
 
 class TestHierarchySheetPin:
     """Tests for SheetPin in hierarchy module."""

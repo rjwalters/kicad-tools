@@ -1092,6 +1092,39 @@ class LibraryManager:
         self.libraries[lib_name] = lib
         return lib
 
+    def load_embedded(self, schematic: Any) -> None:
+        """Load embedded symbol definitions from a schematic.
+
+        KiCad schematics store inline symbol definitions in a ``lib_symbols``
+        section.  This method parses those definitions and registers them so
+        that :meth:`get_symbol` can resolve pin positions without requiring the
+        on-disk library files.
+
+        Args:
+            schematic: A :class:`~kicad_tools.schema.schematic.Schematic`
+                instance (or any object exposing a ``lib_symbols`` property
+                that returns an :class:`SExp` node or ``None``).
+        """
+        lib_symbols = schematic.lib_symbols
+        if lib_symbols is None:
+            return
+
+        for sym_sexp in lib_symbols.find_all("symbol"):
+            sym = LibrarySymbol.from_sexp(sym_sexp)
+            # Embedded symbol names use lib_id format, e.g. "Device:R"
+            lib_id = sym.name
+            if ":" in lib_id:
+                lib_name, short_name = lib_id.split(":", 1)
+            else:
+                lib_name = lib_id
+                short_name = lib_id
+
+            if lib_name not in self.libraries:
+                self.libraries[lib_name] = SymbolLibrary(
+                    path="<embedded>", symbols={}
+                )
+            self.libraries[lib_name].symbols[short_name] = sym
+
     def add_search_path(self, path: str) -> None:
         """Add a directory to search for libraries."""
         self.search_paths.append(path)
