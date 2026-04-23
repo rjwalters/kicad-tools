@@ -741,6 +741,63 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch add-pull-resistor
+    sch_add_pull = sch_subparsers.add_parser(
+        "add-pull-resistor",
+        help="Add a pull-up or pull-down resistor to a schematic pin",
+    )
+    sch_add_pull.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_pull.add_argument(
+        "--ref", required=True, help="Symbol reference of target IC (e.g., U5)"
+    )
+    sch_add_pull.add_argument(
+        "--pin", required=True, help="Pin number on target IC (e.g., 25)"
+    )
+    sch_add_pull.add_argument(
+        "--direction",
+        required=True,
+        choices=["up", "down"],
+        help="Pull-up (power) or pull-down (ground)",
+    )
+    sch_add_pull.add_argument(
+        "--value", required=True, help="Resistor value (e.g., 10k)"
+    )
+    sch_add_pull.add_argument(
+        "--power-net",
+        dest="power_net",
+        help="Power/ground net name (default: +3.3V for up, GND for down)",
+    )
+    sch_add_pull.add_argument(
+        "--reference",
+        help="Reference designator for new resistor (default: R? auto-assign)",
+    )
+    sch_add_pull.add_argument(
+        "--footprint",
+        default="Resistor_SMD:R_0402_1005Metric",
+        help="Resistor footprint (default: Resistor_SMD:R_0402_1005Metric)",
+    )
+    sch_add_pull.add_argument(
+        "--offset",
+        type=float,
+        default=5.08,
+        help="Grid distance from IC pin to resistor center in mm (default: 5.08)",
+    )
+    sch_add_pull.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_pull.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_add_pull.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_pull.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_add_pull.add_argument(
+        "--force", action="store_true", help="Place even if collision detected"
+    )
+
     # sch add-wire
     sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add wire segments to the schematic")
     sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")

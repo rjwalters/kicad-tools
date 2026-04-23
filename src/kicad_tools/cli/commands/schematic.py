@@ -17,11 +17,11 @@ def run_sch_command(args) -> int:
         )
         print(
             "          set-label-direction, add-no-connect, add-component,"
-            " add-bypass-cap, add-wire,"
+            " add-bypass-cap, add-pull-resistor,"
         )
         print(
-            "          add-junction, add-label, cleanup-wires, remove-wire,"
-            " disconnect, re-annotate"
+            "          add-wire, add-junction,"
+            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate"
         )
         return 1
 
@@ -311,6 +311,34 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return add_bypass_main(sub_argv) or 0
+
+    elif args.sch_command == "add-pull-resistor":
+        from ..sch_add_pull_resistor import main as add_pull_main
+
+        sub_argv = [str(schematic_path), "--ref", args.ref, "--pin", args.pin]
+        sub_argv.extend(["--direction", args.direction])
+        sub_argv.extend(["--value", args.value])
+        if args.power_net:
+            sub_argv.extend(["--power-net", args.power_net])
+        if args.reference:
+            sub_argv.extend(["--reference", args.reference])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        if args.offset != 5.08:
+            sub_argv.extend(["--offset", str(args.offset)])
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        if args.force:
+            sub_argv.append("--force")
+        return add_pull_main(sub_argv) or 0
 
     elif args.sch_command == "add-wire":
         from ..sch_add_wire import main as add_wire_main
