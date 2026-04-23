@@ -399,6 +399,7 @@ def run_sch_command(args) -> int:
             start_from=getattr(args, "start_from", 1),
             per_sheet=getattr(args, "per_sheet", False),
             format=getattr(args, "format", "text"),
+            unannotated_only=getattr(args, "unannotated_only", False),
         )
 
     return 1

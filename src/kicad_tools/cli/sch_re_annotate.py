@@ -344,6 +344,7 @@ def run_re_annotate(
     start_from: int = 1,
     per_sheet: bool = False,
     format: str = "text",
+    unannotated_only: bool = False,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -355,6 +356,8 @@ def run_re_annotate(
         start_from: Starting number for each prefix (default 1).
         per_sheet: If True, restart numbering per sheet.
         format: Output format ("text" or "json").
+        unannotated_only: If True, only assign numbers to unannotated (``?``)
+            references, leaving already-assigned references unchanged.
 
     Returns:
         0 on success, 1 on error.
@@ -394,11 +397,13 @@ def run_re_annotate(
 
     if per_sheet:
         uuid_mapping = _build_per_sheet_mapping(
-            all_files, file_symbols, prefixes, start_from
+            all_files, file_symbols, prefixes, start_from,
+            unannotated_only=unannotated_only,
         )
     else:
         uuid_mapping = _build_continuous_mapping(
-            all_files, file_symbols, prefixes, start_from
+            all_files, file_symbols, prefixes, start_from,
+            unannotated_only=unannotated_only,
         )
 
     if not uuid_mapping:
@@ -544,6 +549,8 @@ def _build_continuous_mapping(
     file_symbols: dict[Path, list[dict]],
     prefixes: list[str] | None,
     start_from: int,
+    *,
+    unannotated_only: bool = False,
 ) -> dict[str, dict]:
     """Build a continuous UUID-keyed mapping across all files.
 
@@ -560,7 +567,8 @@ def _build_continuous_mapping(
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
         ordered_symbols.extend(syms_sorted)
 
-    return _assign_numbers(ordered_symbols, prefixes, start_from)
+    return _assign_numbers(ordered_symbols, prefixes, start_from,
+                           unannotated_only=unannotated_only)
 
 
 def _build_per_sheet_mapping(
@@ -568,6 +576,8 @@ def _build_per_sheet_mapping(
     file_symbols: dict[Path, list[dict]],
     prefixes: list[str] | None,
     start_from: int,
+    *,
+    unannotated_only: bool = False,
 ) -> dict[str, dict]:
     """Build a per-sheet UUID-keyed mapping, restarting numbering per file."""
     mapping: dict[str, dict] = {}
@@ -575,7 +585,8 @@ def _build_per_sheet_mapping(
     for sch_file in all_files:
         syms = file_symbols[sch_file]
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
-        sheet_mapping = _assign_numbers(syms_sorted, prefixes, start_from)
+        sheet_mapping = _assign_numbers(syms_sorted, prefixes, start_from,
+                                        unannotated_only=unannotated_only)
         mapping.update(sheet_mapping)
 
     return mapping
@@ -585,16 +596,29 @@ def _assign_numbers(
     symbols: list[dict],
     prefixes: list[str] | None,
     start_from: int,
+    *,
+    unannotated_only: bool = False,
 ) -> dict[str, dict]:
     """Assign sequential numbers to symbols, handling multi-unit components.
 
     Multi-unit components (e.g., U1A and U1B) share the same base reference
     number but differ by their unit suffix.
 
+    When *unannotated_only* is ``True``, only symbols with unannotated
+    references (e.g. ``R?``) receive new numbers.  Already-assigned
+    references are left unchanged and their numbers are reserved so that
+    new assignments do not collide with them.
+
     Returns:
         Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
     """
     mapping: dict[str, dict] = {}
+
+    if unannotated_only:
+        return _assign_numbers_unannotated_only(
+            symbols, prefixes, start_from,
+        )
+
     # Track next number per prefix
     counters: dict[str, int] = {}
     # Track base number assignments for multi-unit: (prefix, old_number) -> new_number
@@ -641,6 +665,89 @@ def _assign_numbers(
     return mapping
 
 
+def _assign_numbers_unannotated_only(
+    symbols: list[dict],
+    prefixes: list[str] | None,
+    start_from: int,
+) -> dict[str, dict]:
+    """Assign numbers only to unannotated symbols, preserving existing refs.
+
+    Collects existing numbers per prefix into a reserved set, then assigns
+    new sequential numbers to unannotated (``?``) symbols while skipping
+    over reserved numbers.
+
+    Returns:
+        Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
+    """
+    mapping: dict[str, dict] = {}
+
+    # Phase 1: Collect existing (reserved) numbers per prefix
+    existing: dict[str, set[int]] = {}
+    # Also collect multi-unit base numbers that are already assigned
+    multi_unit_assigned: dict[tuple[str, int | None], int] = {}
+
+    for sym in symbols:
+        prefix = sym["prefix"]
+        number = sym["number"]
+        unit_suffix = sym["unit_suffix"]
+
+        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
+            continue
+        if prefixes is not None and prefix not in prefixes:
+            continue
+        if number is not None:
+            existing.setdefault(prefix, set()).add(number)
+
+    # Phase 2: Assign numbers only to unannotated symbols
+    counters: dict[str, int] = {}
+
+    def _next_available(pfx: str) -> int:
+        """Return the next available number for *pfx*, skipping reserved."""
+        n = counters.get(pfx, start_from)
+        reserved = existing.get(pfx, set())
+        while n in reserved:
+            n += 1
+        counters[pfx] = n + 1
+        return n
+
+    for sym in symbols:
+        ref = sym["reference"]
+        prefix = sym["prefix"]
+        number = sym["number"]
+        unit_suffix = sym["unit_suffix"]
+        sym_uuid = sym.get("uuid") or ref
+
+        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
+            continue
+        if prefixes is not None and prefix not in prefixes:
+            continue
+
+        # Skip already-assigned references
+        if number is not None:
+            continue
+
+        # Handle multi-unit unannotated components
+        if unit_suffix:
+            key = (prefix, number)  # number is None for unannotated
+            if key in multi_unit_assigned:
+                new_number = multi_unit_assigned[key]
+            else:
+                new_number = _next_available(prefix)
+                multi_unit_assigned[key] = new_number
+            new_ref = f"{prefix}{new_number}{unit_suffix}"
+        else:
+            new_number = _next_available(prefix)
+            new_ref = f"{prefix}{new_number}"
+
+        mapping[sym_uuid] = {
+            "old": ref,
+            "new": new_ref,
+            "unannotated": True,
+        }
+
+    return mapping
+
+
 def main(argv: list[str] | None = None):
     """CLI entry point."""
     import argparse
@@ -673,6 +780,11 @@ def main(argv: list[str] | None = None):
         help="Restart numbering per sheet instead of continuous",
     )
     parser.add_argument(
+        "--unannotated-only",
+        action="store_true",
+        help="Only assign numbers to unannotated (?) references, leaving existing ones unchanged",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -693,6 +805,7 @@ def main(argv: list[str] | None = None):
         start_from=args.start_from,
         per_sheet=args.per_sheet,
         format=args.format,
+        unannotated_only=args.unannotated_only,
     )
 
 
