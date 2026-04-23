@@ -1787,14 +1787,17 @@ class PlacementOptimizer:
             comp.update_position(dt)
 
             # Hard-clamp position to board bounding box (prevents escape)
-            margin = self.config.boundary_margin
-            comp.x = max(min_x + margin, min(max_x - margin, comp.x))
-            comp.y = max(min_y + margin, min(max_y - margin, comp.y))
+            # Use per-component courtyard extent so the entire physical
+            # footprint stays within the board, not just the center.
+            half_w = comp.width / 2 + self.config.boundary_margin
+            half_h = comp.height / 2 + self.config.boundary_margin
+            comp.x = max(min_x + half_w, min(max_x - half_w, comp.x))
+            comp.y = max(min_y + half_h, min(max_y - half_h, comp.y))
 
             # If component was clamped, kill its outward velocity
-            if comp.x <= min_x + margin or comp.x >= max_x - margin:
+            if comp.x <= min_x + half_w or comp.x >= max_x - half_w:
                 comp.vx = 0.0
-            if comp.y <= min_y + margin or comp.y >= max_y - margin:
+            if comp.y <= min_y + half_h or comp.y >= max_y - half_h:
                 comp.vy = 0.0
 
             # Update pin positions based on new position and rotation

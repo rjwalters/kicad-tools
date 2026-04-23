@@ -10,6 +10,7 @@ from kicad_tools.cli.stitch_cmd import (
     PadInfo,
     TraceSegment,
     TrackSegment,
+    ZonePolygon,
     calculate_dogleg_via_position,
     calculate_extended_escape_position,
     calculate_via_position,
@@ -23,6 +24,7 @@ from kicad_tools.cli.stitch_cmd import (
     find_existing_tracks,
     find_existing_vias,
     find_pads_on_nets,
+    find_same_net_filled_polygons,
     generate_grid_positions,
     get_net_map,
     get_net_number,
@@ -650,6 +652,24 @@ class TestCLIMain:
         # No project file should be created
         output_pro = output_file.with_suffix(".kicad_pro")
         assert not output_pro.exists()
+
+    def test_main_output_same_file(self, stitch_test_pcb: Path):
+        """Main with -o pointing to the same file should not raise SameFileError."""
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", str(stitch_test_pcb)])
+
+        assert exit_code == 0
+        assert "(via" in stitch_test_pcb.read_text()
+
+    def test_main_output_same_file_relative(self, stitch_test_pcb: Path):
+        """Main with -o as relative path resolving to input should succeed."""
+        # Build a relative path that resolves to the same file
+        parent = stitch_test_pcb.parent
+        relative_output = str(parent / "." / stitch_test_pcb.name)
+
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", relative_output])
+
+        assert exit_code == 0
+        assert "(via" in stitch_test_pcb.read_text()
 
     def test_main_dry_run_skips_project_copy(self, stitch_test_pcb: Path, tmp_path):
         """Dry-run should not copy project file."""
@@ -4035,3 +4055,477 @@ class TestStitchFilledPolygons:
         # The via placement should either avoid the polygon or skip the pad.
         assert isinstance(result.vias_added, list)
         assert isinstance(result.pads_skipped, list)
+
+
+# ---------------------------------------------------------------------------
+# Through-hole pad fixtures and tests (issue #1942)
+# ---------------------------------------------------------------------------
+
+# PCB with through-hole pads on a power net (no zones, no fills)
+THRU_HOLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000500")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-j1"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000600")
+    (at 110 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1b"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+)
+"""
+
+# PCB with through-hole pad inside a filled zone (should be skipped as connected)
+THRU_HOLE_ZONE_FILLED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000700")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-j1b"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "+3.3V"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-1")
+    (polygon (pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110)))
+  )
+)
+"""
+
+# PCB with through-hole pad inside a zone boundary but NOT filled (unfilled zone)
+THRU_HOLE_ZONE_UNFILLED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000800")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-j1c"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "+3.3V"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-2")
+    (polygon (pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110)))
+  )
+)
+"""
+
+# PCB with mixed SMD and through-hole pads on the same power net
+MIXED_PAD_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000900")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-j1d"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000001000")
+    (at 110 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1d"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000001100")
+    (at 120 100)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c2d"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-3")
+    (polygon (pts (xy 90 90) (xy 130 90) (xy 130 110) (xy 90 110)))
+  )
+)
+"""
+
+
+@pytest.fixture
+def thru_hole_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "thru_hole.kicad_pcb"
+    pcb_file.write_text(THRU_HOLE_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def thru_hole_zone_filled_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "thru_hole_zone_filled.kicad_pcb"
+    pcb_file.write_text(THRU_HOLE_ZONE_FILLED_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def thru_hole_zone_unfilled_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "thru_hole_zone_unfilled.kicad_pcb"
+    pcb_file.write_text(THRU_HOLE_ZONE_UNFILLED_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def mixed_pad_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "mixed_pad.kicad_pcb"
+    pcb_file.write_text(MIXED_PAD_PCB)
+    return pcb_file
+
+
+class TestThruHolePadDetection:
+    """Tests for through-hole pad detection in find_pads_on_nets (issue #1942)."""
+
+    def test_find_thru_hole_pads_on_net(self, thru_hole_pcb: Path):
+        """find_pads_on_nets should include through-hole pads."""
+        sexp = load_pcb(thru_hole_pcb)
+        pads = find_pads_on_nets(sexp, {"GND"})
+
+        refs = {f"{p.reference}.{p.pad_number}" for p in pads}
+        # J1.1 is thru_hole on GND, C1.1 is SMD on GND
+        assert "J1.1" in refs
+        assert "C1.1" in refs
+        assert len(pads) == 2
+
+    def test_thru_hole_pad_type_field(self, thru_hole_pcb: Path):
+        """Through-hole pads should have pad_type='thru_hole'."""
+        sexp = load_pcb(thru_hole_pcb)
+        pads = find_pads_on_nets(sexp, {"GND"})
+
+        j1_pad = next(p for p in pads if p.reference == "J1")
+        assert j1_pad.pad_type == "thru_hole"
+
+        c1_pad = next(p for p in pads if p.reference == "C1")
+        assert c1_pad.pad_type == "smd"
+
+    def test_find_thru_hole_pads_multiple_nets(self, thru_hole_pcb: Path):
+        """Should find through-hole pads on multiple nets."""
+        sexp = load_pcb(thru_hole_pcb)
+        pads = find_pads_on_nets(sexp, {"GND", "+3.3V"})
+
+        # J1.1 (GND), J1.2 (+3.3V), C1.1 (GND), C1.2 (+3.3V)
+        assert len(pads) == 4
+        thru_hole_pads = [p for p in pads if p.pad_type == "thru_hole"]
+        smd_pads = [p for p in pads if p.pad_type == "smd"]
+        assert len(thru_hole_pads) == 2
+        assert len(smd_pads) == 2
+
+
+class TestThruHoleZoneConnectivity:
+    """Tests for through-hole pad zone connectivity in is_pad_connected."""
+
+    def test_thru_hole_pad_connected_via_filled_zone(self):
+        """Through-hole pad inside filled zone polygon should be connected."""
+        pad = PadInfo(
+            reference="J1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            pad_type="thru_hole",
+        )
+
+        filled_poly = FilledPolygon(
+            net_number=1,
+            net_name="GND",
+            layer="In1.Cu",
+            points=[(90, 90), (110, 90), (110, 110), (90, 110)],
+        )
+
+        assert is_pad_connected(
+            pad,
+            vias=[],
+            track_points=[],
+            same_net_filled_polygons=[filled_poly],
+        )
+
+    def test_thru_hole_pad_connected_via_zone_boundary(self):
+        """Through-hole pad inside zone boundary should be connected (unfilled)."""
+        pad = PadInfo(
+            reference="J1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            pad_type="thru_hole",
+        )
+
+        zone_poly = ZonePolygon(
+            net_name="GND",
+            layer="In1.Cu",
+            points=[(90, 90), (110, 90), (110, 110), (90, 110)],
+        )
+
+        assert is_pad_connected(
+            pad,
+            vias=[],
+            track_points=[],
+            same_net_zone_polygons=[zone_poly],
+        )
+
+    def test_thru_hole_pad_outside_zone_not_connected(self):
+        """Through-hole pad outside zone should not be connected."""
+        pad = PadInfo(
+            reference="J1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=200,
+            y=200,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            pad_type="thru_hole",
+        )
+
+        filled_poly = FilledPolygon(
+            net_number=1,
+            net_name="GND",
+            layer="In1.Cu",
+            points=[(90, 90), (110, 90), (110, 110), (90, 110)],
+        )
+
+        assert not is_pad_connected(
+            pad,
+            vias=[],
+            track_points=[],
+            same_net_filled_polygons=[filled_poly],
+        )
+
+    def test_smd_pad_not_checked_for_zone_connectivity(self):
+        """SMD pads should NOT be considered connected just because of zones."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+            pad_type="smd",
+        )
+
+        filled_poly = FilledPolygon(
+            net_number=1,
+            net_name="GND",
+            layer="In1.Cu",
+            points=[(90, 90), (110, 90), (110, 110), (90, 110)],
+        )
+
+        # SMD pad is on F.Cu only -- it cannot reach In1.Cu zone without a via
+        assert not is_pad_connected(
+            pad,
+            vias=[],
+            track_points=[],
+            same_net_filled_polygons=[filled_poly],
+        )
+
+    def test_thru_hole_pad_different_net_zone_not_connected(self):
+        """Through-hole pad should not match zone on different net."""
+        pad = PadInfo(
+            reference="J1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            pad_type="thru_hole",
+        )
+
+        filled_poly = FilledPolygon(
+            net_number=2,
+            net_name="+3.3V",
+            layer="In1.Cu",
+            points=[(90, 90), (110, 90), (110, 110), (90, 110)],
+        )
+
+        assert not is_pad_connected(
+            pad,
+            vias=[],
+            track_points=[],
+            same_net_filled_polygons=[filled_poly],
+        )
+
+    def test_thru_hole_pad_with_existing_via_connected(self):
+        """Through-hole pad with nearby via should be connected (existing logic)."""
+        pad = PadInfo(
+            reference="J1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            pad_type="thru_hole",
+        )
+
+        # Via right next to the pad
+        assert is_pad_connected(pad, vias=[(100.1, 100, 1)], track_points=[])
+
+
+class TestThruHoleStitchIntegration:
+    """Integration tests for stitch with through-hole pads."""
+
+    def test_stitch_finds_thru_hole_pads(self, thru_hole_pcb: Path):
+        """run_stitch should detect through-hole pads needing vias."""
+        result = run_stitch(
+            pcb_path=thru_hole_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # J1.1 (thru_hole) + C1.1 (smd) = 2 GND pads, both needing vias
+        assert len(result.vias_added) == 2
+
+    def test_stitch_skips_thru_hole_in_filled_zone(
+        self, thru_hole_zone_filled_pcb: Path
+    ):
+        """Through-hole pad inside filled zone should be skipped."""
+        result = run_stitch(
+            pcb_path=thru_hole_zone_filled_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # J1.1 is thru_hole inside filled GND zone -- should be skipped
+        assert result.already_connected >= 1
+        # No SMD pads on this PCB, so the only GND pad is J1.1
+        via_refs = {v.pad.reference for v in result.vias_added}
+        assert "J1" not in via_refs
+
+    def test_stitch_skips_thru_hole_in_unfilled_zone(
+        self, thru_hole_zone_unfilled_pcb: Path
+    ):
+        """Through-hole pad inside zone boundary (unfilled) should be skipped."""
+        result = run_stitch(
+            pcb_path=thru_hole_zone_unfilled_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # J1.1 is thru_hole inside GND zone boundary -- connected via fallback
+        assert result.already_connected >= 1
+        via_refs = {v.pad.reference for v in result.vias_added}
+        assert "J1" not in via_refs
+
+    def test_stitch_mixed_pad_types(self, mixed_pad_pcb: Path):
+        """Mixed board: SMD pads get vias, thru_hole in zone is skipped."""
+        result = run_stitch(
+            pcb_path=mixed_pad_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # J1.1 (thru_hole, inside GND zone) should be skipped
+        # C1.1 and C2.1 (smd) should get vias
+        via_refs = [v.pad.reference for v in result.vias_added]
+        assert "J1" not in via_refs
+        assert via_refs.count("C1") == 1
+        assert via_refs.count("C2") == 1
+        assert result.already_connected >= 1
+
+    def test_stitch_thru_hole_outside_zone_gets_via(self, mixed_pad_pcb: Path):
+        """Through-hole pad NOT inside a zone should get a via."""
+        result = run_stitch(
+            pcb_path=mixed_pad_pcb,
+            net_names=["+3.3V"],
+            dry_run=True,
+        )
+
+        # J1.2 is thru_hole on +3.3V -- no +3.3V zone, so it needs a via
+        # C1.2 and C2.2 are SMD on +3.3V -- also need vias
+        assert len(result.vias_added) == 3
+
+    def test_find_same_net_filled_polygons(
+        self, thru_hole_zone_filled_pcb: Path
+    ):
+        """find_same_net_filled_polygons should return polys for specified nets."""
+        sexp = load_pcb(thru_hole_zone_filled_pcb)
+        polys = find_same_net_filled_polygons(sexp, {1})
+
+        assert len(polys) == 1
+        assert polys[0].net_name == "GND"
+        assert polys[0].net_number == 1
+
+    def test_find_same_net_filled_polygons_excludes_other_nets(
+        self, thru_hole_zone_filled_pcb: Path
+    ):
+        """find_same_net_filled_polygons should not return other-net polys."""
+        sexp = load_pcb(thru_hole_zone_filled_pcb)
+        polys = find_same_net_filled_polygons(sexp, {2})
+
+        assert len(polys) == 0
