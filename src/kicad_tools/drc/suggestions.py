@@ -507,6 +507,19 @@ def generate_fix_suggestions(
 
     # Solder mask
     if violation.type == ViolationType.SOLDER_MASK_BRIDGE:
+        # Check if this is inherent to a fine-pitch IC footprint
+        if violation.is_fine_pitch_inherent():
+            return FixSuggestion(
+                action=FixAction.ADJUST_RULE,
+                target="solder mask rule",
+                parameters={},
+                description=(
+                    "No action needed - solder mask bridge is inherent to "
+                    "fine-pitch IC footprint and acceptable for manufacturing"
+                ),
+                priority=3,
+                complexity="trivial",
+            )
         return FixSuggestion(
             action=FixAction.MOVE,
             target="pad/via",

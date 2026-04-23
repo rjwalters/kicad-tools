@@ -249,6 +249,55 @@ def _check_violation(
             manufacturer_limit=rules.min_via_drill_mm,
         )
 
+    # Solder mask bridge violations
+    if violation.type == ViolationType.SOLDER_MASK_BRIDGE:
+        # Check if this is a fine-pitch IC pad-to-pad bridge
+        if violation.is_fine_pitch_inherent(rules.min_solder_mask_dam_mm):
+            return ManufacturerCheck(
+                violation=violation,
+                result=CheckResult.PASS,
+                message=(
+                    f"Fine-pitch IC solder mask bridge - inherent to IC footprint "
+                    f"(dam {violation.actual_value_mm:.4f}mm < "
+                    f"{manufacturer_name} min {rules.min_solder_mask_dam_mm:.3f}mm, "
+                    f"acceptable for fine-pitch ICs)"
+                ),
+                manufacturer_id=manufacturer_id,
+                rule_name="solder_mask_dam",
+                manufacturer_limit=rules.min_solder_mask_dam_mm,
+                actual_value=violation.actual_value_mm,
+            )
+        # Non-fine-pitch: check actual value against manufacturer minimum
+        if violation.actual_value_mm is not None:
+            result = (
+                CheckResult.PASS
+                if violation.actual_value_mm >= rules.min_solder_mask_dam_mm
+                else CheckResult.FAIL
+            )
+            return ManufacturerCheck(
+                violation=violation,
+                result=result,
+                message=(
+                    f"Solder mask dam {violation.actual_value_mm:.4f}mm vs "
+                    f"{manufacturer_name} min {rules.min_solder_mask_dam_mm:.3f}mm"
+                ),
+                manufacturer_id=manufacturer_id,
+                rule_name="solder_mask_dam",
+                manufacturer_limit=rules.min_solder_mask_dam_mm,
+                actual_value=violation.actual_value_mm,
+            )
+        return ManufacturerCheck(
+            violation=violation,
+            result=CheckResult.WARNING,
+            message=(
+                f"Solder mask bridge - {manufacturer_name} requires "
+                f"{rules.min_solder_mask_dam_mm:.3f}mm minimum dam"
+            ),
+            manufacturer_id=manufacturer_id,
+            rule_name="solder_mask_dam",
+            manufacturer_limit=rules.min_solder_mask_dam_mm,
+        )
+
     # Connection issues - always critical, manufacturer-independent
     if violation.type in (ViolationType.UNCONNECTED_ITEMS, ViolationType.SHORTING_ITEMS):
         return ManufacturerCheck(
