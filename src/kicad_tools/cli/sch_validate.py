@@ -176,8 +176,15 @@ def check_missing_footprints(schematic_path: str) -> list[ValidationIssue]:
                                 location=node.get_path_string(),
                             )
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="footprint",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
 
     except Exception as e:
         issues.append(
@@ -216,8 +223,15 @@ def check_missing_values(schematic_path: str) -> list[ValidationIssue]:
                                 location=node.get_path_string(),
                             )
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="value",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
 
     except Exception as e:
         issues.append(
@@ -346,8 +360,15 @@ def check_no_connect_on_input_pins(schematic_path: str) -> list[ValidationIssue]
                                     location=node.get_path_string(),
                                 )
                             )
-            except Exception:
-                pass
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="no_connect",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
 
     except Exception as e:
         issues.append(
@@ -388,8 +409,15 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
                     if gl.text not in label_map:
                         label_map[gl.text] = []
                     label_map[gl.text].append((gl.shape, sheet_path))
-            except Exception:
-                pass
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="global_label",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
 
         # Shapes that count as driver (can source a signal)
         driver_shapes = {"output", "tri_state", "bidirectional", "passive"}

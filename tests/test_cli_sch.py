@@ -1518,6 +1518,125 @@ class TestSchValidateGlobalLabelDirections:
         assert "global_label_directions" in result.checks_run
 
 
+class TestSchValidateSheetParseFailure:
+    """Tests that per-sheet parse failures emit info-level ValidationIssues."""
+
+    def _make_hierarchy_with_broken_sheet(self, tmp_path: Path) -> Path:
+        """Create a two-sheet hierarchy where the sub-sheet is unparseable."""
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "BrokenSub" (at 100 99 0))
+            (property "Sheetfile" "broken.kicad_sch" (at 100 111 0)))
+        )
+        """
+        parent_file = tmp_path / "top.kicad_sch"
+        parent_file.write_text(parent_sch)
+
+        # Write a truncated/broken sub-sheet
+        broken_file = tmp_path / "broken.kicad_sch"
+        broken_file.write_text("(kicad_sch (version 20231120) TRUNCATED")
+
+        return parent_file
+
+    def test_check_missing_footprints_reports_broken_sheet(self, tmp_path: Path):
+        """check_missing_footprints should emit an info issue for unparseable sheets."""
+        from kicad_tools.cli.sch_validate import check_missing_footprints
+
+        parent_file = self._make_hierarchy_with_broken_sheet(tmp_path)
+        issues = check_missing_footprints(str(parent_file))
+
+        info_issues = [i for i in issues if i.severity == "info" and i.category == "footprint"]
+        assert len(info_issues) >= 1
+        assert any("Skipped sheet" in i.message for i in info_issues)
+        # Verify location is populated
+        assert all(i.location for i in info_issues)
+
+    def test_check_missing_values_reports_broken_sheet(self, tmp_path: Path):
+        """check_missing_values should emit an info issue for unparseable sheets."""
+        from kicad_tools.cli.sch_validate import check_missing_values
+
+        parent_file = self._make_hierarchy_with_broken_sheet(tmp_path)
+        issues = check_missing_values(str(parent_file))
+
+        info_issues = [i for i in issues if i.severity == "info" and i.category == "value"]
+        assert len(info_issues) >= 1
+        assert any("Skipped sheet" in i.message for i in info_issues)
+
+    def test_check_global_label_directions_reports_broken_sheet(self, tmp_path: Path):
+        """check_global_label_directions should emit an info issue for unparseable sheets."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_file = self._make_hierarchy_with_broken_sheet(tmp_path)
+        issues = check_global_label_directions(str(parent_file))
+
+        info_issues = [i for i in issues if i.severity == "info" and i.category == "global_label"]
+        assert len(info_issues) >= 1
+        assert any("Skipped sheet" in i.message for i in info_issues)
+
+    def test_all_sheets_broken_reports_one_per_sheet(self, tmp_path: Path):
+        """When all sheets fail to parse, result should contain one info issue per broken sheet."""
+        from kicad_tools.cli.sch_validate import check_missing_footprints
+
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub1" (at 100 99 0))
+            (property "Sheetfile" "sub1.kicad_sch" (at 100 111 0)))
+          (sheet (at 200 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000003")
+            (property "Sheetname" "Sub2" (at 200 99 0))
+            (property "Sheetfile" "sub2.kicad_sch" (at 200 111 0)))
+        )
+        """
+        parent_file = tmp_path / "top.kicad_sch"
+        parent_file.write_text(parent_sch)
+
+        # Both sub-sheets are broken
+        (tmp_path / "sub1.kicad_sch").write_text("BROKEN")
+        (tmp_path / "sub2.kicad_sch").write_text("BROKEN")
+
+        issues = check_missing_footprints(str(parent_file))
+
+        # The parent sheet itself may also fail to parse, so we check for at least 2
+        # broken sub-sheet issues (sub1 and sub2)
+        info_issues = [
+            i for i in issues
+            if i.severity == "info" and i.category == "footprint" and "Skipped sheet" in i.message
+        ]
+        assert len(info_issues) >= 2
+
+    def test_valid_sheets_produce_no_skip_issues(self, tmp_path: Path):
+        """Valid sheets should not produce any 'Skipped sheet' info issues."""
+        from kicad_tools.cli.sch_validate import check_missing_footprints
+
+        sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+        )
+        """
+        sch_file = tmp_path / "valid.kicad_sch"
+        sch_file.write_text(sch)
+
+        issues = check_missing_footprints(str(sch_file))
+
+        skip_issues = [i for i in issues if "Skipped sheet" in i.message]
+        assert len(skip_issues) == 0
+
+
 class TestSchCheckConnections:
     """Tests for sch_check_connections.py CLI."""
 
