@@ -150,8 +150,40 @@ def _show_config() -> int:
     _print_value(
         "cache_ttl_days", config.parts.cache_ttl_days, config.get_source("parts.cache_ttl_days")
     )
+    print()
+
+    # Show native backend status
+    print("[native_backends]")
+    _print_native_backend_status()
 
     return 0
+
+
+def _print_native_backend_status() -> None:
+    """Print status of C++ native backends."""
+    backends = {
+        "router": ("kicad_tools.router.cpp_backend", "router"),
+        "placement": ("kicad_tools.placement.cpp_backend", "placement"),
+        "drc": ("kicad_tools.drc.cpp_backend", "drc"),
+    }
+    any_missing = False
+    for name, (module_path, _label) in backends.items():
+        try:
+            import importlib
+
+            mod = importlib.import_module(module_path)
+            info = mod.get_backend_info()
+            if info.get("available"):
+                version = info.get("version", "unknown")
+                print(f"{name} = \"cpp v{version}\"  # installed")
+            else:
+                print(f"{name} = \"python (fallback)\"  # NOT installed")
+                any_missing = True
+        except Exception:
+            print(f"{name} = \"python (fallback)\"  # NOT installed")
+            any_missing = True
+    if any_missing:
+        print("# Run 'kct build-native' for 10-100x faster routing/placement")
 
 
 def _print_value(key: str, value, source: str) -> None:

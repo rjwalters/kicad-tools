@@ -1,5 +1,13 @@
 """
-A* pathfinding for PCB routing.
+A* pathfinding for PCB routing (pure Python fallback).
+
+NOTE: This is the pure Python implementation. A C++ backend is available
+that provides 10-100x speedup. Build it with:
+
+    kct build-native
+
+The C++ backend is used automatically when available. This module serves
+as the fallback when the C++ extension is not installed.
 
 This module provides:
 - AStarNode: Node for priority queue in A* search

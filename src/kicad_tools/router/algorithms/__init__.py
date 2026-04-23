@@ -6,6 +6,10 @@ This package contains various routing algorithms:
 - Monte Carlo multi-start routing
 - Two-phase global+detailed routing
 - Hierarchical global-to-detailed routing
+
+NOTE: These algorithms use the pure Python pathfinder by default. A C++
+backend is available that provides 10-100x speedup for the core A* loop.
+Build it with 'kct build-native' for production use.
 """
 
 from .hierarchical import HierarchicalRouter
