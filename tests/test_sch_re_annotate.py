@@ -1548,6 +1548,198 @@ class TestUnannotatedOnly:
 
 
 # ---------------------------------------------------------------------------
+# Bare unannotated symbols (no instances block, no pin entries)
+# ---------------------------------------------------------------------------
+
+# Schematic with one assigned R1 and one R? that has NO (instances) block and
+# NO (pin) entries — a "bare" unannotated symbol as KiCad may write it when a
+# component is placed but not yet annotated in a new project.
+BARE_UNANNOTATED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R?"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "C?"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "100nF"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+SPACE_INDENTED_BARE_UNANNOTATED_SCHEMATIC = _tabs_to_spaces(BARE_UNANNOTATED_SCHEMATIC)
+
+
+class TestBareUnannotatedSymbols:
+    """Tests for symbols with ``Reference "?"`` but no (instances) or (pin) blocks.
+
+    These are "bare" unannotated symbols that KiCad may emit when a component
+    is placed but not yet annotated in a freshly created project.
+    """
+
+    def test_extract_detects_bare_unannotated(self):
+        """_extract_symbols_from_text must find bare R? and C? symbols."""
+        symbols = _extract_symbols_from_text(BARE_UNANNOTATED_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert "R?" in refs
+        assert "C?" in refs
+        assert "R1" in refs
+
+    def test_extract_uuid_for_bare_symbols(self):
+        """UUIDs must be correctly extracted for bare unannotated symbols."""
+        symbols = _extract_symbols_from_text(BARE_UNANNOTATED_SCHEMATIC)
+        by_uuid = {s["uuid"]: s for s in symbols}
+        assert "22222222-2222-2222-2222-222222222222" in by_uuid
+        assert by_uuid["22222222-2222-2222-2222-222222222222"]["reference"] == "R?"
+        assert "33333333-3333-3333-3333-333333333333" in by_uuid
+        assert by_uuid["33333333-3333-3333-3333-333333333333"]["reference"] == "C?"
+
+    def test_unannotated_only_annotates_bare_symbols(self, tmp_path):
+        """--unannotated-only must assign numbers to bare unannotated symbols."""
+        sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # R1 must remain unchanged
+        assert '"Reference" "R1"' in text
+        # R? must be assigned R2 (next after R1)
+        assert '"Reference" "R2"' in text
+        # C? must be assigned C1
+        assert '"Reference" "C1"' in text
+        # No unannotated refs remain
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+    def test_creates_instances_block_for_bare_symbols(self, tmp_path):
+        """Bare unannotated symbols must receive an (instances) block."""
+        sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # The instances block for the project must be present
+        assert '(project "test"' in text
+        # The new references must appear in instance entries
+        assert '(reference "R2")' in text
+        assert '(reference "C1")' in text
+
+    def test_instances_block_contains_correct_path(self, tmp_path):
+        """The created instances block must use the correct project UUID path."""
+        sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Root UUID is 00000000-0000-0000-0000-000000000001 so path must be
+        # /00000000-0000-0000-0000-000000000001
+        assert '/00000000-0000-0000-0000-000000000001' in text
+
+    def test_full_annotate_also_handles_bare_symbols(self, tmp_path):
+        """Full re-annotate (not just --unannotated-only) must handle bare symbols too."""
+        sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # All symbols must be annotated
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+    def test_space_indented_bare_unannotated(self, tmp_path):
+        """Bare unannotated symbols in space-indented files are also handled."""
+        sch = _write_sch(tmp_path, SPACE_INDENTED_BARE_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R2"' in text
+        assert '"Reference" "C1"' in text
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+    def test_add_project_instance_bare_symbol(self):
+        """_add_project_instance creates an instances block for bare symbols."""
+        result = _add_project_instance(
+            BARE_UNANNOTATED_SCHEMATIC,
+            "22222222-2222-2222-2222-222222222222",
+            "test",
+            "/00000000-0000-0000-0000-000000000001",
+            "R2",
+        )
+        assert '(instances' in result
+        assert '(project "test"' in result
+        assert '(reference "R2")' in result
+
+
+# ---------------------------------------------------------------------------
 # --include-power flag tests
 # ---------------------------------------------------------------------------
 
