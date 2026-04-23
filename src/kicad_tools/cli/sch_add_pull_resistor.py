@@ -40,7 +40,6 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
-from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
 
 
 @dataclass
@@ -73,21 +72,6 @@ def _setup_lib_manager(
             lib_manager.load_library(lib_file)
 
     # Load symbols already embedded in the schematic
-    if sch.lib_symbols:
-        for sym_sexp in sch.lib_symbols.find_all("symbol"):
-            sym_name = sym_sexp.get_string(0) or ""
-            if sym_name:
-                lib_sym_obj = LibrarySymbol.from_sexp(sym_sexp)
-                if ":" in sym_name:
-                    lib_name = sym_name.split(":")[0]
-                    sym_short = sym_name.split(":", 1)[1]
-                    if lib_name not in lib_manager.libraries:
-                        lib_manager.libraries[lib_name] = SymbolLibrary(
-                            path="", symbols={}
-                        )
-                    lib_manager.libraries[lib_name].symbols[sym_short] = lib_sym_obj
-
-    # Also load embedded via the standard API
     lib_manager.load_embedded(sch)
 
     return lib_manager
@@ -125,8 +109,19 @@ def _resolve_pin_position(
 
 
 def _auto_reference(sch: Schematic) -> str:
-    """Return 'R?' for unannotated auto-assignment."""
-    return "R?"
+    """Return next available R reference by scanning existing resistors.
+
+    Scans all symbols in the schematic for references matching 'R<number>',
+    then returns 'R<max+1>'. Falls back to 'R1' if no numbered resistors exist.
+    """
+    max_n = 0
+    for sym in sch.symbols:
+        ref = sym.reference or ""
+        if ref.startswith("R") and len(ref) > 1 and ref[1:].isdigit():
+            n = int(ref[1:])
+            if n > max_n:
+                max_n = n
+    return f"R{max_n + 1}"
 
 
 def _check_collisions(
@@ -249,12 +244,6 @@ def run_add_pull_resistor(args) -> int:
     resistor_lib_sym = lib_manager.get_symbol(resistor_lib_id)
     need_embed_resistor = sch.get_lib_symbol(resistor_lib_id) is None
 
-    if resistor_lib_sym is None and not need_embed_resistor:
-        # Try from embedded
-        lib_sym_sexp = sch.get_lib_symbol(resistor_lib_id)
-        if lib_sym_sexp is not None:
-            resistor_lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-
     if resistor_lib_sym is None:
         print(
             f"Error: Library symbol '{resistor_lib_id}' not found. "
@@ -301,7 +290,7 @@ def run_add_pull_resistor(args) -> int:
     else:
         power_x = _snap(power_side_pin[0])
         power_y = _snap(power_side_pin[1])
-        power_rotation = 0.0
+        power_rotation = 180.0
 
     power_position = (power_x, power_y)
 
@@ -329,9 +318,7 @@ def run_add_pull_resistor(args) -> int:
 
     # Embed resistor symbol if needed
     if need_embed_resistor:
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {resistor_lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {resistor_lib_id}"))
 
     # Embed power symbol if needed
     power_lib_id = f"power:{power_net}"
@@ -346,9 +333,7 @@ def run_add_pull_resistor(args) -> int:
                 file=sys.stderr,
             )
             return 1
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {power_lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {power_lib_id}"))
 
     # Place resistor
     planned.append(
@@ -399,9 +384,7 @@ def run_add_pull_resistor(args) -> int:
 
     # --- Create backup if requested ---
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
@@ -439,14 +422,16 @@ def run_add_pull_resistor(args) -> int:
     power_pos_snapped = (_snap(power_x), _snap(power_y))
 
     # Only add wire if start != end
-    if abs(ic_pin_snapped[0] - ic_side_snapped[0]) > 0.01 or abs(
-        ic_pin_snapped[1] - ic_side_snapped[1]
-    ) > 0.01:
+    if (
+        abs(ic_pin_snapped[0] - ic_side_snapped[0]) > 0.01
+        or abs(ic_pin_snapped[1] - ic_side_snapped[1]) > 0.01
+    ):
         sch.add_wire(ic_pin_snapped, ic_side_snapped)
 
-    if abs(power_side_snapped[0] - power_pos_snapped[0]) > 0.01 or abs(
-        power_side_snapped[1] - power_pos_snapped[1]
-    ) > 0.01:
+    if (
+        abs(power_side_snapped[0] - power_pos_snapped[0]) > 0.01
+        or abs(power_side_snapped[1] - power_pos_snapped[1]) > 0.01
+    ):
         sch.add_wire(power_side_snapped, power_pos_snapped)
 
     # 5. Save
@@ -467,21 +452,15 @@ def main(argv=None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--ref", required=True, help="Symbol reference of target IC (e.g., U5)"
-    )
-    parser.add_argument(
-        "--pin", required=True, help="Pin number on target IC (e.g., 25)"
-    )
+    parser.add_argument("--ref", required=True, help="Symbol reference of target IC (e.g., U5)")
+    parser.add_argument("--pin", required=True, help="Pin number on target IC (e.g., 25)")
     parser.add_argument(
         "--direction",
         required=True,
         choices=["up", "down"],
         help="Pull-up (power) or pull-down (ground)",
     )
-    parser.add_argument(
-        "--value", required=True, help="Resistor value (e.g., 10k)"
-    )
+    parser.add_argument("--value", required=True, help="Resistor value (e.g., 10k)")
     parser.add_argument(
         "--power-net",
         dest="power_net",
@@ -502,21 +481,11 @@ def main(argv=None):
         default=5.08,
         help="Grid distance from IC pin to resistor center in mm (default: 5.08)",
     )
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
-    parser.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
-    parser.add_argument(
-        "--force", action="store_true", help="Place even if collision detected"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
+    parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    parser.add_argument("--force", action="store_true", help="Place even if collision detected")
 
     args = parser.parse_args(argv)
     return run_add_pull_resistor(args)

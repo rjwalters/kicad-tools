@@ -6,20 +6,15 @@ explicit reference, collision detection, power net defaults, and error cases.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.sch_add_pull_resistor import (
-    PlannedAction,
-    _auto_reference,
-    _check_collisions,
-    _resolve_pin_position,
-    _setup_lib_manager,
     _snap,
+)
+from kicad_tools.cli.sch_add_pull_resistor import (
     main as add_pull_main,
-    run_add_pull_resistor,
 )
 from kicad_tools.schema import Schematic
 
@@ -138,13 +133,19 @@ class TestPullUpBasic:
         # Use pin 3 (VCC pin at top of IC) for pull-up test
         # Pin 3 is at local (0, 5.08) with direction 270, length 2.54
         # So absolute pin position = IC pos (100, 80) + pin offset
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
         assert rc == 0
 
         # Reload and check that new symbols were added
@@ -173,13 +174,19 @@ class TestPullDownBasic:
     def test_pull_down_places_symbols_and_wires(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--direction", "down",
-            "--value", "10k",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--direction",
+                "down",
+                "--value",
+                "10k",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -205,14 +212,20 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path)
         original = sch_path.read_text()
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--dry-run",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--dry-run",
+            ]
+        )
         assert rc == 0
 
         # File should be unchanged
@@ -221,14 +234,20 @@ class TestDryRun:
     def test_dry_run_output(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--dry-run",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--dry-run",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "DRY RUN" in captured.out
@@ -247,14 +266,20 @@ class TestBackup:
     def test_backup_created(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--backup",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--backup",
+            ]
+        )
         assert rc == 0
 
         # Check backup file exists
@@ -271,20 +296,26 @@ class TestAutoReference:
     def test_auto_reference_no_collision(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
-        # The auto-assigned ref should be R?
+        # No existing R<n> refs, so auto-assign yields R1
         r_syms = [s for s in sch.symbols if s.lib_id == "Device:R"]
         assert len(r_syms) == 1
-        assert r_syms[0].reference == "R?"
+        assert r_syms[0].reference == "R1"
 
 
 # ---------------------------------------------------------------------------
@@ -296,14 +327,21 @@ class TestExplicitReference:
     def test_explicit_reference(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--reference", "R99",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--reference",
+                "R99",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -321,37 +359,55 @@ class TestErrors:
     def test_pin_not_found_error(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "99",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "99",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
         assert rc == 1
 
     def test_ref_not_found_error(self, tmp_path):
         sch_path = _write_sch(tmp_path)
 
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U99",
-            "--pin", "1",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U99",
+                "--pin",
+                "1",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
         assert rc == 1
 
     def test_ref_not_found_message(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U99",
-            "--pin", "1",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U99",
+                "--pin",
+                "1",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "U99" in captured.err
@@ -360,13 +416,19 @@ class TestErrors:
     def test_pin_not_found_message(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "99",
-            "--direction", "up",
-            "--value", "10k",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "99",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "99" in captured.err
@@ -383,21 +445,28 @@ class TestCollisionWarning:
         """Place a pull resistor near an existing symbol to trigger collision warning."""
         sch_path = _write_sch(tmp_path)
 
-        # Place at pin 3 with a very small offset to potentially overlap with IC
-        rc = add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--offset", "2.0",
-        ])
+        # Pin 3 (VCC) is at local (0, 5.08) direction 270 on U1 at (100, 80).
+        # With offset=2.0 the resistor center lands very close to U1 (100, 80),
+        # within the default tolerance of 2.54mm — collision is expected.
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--offset",
+                "2.0",
+            ]
+        )
 
         captured = capsys.readouterr()
-        # Check if warning was printed (collision with U1 is likely at this offset)
-        # The collision check may or may not trigger depending on geometry,
-        # but the command should still succeed
         assert rc == 0
+        assert "Warning" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -409,14 +478,20 @@ class TestPowerNetDefaults:
     def test_power_net_default_up(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--dry-run",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--dry-run",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "+3.3V" in captured.out
@@ -424,14 +499,20 @@ class TestPowerNetDefaults:
     def test_power_net_default_down(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--direction", "down",
-            "--value", "10k",
-            "--dry-run",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--direction",
+                "down",
+                "--value",
+                "10k",
+                "--dry-run",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "GND" in captured.out
@@ -446,19 +527,26 @@ class TestOffsetOverride:
     def test_offset_changes_placement(self, tmp_path, capsys):
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--offset", "10.16",
-            "--dry-run",
-        ])
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--offset",
+                "10.16",
+                "--dry-run",
+            ]
+        )
 
         captured = capsys.readouterr()
+        assert rc == 0
         assert "Planned actions" in captured.out
-        assert rc == 0 if "rc" in dir() else True  # just check output
 
 
 # ---------------------------------------------------------------------------
@@ -471,14 +559,20 @@ class TestOutputFormat:
         """Output format should match other sch add-* commands."""
         sch_path = _write_sch(tmp_path)
 
-        add_pull_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "3",
-            "--direction", "up",
-            "--value", "10k",
-            "--dry-run",
-        ])
+        add_pull_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--dry-run",
+            ]
+        )
 
         captured = capsys.readouterr()
         # Should have "Planned actions (N):" header
