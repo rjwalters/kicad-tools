@@ -404,6 +404,11 @@ class ManufacturingPackage:
             # Load collected JSON snapshots into ReportData kwargs
             data_kwargs = self._load_report_data_dir(data_dir)
 
+            # Generate figures (PCB renders + schematic screenshots)
+            figures_data = self._generate_figures(version_dir)
+            if figures_data:
+                data_kwargs.update(figures_data)
+
             project_name = self.pcb_path.stem
             data = ReportData(
                 project_name=project_name,
@@ -426,6 +431,69 @@ class ManufacturingPackage:
         except Exception as e:
             result.errors.append(f"Report generation failed: {e}")
             logger.error(f"Report generation failed: {e}")
+
+    def _generate_figures(self, version_dir: Path) -> dict | None:
+        """Generate PCB and schematic figures for the report.
+
+        Returns a dict with ``pcb_figures`` and/or ``schematic_sheets``
+        keys suitable for merging into ReportData kwargs, or ``None``
+        if figure generation is unavailable or fails.
+        """
+        try:
+            from ..report.figures import ReportFigureGenerator
+            from ..report.utils import find_schematic
+        except ImportError:
+            logger.info("Figure generation skipped: dependencies not available")
+            return None
+
+        sch_path = self.schematic_path
+        if sch_path is None:
+            sch_path = find_schematic(self.pcb_path)
+        if sch_path is None:
+            logger.info("Figure generation skipped: no schematic found")
+            return None
+
+        figures_dir = version_dir / "figures"
+        try:
+            fig_gen = ReportFigureGenerator()
+            entries = fig_gen.generate_all(self.pcb_path, sch_path, figures_dir)
+        except (RuntimeError, OSError) as exc:
+            logger.warning(f"Figure generation skipped: {exc}")
+            return None
+
+        if not entries:
+            return None
+
+        # Convert FigureEntry list to ReportData-compatible dicts
+        type_to_key = {
+            "pcb_front": "front",
+            "pcb_back": "back",
+            "pcb_copper": "copper",
+            "assembly": "assembly",
+        }
+        result: dict = {}
+
+        pcb_figs: dict[str, str] = {}
+        for entry in entries:
+            key = type_to_key.get(entry.figure_type)
+            if key is not None:
+                pcb_figs[key] = f"figures/{entry.filename}"
+        if pcb_figs:
+            result["pcb_figures"] = pcb_figs
+
+        sch_sheets = [
+            {"name": entry.caption, "figure_path": f"figures/{entry.filename}"}
+            for entry in entries
+            if entry.figure_type == "schematic"
+        ]
+        if sch_sheets:
+            result["schematic_sheets"] = sch_sheets
+
+        logger.info(
+            f"Generated {len(entries)} figure(s): "
+            f"{len(pcb_figs)} PCB, {len(sch_sheets)} schematic"
+        )
+        return result or None
 
     @staticmethod
     def _render_report_pdf(

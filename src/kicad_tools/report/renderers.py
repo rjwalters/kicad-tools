@@ -43,9 +43,26 @@ def render_html(
             "Install with: pip install 'kicad-tools[report]'"
         ) from exc
 
+    # Strip YAML front matter (used by pandoc) and extract metadata
+    markdown_content, metadata = _strip_yaml_front_matter(markdown_content)
+
+    # Replace LaTeX page breaks with HTML markers
+    markdown_content = markdown_content.replace("\\newpage", "<!-- page-break -->")
+
     html_body = md_lib.markdown(
         markdown_content,
         extensions=["tables", "fenced_code", "toc"],
+    )
+
+    # Convert page-break markers to CSS page-break divs
+    html_body = html_body.replace(
+        "<p><!-- page-break --></p>",
+        '<div class="page-break"></div>',
+    )
+    # Handle case where comment isn't wrapped in <p>
+    html_body = html_body.replace(
+        "<!-- page-break -->",
+        '<div class="page-break"></div>',
     )
 
     css = _load_css()
@@ -57,7 +74,13 @@ def render_html(
     # Wrap tables in a scrollable div for responsive layout
     html_body = _wrap_tables(html_body)
 
-    return _wrap_html(html_body, css)
+    # Prepend title block from YAML metadata
+    if metadata:
+        title_html = _metadata_to_title_block(metadata)
+        html_body = title_html + html_body
+
+    title = metadata.get("title", "KiCad Design Report") if metadata else "KiCad Design Report"
+    return _wrap_html(html_body, css, title=title)
 
 
 def render_pdf(html_content: str, output_path: Path | str) -> None:
@@ -150,6 +173,52 @@ def pdf_renderer_available() -> str | None:
     return None
 
 
+def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
+    """Strip YAML front matter from Markdown content.
+
+    Returns the content without the front matter block and a dict of
+    parsed metadata fields.  Only simple ``key: value`` pairs are
+    extracted; nested structures are ignored.
+    """
+    if not content.startswith("---"):
+        return content, {}
+
+    # Find closing ---
+    end = content.find("\n---", 3)
+    if end == -1:
+        return content, {}
+
+    front_matter = content[3:end].strip()
+    body = content[end + 4:]  # skip past "\n---"
+
+    metadata: dict[str, str] = {}
+    for line in front_matter.splitlines():
+        line = line.strip()
+        if ":" in line and not line.startswith("-") and not line.startswith("#"):
+            key, _, value = line.partition(":")
+            value = value.strip().strip('"').strip("'")
+            if value:
+                metadata[key.strip()] = value
+
+    return body, metadata
+
+
+def _metadata_to_title_block(metadata: dict) -> str:
+    """Convert YAML metadata to an HTML title block."""
+    parts = []
+    parts.append('<div class="cover-block">')
+    if "title" in metadata:
+        parts.append(f"<h1>{metadata['title']}</h1>")
+    if "subtitle" in metadata:
+        parts.append(f'<p class="cover-meta">{metadata["subtitle"]}</p>')
+    if "date" in metadata:
+        parts.append(f'<p class="cover-meta">{metadata["date"]}</p>')
+    if "author" in metadata:
+        parts.append(f'<p class="cover-meta">{metadata["author"]}</p>')
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def _load_css() -> str:
     """Load the report CSS template from the templates directory.
 
@@ -209,7 +278,7 @@ def _wrap_tables(html: str) -> str:
     ).replace("</table>", "</table></div>")
 
 
-def _wrap_html(body: str, css: str) -> str:
+def _wrap_html(body: str, css: str, title: str = "KiCad Design Report") -> str:
     """Wrap an HTML body fragment in a complete HTML5 document.
 
     The CSS is embedded inline in a ``<style>`` tag so the output is
@@ -218,6 +287,7 @@ def _wrap_html(body: str, css: str) -> str:
     Args:
         body: HTML body content.
         css: CSS stylesheet content.
+        title: HTML ``<title>`` text.
 
     Returns:
         Complete HTML5 document string.
@@ -228,7 +298,7 @@ def _wrap_html(body: str, css: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="kicad-tools report renderer">
-<title>KiCad Design Report</title>
+<title>{title}</title>
 <style>
 {css}
 </style>

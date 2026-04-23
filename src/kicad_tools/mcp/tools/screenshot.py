@@ -73,38 +73,50 @@ def _macos_cairo_lib_dirs() -> list[str]:
 
 
 def _try_preload_cairo_macos() -> bool:
-    """Attempt to pre-load ``libcairo`` from Homebrew paths on macOS.
+    """Attempt to make ``libcairo`` discoverable from Homebrew paths on macOS.
 
-    Uses :func:`ctypes.cdll.LoadLibrary` to explicitly load the shared
-    library before ``cairosvg`` tries to find it via the default dynamic
-    linker search.  This is more reliable than setting
-    ``DYLD_FALLBACK_LIBRARY_PATH`` because the env var may not take
-    effect for already-initialised ``dlopen`` state.
+    Sets ``DYLD_FALLBACK_LIBRARY_PATH`` to include the Homebrew lib
+    directory so that ``cairocffi``'s ``ffi.dlopen()`` can find the
+    native ``libcairo`` shared library.
+
+    When ``import cairosvg`` has already failed (because ``cairocffi``
+    raised ``OSError`` at module scope), the failed modules are cached
+    by Python.  After updating the library path, the cached failures
+    are evicted so that a fresh import succeeds.
 
     Returns ``True`` if a subsequent cairosvg probe render succeeds
-    after pre-loading the library; ``False`` otherwise.
+    after configuring the library path; ``False`` otherwise.
     """
-    import cairosvg  # already known importable at this point
-
     probe_svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>"
 
     for lib_dir in _macos_cairo_lib_dirs():
         cairo_path = Path(lib_dir) / "libcairo.dylib"
         if not cairo_path.exists():
             continue
-        try:
-            ctypes.cdll.LoadLibrary(str(cairo_path))
-            logger.debug("Pre-loaded libcairo from %s", cairo_path)
-        except OSError:
-            logger.debug("Failed to load libcairo from %s", cairo_path)
-            continue
 
-        # Re-attempt the probe render now that the library is loaded.
+        # Add to DYLD_FALLBACK_LIBRARY_PATH so cairocffi's ffi.dlopen()
+        # can find libcairo on the next import attempt.
+        existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+        if lib_dir not in existing:
+            os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = (
+                f"{lib_dir}:{existing}" if existing else lib_dir
+            )
+            logger.debug("Added %s to DYLD_FALLBACK_LIBRARY_PATH", lib_dir)
+
+        # Evict cached failed imports so cairocffi and cairosvg can
+        # retry with the updated library path.
+        for mod_name in list(sys.modules):
+            if mod_name.startswith(("cairocffi", "cairosvg")):
+                del sys.modules[mod_name]
+
+        # Re-attempt the probe render.
         try:
+            import cairosvg
+
             cairosvg.svg2png(bytestring=probe_svg)
             logger.info("Auto-detected cairo library at %s", lib_dir)
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, ImportError):
             continue
 
     return False

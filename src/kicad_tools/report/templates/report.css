@@ -390,6 +390,10 @@ h1 {
         page-break-before: always;
     }
 
+    .page-break {
+        page-break-before: always;
+    }
+
     /* Avoid breaking inside these elements */
     table, pre, img, figure, .summary-box {
         page-break-inside: avoid;
