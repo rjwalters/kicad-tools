@@ -406,6 +406,9 @@ class TestRenderReportPdf:
             with patch(
                 "kicad_tools.report.renderers._weasyprint_available",
                 return_value=False,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
+                return_value=False,
             ):
                 pkg._generate_report(out_dir, result)
 

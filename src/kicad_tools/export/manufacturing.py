@@ -144,7 +144,11 @@ def _create_project_zip(
     zip_path = output_dir / zip_name
 
     extensions = {".kicad_pcb", ".kicad_sch", ".kicad_pro"}
-    project_files = [f for f in project_dir.iterdir() if f.is_file() and f.suffix in extensions]
+    project_files = [
+        f
+        for f in project_dir.iterdir()
+        if f.is_file() and f.suffix in extensions and "_backup_" not in f.stem
+    ]
 
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
@@ -331,9 +335,9 @@ class ManufacturingPackage:
         )
         if self.config.include_report:
             try:
-                from ..report.renderers import _weasyprint_available
+                from ..report.renderers import pdf_renderer_available
 
-                if _weasyprint_available():
+                if pdf_renderer_available() is not None:
                     result.report_path = out_dir / "report.pdf"
                 else:
                     result.report_path = out_dir / "report.md"
@@ -419,13 +423,14 @@ class ManufacturingPackage:
         version_dir: Path,
         result: ManufacturingResult,
     ) -> None:
-        """Render the Markdown report to PDF via HTML.
+        """Render the Markdown report to PDF.
 
-        Degrades gracefully: if ``weasyprint`` or ``markdown`` are not
-        installed, a warning is logged and only the ``.md`` file remains.
+        Tries weasyprint (HTML→PDF) first, then pandoc+TeX as fallback.
+        Degrades gracefully: if neither is available, a warning is logged
+        and only the ``.md`` file remains.
         """
         try:
-            from ..report.renderers import render_html, render_pdf
+            from ..report.renderers import pdf_renderer_available
         except ImportError:
             logger.warning(
                 "PDF report rendering skipped: install 'kicad-tools[report]' "
@@ -433,24 +438,36 @@ class ManufacturingPackage:
             )
             return
 
-        try:
-            md_content = report_path.read_text(encoding="utf-8")
-            figures_dir = version_dir / "figures"
-            html_content = render_html(
-                md_content,
-                figures_dir=figures_dir if figures_dir.is_dir() else None,
-            )
-            pdf_path = report_path.with_suffix(".pdf")
-            render_pdf(html_content, pdf_path)
-            result.report_path = pdf_path
-            logger.info(f"Generated PDF report: {pdf_path}")
-        except ImportError:
+        renderer = pdf_renderer_available()
+        if renderer is None:
             logger.warning(
-                "PDF report rendering skipped: weasyprint or markdown not "
-                "installed (hint: pip install 'kicad-tools[report]')"
+                "PDF report rendering skipped: install weasyprint or pandoc+TeX "
+                "for PDF output"
             )
+            return
+
+        pdf_path = report_path.with_suffix(".pdf")
+
+        try:
+            if renderer == "weasyprint":
+                from ..report.renderers import render_html, render_pdf
+
+                md_content = report_path.read_text(encoding="utf-8")
+                figures_dir = version_dir / "figures"
+                html_content = render_html(
+                    md_content,
+                    figures_dir=figures_dir if figures_dir.is_dir() else None,
+                )
+                render_pdf(html_content, pdf_path)
+            else:
+                from ..report.renderers import render_pdf_pandoc
+
+                render_pdf_pandoc(report_path, pdf_path)
+
+            result.report_path = pdf_path
+            logger.info(f"Generated PDF report via {renderer}: {pdf_path}")
         except Exception as exc:
-            logger.warning(f"PDF report rendering failed: {exc}")
+            logger.warning(f"PDF report rendering via {renderer} failed: {exc}")
 
     @staticmethod
     def _load_report_data_dir(data_dir: Path) -> dict:

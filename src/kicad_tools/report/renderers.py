@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -82,6 +84,46 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
 
 
+def render_pdf_pandoc(
+    markdown_path: Path | str,
+    output_path: Path | str,
+    pdf_engine: str = "xelatex",
+) -> None:
+    """Render a Markdown file to PDF via pandoc and a TeX engine.
+
+    Args:
+        markdown_path: Path to the Markdown source file.
+        output_path: Destination path for the PDF file.
+        pdf_engine: TeX engine to use (xelatex, pdflatex, or lualatex).
+
+    Raises:
+        RuntimeError: If pandoc exits with a non-zero status.
+        FileNotFoundError: If pandoc is not installed.
+    """
+    markdown_path = Path(markdown_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "pandoc",
+        str(markdown_path),
+        "-o",
+        str(output_path),
+        f"--pdf-engine={pdf_engine}",
+        "--variable=geometry:margin=1in",
+        "--variable=colorlinks:true",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"pandoc failed (exit {result.returncode}): {result.stderr}")
+
+
+def _pandoc_available() -> bool:
+    """Check whether pandoc is installed and accessible."""
+    return shutil.which("pandoc") is not None
+
+
 def _weasyprint_available() -> bool:
     """Check whether weasyprint can be imported."""
     try:
@@ -90,6 +132,21 @@ def _weasyprint_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def pdf_renderer_available() -> str | None:
+    """Return the name of the best available PDF renderer, or None.
+
+    Checks weasyprint first (higher-quality output), then pandoc+TeX.
+
+    Returns:
+        ``"weasyprint"``, ``"pandoc"``, or ``None``.
+    """
+    if _weasyprint_available():
+        return "weasyprint"
+    if _pandoc_available():
+        return "pandoc"
+    return None
 
 
 def _load_css() -> str:
