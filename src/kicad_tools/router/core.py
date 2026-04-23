@@ -3592,8 +3592,100 @@ class Autorouter:
 
         return result
 
+    def cleanup_artifacts(
+        self,
+        oob_margin: float = 0.5,
+    ) -> dict[str, int]:
+        """Remove net-0 orphan traces and out-of-bounds segments/vias.
+
+        This post-route cleanup pass removes artifacts left by intermediate
+        routing strategies (escape routing, sub-grid pre-pass) that can
+        produce segments with net=0 or endpoints outside the board outline.
+
+        Args:
+            oob_margin: Margin in mm beyond the board bounding box within
+                which segments are still considered valid.  Default 0.5mm.
+
+        Returns:
+            Dictionary with cleanup statistics:
+            - ``net0_routes_removed``: Routes with net==0 removed entirely.
+            - ``net0_segments_removed``: Individual net-0 segments stripped
+              from otherwise valid routes.
+            - ``net0_vias_removed``: Individual net-0 vias stripped from
+              otherwise valid routes.
+            - ``oob_segments_removed``: Segments with both endpoints outside
+              the board bounding box (plus margin).
+            - ``oob_vias_removed``: Vias with center outside the board
+              bounding box (plus margin).
+        """
+        stats: dict[str, int] = {
+            "net0_routes_removed": 0,
+            "net0_segments_removed": 0,
+            "net0_vias_removed": 0,
+            "oob_segments_removed": 0,
+            "oob_vias_removed": 0,
+        }
+
+        # -- Step 1: Remove entire routes with net == 0 --
+        kept_routes: list[Route] = []
+        for route in self.routes:
+            if route.net == 0:
+                stats["net0_routes_removed"] += 1
+            else:
+                kept_routes.append(route)
+        self.routes = kept_routes
+
+        # -- Step 2: Strip individual net-0 segments/vias inside valid routes --
+        for route in self.routes:
+            orig_seg_count = len(route.segments)
+            orig_via_count = len(route.vias)
+            route.segments = [s for s in route.segments if s.net != 0]
+            route.vias = [v for v in route.vias if v.net != 0]
+            stats["net0_segments_removed"] += orig_seg_count - len(route.segments)
+            stats["net0_vias_removed"] += orig_via_count - len(route.vias)
+
+        # -- Step 3: Remove out-of-bounds segments and vias --
+        # Compute board bounding box from the grid's origin and dimensions.
+        min_x = self.grid.origin_x - oob_margin
+        min_y = self.grid.origin_y - oob_margin
+        max_x = self.grid.origin_x + self.grid.width + oob_margin
+        max_y = self.grid.origin_y + self.grid.height + oob_margin
+
+        for route in self.routes:
+            orig_seg_count = len(route.segments)
+            orig_via_count = len(route.vias)
+
+            # Keep segment if at least one endpoint is inside bounds
+            # (bridges the board edge -- preserve to avoid breaking
+            # legitimate near-edge traces).
+            kept_segs = []
+            for seg in route.segments:
+                p1_inside = min_x <= seg.x1 <= max_x and min_y <= seg.y1 <= max_y
+                p2_inside = min_x <= seg.x2 <= max_x and min_y <= seg.y2 <= max_y
+                if p1_inside or p2_inside:
+                    kept_segs.append(seg)
+            route.segments = kept_segs
+
+            # Remove vias with center outside bounds
+            route.vias = [
+                v for v in route.vias
+                if min_x <= v.x <= max_x and min_y <= v.y <= max_y
+            ]
+
+            stats["oob_segments_removed"] += orig_seg_count - len(route.segments)
+            stats["oob_vias_removed"] += orig_via_count - len(route.vias)
+
+        # Store stats for retrieval by output module
+        self._cleanup_stats = stats
+        return stats
+
     def to_sexp(self) -> str:
-        """Generate KiCad S-expressions for all routes."""
+        """Generate KiCad S-expressions for all routes.
+
+        Automatically runs ``cleanup_artifacts()`` before emitting to
+        remove net-0 orphans and out-of-bounds segments.
+        """
+        self.cleanup_artifacts()
         return "\n\t".join(route.to_sexp() for route in self.routes)
 
     def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:

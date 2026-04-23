@@ -91,6 +91,29 @@ def show_routing_summary(
     print(f"\n{'=' * 60}")
     print("Routing Complete!")
     print(f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)")
+
+    # Show cleanup statistics if any artifacts were removed
+    cleanup_stats = getattr(router, "_cleanup_stats", None)
+    if cleanup_stats:
+        total_removed = sum(cleanup_stats.values())
+        if total_removed > 0:
+            parts = []
+            if cleanup_stats.get("net0_routes_removed"):
+                parts.append(
+                    f"{cleanup_stats['net0_routes_removed']} net-0 route(s)"
+                )
+            net0_items = cleanup_stats.get(
+                "net0_segments_removed", 0
+            ) + cleanup_stats.get("net0_vias_removed", 0)
+            if net0_items:
+                parts.append(f"{net0_items} net-0 segment/via(s)")
+            oob_items = cleanup_stats.get(
+                "oob_segments_removed", 0
+            ) + cleanup_stats.get("oob_vias_removed", 0)
+            if oob_items:
+                parts.append(f"{oob_items} out-of-bounds segment/via(s)")
+            print(f"  Cleanup: removed {', '.join(parts)}")
+
     print(f"{'=' * 60}")
 
     # Show unrouted nets section first if there are failures (more important)
