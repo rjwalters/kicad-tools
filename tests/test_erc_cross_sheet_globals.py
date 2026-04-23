@@ -102,6 +102,30 @@ class TestExtractLabelName:
         desc = "Label 'NET_3V3' appears only once in the design"
         assert _extract_label_name(desc) == "NET_3V3"
 
+    def test_kicad10_label_in_items_single_quoted(self):
+        """KiCad 10+ puts the label name in items, not the description."""
+        desc = "Global label only appears once in the schematic"
+        items = [{"description": "Global Label 'AUDIO_L'", "pos": {"x": 0, "y": 0}}]
+        assert _extract_label_name(desc, items) == "AUDIO_L"
+
+    def test_kicad10_label_in_items_isolated_pin(self):
+        """KiCad 10+ isolated_pin_label also uses items for the label name."""
+        desc = "Label connected to only one pin"
+        items = [{"description": "Global Label 'SYNC_R'", "pos": {"x": 0, "y": 0}}]
+        assert _extract_label_name(desc, items) == "SYNC_R"
+
+    def test_kicad10_no_items_returns_none(self):
+        """Generic description with no items should return None."""
+        desc = "Label connected to only one pin"
+        assert _extract_label_name(desc) is None
+        assert _extract_label_name(desc, []) is None
+
+    def test_kicad10_items_without_label_returns_none(self):
+        """Items that don't contain a label name should return None."""
+        desc = "Label connected to only one pin"
+        items = [{"description": "Pin 1 of R1", "pos": {"x": 0, "y": 0}}]
+        assert _extract_label_name(desc, items) is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: build_global_label_inventory
@@ -437,3 +461,154 @@ class TestFilterCrossSheetGlobalLabels:
             [], str(tmp_path / "nonexistent.kicad_sch")
         )
         assert result == []
+
+    def _make_kicad10_violation(self, vtype: str, label_name: str) -> dict:
+        """Helper to create a KiCad 10 style violation dict.
+
+        KiCad 10 uses a generic top-level description and puts the
+        specific label name inside the ``items`` array.
+        """
+        if vtype == "single_global_label":
+            desc = "Global label only appears once in the schematic"
+        else:
+            desc = "Label connected to only one pin"
+        return {
+            "type": vtype,
+            "severity": "warning",
+            "description": desc,
+            "items": [
+                {
+                    "description": f"Global Label '{label_name}'",
+                    "pos": {"x": 0, "y": 0},
+                    "uuid": "test-uuid",
+                }
+            ],
+        }
+
+    def test_kicad10_single_global_label_filtered(self, tmp_path: Path):
+        """KiCad 10 format: single_global_label with label in items
+        should be filtered when the label appears on multiple sheets."""
+        sub_file = "sub.kicad_sch"
+
+        root_labels = _make_global_label("AUDIO_L", uuid="gl-root")
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=root_sheets
+        )
+
+        sub_labels = _make_global_label("AUDIO_L", uuid="gl-sub")
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=sub_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        violations = [
+            self._make_kicad10_violation("single_global_label", "AUDIO_L"),
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        assert len(result) == 0
+
+    def test_kicad10_isolated_pin_label_filtered(self, tmp_path: Path):
+        """KiCad 10 format: isolated_pin_label with label in items
+        should be filtered when the label appears on multiple sheets."""
+        sub_file = "sub.kicad_sch"
+
+        root_labels = _make_global_label("SYNC_R", uuid="gl-root")
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=root_sheets
+        )
+
+        sub_labels = _make_global_label("SYNC_R", uuid="gl-sub")
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=sub_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        violations = [
+            self._make_kicad10_violation("isolated_pin_label", "SYNC_R"),
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        assert len(result) == 0
+
+    def test_kicad10_mixed_format_chorus_scenario(self, tmp_path: Path):
+        """Reproduce the chorus-test-revA scenario: 8 violations (4
+        isolated_pin_label on root + 4 single_global_label on /Sync/)
+        should all be suppressed when labels exist on multiple sheets."""
+        sync_file = "sync.kicad_sch"
+        dac_file = "dac.kicad_sch"
+
+        labels = ["AUDIO_L", "AUDIO_R", "SYNC_L", "SYNC_R"]
+
+        root_labels = "\n".join(
+            _make_global_label(name, uuid=f"gl-root-{name}") for name in labels
+        )
+        root_sheets = (
+            _make_sheet("Sync", sync_file, uuid="sheet-sync")
+            + _make_sheet("DAC", dac_file, uuid="sheet-dac")
+        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=root_sheets
+        )
+
+        sync_labels = "\n".join(
+            _make_global_label(name, uuid=f"gl-sync-{name}") for name in labels
+        )
+        sync_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sync-uuid", global_labels=sync_labels
+        )
+
+        dac_labels = "\n".join(
+            _make_global_label(name, uuid=f"gl-dac-{name}") for name in labels
+        )
+        dac_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="dac-uuid", global_labels=dac_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sync_file).write_text(sync_content)
+        (tmp_path / dac_file).write_text(dac_content)
+
+        # Build violations matching KiCad 10 output format
+        violations = []
+        for name in labels:
+            violations.append(
+                self._make_kicad10_violation("isolated_pin_label", name)
+            )
+            violations.append(
+                self._make_kicad10_violation("single_global_label", name)
+            )
+
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        assert len(result) == 0
+
+    def test_kicad10_genuine_single_label_preserved(self, tmp_path: Path):
+        """KiCad 10 format: a label that truly appears on only one
+        sheet should still be reported."""
+        root_labels = _make_global_label("LONELY_NET", uuid="gl-lonely")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=""
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        violations = [
+            self._make_kicad10_violation("single_global_label", "LONELY_NET"),
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        assert len(result) == 1

@@ -210,21 +210,33 @@ def build_global_label_inventory(root_schematic: str) -> dict[str, set[str]]:
     return dict(inventory)
 
 
-def _extract_label_name(description: str) -> str | None:
+def _extract_label_name(description: str, items: list[dict] | None = None) -> str | None:
     """Extract a label name from a KiCad ERC violation description.
 
-    KiCad formats these descriptions in several ways:
+    KiCad formats these descriptions in several ways depending on the
+    version:
+
+    **Older KiCad (label name in top-level description)**:
 
     * ``Label 'AUDIO_L' appears only once in the design``
-    * ``Pin connected to only other pins or labels on the sheet``
-      (followed by items that contain the label name)
     * ``Global label 'AUDIO_L' is not connected anywhere else in the
       schematic``
+
+    **KiCad 10+ (label name in items, not top-level description)**:
+
+    * Top-level: ``Label connected to only one pin``
+    * Item:      ``Global Label 'AUDIO_L'``
+
+    Args:
+        description: The violation's top-level description string.
+        items: Optional list of item dicts from the violation.  Each
+            dict may contain a ``"description"`` key with the label
+            name (e.g. ``"Global Label 'AUDIO_L'"``)
 
     Returns the extracted label name, or ``None`` if no label name
     could be parsed.
     """
-    # Match quoted label name patterns
+    # Match quoted label name patterns in the top-level description
     m = re.search(r"[Ll]abel\s+'([^']+)'", description)
     if m:
         return m.group(1)
@@ -232,6 +244,18 @@ def _extract_label_name(description: str) -> str | None:
     m = re.search(r'"([^"]+)"', description)
     if m:
         return m.group(1)
+
+    # KiCad 10+ puts the label name in the items array instead of the
+    # top-level description.  Scan item descriptions for a quoted name.
+    if items:
+        for item in items:
+            item_desc = item.get("description", "")
+            m = re.search(r"[Ll]abel\s+'([^']+)'", item_desc)
+            if m:
+                return m.group(1)
+            m = re.search(r'"([^"]+)"', item_desc)
+            if m:
+                return m.group(1)
 
     return None
 
@@ -279,7 +303,9 @@ def filter_cross_sheet_global_labels(
             filtered.append(v)
             continue
 
-        label_name = _extract_label_name(v.get("description", ""))
+        label_name = _extract_label_name(
+            v.get("description", ""), v.get("items")
+        )
         if label_name is None:
             # Could not parse label name -- keep the violation to be safe.
             filtered.append(v)
