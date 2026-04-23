@@ -11,7 +11,10 @@ Example:
     ...     print(f"  {v.type}: {v.description}")
 """
 
-from .cross_sheet import check_cross_sheet_duplicates
+from .cross_sheet import (
+    check_cross_sheet_duplicates,
+    filter_cross_sheet_global_labels,
+)
 from .report import (
     ERCReport,
     parse_json_report,
@@ -42,4 +45,5 @@ __all__ = [
     "parse_text_report",
     # Cross-sheet checks
     "check_cross_sheet_duplicates",
+    "filter_cross_sheet_global_labels",
 ]

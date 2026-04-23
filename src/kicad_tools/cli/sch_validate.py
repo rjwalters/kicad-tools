@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.erc.cross_sheet import filter_cross_sheet_global_labels
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
 
@@ -114,16 +115,31 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                     content = f.read()
                     if content.strip():
                         data = json_mod.loads(content)
+
+                        # Collect raw violation dicts so we can filter
+                        # cross-sheet false positives before converting.
+                        raw_violations: list[dict] = []
                         for sheet in data.get("sheets", []):
                             for violation in sheet.get("violations", []):
-                                issues.append(
-                                    ValidationIssue(
-                                        severity=violation.get("severity", "warning"),
-                                        category="erc",
-                                        message=violation.get("description", "Unknown ERC issue"),
-                                        location=sheet.get("path", ""),
-                                    )
+                                violation["_sheet_path"] = sheet.get("path", "")
+                                raw_violations.append(violation)
+
+                        # Filter false-positive single_global_label /
+                        # isolated_pin_label violations for labels that
+                        # actually appear on multiple sheets.
+                        raw_violations = filter_cross_sheet_global_labels(
+                            raw_violations, schematic_path
+                        )
+
+                        for violation in raw_violations:
+                            issues.append(
+                                ValidationIssue(
+                                    severity=violation.get("severity", "warning"),
+                                    category="erc",
+                                    message=violation.get("description", "Unknown ERC issue"),
+                                    location=violation.get("_sheet_path", ""),
                                 )
+                            )
         finally:
             Path(output_file).unlink(missing_ok=True)
 
