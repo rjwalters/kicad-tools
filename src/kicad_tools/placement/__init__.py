@@ -45,7 +45,7 @@ from .conflict import (
     ConflictType,
     PlacementFix,
 )
-from .fixer import PlacementFixer
+from .fixer import IterativeFixResult, PassResult, PlacementFixer
 from .multi_fidelity import (
     DefaultFidelitySelector,
     FidelityConfig,
@@ -121,6 +121,7 @@ __all__ = [
     "FidelityLevel",
     "FidelityResult",
     "FidelitySelector",
+    "IterativeFixResult",
     "HPWLResult",
     "Conflict",
     "ConflictSeverity",
@@ -129,6 +130,7 @@ __all__ = [
     "DRCResult",
     "DRCViolation",
     "NetWirelength",
+    "PassResult",
     "PadDef",
     "PlacedComponent",
     "PlacementAnalyzer",
