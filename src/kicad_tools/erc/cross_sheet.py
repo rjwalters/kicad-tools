@@ -210,6 +210,40 @@ def build_global_label_inventory(root_schematic: str) -> dict[str, set[str]]:
     return dict(inventory)
 
 
+def build_sheet_label_presence(root_schematic: str) -> set[str]:
+    """Return the set of sheet paths that contain at least one label.
+
+    Checks for local labels, global labels, and hierarchical labels.
+    A sheet that contains none of these is considered label-free.
+
+    Args:
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        A set of sheet path strings (e.g. ``"/"``, ``"/Power"``) for
+        sheets that have at least one label of any kind.
+    """
+    from kicad_tools.schema.hierarchy import build_hierarchy
+    from kicad_tools.schema.schematic import Schematic
+
+    hierarchy = build_hierarchy(root_schematic)
+
+    sheets_with_labels: set[str] = set()
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+
+        sheet_path = node.get_path_string()
+
+        if sch.labels or sch.global_labels or sch.hierarchical_labels:
+            sheets_with_labels.add(sheet_path)
+
+    return sheets_with_labels
+
+
 def _extract_label_name(description: str, items: list[dict] | None = None) -> str | None:
     """Extract a label name from a KiCad ERC violation description.
 
@@ -265,20 +299,28 @@ def filter_cross_sheet_global_labels(
     root_schematic: str,
 ) -> list[dict]:
     """Remove false-positive ``single_global_label`` and ``isolated_pin_label``
-    violations for global labels that appear on multiple sheets.
+    violations for global labels that appear on multiple sheets, and for
+    violations reported on sheets that contain no labels at all.
 
     KiCad's ERC engine reports these violations per-sheet without aggregating
     across the hierarchy.  A global label such as ``AUDIO_L`` that appears in
     ``/DAC``, ``/Connectors``, and ``/Sync`` may get reported as
     "only appears once" when KiCad processes each sheet in isolation.
 
+    KiCad may also report ``isolated_pin_label`` on a sheet (commonly the
+    root sheet ``/``) that contains no labels whatsoever -- only sub-sheet
+    references.  These phantom violations are suppressed by checking whether
+    the reported sheet actually has any labels.
+
     This function builds a cross-sheet global label inventory and suppresses
-    violations whose label name appears on two or more distinct sheets.
+    violations whose label name appears on two or more distinct sheets, as
+    well as violations on label-free sheets with unparseable descriptions.
 
     Args:
         violations: List of raw violation dicts as parsed from KiCad's JSON
             report.  Each dict must have at least ``"type"`` and
-            ``"description"`` keys.
+            ``"description"`` keys.  An optional ``"_sheet_path"`` key
+            identifies the sheet the violation was reported on.
         root_schematic: Path to the root ``.kicad_sch`` file used to build
             the global label inventory.
 
@@ -295,6 +337,7 @@ def filter_cross_sheet_global_labels(
         return violations
 
     inventory = build_global_label_inventory(root_schematic)
+    sheet_label_presence = build_sheet_label_presence(root_schematic)
 
     filtered: list[dict] = []
     for v in violations:
@@ -307,7 +350,12 @@ def filter_cross_sheet_global_labels(
             v.get("description", ""), v.get("items")
         )
         if label_name is None:
-            # Could not parse label name -- keep the violation to be safe.
+            # Could not parse label name.  If the violation's sheet has no
+            # labels at all, this is a phantom detection -- suppress it.
+            sheet_path = v.get("_sheet_path", "")
+            if sheet_path and sheet_path not in sheet_label_presence:
+                continue
+            # Sheet has labels (or no sheet info available) -- keep to be safe.
             filtered.append(v)
             continue
 

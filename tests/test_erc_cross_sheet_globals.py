@@ -7,6 +7,7 @@ import pytest
 from kicad_tools.erc.cross_sheet import (
     _extract_label_name,
     build_global_label_inventory,
+    build_sheet_label_presence,
     filter_cross_sheet_global_labels,
 )
 
@@ -68,6 +69,20 @@ _SHEET_TEMPLATE = """\
 
 def _make_global_label(text: str, uuid: str = "gl-001") -> str:
     return _GLOBAL_LABEL_TEMPLATE.format(text=text, uuid=uuid)
+
+
+_LOCAL_LABEL_TEMPLATE = """\
+  (label "{text}"
+    (at 100 100 0)
+    (fields_autoplaced yes)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "{uuid}")
+  )
+"""
+
+
+def _make_local_label(text: str, uuid: str = "ll-001") -> str:
+    return _LOCAL_LABEL_TEMPLATE.format(text=text, uuid=uuid)
 
 
 def _make_sheet(name: str, filename: str, uuid: str = "sheet-001") -> str:
@@ -462,6 +477,7 @@ class TestFilterCrossSheetGlobalLabels:
         )
         assert result == []
 
+
     def _make_kicad10_violation(self, vtype: str, label_name: str) -> dict:
         """Helper to create a KiCad 10 style violation dict.
 
@@ -612,3 +628,191 @@ class TestFilterCrossSheetGlobalLabels:
         )
 
         assert len(result) == 1
+
+    def test_suppresses_unparseable_violation_on_label_free_sheet(self, tmp_path: Path):
+        """isolated_pin_label on a sheet with no labels should be suppressed."""
+        sub_file = "sub.kicad_sch"
+
+        # Root has only sheet references, no labels at all
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels="", sheets=root_sheets
+        )
+
+        sub_labels = _make_global_label("SPI_MOSI", uuid="gl-sub")
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=sub_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        violations = [
+            {
+                "type": "isolated_pin_label",
+                "severity": "warning",
+                "description": "Pin connected to only other pins or labels on the sheet",
+                "_sheet_path": "/",
+            },
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        # Root sheet has no labels -- violation is a phantom detection
+        assert len(result) == 0
+
+    def test_keeps_unparseable_violation_on_sheet_with_labels(self, tmp_path: Path):
+        """isolated_pin_label on a sheet that has labels should be kept."""
+        root_labels = _make_local_label("LOCAL_NET", uuid="ll-root")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=""
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        violations = [
+            {
+                "type": "isolated_pin_label",
+                "severity": "warning",
+                "description": "Pin connected to only other pins or labels on the sheet",
+                "_sheet_path": "/",
+            },
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        # Root sheet has a local label -- violation is kept
+        assert len(result) == 1
+
+    def test_keeps_unparseable_violation_without_sheet_path(self, tmp_path: Path):
+        """isolated_pin_label without _sheet_path should be kept (safe default)."""
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels="", sheets=""
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        violations = [
+            {
+                "type": "isolated_pin_label",
+                "severity": "warning",
+                "description": "Pin connected to only other pins or labels on the sheet",
+                # No _sheet_path key
+            },
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        # No sheet path info -- keep to be safe
+        assert len(result) == 1
+
+    def test_suppresses_multiple_phantom_violations_on_root(self, tmp_path: Path):
+        """Multiple isolated_pin_label on label-free root should all be suppressed."""
+        sub_a = "sub_a.kicad_sch"
+        sub_b = "sub_b.kicad_sch"
+
+        root_sheets = (
+            _make_sheet("SubA", sub_a, uuid="sheet-a")
+            + _make_sheet("SubB", sub_b, uuid="sheet-b")
+        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels="", sheets=root_sheets
+        )
+
+        sub_a_labels = _make_global_label("NET_A", uuid="gl-a")
+        sub_a_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-a-uuid", global_labels=sub_a_labels
+        )
+
+        sub_b_labels = _make_global_label("NET_B", uuid="gl-b")
+        sub_b_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-b-uuid", global_labels=sub_b_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_a).write_text(sub_a_content)
+        (tmp_path / sub_b).write_text(sub_b_content)
+
+        # 4 phantom violations on root sheet (like the issue describes)
+        violations = [
+            {
+                "type": "isolated_pin_label",
+                "severity": "warning",
+                "description": "Label connected to only one pin",
+                "_sheet_path": "/",
+            }
+            for _ in range(4)
+        ]
+        result = filter_cross_sheet_global_labels(
+            violations, str(tmp_path / "root.kicad_sch")
+        )
+
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: build_sheet_label_presence
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSheetLabelPresence:
+    """Tests for building sheet label presence set."""
+
+    def test_root_with_global_labels(self, tmp_path: Path):
+        """Root sheet with global labels should be in the presence set."""
+        root_labels = _make_global_label("AUDIO_L", uuid="gl-root")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=""
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
+
+        assert "/" in presence
+
+    def test_root_without_labels(self, tmp_path: Path):
+        """Root sheet with no labels should not be in the presence set."""
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels="", sheets=""
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
+
+        assert "/" not in presence
+
+    def test_root_with_local_labels(self, tmp_path: Path):
+        """Root sheet with local labels should be in the presence set."""
+        root_labels = _make_local_label("LOCAL_NET", uuid="ll-root")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=""
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
+
+        assert "/" in presence
+
+    def test_mixed_sheets(self, tmp_path: Path):
+        """Root without labels, sub-sheet with labels: only sub-sheet in set."""
+        sub_file = "sub.kicad_sch"
+
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels="", sheets=root_sheets
+        )
+
+        sub_labels = _make_global_label("NET_A", uuid="gl-sub")
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=sub_labels
+        )
+
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
+
+        assert "/" not in presence
+        assert "/Sub" in presence
