@@ -1,0 +1,97 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "shared-root-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Shared Sub-Sheet Test")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "shared-root-r1-uuid")
+		(property "Reference" "R1"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(pin "1" (uuid "shared-root-r1-pin1"))
+		(pin "2" (uuid "shared-root-r1-pin2"))
+	)
+	(sheet
+		(at 130 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-sub-b-instance-1")
+		(property "Sheetname" "SubB_1"
+			(at 130 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_b.kicad_sch"
+			(at 130 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+	(sheet
+		(at 130 60) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-sub-b-instance-2")
+		(property "Sheetname" "SubB_2"
+			(at 130 59 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_b.kicad_sch"
+			(at 130 81 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+	(sheet
+		(at 130 90) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-missing")
+		(property "Sheetname" "Missing"
+			(at 130 89 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "does_not_exist.kicad_sch"
+			(at 130 111 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+	(sheet
+		(at 200 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-empty")
+		(property "Sheetname" "Empty"
+			(at 200 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "empty.kicad_sch"
+			(at 200 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+)
