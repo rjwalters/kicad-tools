@@ -41,6 +41,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--anchor", args.anchor])
         if args.dry_run:
             sub_argv.append("--dry-run")
+        if getattr(args, "timeout", None) is not None:
+            sub_argv.extend(["--timeout", str(args.timeout)])
         if args.verbose:
             sub_argv.append("--verbose")
         # Use command-level quiet or global quiet

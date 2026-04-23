@@ -122,6 +122,7 @@ def cmd_fix(args) -> int:
             print(f"Anchored components: {anchored}")
 
     max_passes = getattr(args, "max_passes", 10)
+    timeout = getattr(args, "timeout", None)
 
     # Create fixer
     fixer = PlacementFixer(
@@ -139,6 +140,7 @@ def cmd_fix(args) -> int:
             output_path=output_path,
             max_passes=max_passes,
             dry_run=args.dry_run,
+            timeout=timeout,
         )
 
     if not quiet:
@@ -1474,6 +1476,12 @@ def main(argv: list[str] | None = None) -> int:
         default=10,
         dest="max_passes",
         help="Maximum number of iterative fix passes (default: 10)",
+    )
+    fix_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Maximum wall-clock seconds; returns best result so far on expiry",
     )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")

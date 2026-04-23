@@ -10,6 +10,8 @@ Suggests and applies fixes for placement conflicts:
 from __future__ import annotations
 
 import math
+import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -521,6 +523,7 @@ class PlacementFixer:
         max_passes: int = 10,
         escalation_factor: float = 1.5,
         dry_run: bool = False,
+        timeout: float | None = None,
     ) -> IterativeFixResult:
         """Run iterative multi-pass conflict resolution.
 
@@ -530,6 +533,9 @@ class PlacementFixer:
         magnitudes are escalated by *escalation_factor* and previously
         attempted fix directions for a component are avoided.
 
+        Uses in-memory conflict detection to avoid repeated file I/O
+        and S-expression re-parsing on each pass.
+
         Args:
             pcb_path: Path to input .kicad_pcb file.
             rules: Design rules for conflict detection.
@@ -538,15 +544,28 @@ class PlacementFixer:
             escalation_factor: Multiplier applied to move magnitudes when
                 a pass does not reduce the conflict count.
             dry_run: If True, return what *would* happen without writing.
+            timeout: Maximum wall-clock seconds to spend. When exceeded
+                the best result found so far is returned.
 
         Returns:
             IterativeFixResult with per-pass diagnostics.
         """
+        from kicad_tools.schema import PCB
+
         pcb_path = Path(pcb_path)
         if output_path is None:
             output_path = pcb_path
+        if rules is None:
+            rules = DesignRules()
 
-        # Work on a copy so we can iterate in-memory
+        start_time = time.monotonic()
+        timed_out = False
+
+        # Load PCB once into memory
+        pcb = PCB.load(str(pcb_path))
+
+        # Also keep textual content for final output (apply_fix_to_content
+        # modifies the S-expression text to produce the output file).
         content = pcb_path.read_text()
 
         analyzer = PlacementAnalyzer(verbose=self.verbose)
@@ -558,150 +577,189 @@ class PlacementFixer:
         # re-suggesting the same move on consecutive stalled passes.
         previous_fix_keys: set[tuple[str, int, int]] = set()
 
-        # Detect initial conflicts by writing to a temp file
-        import tempfile
+        # Cumulative position deltas per footprint reference so we can
+        # replay all moves onto the text content at the end in one shot.
+        cumulative_moves: dict[str, Point] = {}
 
-        with tempfile.NamedTemporaryFile(
-            suffix=".kicad_pcb", mode="w", delete=False
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            tmp.write(content)
+        # Initial conflict detection -- fully in memory
+        analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+        initial_conflicts = analyzer._find_conflicts_internal(rules)
+        initial_count = len(initial_conflicts)
 
-        try:
-            initial_conflicts = analyzer.find_conflicts(tmp_path, rules)
-            initial_count = len(initial_conflicts)
+        _progress(
+            f"Found {initial_count} placement conflicts",
+            verbose=self.verbose,
+        )
 
-            if initial_count == 0:
-                return IterativeFixResult(
-                    success=True,
-                    total_passes=0,
-                    initial_conflicts=0,
-                    remaining_conflicts=0,
-                    total_fixes_applied=0,
-                    pass_results=[],
-                    message="No placement conflicts found",
-                )
+        if initial_count == 0:
+            return IterativeFixResult(
+                success=True,
+                total_passes=0,
+                initial_conflicts=0,
+                remaining_conflicts=0,
+                total_fixes_applied=0,
+                pass_results=[],
+                message="No placement conflicts found",
+            )
 
-            prev_conflict_count = initial_count
+        prev_conflict_count = initial_count
 
-            for pass_num in range(1, max_passes + 1):
-                # Write current content to temp for analysis
-                tmp_path.write_text(content)
-                conflicts = analyzer.find_conflicts(tmp_path, rules)
-                conflict_count = len(conflicts)
-
-                if conflict_count == 0:
-                    pass_results.append(PassResult(
-                        pass_number=pass_num,
-                        conflicts_before=prev_conflict_count,
-                        conflicts_after=0,
-                        fixes_applied=0,
-                        escalation_factor=current_escalation,
-                    ))
+        for pass_num in range(1, max_passes + 1):
+            # Check timeout
+            if timeout is not None:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    timed_out = True
+                    _progress(
+                        f"Timeout after {elapsed:.1f}s -- returning best result",
+                        verbose=self.verbose,
+                    )
                     break
 
-                # Suggest fixes
-                fixes = self.suggest_fixes(conflicts, analyzer)
+            # Detect conflicts in memory
+            analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+            conflicts = analyzer._find_conflicts_internal(rules)
+            conflict_count = len(conflicts)
 
-                if not fixes:
-                    pass_results.append(PassResult(
-                        pass_number=pass_num,
-                        conflicts_before=conflict_count,
-                        conflicts_after=conflict_count,
-                        fixes_applied=0,
-                        escalation_factor=current_escalation,
-                    ))
-                    break
+            if conflict_count == 0:
+                pass_results.append(PassResult(
+                    pass_number=pass_num,
+                    conflicts_before=prev_conflict_count,
+                    conflicts_after=0,
+                    fixes_applied=0,
+                    escalation_factor=current_escalation,
+                ))
+                break
 
-                # Filter out previously-stalled fix directions
-                if previous_fix_keys:
-                    filtered: list[PlacementFix] = []
-                    for fix in fixes:
-                        key = _fix_direction_key(fix)
-                        if key not in previous_fix_keys:
-                            filtered.append(fix)
-                    if filtered:
-                        fixes = filtered
-                    # If all fixes are duplicates, keep them but escalate
-                    # to break out of the stall
+            # Suggest fixes
+            fixes = self.suggest_fixes(conflicts, analyzer)
 
-                # Apply escalation to move magnitudes
-                if current_escalation > 1.0:
-                    fixes = _escalate_fixes(fixes, current_escalation)
-
-                # Apply fixes to in-memory content
-                applied = 0
-                for fix in fixes:
-                    new_content = self._apply_fix_to_content(content, fix)
-                    if new_content != content:
-                        content = new_content
-                        applied += 1
-
-                total_fixes += applied
-
-                # Re-check conflicts after this pass
-                tmp_path.write_text(content)
-                new_conflicts = analyzer.find_conflicts(tmp_path, rules)
-                new_count = len(new_conflicts)
-
+            if not fixes:
                 pass_results.append(PassResult(
                     pass_number=pass_num,
                     conflicts_before=conflict_count,
-                    conflicts_after=new_count,
-                    fixes_applied=applied,
+                    conflicts_after=conflict_count,
+                    fixes_applied=0,
                     escalation_factor=current_escalation,
                 ))
+                break
 
-                if self.verbose:
-                    print(
-                        f"  Pass {pass_num}: {conflict_count} conflicts "
-                        f"-> {new_count} conflicts "
-                        f"({conflict_count - new_count} resolved)"
+            # Filter out previously-stalled fix directions
+            if previous_fix_keys:
+                filtered: list[PlacementFix] = []
+                for fix in fixes:
+                    key = _fix_direction_key(fix)
+                    if key not in previous_fix_keys:
+                        filtered.append(fix)
+                if filtered:
+                    fixes = filtered
+                # If all fixes are duplicates, keep them but escalate
+                # to break out of the stall
+
+            # Apply escalation to move magnitudes
+            if current_escalation > 1.0:
+                fixes = _escalate_fixes(fixes, current_escalation)
+
+            # Apply fixes by updating footprint positions in the PCB object
+            applied = 0
+            for fix in fixes:
+                fp = pcb.get_footprint(fix.component)
+                if fp is not None:
+                    old_x, old_y = fp.position
+                    fp.position = (
+                        old_x + fix.move_vector.x,
+                        old_y + fix.move_vector.y,
                     )
+                    # Accumulate moves for text-based output later
+                    if fix.component in cumulative_moves:
+                        prev = cumulative_moves[fix.component]
+                        cumulative_moves[fix.component] = Point(
+                            prev.x + fix.move_vector.x,
+                            prev.y + fix.move_vector.y,
+                        )
+                    else:
+                        cumulative_moves[fix.component] = Point(
+                            fix.move_vector.x, fix.move_vector.y,
+                        )
+                    applied += 1
 
-                if new_count == 0:
-                    break
+            total_fixes += applied
 
-                # Detect stall: no progress
-                if new_count >= conflict_count:
-                    # Record current fix directions as stalled
-                    for fix in fixes:
-                        previous_fix_keys.add(_fix_direction_key(fix))
-                    # Escalate move magnitude for next pass
-                    current_escalation *= escalation_factor
-                else:
-                    # Progress made, reset stall tracking
-                    previous_fix_keys.clear()
-                    current_escalation = 1.0
+            # Re-check conflicts after this pass (in memory)
+            analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+            new_conflicts = analyzer._find_conflicts_internal(rules)
+            new_count = len(new_conflicts)
 
-                prev_conflict_count = new_count
+            pass_results.append(PassResult(
+                pass_number=pass_num,
+                conflicts_before=conflict_count,
+                conflicts_after=new_count,
+                fixes_applied=applied,
+                escalation_factor=current_escalation,
+            ))
 
-        finally:
-            tmp_path.unlink(missing_ok=True)
+            elapsed = time.monotonic() - start_time
+            _progress(
+                f"Pass {pass_num}/{max_passes}: "
+                f"{conflict_count} -> {new_count} conflicts "
+                f"({conflict_count - new_count:+d}), "
+                f"{elapsed:.1f}s elapsed",
+                verbose=self.verbose,
+            )
+
+            if new_count == 0:
+                break
+
+            # Detect stall: no progress
+            if new_count >= conflict_count:
+                # Record current fix directions as stalled
+                for fix in fixes:
+                    previous_fix_keys.add(_fix_direction_key(fix))
+                # Escalate move magnitude for next pass
+                current_escalation *= escalation_factor
+            else:
+                # Progress made, reset stall tracking
+                previous_fix_keys.clear()
+                current_escalation = 1.0
+
+            prev_conflict_count = new_count
 
         # Determine final conflict count
         remaining = pass_results[-1].conflicts_after if pass_results else initial_count
 
-        if not dry_run:
+        # Apply cumulative moves to text content for file output
+        if cumulative_moves and not dry_run:
+            for ref, move in cumulative_moves.items():
+                synthetic_fix = PlacementFix(
+                    conflict=initial_conflicts[0],  # placeholder
+                    component=ref,
+                    move_vector=move,
+                )
+                content = self._apply_fix_to_content(content, synthetic_fix)
             Path(output_path).write_text(content)
 
         # Build summary message
+        elapsed_total = time.monotonic() - start_time
         if remaining == 0:
             msg = (
                 f"All conflicts resolved in {len(pass_results)} passes "
-                f"({total_fixes} fixes applied)"
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
             )
         elif remaining < initial_count:
             msg = (
                 f"Reduced conflicts from {initial_count} to {remaining} "
-                f"in {len(pass_results)} passes ({total_fixes} fixes applied)"
+                f"in {len(pass_results)} passes "
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
             )
         else:
             msg = (
                 f"Could not reduce conflicts below {remaining} "
-                f"after {len(pass_results)} passes ({total_fixes} fixes applied)"
+                f"after {len(pass_results)} passes "
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
             )
 
+        if timed_out:
+            msg += " (timed out)"
         if dry_run:
             msg += " (dry run)"
 
@@ -821,6 +879,19 @@ class PlacementFixer:
 # ---------------------------------------------------------------------------
 # Module-level helpers for iterative fix
 # ---------------------------------------------------------------------------
+
+
+def _progress(message: str, *, verbose: bool = False) -> None:
+    """Print a progress line to stderr.
+
+    Always prints when *verbose* is True. Otherwise prints a compact
+    single-line update to stderr so that callers (including agent
+    pipelines) can see that the fixer is making forward progress.
+    """
+    if verbose:
+        print(f"  {message}", file=sys.stderr)
+    else:
+        print(f"  {message}", file=sys.stderr)
 
 
 def _fix_direction_key(fix: PlacementFix) -> tuple[str, int, int]:
