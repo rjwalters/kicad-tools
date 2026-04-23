@@ -673,6 +673,7 @@ class TestPcbSyncNetlistCLIDispatch:
             format = "text"
             remove_orphans = False
             force = False
+            auto_rename = False
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 1
@@ -691,6 +692,7 @@ class TestPcbSyncNetlistCLIDispatch:
             format = "text"
             remove_orphans = False
             force = False
+            auto_rename = False
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 1
@@ -735,6 +737,117 @@ PCB_WITH_ORPHAN_TRACED = """(kicad_pcb
     (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
   )
   (segment (start 139.5 100) (end 130 100) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+# --- Test fixtures for new Gap tests ---
+
+# Schematic with R1(10k, R_0402) and R2(10k, R_0402) -- two same-signature components
+SCHEMATIC_R1_R2_SAME = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (property "Reference" "R2" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with R50 and R51 -- two same-signature footprints (ambiguous match for R1/R2)
+PCB_R50_R51_SAME = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r50")
+    (at 100 100)
+    (property "Reference" "R50" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r51")
+    (at 120 100)
+    (property "Reference" "R51" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# Schematic with U8(MCU) and U15(REG) -- for multi-rename test
+SCHEMATIC_U8_U15 = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "U8" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "MCU" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_QFP:QFP-32" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000011")
+    (property "Reference" "U15" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "REG" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_SO:SO-8" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with U3(MCU, QFP-32) and U10(REG, SO-8) -- both renamed in schematic
+# U3->U8 and U10->U15 (independent renames, no collision chain)
+PCB_U3_U10 = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Package_QFP:QFP-32"
+    (layer "F.Cu")
+    (uuid "fp-u3")
+    (at 100 100)
+    (property "Reference" "U3" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "MCU" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Package_SO:SO-8"
+    (layer "F.Cu")
+    (uuid "fp-u10")
+    (at 120 100)
+    (property "Reference" "U10" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "REG" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
 )
 """
 
@@ -961,6 +1074,7 @@ class TestSyncNetlistCLIRemoveOrphansFlags:
             format = "text"
             remove_orphans = True
             force = False
+            auto_rename = False
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 0
@@ -1000,3 +1114,326 @@ class TestFootprintHasTraces:
         board = PCB.load(pcb)
 
         assert board.footprint_has_traces("Z99") is False
+
+
+class TestCollisionSafeRenames:
+    """Tests for Gap 1: collision-safe rename handling via _build_rename_plan."""
+
+    def test_multiple_renames_detected(self, tmp_path):
+        """U3->U8 and U10->U15 should both be detected as renames."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_U8_U15)
+        pcb.write_text(PCB_U3_U10)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.renamed) == 2
+        renames = {a.old_reference: a.reference for a in result.renamed}
+        assert renames == {"U3": "U8", "U10": "U15"}
+        assert not result.added
+        assert not result.orphaned
+        assert not result.errors
+
+    def test_multiple_renames_applied_safely(self, tmp_path):
+        """Multiple renames are applied using collision-safe rename plan."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_U8_U15)
+        pcb.write_text(PCB_U3_U10)
+
+        result = sync_netlist(sch, pcb, dry_run=False, auto_rename=True)
+
+        assert len(result.renamed) == 2
+        assert not result.errors
+
+        # Verify the PCB was actually updated correctly
+        board = PCB.load(pcb)
+        refs = {fp.reference for fp in board.footprints}
+        assert refs == {"U8", "U15"}
+
+        # Verify the values are on the correct references
+        ref_vals = {fp.reference: fp.value for fp in board.footprints}
+        assert ref_vals["U8"] == "MCU"
+        assert ref_vals["U15"] == "REG"
+
+    def test_build_rename_plan_resolves_chain(self):
+        """_build_rename_plan correctly resolves collision chains via temp refs."""
+        from kicad_tools.cli.commands.pcb import _build_rename_plan
+
+        # Simulate a collision chain: A->B and B->C
+        # B is both a source and a target
+        mapping = {"A": "B", "B": "C"}
+        existing = {"A", "B"}
+
+        steps, warnings, errors = _build_rename_plan(mapping, existing)
+
+        assert not errors
+        # Should use temp refs to avoid overwriting B before it's renamed
+        assert len(steps) > 2  # Direct would be 2, chain needs more
+
+        # Verify that after applying all steps in order, we get the right result
+        state = {"A": "A_val", "B": "B_val"}
+        for from_ref, to_ref, _via in steps:
+            if from_ref in state:
+                state[to_ref] = state.pop(from_ref)
+
+        assert "B" in state and state["B"] == "A_val"
+        assert "C" in state and state["C"] == "B_val"
+
+    def test_apply_renames_safe_delegates_to_build_rename_plan(self, tmp_path):
+        """_apply_renames_safe uses _build_rename_plan for safe execution."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncResult, _apply_renames_safe
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+        board = PCB.load(pcb)
+
+        result = SyncResult()
+        rename_map = {"R99": "R1"}
+        pcb_refs = {"R99", "C1"}
+
+        _apply_renames_safe(board, rename_map, pcb_refs, result)
+
+        assert not result.errors
+        refs = {fp.reference for fp in board.footprints}
+        assert "R1" in refs
+        assert "R99" not in refs
+
+
+class TestAmbiguousMatchWarnings:
+    """Tests for Gap 2: ambiguous match warnings."""
+
+    def test_ambiguous_match_produces_warning(self, tmp_path):
+        """Multiple orphans with same signature produce a warning."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_R1_R2_SAME)
+        pcb.write_text(PCB_R50_R51_SAME)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        # No renames because signature is ambiguous (2 schematic, 2 PCB)
+        assert not result.renamed
+        # Both schematic refs should be added (not matched)
+        assert len(result.added) == 2
+        # Both PCB refs should be orphaned (not matched)
+        assert len(result.orphaned) == 2
+        # Should have a warning about ambiguous match
+        assert len(result.warnings) == 1
+        assert "Ambiguous" in result.warnings[0]
+        assert "R_0402" in result.warnings[0]
+
+    def test_warning_in_text_output(self, tmp_path):
+        """Warnings appear in text format output alongside other changes."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
+
+        result = SyncResult(
+            orphaned=[SyncAction(action="orphan", reference="R50", footprint="R_0402", value="10k")],
+            warnings=["Ambiguous match for (R_0402, 10k)"],
+        )
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_text(result, dry_run=True, pcb_path=pcb)
+
+        assert "Warnings" in output
+        assert "Ambiguous" in output
+
+    def test_warning_in_json_output(self, tmp_path):
+        """Warnings appear in JSON format output."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncResult, format_json
+
+        result = SyncResult(warnings=["Ambiguous match for (R_0402, 10k)"])
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_json(result, dry_run=True, pcb_path=pcb)
+
+        import json
+        data = json.loads(output)
+        assert "warnings" in data
+        assert len(data["warnings"]) == 1
+        assert "Ambiguous" in data["warnings"][0]
+
+    def test_no_warning_for_unique_match(self, tmp_path):
+        """Unique 1:1 matches produce no warnings."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.renamed) == 1
+        assert not result.warnings
+
+
+class TestAutoRenameFlag:
+    """Tests for Gap 3: --auto-rename flag and interactive confirmation."""
+
+    def test_parser_accepts_auto_rename(self):
+        """Parser supports --auto-rename flag."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "--auto-rename",
+            "test.kicad_pcb",
+        ])
+        assert args.auto_rename is True
+
+    def test_parser_auto_rename_default_false(self):
+        """--auto-rename defaults to False."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "test.kicad_pcb",
+        ])
+        assert args.auto_rename is False
+
+    def test_auto_rename_applies_renames(self, tmp_path):
+        """auto_rename=True applies renames without prompt."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+
+        result = sync_netlist(sch, pcb, dry_run=False, auto_rename=True)
+
+        assert len(result.renamed) == 1
+        assert not result.errors
+
+        # Verify rename was applied
+        board = PCB.load(pcb)
+        refs = {fp.reference for fp in board.footprints}
+        assert "R1" in refs
+        assert "R99" not in refs
+
+    def test_no_auto_rename_skips_application(self, tmp_path):
+        """auto_rename=False does not apply renames (leaves for caller to confirm)."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+        original_content = pcb.read_text()
+
+        result = sync_netlist(sch, pcb, dry_run=False, auto_rename=False)
+
+        # Renames are detected but not applied
+        assert len(result.renamed) == 1
+        # PCB file should be unchanged
+        assert pcb.read_text() == original_content
+
+    def test_dry_run_overrides_auto_rename(self, tmp_path):
+        """dry_run=True prevents application even with auto_rename=True."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+        original_content = pcb.read_text()
+
+        result = sync_netlist(sch, pcb, dry_run=True, auto_rename=True)
+
+        assert len(result.renamed) == 1
+        assert pcb.read_text() == original_content
+
+    def test_dispatcher_passes_auto_rename(self, tmp_path):
+        """_run_sync_netlist_command passes auto_rename to run_sync_netlist."""
+        from kicad_tools.cli.commands.pcb import _run_sync_netlist_command
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        class Args:
+            schematic = str(sch)
+            output = None
+            dry_run = True
+            format = "text"
+            remove_orphans = False
+            force = False
+            auto_rename = True
+
+        rc = _run_sync_netlist_command(Args(), pcb)
+        assert rc == 0
+
+    def test_run_sync_netlist_interactive_prompt_decline(self, tmp_path, monkeypatch):
+        """Declining interactive prompt skips renames."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+        original_content = pcb.read_text()
+
+        # Simulate user declining
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, auto_rename=False)
+
+        assert rc == 0
+        # PCB should be unchanged
+        assert pcb.read_text() == original_content
+
+    def test_run_sync_netlist_interactive_prompt_accept(self, tmp_path, monkeypatch):
+        """Accepting interactive prompt applies renames."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+
+        # Simulate user accepting
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, auto_rename=False)
+
+        assert rc == 0
+        # Verify rename was applied
+        board = PCB.load(pcb)
+        refs = {fp.reference for fp in board.footprints}
+        assert "R1" in refs
+        assert "R99" not in refs
+
+    def test_run_sync_netlist_eof_declines(self, tmp_path, monkeypatch):
+        """EOFError on input (e.g., piped stdin) acts as decline."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_RENAMED_REF)
+        original_content = pcb.read_text()
+
+        def raise_eof(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, auto_rename=False)
+
+        assert rc == 0
+        assert pcb.read_text() == original_content

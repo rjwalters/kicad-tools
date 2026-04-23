@@ -1162,6 +1162,11 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Remove orphans even if they have routed traces",
     )
+    pcb_sync_netlist.add_argument(
+        "--auto-rename",
+        action="store_true",
+        help="Apply reference renames without interactive confirmation",
+    )
 
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(

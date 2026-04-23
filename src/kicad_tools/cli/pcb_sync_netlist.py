@@ -36,6 +36,7 @@ class SyncResult:
     orphaned: list[SyncAction] = field(default_factory=list)
     removed: list[SyncAction] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
@@ -60,6 +61,7 @@ def sync_netlist(
     output_path: Path | None = None,
     remove_orphans: bool = False,
     force: bool = False,
+    auto_rename: bool = False,
 ) -> SyncResult:
     """Sync PCB footprints from schematic.
 
@@ -70,6 +72,10 @@ def sync_netlist(
         output_path: If set, write modified PCB here instead of overwriting.
         remove_orphans: If True, delete orphaned footprints from the PCB.
         force: If True, remove orphans even if they have routed traces.
+        auto_rename: If True, apply renames without interactive confirmation.
+            When False (default) and not dry_run, the caller is responsible
+            for confirming renames before applying.  The ``run_sync_netlist``
+            wrapper handles the interactive prompt.
 
     Returns:
         SyncResult describing all actions taken or planned.
@@ -135,7 +141,8 @@ def sync_netlist(
             extra_by_sig.setdefault(sig, []).append(ref)
 
         # Match unique pairs: if exactly one missing and one extra share the same
-        # (footprint, value) signature, treat it as a rename
+        # (footprint, value) signature, treat it as a rename.
+        # Ambiguous matches (N:M with same signature) are skipped with a warning.
         for sig, sch_refs_list in missing_by_sig.items():
             if sig in extra_by_sig:
                 pcb_refs_list = extra_by_sig[sig]
@@ -143,6 +150,13 @@ def sync_netlist(
                     old_ref = pcb_refs_list[0]
                     new_ref = sch_refs_list[0]
                     rename_map[old_ref] = new_ref
+                else:
+                    fp_name, val = sig
+                    result.warnings.append(
+                        f"Ambiguous match for ({fp_name}, {val}): "
+                        f"schematic refs {sorted(sch_refs_list)} vs "
+                        f"PCB refs {sorted(pcb_refs_list)} - skipped"
+                    )
 
     # Remove matched renames from missing/extra sets
     renamed_old_refs = set(rename_map.keys())
@@ -215,10 +229,13 @@ def sync_netlist(
             ))
 
     # --- Apply changes if not dry-run ---
-    if not dry_run and result.has_changes:
-        # Apply renames first
-        for action in result.renamed:
-            _apply_rename(pcb, action.old_reference, action.reference)
+    # When auto_rename is False and there are renames, the caller must confirm
+    # before calling with auto_rename=True.  dry_run always skips application.
+    skip_apply = dry_run or (result.renamed and not auto_rename)
+    if not skip_apply and result.has_changes:
+        # Apply renames using collision-safe rename plan
+        if result.renamed:
+            _apply_renames_safe(pcb, rename_map, pcb_ref_set, result)
 
         # Add missing footprints at board edge
         placement_x, placement_y = _get_board_edge_position(pcb)
@@ -290,6 +307,28 @@ def _apply_rename(pcb, old_ref: str, new_ref: str) -> bool:
     return _update_footprint_reference(pcb, old_ref, new_ref)
 
 
+def _apply_renames_safe(
+    pcb, rename_map: dict[str, str], pcb_ref_set: set[str], result: SyncResult
+) -> None:
+    """Apply renames using collision-safe rename plan.
+
+    Uses ``_build_rename_plan`` from the reannotate command to resolve
+    collision chains (e.g. U3->U8 and U10->U3) via temporary intermediate
+    references.
+    """
+    from kicad_tools.cli.commands.pcb import _build_rename_plan
+
+    steps, plan_warnings, plan_errors = _build_rename_plan(rename_map, pcb_ref_set)
+    result.warnings.extend(plan_warnings)
+
+    if plan_errors:
+        result.errors.extend(plan_errors)
+        return
+
+    for from_ref, to_ref, _via_temp in steps:
+        _apply_rename(pcb, from_ref, to_ref)
+
+
 def _get_board_edge_position(pcb) -> tuple[float, float]:
     """Determine a position just outside the board edge for staging footprints.
 
@@ -343,6 +382,12 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             lines.append(f"    {action.reference}: {action.value} ({action.footprint})")
         lines.append("")
 
+    if result.warnings:
+        lines.append(f"  Warnings ({len(result.warnings)}):")
+        for warn in result.warnings:
+            lines.append(f"    {warn}")
+        lines.append("")
+
     if result.errors:
         lines.append(f"  Errors ({len(result.errors)}):")
         for err in result.errors:
@@ -390,6 +435,7 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             }
             for a in result.removed
         ],
+        "warnings": result.warnings,
         "errors": result.errors,
     }
     return json.dumps(output, indent=2)
@@ -403,6 +449,7 @@ def run_sync_netlist(
     output_format: str = "text",
     remove_orphans: bool = False,
     force: bool = False,
+    auto_rename: bool = False,
 ) -> int:
     """Run the sync-netlist command.
 
@@ -414,10 +461,14 @@ def run_sync_netlist(
         output_format: "text" or "json".
         remove_orphans: If True, delete orphaned footprints.
         force: If True, remove orphans even with routed traces.
+        auto_rename: If True, apply renames without interactive confirmation.
+            When False (default) and not dry_run, shows a confirmation prompt
+            before applying renames.
 
     Returns:
         Exit code (0 for success, 1 for errors).
     """
+    # First pass: compute diff (renames not applied yet unless auto_rename)
     result = sync_netlist(
         schematic_path=schematic_path,
         pcb_path=pcb_path,
@@ -425,12 +476,39 @@ def run_sync_netlist(
         output_path=output_path,
         remove_orphans=remove_orphans,
         force=force,
+        auto_rename=auto_rename,
     )
 
     if output_format == "json":
         print(format_json(result, dry_run, pcb_path))
     else:
         print(format_text(result, dry_run, pcb_path))
+
+    # Interactive confirmation for renames when not dry_run and not auto_rename
+    if (
+        not dry_run
+        and not auto_rename
+        and result.renamed
+        and not result.errors
+    ):
+        try:
+            answer = input("Apply renames? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer.strip().lower() in ("y", "yes"):
+            # Re-run with auto_rename to actually apply
+            result = sync_netlist(
+                schematic_path=schematic_path,
+                pcb_path=pcb_path,
+                dry_run=False,
+                output_path=output_path,
+                remove_orphans=remove_orphans,
+                force=force,
+                auto_rename=True,
+            )
+            print("Renames applied.")
+        else:
+            print("Renames skipped.")
 
     # Return non-zero only on errors, not on orphaned footprints
     return 1 if result.errors else 0
