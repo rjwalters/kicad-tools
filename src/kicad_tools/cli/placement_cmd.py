@@ -111,20 +111,6 @@ def cmd_fix(args) -> int:
         courtyard_margin=args.courtyard_margin,
     )
 
-    # Analyze first
-    analyzer = PlacementAnalyzer(verbose=args.verbose and not quiet)
-
-    with spinner("Analyzing placement...", quiet=quiet):
-        conflicts = analyzer.find_conflicts(pcb_path, rules)
-
-    if not conflicts:
-        if not quiet:
-            print("No placement conflicts found!")
-        return 0
-
-    if not quiet:
-        print(f"Found {len(conflicts)} conflicts")
-
     # Parse strategy
     strategy = FixStrategy(args.strategy)
 
@@ -135,41 +121,48 @@ def cmd_fix(args) -> int:
         if not quiet:
             print(f"Anchored components: {anchored}")
 
-    # Create fixer and suggest fixes
+    max_passes = getattr(args, "max_passes", 10)
+
+    # Create fixer
     fixer = PlacementFixer(
         strategy=strategy,
         anchored=anchored,
         verbose=args.verbose and not quiet,
     )
 
-    with spinner("Generating fix suggestions...", quiet=quiet):
-        fixes = fixer.suggest_fixes(conflicts, analyzer)
+    output_path = args.output or pcb_path
 
-    if not fixes:
-        if not quiet:
-            print("No fixes could be suggested")
-        return 0
+    with spinner("Resolving placement conflicts...", quiet=quiet):
+        result = fixer.iterative_fix(
+            pcb_path,
+            rules=rules,
+            output_path=output_path,
+            max_passes=max_passes,
+            dry_run=args.dry_run,
+        )
 
     if not quiet:
-        print(f"\nSuggested {len(fixes)} fixes:")
-        print(fixer.preview_fixes(fixes))
+        # Per-pass progress when verbose
+        if args.verbose and result.pass_results:
+            print("\nPer-pass progress:")
+            for pr in result.pass_results:
+                resolved = pr.conflicts_before - pr.conflicts_after
+                esc_str = f" (escalation: {pr.escalation_factor:.1f}x)" if pr.escalation_factor > 1.0 else ""
+                print(
+                    f"  Pass {pr.pass_number}: {pr.conflicts_before} conflicts "
+                    f"-> {pr.conflicts_after} conflicts "
+                    f"({resolved} resolved, {pr.fixes_applied} fixes applied{esc_str})"
+                )
+
+        print(f"\n{result.message}")
+
+        if result.remaining_conflicts > 0:
+            print(f"Warning: {result.remaining_conflicts} conflicts remain after fixes")
 
     if args.dry_run:
         if not quiet:
             print("\n(Dry run - no changes made)")
         return 0
-
-    # Apply fixes
-    output_path = args.output or pcb_path
-
-    with spinner("Applying fixes...", quiet=quiet):
-        result = fixer.apply_fixes(pcb_path, fixes, output_path)
-
-    if not quiet:
-        print(f"\n{result.message}")
-
-        if result.new_conflicts > 0:
-            print(f"Warning: {result.new_conflicts} conflicts remain after fixes")
 
     return 0 if result.success else 1
 
@@ -1472,6 +1465,13 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.25,
         help="Courtyard margin around pads in mm",
+    )
+    fix_parser.add_argument(
+        "--max-passes",
+        type=int,
+        default=10,
+        dest="max_passes",
+        help="Maximum number of iterative fix passes (default: 10)",
     )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")

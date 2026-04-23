@@ -41,6 +41,35 @@ class FixResult:
     message: str
 
 
+@dataclass
+class PassResult:
+    """Result of a single fix pass."""
+
+    pass_number: int
+    conflicts_before: int
+    conflicts_after: int
+    fixes_applied: int
+    escalation_factor: float
+
+
+@dataclass
+class IterativeFixResult:
+    """Result of iterative fix resolution."""
+
+    success: bool
+    total_passes: int
+    initial_conflicts: int
+    remaining_conflicts: int
+    total_fixes_applied: int
+    pass_results: list[PassResult]
+    message: str
+
+    @property
+    def made_progress(self) -> bool:
+        """Whether any passes reduced conflict count."""
+        return self.remaining_conflicts < self.initial_conflicts
+
+
 class PlacementFixer:
     """Suggests and applies fixes for placement conflicts.
 
@@ -484,6 +513,208 @@ class PlacementFixer:
             message=f"Applied {applied} fixes, {len(new_conflicts)} conflicts remaining",
         )
 
+    def iterative_fix(
+        self,
+        pcb_path: str | Path,
+        rules: DesignRules | None = None,
+        output_path: str | Path | None = None,
+        max_passes: int = 10,
+        escalation_factor: float = 1.5,
+        dry_run: bool = False,
+    ) -> IterativeFixResult:
+        """Run iterative multi-pass conflict resolution.
+
+        Repeatedly detects conflicts, suggests fixes, applies them, and
+        re-checks until conflicts are resolved or no further progress is
+        made.  When a pass fails to reduce the conflict count, move
+        magnitudes are escalated by *escalation_factor* and previously
+        attempted fix directions for a component are avoided.
+
+        Args:
+            pcb_path: Path to input .kicad_pcb file.
+            rules: Design rules for conflict detection.
+            output_path: Output path (None = modify in place).
+            max_passes: Maximum number of fix passes.
+            escalation_factor: Multiplier applied to move magnitudes when
+                a pass does not reduce the conflict count.
+            dry_run: If True, return what *would* happen without writing.
+
+        Returns:
+            IterativeFixResult with per-pass diagnostics.
+        """
+        pcb_path = Path(pcb_path)
+        if output_path is None:
+            output_path = pcb_path
+
+        # Work on a copy so we can iterate in-memory
+        content = pcb_path.read_text()
+
+        analyzer = PlacementAnalyzer(verbose=self.verbose)
+        pass_results: list[PassResult] = []
+        total_fixes = 0
+        current_escalation = 1.0
+
+        # Track previous fix keys (component, direction_bucket) to avoid
+        # re-suggesting the same move on consecutive stalled passes.
+        previous_fix_keys: set[tuple[str, int, int]] = set()
+
+        # Detect initial conflicts by writing to a temp file
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".kicad_pcb", mode="w", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+
+        try:
+            initial_conflicts = analyzer.find_conflicts(tmp_path, rules)
+            initial_count = len(initial_conflicts)
+
+            if initial_count == 0:
+                return IterativeFixResult(
+                    success=True,
+                    total_passes=0,
+                    initial_conflicts=0,
+                    remaining_conflicts=0,
+                    total_fixes_applied=0,
+                    pass_results=[],
+                    message="No placement conflicts found",
+                )
+
+            prev_conflict_count = initial_count
+
+            for pass_num in range(1, max_passes + 1):
+                # Write current content to temp for analysis
+                tmp_path.write_text(content)
+                conflicts = analyzer.find_conflicts(tmp_path, rules)
+                conflict_count = len(conflicts)
+
+                if conflict_count == 0:
+                    pass_results.append(PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=prev_conflict_count,
+                        conflicts_after=0,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    ))
+                    break
+
+                # Suggest fixes
+                fixes = self.suggest_fixes(conflicts, analyzer)
+
+                if not fixes:
+                    pass_results.append(PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=conflict_count,
+                        conflicts_after=conflict_count,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    ))
+                    break
+
+                # Filter out previously-stalled fix directions
+                if previous_fix_keys:
+                    filtered: list[PlacementFix] = []
+                    for fix in fixes:
+                        key = _fix_direction_key(fix)
+                        if key not in previous_fix_keys:
+                            filtered.append(fix)
+                    if filtered:
+                        fixes = filtered
+                    # If all fixes are duplicates, keep them but escalate
+                    # to break out of the stall
+
+                # Apply escalation to move magnitudes
+                if current_escalation > 1.0:
+                    fixes = _escalate_fixes(fixes, current_escalation)
+
+                # Apply fixes to in-memory content
+                applied = 0
+                for fix in fixes:
+                    new_content = self._apply_fix_to_content(content, fix)
+                    if new_content != content:
+                        content = new_content
+                        applied += 1
+
+                total_fixes += applied
+
+                # Re-check conflicts after this pass
+                tmp_path.write_text(content)
+                new_conflicts = analyzer.find_conflicts(tmp_path, rules)
+                new_count = len(new_conflicts)
+
+                pass_results.append(PassResult(
+                    pass_number=pass_num,
+                    conflicts_before=conflict_count,
+                    conflicts_after=new_count,
+                    fixes_applied=applied,
+                    escalation_factor=current_escalation,
+                ))
+
+                if self.verbose:
+                    print(
+                        f"  Pass {pass_num}: {conflict_count} conflicts "
+                        f"-> {new_count} conflicts "
+                        f"({conflict_count - new_count} resolved)"
+                    )
+
+                if new_count == 0:
+                    break
+
+                # Detect stall: no progress
+                if new_count >= conflict_count:
+                    # Record current fix directions as stalled
+                    for fix in fixes:
+                        previous_fix_keys.add(_fix_direction_key(fix))
+                    # Escalate move magnitude for next pass
+                    current_escalation *= escalation_factor
+                else:
+                    # Progress made, reset stall tracking
+                    previous_fix_keys.clear()
+                    current_escalation = 1.0
+
+                prev_conflict_count = new_count
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        # Determine final conflict count
+        remaining = pass_results[-1].conflicts_after if pass_results else initial_count
+
+        if not dry_run:
+            Path(output_path).write_text(content)
+
+        # Build summary message
+        if remaining == 0:
+            msg = (
+                f"All conflicts resolved in {len(pass_results)} passes "
+                f"({total_fixes} fixes applied)"
+            )
+        elif remaining < initial_count:
+            msg = (
+                f"Reduced conflicts from {initial_count} to {remaining} "
+                f"in {len(pass_results)} passes ({total_fixes} fixes applied)"
+            )
+        else:
+            msg = (
+                f"Could not reduce conflicts below {remaining} "
+                f"after {len(pass_results)} passes ({total_fixes} fixes applied)"
+            )
+
+        if dry_run:
+            msg += " (dry run)"
+
+        return IterativeFixResult(
+            success=remaining == 0,
+            total_passes=len(pass_results),
+            initial_conflicts=initial_count,
+            remaining_conflicts=remaining,
+            total_fixes_applied=total_fixes,
+            pass_results=pass_results,
+            message=msg,
+        )
+
     def _apply_fix_to_content(self, content: str, fix: PlacementFix) -> str:
         """Apply a single fix to PCB content.
 
@@ -585,3 +816,40 @@ class PlacementFixer:
             lines.append("")
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for iterative fix
+# ---------------------------------------------------------------------------
+
+
+def _fix_direction_key(fix: PlacementFix) -> tuple[str, int, int]:
+    """Return a hashable key representing (component, direction_bucket).
+
+    The direction is bucketed into sign-based octants so that
+    near-identical moves are treated as duplicates.
+    """
+    dx_sign = 1 if fix.move_vector.x >= 0 else -1
+    dy_sign = 1 if fix.move_vector.y >= 0 else -1
+    return (fix.component, dx_sign, dy_sign)
+
+
+def _escalate_fixes(
+    fixes: list[PlacementFix],
+    factor: float,
+) -> list[PlacementFix]:
+    """Return a copy of *fixes* with move magnitudes multiplied by *factor*."""
+    escalated: list[PlacementFix] = []
+    for fix in fixes:
+        new_vector = Point(fix.move_vector.x * factor, fix.move_vector.y * factor)
+        escalated.append(
+            PlacementFix(
+                conflict=fix.conflict,
+                component=fix.component,
+                move_vector=new_vector,
+                confidence=fix.confidence,
+                new_position=None,
+                creates_new_conflicts=fix.creates_new_conflicts,
+            )
+        )
+    return escalated
