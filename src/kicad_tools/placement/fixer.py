@@ -515,6 +515,165 @@ class PlacementFixer:
             message=f"Applied {applied} fixes, {len(new_conflicts)} conflicts remaining",
         )
 
+    def nudge_pad_clearance(
+        self,
+        pcb_path: str | Path,
+        rules: DesignRules | None = None,
+        output_path: str | Path | None = None,
+        dry_run: bool = False,
+        max_passes: int = 3,
+    ) -> FixResult:
+        """Fast targeted pad clearance violation repair.
+
+        Detects pad clearance violations only and nudges the smaller component
+        in each pair the minimum distance to resolve the overlap.  Preserves
+        the existing directional relationship (e.g. if R13 is to the right of
+        U8, it moves further right).  After applying fixes, verifies that no
+        new courtyard or pad clearance conflicts were introduced.
+
+        Uses up to *max_passes* quick passes to converge (each pass re-detects
+        remaining pad clearance violations and nudges again).  This handles
+        cases where a single nudge doesn't fully resolve all pad pairs between
+        two components.  Designed to complete in under 5 seconds for typical
+        boards.
+
+        Args:
+            pcb_path: Path to input .kicad_pcb file.
+            rules: Design rules for conflict detection.
+            output_path: Output path (None = modify in place).
+            dry_run: If True, return what would happen without writing.
+            max_passes: Maximum number of nudge passes (default: 3).
+
+        Returns:
+            FixResult with success status and details.
+        """
+        import tempfile
+
+        pcb_path = Path(pcb_path)
+        if output_path is None:
+            output_path = pcb_path
+
+        # Detect initial conflicts
+        analyzer = PlacementAnalyzer(verbose=self.verbose)
+        all_conflicts = analyzer.find_conflicts(pcb_path, rules)
+
+        # Filter to pad clearance only
+        pad_conflicts = [
+            c for c in all_conflicts if c.type == ConflictType.PAD_CLEARANCE
+        ]
+
+        if not pad_conflicts:
+            return FixResult(
+                success=True,
+                fixes_applied=0,
+                new_conflicts=0,
+                message="No pad clearance violations found",
+            )
+
+        # For dry run, just report what we'd do on the first pass
+        if dry_run:
+            fixes = self.suggest_fixes(pad_conflicts, analyzer)
+            return FixResult(
+                success=True,
+                fixes_applied=len(fixes),
+                new_conflicts=0,
+                message=(
+                    f"Would apply {len(fixes)} nudge(s) to resolve "
+                    f"{len(pad_conflicts)} pad clearance violation(s) (dry run)"
+                ),
+            )
+
+        # Multi-pass nudge: iterate until pad clearance violations are
+        # resolved or no further progress is made.
+        content = pcb_path.read_text()
+        total_applied = 0
+        initial_pad_count = len(pad_conflicts)
+
+        # Record original conflict fingerprints for new-conflict detection
+        original_pairs = {
+            (c.component1, c.component2, c.type) for c in all_conflicts
+        }
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".kicad_pcb", mode="w", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+
+        try:
+            for pass_num in range(max_passes):
+                # Re-detect pad clearance violations
+                tmp_path.write_text(content)
+                current_conflicts = analyzer.find_conflicts(tmp_path, rules)
+                current_pad = [
+                    c for c in current_conflicts
+                    if c.type == ConflictType.PAD_CLEARANCE
+                ]
+
+                if not current_pad:
+                    break
+
+                # Suggest fixes for remaining violations
+                fixes = self.suggest_fixes(current_pad, analyzer)
+                if not fixes:
+                    break
+
+                # Apply fixes to content
+                applied_this_pass = 0
+                for fix in fixes:
+                    new_content = self._apply_fix_to_content(content, fix)
+                    if new_content != content:
+                        content = new_content
+                        applied_this_pass += 1
+
+                if applied_this_pass == 0:
+                    break
+
+                total_applied += applied_this_pass
+
+                if self.verbose:
+                    print(
+                        f"  Nudge pass {pass_num + 1}: applied {applied_this_pass} fix(es), "
+                        f"{len(current_pad)} pad violations before"
+                    )
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        # Write final output
+        Path(output_path).write_text(content)
+
+        # Final verification
+        final_conflicts = analyzer.find_conflicts(output_path, rules)
+        newly_introduced = [
+            c for c in final_conflicts
+            if (c.component1, c.component2, c.type) not in original_pairs
+        ]
+        remaining_pad = [
+            c for c in final_conflicts if c.type == ConflictType.PAD_CLEARANCE
+        ]
+
+        if remaining_pad:
+            msg = (
+                f"Applied {total_applied} nudge(s), "
+                f"{len(remaining_pad)} pad clearance violation(s) remain"
+            )
+        else:
+            msg = (
+                f"Applied {total_applied} nudge(s), all {initial_pad_count} "
+                f"pad clearance violation(s) resolved"
+            )
+
+        if newly_introduced:
+            msg += f" (WARNING: {len(newly_introduced)} new conflict(s) introduced)"
+
+        return FixResult(
+            success=len(remaining_pad) == 0 and len(newly_introduced) == 0,
+            fixes_applied=total_applied,
+            new_conflicts=len(newly_introduced),
+            message=msg,
+        )
+
     def iterative_fix(
         self,
         pcb_path: str | Path,
@@ -777,41 +936,62 @@ class PlacementFixer:
         """Apply a single fix to PCB content.
 
         Modifies the (at x y) position of the component's footprint.
+
+        Uses a two-step approach to avoid cross-footprint regex matching:
+        1. Find the footprint block containing the target reference.
+        2. Update the first (at X Y) within that block.
         """
         import re
 
         ref = fix.component
 
-        # Pattern to match the footprint block with this reference.
+        # Step 1: Find all footprint blocks and locate the one with our reference.
         # KiCad PCB files have two reference formats:
         # 1. KiCad 8 property format: (property "Reference" "REF" ...)
         # 2. Legacy fp_text format: (fp_text reference "REF" ...)
-        #
-        # Key fixes:
-        # 1. Use "[^"]+" for quoted footprint name (not [^\)]+)
-        # 2. Use [\s\S]*? for lazy match across nested S-expressions (not [^\)]*)
-        # 3. The suffix includes the closing ), so don't add another in replacement
-        # 4. Match both reference formats using alternation (?: ... | ... )
-        #
-        # Structure: (footprint "name" (layer "...") ... (at X Y [R]) ... reference identifier ...)
-        fp_pattern = rf'(\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\)[\s\S]*?(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}"))'
+        ref_pattern = re.compile(
+            rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+        )
 
-        def update_position(match):
-            prefix = match.group(1)
-            old_x = float(match.group(2))
-            old_y = float(match.group(3))
-            rotation = match.group(4) or ""
-            suffix = match.group(5)  # Already includes closing )
+        # Find start of each footprint block
+        fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+
+        for i, fp_start in enumerate(fp_starts):
+            # Determine the end of this footprint block
+            # (next footprint start, or end of content)
+            fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+            fp_block = content[fp_start:fp_end]
+
+            # Check if this footprint contains our reference
+            if not ref_pattern.search(fp_block):
+                continue
+
+            # Step 2: Find and update the first (at X Y [R]) in this footprint
+            at_pattern = re.compile(
+                r'(\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\))'
+            )
+            at_match = at_pattern.search(fp_block)
+            if not at_match:
+                continue
+
+            old_x = float(at_match.group(2))
+            old_y = float(at_match.group(3))
+            rotation = at_match.group(4) or ""
 
             new_x = old_x + fix.move_vector.x
             new_y = old_y + fix.move_vector.y
 
-            # Note: suffix starts with ) so don't add another
-            return f"{prefix}{new_x:.4f} {new_y:.4f}{rotation}{suffix}"
+            # Build the replacement for the (at ...) portion
+            new_at = f"{at_match.group(1)}{new_x:.4f} {new_y:.4f}{rotation}{at_match.group(5)}"
 
-        new_content = re.sub(fp_pattern, update_position, content, flags=re.DOTALL)
+            # Replace within the content at the exact position
+            abs_start = fp_start + at_match.start()
+            abs_end = fp_start + at_match.end()
+            content = content[:abs_start] + new_at + content[abs_end:]
 
-        return new_content
+            return content
+
+        return content
 
     def verify_fixes(
         self,

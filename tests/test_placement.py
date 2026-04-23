@@ -931,13 +931,22 @@ class TestApplyFixes:
         modified = output_path.read_text()
 
         # Extract positions from both files for the moved component
-        # Look for the (at X Y) pattern near the component's reference
+        # Look for the (at X Y) pattern in the footprint block for the given reference.
         def find_position(content: str, ref: str) -> tuple[float, float] | None:
-            # Find footprint with this reference and extract its position
-            pattern = rf'\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+([\d.-]+)\s+([\d.-]+)[\s\S]*?property\s+"Reference"\s+"{re.escape(ref)}"'
-            match = re.search(pattern, content)
-            if match:
-                return float(match.group(1)), float(match.group(2))
+            # Step 1: Find all footprint blocks
+            ref_pattern = re.compile(
+                rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+            )
+            fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+            for i, fp_start in enumerate(fp_starts):
+                fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+                fp_block = content[fp_start:fp_end]
+                if not ref_pattern.search(fp_block):
+                    continue
+                # Step 2: Extract the first (at X Y) in this block (footprint position)
+                at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)', fp_block)
+                if at_match:
+                    return float(at_match.group(1)), float(at_match.group(2))
             return None
 
         orig_pos = find_position(original, component_to_move)
@@ -1156,11 +1165,20 @@ class TestFpTextReferenceFormat:
 
         # Helper to find position - must match both formats
         def find_position(content: str, ref: str) -> tuple[float, float] | None:
-            # Match both property "Reference" and fp_text reference formats
-            pattern = rf'\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+([\d.-]+)\s+([\d.-]+)[\s\S]*?(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
-            match = re.search(pattern, content)
-            if match:
-                return float(match.group(1)), float(match.group(2))
+            # Step 1: Find all footprint blocks
+            ref_pattern = re.compile(
+                rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+            )
+            fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+            for i, fp_start in enumerate(fp_starts):
+                fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+                fp_block = content[fp_start:fp_end]
+                if not ref_pattern.search(fp_block):
+                    continue
+                # Step 2: Extract the first (at X Y) in this block (footprint position)
+                at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)', fp_block)
+                if at_match:
+                    return float(at_match.group(1)), float(at_match.group(2))
             return None
 
         orig_pos = find_position(original, component_to_move)
