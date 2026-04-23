@@ -222,6 +222,7 @@ def resolve_pin_map(
                 "name": lib_pin.name,
                 "net": net,
                 "type": lib_pin.type,
+                "position": [round(pos[0], 4), round(pos[1], 4)],
             }
 
         # Handle multi-unit: if the same reference already exists, merge pins
@@ -250,8 +251,8 @@ def output_table(pin_map: dict[str, dict]) -> None:
     for ref in sorted(pin_map.keys()):
         entry = pin_map[ref]
         print(f"\n{ref} ({entry['lib_id']})")
-        print(f"  {'Pin':<6} {'Name':<20} {'Type':<15} {'Net'}")
-        print("  " + "-" * 60)
+        print(f"  {'Pin':<6} {'Name':<20} {'Type':<15} {'Position':<22} {'Net'}")
+        print("  " + "-" * 80)
 
         pins = entry["pins"]
         for pin_num in sorted(
@@ -260,7 +261,9 @@ def output_table(pin_map: dict[str, dict]) -> None:
         ):
             pin = pins[pin_num]
             net_str = pin["net"] if pin["net"] else "(unconnected)"
-            print(f"  {pin_num:<6} {pin['name']:<20} {pin['type']:<15} {net_str}")
+            pos = pin.get("position")
+            pos_str = f"({pos[0]:.2f}, {pos[1]:.2f})" if pos else ""
+            print(f"  {pin_num:<6} {pin['name']:<20} {pin['type']:<15} {pos_str:<22} {net_str}")
 
 
 def main(argv=None):
