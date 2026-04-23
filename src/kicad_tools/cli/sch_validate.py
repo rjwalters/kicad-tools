@@ -499,7 +499,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     - Power symbols (``lib_id`` starting with ``power:``)
     - Symbols with both ``in_bom=no`` and ``on_board=no`` (graphical-only)
 
-    Multi-unit symbols are deduplicated by UUID prefix so that a missing
+    Multi-unit symbols are deduplicated by (reference, lib_id) so that a missing
     ``instances`` block on a two-unit IC produces a single warning, not one
     per unit.
     """
