@@ -1152,6 +1152,53 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Preview sync actions without modifying the PCB file",
     )
+    pcb_sync_netlist.add_argument(
+        "--remove-orphans",
+        action="store_true",
+        help="Delete orphaned footprints (in PCB but not in schematic)",
+    )
+    pcb_sync_netlist.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove orphans even if they have routed traces",
+    )
+
+    # pcb remove-footprint
+    pcb_remove_fp = pcb_subparsers.add_parser(
+        "remove-footprint",
+        help="Remove a footprint from the PCB by reference designator",
+        description="Remove a specific footprint from a PCB file. "
+        "By default, refuses to remove footprints with routed traces "
+        "unless --force is specified.",
+    )
+    pcb_remove_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_remove_fp.add_argument(
+        "--ref",
+        required=True,
+        help="Reference designator of footprint to remove (e.g., C1)",
+    )
+    pcb_remove_fp.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_remove_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_remove_fp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview removal without modifying the PCB file",
+    )
+    pcb_remove_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove footprint even if it has routed traces",
+    )
 
 
 def _add_lib_parser(subparsers) -> None:

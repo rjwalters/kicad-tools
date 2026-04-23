@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -30,6 +30,10 @@ def run_pcb_command(args) -> int:
     # Handle sync-netlist command
     if args.pcb_command == "sync-netlist":
         return _run_sync_netlist_command(args, pcb_path)
+
+    # Handle remove-footprint command
+    if args.pcb_command == "remove-footprint":
+        return _run_remove_footprint_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -488,11 +492,40 @@ def _run_sync_netlist_command(args, pcb_path: Path) -> int:
     output_path = Path(output) if output else None
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
+    remove_orphans = getattr(args, "remove_orphans", False)
+    force = getattr(args, "force", False)
 
     return run_sync_netlist(
         schematic_path=schematic_path,
         pcb_path=pcb_path,
         dry_run=dry_run,
         output_path=output_path,
+        output_format=output_format,
+        remove_orphans=remove_orphans,
+        force=force,
+    )
+
+
+def _run_remove_footprint_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb remove-footprint' command."""
+    from kicad_tools.cli.pcb_remove_footprint import run_remove_footprint
+
+    ref = getattr(args, "ref", None)
+    if not ref:
+        print("Error: --ref is required", file=sys.stderr)
+        return 1
+
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+    output_format = getattr(args, "format", "text")
+
+    return run_remove_footprint(
+        pcb_path=pcb_path,
+        reference=ref,
+        dry_run=dry_run,
+        output_path=output_path,
+        force=force,
         output_format=output_format,
     )

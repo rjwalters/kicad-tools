@@ -671,6 +671,8 @@ class TestPcbSyncNetlistCLIDispatch:
             output = None
             dry_run = False
             format = "text"
+            remove_orphans = False
+            force = False
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 1
@@ -687,6 +689,314 @@ class TestPcbSyncNetlistCLIDispatch:
             output = None
             dry_run = False
             format = "text"
+            remove_orphans = False
+            force = False
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 1
+
+
+# --- PCB with orphan D1 that has routed traces ---
+PCB_WITH_ORPHAN_TRACED = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "LED_A")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "LED_SMD:LED_0603"
+    (layer "F.Cu")
+    (uuid "fp-d1")
+    (at 140 100)
+    (property "Reference" "D1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "LED" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "LED_A"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (segment (start 139.5 100) (end 130 100) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+
+class TestRemoveOrphans:
+    """Tests for --remove-orphans functionality in sync_netlist."""
+
+    def test_remove_orphans_removes_untraced_footprint(self, tmp_path):
+        """Orphaned footprint without traces is removed."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN)
+
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True)
+
+        assert len(result.removed) == 1
+        assert result.removed[0].reference == "D1"
+        assert result.removed[0].action == "remove"
+        assert not result.orphaned
+        assert not result.errors
+
+        # Verify D1 was actually removed from the PCB file
+        board = PCB.load(pcb)
+        assert board.get_footprint("D1") is None
+        assert board.get_footprint("R1") is not None
+        assert board.get_footprint("C1") is not None
+
+    def test_remove_orphans_dry_run_does_not_modify(self, tmp_path):
+        """--remove-orphans with --dry-run reports but does not modify."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN)
+        original = pcb.read_text()
+
+        result = sync_netlist(sch, pcb, dry_run=True, remove_orphans=True)
+
+        assert len(result.removed) == 1
+        assert result.removed[0].reference == "D1"
+        assert pcb.read_text() == original
+
+    def test_remove_orphans_blocks_traced_footprint(self, tmp_path):
+        """Orphaned footprint with traces is blocked without --force."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN_TRACED)
+
+        result = sync_netlist(sch, pcb, dry_run=True, remove_orphans=True)
+
+        assert len(result.orphaned) == 1
+        assert result.orphaned[0].reference == "D1"
+        assert not result.removed
+        assert any("D1" in e and "traces" in e for e in result.errors)
+
+    def test_remove_orphans_force_removes_traced_footprint(self, tmp_path):
+        """--force allows removal of orphaned footprint with traces."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN_TRACED)
+
+        result = sync_netlist(
+            sch, pcb, dry_run=False, remove_orphans=True, force=True
+        )
+
+        assert len(result.removed) == 1
+        assert result.removed[0].reference == "D1"
+        assert not result.orphaned
+        assert not result.errors
+
+        board = PCB.load(pcb)
+        assert board.get_footprint("D1") is None
+
+    def test_remove_orphans_no_orphans_is_noop(self, tmp_path):
+        """--remove-orphans with no orphans is a clean no-op."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(sch, pcb, dry_run=True, remove_orphans=True)
+
+        assert not result.removed
+        assert not result.orphaned
+        assert not result.errors
+
+    def test_remove_orphans_all_orphaned(self, tmp_path):
+        """When all footprints are orphaned, they should all be removed."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "empty.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(
+            "(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))"
+        )
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True)
+
+        assert len(result.removed) == 2
+        refs = {a.reference for a in result.removed}
+        assert refs == {"R1", "C1"}
+
+        board = PCB.load(pcb)
+        assert board.get_footprint("R1") is None
+        assert board.get_footprint("C1") is None
+
+    def test_without_remove_orphans_behavior_unchanged(self, tmp_path):
+        """Without --remove-orphans, orphans are only reported (not removed)."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN)
+
+        result = sync_netlist(sch, pcb, dry_run=True, remove_orphans=False)
+
+        assert len(result.orphaned) == 1
+        assert result.orphaned[0].reference == "D1"
+        assert not result.removed
+
+
+class TestRemoveOrphansFormatting:
+    """Tests for removed footprints in text and JSON output."""
+
+    def test_removed_in_text_output(self, tmp_path):
+        """Removed footprints appear in text output."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
+
+        result = SyncResult(
+            removed=[SyncAction(
+                action="remove",
+                reference="D1",
+                footprint="LED_SMD:LED_0603",
+                value="LED",
+            )]
+        )
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_text(result, dry_run=False, pcb_path=pcb)
+
+        assert "Removed" in output
+        assert "D1" in output
+
+    def test_removed_in_json_output(self, tmp_path):
+        """Removed footprints appear in JSON output."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
+
+        result = SyncResult(
+            removed=[SyncAction(
+                action="remove",
+                reference="D1",
+                footprint="LED_SMD:LED_0603",
+                value="LED",
+            )]
+        )
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_json(result, dry_run=False, pcb_path=pcb)
+
+        data = json.loads(output)
+        assert "removed" in data
+        assert len(data["removed"]) == 1
+        assert data["removed"][0]["reference"] == "D1"
+
+
+class TestSyncNetlistCLIRemoveOrphansFlags:
+    """Tests for --remove-orphans and --force CLI flags."""
+
+    def test_parser_remove_orphans_flag(self):
+        """Parser accepts --remove-orphans flag."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "--remove-orphans",
+            "test.kicad_pcb",
+        ])
+        assert args.remove_orphans is True
+
+    def test_parser_force_flag(self):
+        """Parser accepts --force flag for sync-netlist."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "--remove-orphans",
+            "--force",
+            "test.kicad_pcb",
+        ])
+        assert args.force is True
+
+    def test_dispatcher_passes_remove_orphans(self, tmp_path):
+        """Dispatcher passes remove_orphans and force to run_sync_netlist."""
+        from kicad_tools.cli.commands.pcb import _run_sync_netlist_command
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN)
+
+        class Args:
+            schematic = str(sch)
+            output = None
+            dry_run = False
+            format = "text"
+            remove_orphans = True
+            force = False
+
+        rc = _run_sync_netlist_command(Args(), pcb)
+        assert rc == 0
+
+
+class TestFootprintHasTraces:
+    """Tests for PCB.footprint_has_traces helper."""
+
+    def test_footprint_without_traces(self, tmp_path):
+        """Footprint with no connected segments returns False."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(PCB_WITH_ORPHAN)
+        board = PCB.load(pcb)
+
+        # D1 has no net connections (net 0)
+        assert board.footprint_has_traces("D1") is False
+
+    def test_footprint_with_traces(self, tmp_path):
+        """Footprint with connected segments returns True."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(PCB_WITH_ORPHAN_TRACED)
+        board = PCB.load(pcb)
+
+        # D1 pad 1 is on net 2 with a segment touching it
+        assert board.footprint_has_traces("D1") is True
+
+    def test_nonexistent_footprint(self, tmp_path):
+        """Non-existent footprint returns False."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+        board = PCB.load(pcb)
+
+        assert board.footprint_has_traces("Z99") is False
