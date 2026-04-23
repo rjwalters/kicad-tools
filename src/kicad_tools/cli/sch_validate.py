@@ -40,6 +40,7 @@ class ValidationIssue:
     category: str  # "erc", "unconnected", "footprint", "hierarchy"
     message: str
     location: str = ""  # Sheet or reference
+    items: list[str] = field(default_factory=list)  # Contextual items (label/net names)
 
 
 @dataclass
@@ -131,13 +132,46 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                             raw_violations, schematic_path
                         )
 
+                        # Violation types whose messages benefit from
+                        # label/net name enrichment.
+                        _LABEL_TYPES = {
+                            "isolated_pin_label",
+                            "single_global_label",
+                            "label_dangling",
+                            "global_label_dangling",
+                            "similar_labels",
+                            "multiple_net_names",
+                            "hier_label_mismatch",
+                        }
+
                         for violation in raw_violations:
+                            item_descs = [
+                                i.get("description", "")
+                                for i in violation.get("items", [])
+                                if i.get("description", "")
+                            ]
+
+                            desc = violation.get("description", "Unknown ERC issue")
+                            vtype = violation.get("type", "")
+
+                            # Enrich the message with item context for
+                            # label-relevant violation types, but only if the
+                            # description does not already contain the item
+                            # text (some KiCad versions inline it).
+                            if vtype in _LABEL_TYPES and item_descs:
+                                new_parts = [
+                                    d for d in item_descs if d not in desc
+                                ]
+                                if new_parts:
+                                    desc = f"{desc} [{'; '.join(new_parts)}]"
+
                             issues.append(
                                 ValidationIssue(
                                     severity=violation.get("severity", "warning"),
                                     category="erc",
-                                    message=violation.get("description", "Unknown ERC issue"),
+                                    message=desc,
                                     location=violation.get("_sheet_path", ""),
+                                    items=item_descs,
                                 )
                             )
         finally:
@@ -555,6 +589,7 @@ def main(argv=None):
                             "category": i.category,
                             "message": i.message,
                             "location": i.location,
+                            "items": i.items,
                         }
                         for i in result.issues
                         if not args.quiet or i.severity == "error"
@@ -609,6 +644,8 @@ def print_result(result: ValidationResult, quiet: bool = False):
                     icon = "⚠️"
                 loc = f" ({issue.location})" if issue.location else ""
                 print(f"  {icon} {issue.message}{loc}")
+                for item in issue.items:
+                    print(f"       {item}")
             if len(issues) > 10:
                 print(f"  ... and {len(issues) - 10} more")
 
