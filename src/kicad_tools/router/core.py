@@ -2702,6 +2702,9 @@ class Autorouter:
                     flush_print(
                         f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
                     )
+                    flush_print(
+                        f"  Progress: {len(net_routes)}/{total_nets} nets routed total"
+                    )
 
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
