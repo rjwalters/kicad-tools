@@ -110,6 +110,7 @@ def render_pdf_pandoc(
         "-o",
         str(output_path),
         f"--pdf-engine={pdf_engine}",
+        "--from=markdown+yaml_metadata_block+pipe_tables+raw_tex",
         "--variable=geometry:margin=1in",
         "--variable=colorlinks:true",
     ]

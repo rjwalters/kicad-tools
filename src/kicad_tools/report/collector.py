@@ -542,22 +542,31 @@ class ReportDataCollector:
         files[name] = path
 
     def _get_board_dimensions(self, pcb: Any) -> tuple[float, float]:
-        """Get board dimensions (width, height) in mm from Edge.Cuts."""
+        """Get board dimensions (width, height) in mm from Edge.Cuts.
+
+        Skips circle elements (mounting hole cutouts) whose ``start``
+        coordinates are parser artifacts (typically ``(0, 0)``).
+        """
         min_x = min_y = float("inf")
         max_x = max_y = float("-inf")
 
         for item in pcb.graphic_items:
-            if item.layer == "Edge.Cuts":
-                if hasattr(item, "start"):
-                    min_x = min(min_x, item.start[0])
-                    min_y = min(min_y, item.start[1])
-                    max_x = max(max_x, item.start[0])
-                    max_y = max(max_y, item.start[1])
-                if hasattr(item, "end"):
-                    min_x = min(min_x, item.end[0])
-                    min_y = min(min_y, item.end[1])
-                    max_x = max(max_x, item.end[0])
-                    max_y = max(max_y, item.end[1])
+            if item.layer != "Edge.Cuts":
+                continue
+            # Skip circles — their start/end don't represent board outline
+            gtype = getattr(item, "graphic_type", None)
+            if gtype == "circle":
+                continue
+            if hasattr(item, "start"):
+                min_x = min(min_x, item.start[0])
+                min_y = min(min_y, item.start[1])
+                max_x = max(max_x, item.start[0])
+                max_y = max(max_y, item.start[1])
+            if hasattr(item, "end"):
+                min_x = min(min_x, item.end[0])
+                min_y = min(min_y, item.end[1])
+                max_x = max(max_x, item.end[0])
+                max_y = max(max_y, item.end[1])
 
         if min_x != float("inf"):
             return (max_x - min_x, max_y - min_y)

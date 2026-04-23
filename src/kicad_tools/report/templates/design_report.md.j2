@@ -1,12 +1,17 @@
-<div class="cover-block">
-
-# {{ project_name }}
-
-<p class="cover-meta">Design Report</p>
-<p class="cover-meta">Rev {{ revision }} | <span class="cover-meta-date">{{ date }}</span> | {{ manufacturer }}</p>
-<p class="cover-meta">kicad-tools {{ tool_version }}{% if git_hash %} ({{ git_hash }}){% endif %}</p>
-
-</div>
+---
+title: "{{ project_name }}"
+subtitle: "Design Report"
+author: "kicad-tools {{ tool_version }}"
+date: "Rev {{ revision }} | {{ date }} | {{ manufacturer }}"
+geometry: "margin=1in"
+fontsize: 11pt
+colorlinks: true
+header-includes:
+  - \usepackage{longtable}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage{float}
+---
 
 {% if board_stats %}
 ## Board Summary
@@ -42,13 +47,15 @@
 | Warnings | {{ erc.warning_count | default(0) }} |
 
 **Status**: {% if erc.skipped | default(false) %}SKIPPED{% elif erc.passed | default(true) %}PASS{% else %}FAIL{% endif %}
-
 {% if erc.details %}
-**Details**: {{ erc.details }}
+ -- {{ erc.details }}
 {% endif %}
 
 {% endif %}
 {% if schematic_sheets %}
+
+\newpage
+
 ## Schematic Overview
 
 {% for sheet in schematic_sheets %}
@@ -59,27 +66,19 @@
 {% endfor %}
 {% endif %}
 {% if pcb_figures %}
+
+\newpage
+
 ## PCB Layout
 
-{% if pcb_figures.front is defined and pcb_figures.front and pcb_figures.back is defined and pcb_figures.back %}
-<div class="pcb-grid">
-<figure>
-<img src="{{ pcb_figures.front }}" alt="PCB Front">
-<figcaption>Front</figcaption>
-</figure>
-<figure>
-<img src="{{ pcb_figures.back }}" alt="PCB Back">
-<figcaption>Back</figcaption>
-</figure>
-</div>
-
-{% elif pcb_figures.front is defined and pcb_figures.front %}
+{% if pcb_figures.front is defined and pcb_figures.front %}
 ![PCB Front]({{ pcb_figures.front }})
-
-{% elif pcb_figures.back is defined and pcb_figures.back %}
-![PCB Back]({{ pcb_figures.back }})
-
 {% endif %}
+
+{% if pcb_figures.back is defined and pcb_figures.back %}
+![PCB Back]({{ pcb_figures.back }})
+{% endif %}
+
 {% if pcb_figures.copper is defined and pcb_figures.copper %}
 ### Copper
 
@@ -94,16 +93,44 @@
 {% endif %}
 {% endif %}
 {% if bom_groups %}
+
+\newpage
+
 ## Bill of Materials
 
-| Value | Footprint | Qty | References | MPN | LCSC |
-|-------|-----------|-----|------------|-----|------|
+{% set has_mpn = bom_groups | selectattr('mpn', 'defined') | selectattr('mpn') | list | length > 0 %}
+{% set has_lcsc = bom_groups | selectattr('lcsc', 'defined') | selectattr('lcsc') | list | length > 0 %}
+{% if has_mpn and has_lcsc %}
+| Value | Package | Qty | References | MPN | LCSC |
+|-------|---------|-----|------------|-----|------|
 {% for item in bom_groups %}
-| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
 {% endfor %}
+{% elif has_lcsc %}
+| Value | Package | Qty | References | LCSC |
+|-------|---------|-----|------------|------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.lcsc | default("", true) }} |
+{% endfor %}
+{% elif has_mpn %}
+| Value | Package | Qty | References | MPN |
+|-------|---------|-----|------------|-----|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} |
+{% endfor %}
+{% else %}
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} |
+{% endfor %}
+{% endif %}
 
 {% endif %}
 {% if drc %}
+
+\newpage
+
 ## DRC Status
 
 | Metric | Count |
@@ -116,6 +143,9 @@
 
 {% endif %}
 {% if audit %}
+
+\newpage
+
 ## Manufacturing Readiness
 
 **Verdict**: {{ audit.verdict | default("unknown") | upper }}
@@ -125,8 +155,6 @@
 
 {% for item in audit.action_items %}
 - **[{{ {1: 'CRITICAL', 2: 'IMPORTANT', 3: 'OPTIONAL'}.get(item.priority, 'INFO') }}]** {{ item.description }}
-{% if item.command %}  `{{ item.command }}`
-{% endif %}
 {% endfor %}
 {% endif %}
 
@@ -134,7 +162,7 @@
 {% if analog_components %}
 ## Analog Components
 
-{{ analog_components | length }} analog-sensitive component{{ 's' if analog_components | length != 1 else '' }} detected — manual layout review recommended.
+{{ analog_components | length }} analog-sensitive component{{ 's' if analog_components | length != 1 else '' }} detected -- manual layout review recommended.
 
 | Reference | Value | Reason |
 |-----------|-------|--------|
@@ -144,6 +172,9 @@
 
 {% endif %}
 {% if net_status %}
+
+\newpage
+
 ## Routing Status
 
 | Metric | Value |
@@ -168,6 +199,7 @@
 {% for net in net_status.zone_connected_nets %}
 - {{ net }}
 {% endfor %}
+
 {% endif %}
 {% if net_status.single_pad_nets is defined and net_status.single_pad_nets %}
 ### Single-Pad Nets
@@ -175,6 +207,7 @@
 {% for net in net_status.single_pad_nets %}
 - {{ net }}
 {% endfor %}
+
 {% endif %}
 {% if net_status.signal_incomplete_net_names is defined and net_status.signal_incomplete_net_names %}
 ### Unrouted Signal Nets
@@ -182,12 +215,14 @@
 {% for net in net_status.signal_incomplete_net_names %}
 - {{ net }}
 {% endfor %}
+
 {% elif net_status.incomplete_net_names is defined and net_status.incomplete_net_names %}
 ### Incomplete Nets
 
 {% for net in net_status.incomplete_net_names %}
 - {{ net }}
 {% endfor %}
+
 {% endif %}
 
 {% endif %}

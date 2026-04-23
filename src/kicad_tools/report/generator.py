@@ -19,6 +19,19 @@ __all__ = ["ReportGenerator"]
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _short_footprint(footprint: str) -> str:
+    """Strip the KiCad library prefix from a footprint name.
+
+    Converts e.g. ``"Capacitor_SMD:C_0402_1005Metric"`` to
+    ``"C_0402_1005Metric"``.
+    """
+    if not footprint:
+        return footprint
+    if ":" in footprint:
+        return footprint.split(":", 1)[1]
+    return footprint
+
+
 def _truncate_refs(refs: str, max_count: int = 10) -> str:
     """Truncate a comma-separated reference list to *max_count* items.
 
@@ -72,6 +85,7 @@ class ReportGenerator:
             lstrip_blocks=True,
         )
         self._env.filters["truncate_refs"] = _truncate_refs
+        self._env.filters["short_footprint"] = _short_footprint
         self._template_name = template_name
 
     # ------------------------------------------------------------------
