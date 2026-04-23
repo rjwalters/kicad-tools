@@ -292,6 +292,75 @@ def check_hierarchy(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def check_no_connect_on_input_pins(schematic_path: str) -> list[ValidationIssue]:
+    """Flag no-connect markers placed on pins typed 'input' in the library.
+
+    Input pins typically require a defined logic state.  Placing a no-connect
+    flag on one silences the unconnected-pin check but may hide a real design
+    issue (e.g. an active-low control left floating instead of being tied to a
+    pull resistor).
+
+    Only ``input`` pins are flagged -- ``passive``, ``no_connect``, and other
+    types are intentionally excluded because no-connect markers on those are
+    standard practice.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.schematic.models import Schematic as OpSchematic
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = OpSchematic.load(node.path)
+
+                nc_points = {(round(nc.x, 2), round(nc.y, 2)) for nc in sch.no_connects}
+                if not nc_points:
+                    continue
+
+                for sym in sch.symbols:
+                    # Skip power symbols -- their pins are always power_in/power_out
+                    if sym.symbol_def.lib_id.startswith("power:"):
+                        continue
+
+                    for pin in sym.symbol_def.pins:
+                        if pin.pin_type != "input":
+                            continue
+
+                        pos = sym.pin_position(pin.number)
+                        pos_r = (round(pos[0], 2), round(pos[1], 2))
+
+                        if pos_r in nc_points:
+                            display = pin.name if pin.name and pin.name != "~" else pin.number
+                            issues.append(
+                                ValidationIssue(
+                                    severity="info",
+                                    category="no_connect",
+                                    message=(
+                                        f"No-connect on input pin {display} "
+                                        f"(pin {pin.number}) of {sym.reference} "
+                                        f"({sym.value}) -- verify this pin does "
+                                        f"not need a defined state"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+            except Exception:
+                pass
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="no_connect",
+                message=f"No-connect input pin check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -311,6 +380,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Hierarchy
     result.checks_run.append("hierarchy")
     result.issues.extend(check_hierarchy(schematic_path))
+
+    # No-connect on input pins
+    result.checks_run.append("no_connect_input")
+    result.issues.extend(check_no_connect_on_input_pins(schematic_path))
 
     return result
 
@@ -398,7 +471,12 @@ def print_result(result: ValidationResult, quiet: bool = False):
         for category, issues in sorted(by_category.items()):
             print(f"\n[{category.upper()}]")
             for issue in issues[:10]:  # Limit to 10 per category
-                icon = "❌" if issue.severity == "error" else "⚠️"
+                if issue.severity == "error":
+                    icon = "❌"
+                elif issue.severity == "info":
+                    icon = "ℹ️"
+                else:
+                    icon = "⚠️"
                 loc = f" ({issue.location})" if issue.location else ""
                 print(f"  {icon} {issue.message}{loc}")
             if len(issues) > 10:
