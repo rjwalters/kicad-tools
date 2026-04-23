@@ -1325,6 +1325,199 @@ class TestSchValidateNoConnectInput:
         assert "(pin 1)" in issues[0].message
 
 
+class TestSchValidateGlobalLabelDirections:
+    """Tests for global label direction mismatch detection in sch_validate.py."""
+
+    def _make_schematic(self, global_labels_sexp: str) -> str:
+        """Build a minimal schematic string with the given global_label entries."""
+        return f"""(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          {global_labels_sexp}
+        )
+        """
+
+    def test_no_driver_detected_as_error(self, tmp_path: Path):
+        """All instances are input -- no driver exists -- should be an error."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        # Parent with one global label input, child with another global label input
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_A" (shape input) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "a1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_A" (shape input) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "a2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+
+        assert len(gl_issues) == 1
+        assert gl_issues[0].severity == "error"
+        assert "SIG_A" in gl_issues[0].message
+        assert "no driver" in gl_issues[0].message
+
+    def test_no_receiver_detected_as_warning(self, tmp_path: Path):
+        """All instances are output -- no receiver exists -- should be a warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_B" (shape output) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "b1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_B" (shape output) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "b2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+
+        assert len(gl_issues) == 1
+        assert gl_issues[0].severity == "warning"
+        assert "SIG_B" in gl_issues[0].message
+        assert "no receiver" in gl_issues[0].message
+
+    def test_valid_output_input_mix(self, tmp_path: Path):
+        """One output and one input on the same net -- no issues."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_C" (shape output) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "c1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_C" (shape input) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "c2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
+
+    def test_bidirectional_counts_as_both(self, tmp_path: Path):
+        """All bidirectional -- counts as both driver and receiver."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        sch = self._make_schematic("""
+          (global_label "I2C_SDA" (shape bidirectional) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "d1"))
+          (global_label "I2C_SDA" (shape bidirectional) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "d2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
+
+    def test_passive_counts_as_both(self, tmp_path: Path):
+        """All passive -- counts as both driver and receiver."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        sch = self._make_schematic("""
+          (global_label "GND_SENSE" (shape passive) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "e1"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
+
+    def test_tri_state_is_driver(self, tmp_path: Path):
+        """tri_state counts as a driver but not a receiver."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "BUS_D0" (shape tri_state) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "f1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "BUS_D0" (shape tri_state) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "f2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+
+        # tri_state is driver-only, so no receiver -> warning
+        assert len(gl_issues) == 1
+        assert gl_issues[0].severity == "warning"
+        assert "no receiver" in gl_issues[0].message
+
+    def test_json_output_includes_global_label_category(self, tmp_path: Path, capsys, monkeypatch):
+        """JSON output should include category 'global_label'."""
+        from kicad_tools.cli.sch_validate import main
+
+        sch = self._make_schematic("""
+          (global_label "NOCAP" (shape input) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "g1"))
+        """)
+        sch_file = tmp_path / "top.kicad_sch"
+        sch_file.write_text(sch)
+
+        monkeypatch.setattr(
+            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
+        )
+        import contextlib
+
+        with contextlib.suppress(SystemExit):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        gl_issues = [i for i in data["issues"] if i["category"] == "global_label"]
+        assert len(gl_issues) == 1
+        assert "NOCAP" in gl_issues[0]["message"]
+
+    def test_validate_schematic_includes_check(self, tmp_path: Path):
+        """validate_schematic() should include 'global_label_directions' in checks_run."""
+        from kicad_tools.cli.sch_validate import validate_schematic
+
+        sch = self._make_schematic("")
+        sch_file = tmp_path / "top.kicad_sch"
+        sch_file.write_text(sch)
+
+        result = validate_schematic(str(sch_file))
+        assert "global_label_directions" in result.checks_run
+
+
 class TestSchCheckConnections:
     """Tests for sch_check_connections.py CLI."""
 

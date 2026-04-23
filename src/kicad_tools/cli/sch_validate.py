@@ -361,6 +361,88 @@ def check_no_connect_on_input_pins(schematic_path: str) -> list[ValidationIssue]
     return issues
 
 
+def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
+    """Check global label driver/receiver direction mismatches.
+
+    Groups global labels by net name across all sheets and checks that each
+    net has at least one driver and at least one receiver.
+
+    Direction semantics:
+      - ``output`` / ``tri_state``: driver only
+      - ``input``: receiver only
+      - ``bidirectional`` / ``passive``: counts as both driver and receiver
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Collect global labels across all sheets: net_name -> list of (shape, sheet_path)
+        label_map: dict[str, list[tuple[str, str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                sheet_path = node.get_path_string()
+                for gl in sch.global_labels:
+                    if gl.text not in label_map:
+                        label_map[gl.text] = []
+                    label_map[gl.text].append((gl.shape, sheet_path))
+            except Exception:
+                pass
+
+        # Shapes that count as driver (can source a signal)
+        driver_shapes = {"output", "tri_state", "bidirectional", "passive"}
+        # Shapes that count as receiver (can sink a signal)
+        receiver_shapes = {"input", "bidirectional", "passive"}
+
+        for net_name, entries in sorted(label_map.items()):
+            shapes = {shape for shape, _ in entries}
+            sheets = sorted({sheet for _, sheet in entries})
+            has_driver = bool(shapes & driver_shapes)
+            has_receiver = bool(shapes & receiver_shapes)
+
+            if not has_driver:
+                # All instances are input -- no driver exists
+                shapes_str = ", ".join(sorted(shapes))
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="global_label",
+                        message=(
+                            f"Global label '{net_name}' has no driver "
+                            f"(shapes: {shapes_str})"
+                        ),
+                        location=", ".join(sheets),
+                    )
+                )
+            elif not has_receiver:
+                # All instances are output/tri_state -- no receiver exists
+                shapes_str = ", ".join(sorted(shapes))
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="global_label",
+                        message=(
+                            f"Global label '{net_name}' has no receiver "
+                            f"(shapes: {shapes_str})"
+                        ),
+                        location=", ".join(sheets),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="global_label",
+                message=f"Global label direction check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -384,6 +466,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # No-connect on input pins
     result.checks_run.append("no_connect_input")
     result.issues.extend(check_no_connect_on_input_pins(schematic_path))
+
+    # Global label directions
+    result.checks_run.append("global_label_directions")
+    result.issues.extend(check_global_label_directions(schematic_path))
 
     return result
 
