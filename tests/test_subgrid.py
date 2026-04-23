@@ -686,16 +686,20 @@ class TestEscapeClearanceValidation:
         analysis = subgrid.analyze_pads(all_pads)
         result = subgrid.generate_escape_segments(analysis)
 
-        # The off-grid pad should either get an escape that passes clearance,
-        # or fail entirely -- it should never produce a segment that violates
-        # clearance against the neighbor pad.
+        # The off-grid pad should get an escape that passes clearance.
+        # Issue #1965: With fallback strategies, escape segments may use
+        # relaxed clearance (50% of design rule) when full clearance is
+        # impossible due to pad proximity.  The segment must still have
+        # positive clearance (no copper overlap).
+        relaxed_clearance = rules.trace_clearance * 0.5
         for escape in result.escapes:
             if escape.pad.net == 1:
-                is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                _is_valid, actual_clearance, _loc = grid.validate_segment_clearance(
                     escape.segment, exclude_net=1,
                 )
-                assert is_valid, (
-                    f"Escape segment for net 1 violates clearance: "
+                assert actual_clearance >= relaxed_clearance - 0.001, (
+                    f"Escape segment for net 1 has insufficient clearance "
+                    f"({actual_clearance:.4f}mm < relaxed {relaxed_clearance:.3f}mm): "
                     f"({escape.segment.x1:.3f}, {escape.segment.y1:.3f}) -> "
                     f"({escape.segment.x2:.3f}, {escape.segment.y2:.3f})"
                 )
@@ -1894,6 +1898,255 @@ class TestTightPitchClearanceRejection:
         )
 
         # All must pass clearance
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+            )
+            assert is_valid, (
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates "
+                f"clearance={clearance:.4f}mm"
+            )
+
+
+# =========================================================================
+# Issue #1965: Fallback strategies for off-grid pad escape
+# =========================================================================
+
+
+class TestEscapeFallbackStrategies:
+    """Tests for Issue #1965: expanded search, relaxed clearance, multi-hop.
+
+    When the initial search radius and full clearance reject all candidates,
+    the escape system should fall back to progressively more aggressive
+    strategies rather than failing outright.
+    """
+
+    def test_expanded_radius_rescues_blocked_pad(self):
+        """A pad blocked at normal radius should escape at expanded radius.
+
+        The pad has neighbors that block the closest grid points at radius=1,
+        but with expanded radius (2x) a free grid point is reachable in
+        the escape direction (away from neighbors).
+        """
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        # Use radius=1 so the normal search covers only 3x3 cells,
+        # which are all blocked by neighbor clearance zones.  The
+        # expanded radius (2) should reach past the blocker.
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=1)
+
+        # Off-grid pad with a single neighbor that blocks the closest
+        # grid point in one direction.  The escape direction (outward)
+        # points away from the neighbor.
+        off_grid_pad = make_pad(
+            x=10.05, y=10.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        # Neighbor blocking the nearest grid point to the left
+        neighbor = make_pad(
+            x=9.7, y=10.0, net=10, ref="U2", pin="10",
+            width=0.4, height=0.4,
+        )
+
+        # Component center so escape direction points right (positive X)
+        center_pad = make_pad(
+            x=8.0, y=10.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        all_pads = [off_grid_pad, neighbor, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # The off-grid pad should escape (via expanded radius or fallback)
+        net1_escapes = [e for e in result.escapes if e.pad.net == 1]
+        assert len(net1_escapes) >= 1, (
+            f"Pad should escape via fallback strategy, "
+            f"but got {result.success_count} successes and "
+            f"{len(result.failed_pads)} failures"
+        )
+
+    def test_relaxed_clearance_rescues_tight_spacing(self):
+        """Pads in very tight spacing should escape with relaxed clearance."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.15,  # Strict clearance
+        )
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=3)
+
+        # Create tight-pitch pads where normal clearance blocks all escapes
+        # but relaxed clearance (50%) allows them.
+        pads = []
+        for i in range(4):
+            pads.append(make_pad(
+                x=10.0,
+                y=10.0 + i * 0.55,  # 0.55mm pitch, tight
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3,
+                height=0.4,
+            ))
+        # Opposite side for component center
+        pads.append(make_pad(
+            x=16.0, y=10.825, net=10,
+            ref="U1", pin="10",
+            width=0.3, height=0.4,
+        ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Should have some successful escapes (via fallback)
+        assert result.success_count > 0, (
+            f"Expected >0 escapes with fallback strategies, "
+            f"got {result.success_count}/{result.total_attempted}"
+        )
+
+    def test_high_escape_rate_ssop28(self):
+        """SSOP-28 at 0.65mm pitch should achieve >90% escape success
+        with fallback strategies enabled (Issue #1965 target)."""
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # SSOP-28: 14 pads per side, 0.65mm pitch
+        pads = []
+        base_x = 10.0
+        base_y = 10.0
+
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x,
+                y=base_y + i * 0.65,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3, height=0.45,
+            ))
+
+        for i in range(14):
+            pads.append(make_pad(
+                x=base_x + 6.0,
+                y=base_y + i * 0.65,
+                net=i + 15,
+                ref="U1",
+                pin=str(i + 15),
+                width=0.3, height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        if result.total_attempted > 0:
+            success_rate = result.success_count / result.total_attempted
+            assert success_rate >= 0.9, (
+                f"SSOP-28 escape success rate {success_rate:.1%} "
+                f"({result.success_count}/{result.total_attempted}) "
+                f"is below 90% target"
+            )
+
+    def test_multi_hop_fallback_produces_valid_segment(self):
+        """Multi-hop escape should produce a valid segment that starts at
+        the pad center and ends at a grid-accessible point."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Off-grid pad with neighbors -- escape may need multi-hop
+        off_grid_pad = make_pad(
+            x=10.05, y=10.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        center_pad = make_pad(
+            x=10.05, y=12.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        for p in [off_grid_pad, center_pad]:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads([off_grid_pad, center_pad])
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Should succeed (may or may not use multi-hop)
+        net1_escapes = [e for e in result.escapes if e.pad.net == 1]
+        assert len(net1_escapes) >= 1
+
+        escape = net1_escapes[0]
+        # Segment starts at pad center
+        assert abs(escape.segment.x1 - off_grid_pad.x) < 0.001
+        assert abs(escape.segment.y1 - off_grid_pad.y) < 0.001
+        # Grid point is within bounds
+        gx, gy = escape.grid_point
+        assert 0 <= gx < grid.cols
+        assert 0 <= gy < grid.rows
+
+    def test_fallback_does_not_break_wider_pitch(self):
+        """Fallback strategies should not degrade results for pads with
+        wider pitch that already work with normal clearance."""
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # 1.0mm pitch (generous) -- should all escape with normal strategy
+        pads = []
+        for i in range(6):
+            pads.append(make_pad(
+                x=10.0,
+                y=10.03 + i * 1.0,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3, height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # All off-grid pads should escape successfully
+        assert result.success_count == result.total_attempted, (
+            f"Wide-pitch pads: {result.success_count}/{result.total_attempted} "
+            f"should all escape"
+        )
+
+        # All escapes must pass full clearance validation
         for escape in result.escapes:
             is_valid, clearance, violation_loc = grid.validate_segment_clearance(
                 escape.segment,
