@@ -1053,6 +1053,7 @@ def cmd_optimize(args) -> int:
             print(f"Keepout zones: {len(keepout_zones)}")
 
     # Create workflow configuration
+    boundary_margin = getattr(args, "boundary_margin", None)
     workflow_config = WorkflowConfig(
         strategy=strategy,
         grid=args.grid,
@@ -1064,6 +1065,7 @@ def cmd_optimize(args) -> int:
         enable_clustering=enable_clustering,
         edge_detect=edge_detect,
         fixed_refs=fixed_refs,
+        boundary_margin=boundary_margin,
     )
 
     # Create and run workflow
@@ -1665,6 +1667,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="check_routability",
         help="Check routability before and after optimization to show impact",
+    )
+    optimize_parser.add_argument(
+        "--boundary-margin",
+        type=float,
+        default=None,
+        dest="boundary_margin",
+        help="Extra margin in mm between component courtyards and board edge (default: 1.0)",
     )
     optimize_parser.add_argument(
         "--dry-run",

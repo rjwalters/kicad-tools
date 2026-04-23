@@ -1503,3 +1503,146 @@ class TestOptimizerConvergence:
                     separated = True
                     break
         assert separated, "Overlapping components did not separate"
+
+
+class TestCourtyardAwareClamping:
+    """Tests for courtyard-aware boundary clamping (issue #1945)."""
+
+    def test_courtyard_stays_within_board_after_optimization(self):
+        """Component courtyards must not extend beyond the board bounding box."""
+        board = Polygon.rectangle(50, 50, 50, 50)  # 50x50mm board centered at (50,50)
+        config = PlacementConfig(boundary_margin=1.0)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Add 20 components in a tight cluster to generate high repulsion
+        for i in range(20):
+            x = 45.0 + (i % 5) * 2.0
+            y = 45.0 + (i // 5) * 2.0
+            comp = Component(ref=f"R{i}", x=x, y=y, width=3.0, height=2.0)
+            optimizer.add_component(comp)
+
+        optimizer.run(iterations=500, dt=0.01)
+
+        # Board bounding box
+        min_x = min(v.x for v in board.vertices)
+        max_x = max(v.x for v in board.vertices)
+        min_y = min(v.y for v in board.vertices)
+        max_y = max(v.y for v in board.vertices)
+
+        for comp in optimizer.components:
+            courtyard_min_x = comp.x - comp.width / 2
+            courtyard_max_x = comp.x + comp.width / 2
+            courtyard_min_y = comp.y - comp.height / 2
+            courtyard_max_y = comp.y + comp.height / 2
+            assert courtyard_min_x >= min_x - 0.01, (
+                f"Component {comp.ref} courtyard extends past left edge: "
+                f"courtyard_min_x={courtyard_min_x:.2f}, board_min_x={min_x:.2f}"
+            )
+            assert courtyard_max_x <= max_x + 0.01, (
+                f"Component {comp.ref} courtyard extends past right edge: "
+                f"courtyard_max_x={courtyard_max_x:.2f}, board_max_x={max_x:.2f}"
+            )
+            assert courtyard_min_y >= min_y - 0.01, (
+                f"Component {comp.ref} courtyard extends past bottom edge: "
+                f"courtyard_min_y={courtyard_min_y:.2f}, board_min_y={min_y:.2f}"
+            )
+            assert courtyard_max_y <= max_y + 0.01, (
+                f"Component {comp.ref} courtyard extends past top edge: "
+                f"courtyard_max_y={courtyard_max_y:.2f}, board_max_y={max_y:.2f}"
+            )
+
+    def test_large_component_clamped_with_courtyard(self):
+        """A large IC should be inset further than a small resistor."""
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(boundary_margin=0.5)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Large component placed at board corner - should be pushed inward
+        big = Component(ref="U1", x=2.0, y=12.0, width=10.0, height=10.0)
+        optimizer.add_component(big)
+
+        # Small component at same corner - needs less inset
+        small = Component(ref="R1", x=2.0, y=30.0, width=1.6, height=0.8)
+        optimizer.add_component(small)
+
+        optimizer.run(iterations=100, dt=0.01)
+
+        # Board bounds
+        min_x = min(v.x for v in board.vertices)
+
+        # Large component center must be at least half_w from the edge
+        assert big.x >= min_x + big.width / 2 + config.boundary_margin - 0.01, (
+            f"Large component U1 center too close to edge: x={big.x:.2f}, "
+            f"needed >= {min_x + big.width / 2 + config.boundary_margin:.2f}"
+        )
+        # Small component can be closer to the edge
+        assert small.x >= min_x + small.width / 2 + config.boundary_margin - 0.01, (
+            f"Small component R1 center too close to edge: x={small.x:.2f}"
+        )
+        # The large component should be further from the edge than the small one
+        # (comparing the minimum allowed center position)
+        big_min = big.width / 2 + config.boundary_margin
+        small_min = small.width / 2 + config.boundary_margin
+        assert big_min > small_min, "Large component should need more inset than small one"
+
+    def test_boundary_margin_respected_with_custom_value(self):
+        """Custom boundary_margin should be respected in courtyard clamping."""
+        board = Polygon.rectangle(50, 50, 80, 80)  # 80x80 board
+        margin = 3.0
+        config = PlacementConfig(boundary_margin=margin)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Place component at the edge - it should be pushed in by margin + half extent
+        comp = Component(ref="U1", x=10.0, y=10.0, width=6.0, height=4.0)
+        optimizer.add_component(comp)
+
+        optimizer.run(iterations=100, dt=0.01)
+
+        min_x = min(v.x for v in board.vertices)
+        min_y = min(v.y for v in board.vertices)
+
+        expected_min_x = min_x + comp.width / 2 + margin
+        expected_min_y = min_y + comp.height / 2 + margin
+
+        assert comp.x >= expected_min_x - 0.01, (
+            f"Component x={comp.x:.2f} should be >= {expected_min_x:.2f}"
+        )
+        assert comp.y >= expected_min_y - 0.01, (
+            f"Component y={comp.y:.2f} should be >= {expected_min_y:.2f}"
+        )
+
+    def test_component_larger_than_board_no_crash(self):
+        """A component wider than the board must not cause NaN or infinite loops."""
+        board = Polygon.rectangle(50, 50, 8, 8)  # Tiny 8x8mm board
+        config = PlacementConfig(boundary_margin=1.0)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Component courtyard (10+2*1=12mm) exceeds board (8mm)
+        comp = Component(ref="U1", x=50.0, y=50.0, width=10.0, height=10.0)
+        optimizer.add_component(comp)
+
+        # Should complete without error or NaN
+        optimizer.run(iterations=100, dt=0.01)
+
+        assert math.isfinite(comp.x), f"Component x is not finite: {comp.x}"
+        assert math.isfinite(comp.y), f"Component y is not finite: {comp.y}"
+
+    def test_velocity_killed_on_courtyard_clamp(self):
+        """Velocity should be zeroed when a component is clamped at the courtyard boundary."""
+        board = Polygon.rectangle(50, 50, 60, 60)
+        config = PlacementConfig(boundary_margin=1.0)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Component with significant width, placed right at the boundary
+        comp = Component(ref="U1", x=20.0, y=50.0, width=8.0, height=4.0)
+        comp.vx = -100.0  # Strong outward velocity
+        optimizer.add_component(comp)
+
+        optimizer.step(dt=0.01)
+
+        min_x = min(v.x for v in board.vertices)
+        half_w = comp.width / 2 + config.boundary_margin
+
+        # The component should be clamped and its velocity killed
+        assert comp.x >= min_x + half_w - 0.01
+        assert comp.vx == 0.0, f"Outward velocity should be zeroed, got {comp.vx}"
