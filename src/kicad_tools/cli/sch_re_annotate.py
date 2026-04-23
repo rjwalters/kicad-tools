@@ -34,6 +34,31 @@ from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
 # Prefixes for power/flag symbols that should be excluded from renumbering
 EXCLUDED_PREFIXES = {"#PWR", "#FLG", "#SYM"}
 
+# Whitespace token for regex: matches one or more tabs or spaces
+_WS = r'[ \t]+'
+
+
+def _detect_indent(text: str) -> str:
+    """Detect the indentation unit used in a schematic file.
+
+    Looks at the first indented line to determine whether the file uses
+    tabs or spaces (and how many spaces per level).
+
+    Returns:
+        The single-level indent string (e.g. ``'\\t'`` or ``'  '``).
+    """
+    for line in text.splitlines():
+        if line and line[0] in (' ', '\t'):
+            # Count leading whitespace
+            stripped = line.lstrip(' \t')
+            leading = line[:len(line) - len(stripped)]
+            if '\t' in leading:
+                return '\t'
+            # Assume the first indented line is at depth 1
+            # Common space counts: 2 or 4
+            return leading
+    return '\t'
+
 
 def _parse_reference(ref: str) -> tuple[str, int | None, str]:
     """Parse a reference designator into (prefix, number, unit_suffix).
@@ -66,11 +91,13 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     symbols = []
 
     # Find all symbol blocks that have lib_id (instances, not lib definitions)
+    # Use _WS instead of literal \t to support both tab and space indentation
     block_pattern = re.compile(
-        r'\t\(symbol\n'
-        r'\t\t\(lib_id "[^"]+"\)'
+        _WS + r'\(symbol\n'
+        + _WS + r'\(lib_id "[^"]+"\)'
         r'.*?'
-        r'(?:\t\t\(instances\n.*?\t\t\)\n\t\)|\t\t\(pin "[^"]+"\n\t\t\t\(uuid "[^"]+"\)\n\t\t\)\n\t\))',
+        r'(?:' + _WS + r'\(instances\n.*?' + _WS + r'\)\n' + _WS + r'\)'
+        r'|' + _WS + r'\(pin "[^"]+"\n' + _WS + r'\(uuid "[^"]+"\)\n' + _WS + r'\)\n' + _WS + r'\))',
         re.DOTALL,
     )
 
@@ -138,23 +165,28 @@ def _apply_uuid_reference_rename(text: str, sym_uuid: str, new_ref: str) -> str:
     Targets the symbol block containing the given UUID.
     """
     # Strategy: find the symbol block boundaries first, then modify within.
-    # Symbol blocks start with \t(symbol\n and end with \t).
+    # Symbol blocks start with <indent>(symbol\n and end with <indent>).
     # We find the block that contains our UUID and replace within it.
     uuid_str = f'(uuid "{sym_uuid}")'
     uuid_pos = text.find(uuid_str)
     if uuid_pos == -1:
         return text
 
-    # Walk backward to find the start of this symbol block
-    block_start = text.rfind('\t(symbol\n', 0, uuid_pos)
+    # Walk backward to find the start of this symbol block using regex
+    # to support both tab and space indentation
+    start_pattern = re.compile(_WS + r'\(symbol\n')
+    block_start = -1
+    for m in start_pattern.finditer(text, 0, uuid_pos):
+        block_start = m.start()
     if block_start == -1:
         return text
 
-    # Walk forward to find the end of this symbol block (\n\t) at the right depth)
-    block_end = text.find('\n\t)', uuid_pos)
-    if block_end == -1:
+    # Walk forward to find the end of this symbol block (\n<indent>) at depth 1)
+    end_pattern = re.compile(r'\n' + _WS + r'\)')
+    end_match = end_pattern.search(text, uuid_pos)
+    if end_match is None:
         return text
-    block_end += 3  # include the \n\t)
+    block_end = end_match.end()
 
     block = text[block_start:block_end]
 
@@ -186,7 +218,7 @@ def _detect_project_info(
     root_text = root_path.read_text(encoding="utf-8")
 
     # Find root schematic UUID (first uuid at top level)
-    root_uuid_match = re.search(r'^\t\(uuid "([^"]+)"\)', root_text, re.MULTILINE)
+    root_uuid_match = re.search(r'^' + _WS + r'\(uuid "([^"]+)"\)', root_text, re.MULTILINE)
     root_uuid = root_uuid_match.group(1) if root_uuid_match else ""
 
     # Build map of sub-sheet file -> instance path
@@ -233,33 +265,40 @@ def _add_project_instance(
     Returns:
         Modified schematic text.
     """
+    # Detect the indentation unit used in this file
+    ind = _detect_indent(text)
+    i2 = ind * 2
+    i3 = ind * 3
+    i4 = ind * 4
+    i5 = ind * 5
+
     instance_entry = (
-        f'\t\t\t(project "{project_name}"\n'
-        f'\t\t\t\t(path "{instance_path}"\n'
-        f'\t\t\t\t\t(reference "{new_ref}")\n'
-        f'\t\t\t\t\t(unit {unit})\n'
-        f'\t\t\t\t)\n'
-        f'\t\t\t)\n'
+        f'{i3}(project "{project_name}"\n'
+        f'{i4}(path "{instance_path}"\n'
+        f'{i5}(reference "{new_ref}")\n'
+        f'{i5}(unit {unit})\n'
+        f'{i4})\n'
+        f'{i3})\n'
     )
 
     # Find the symbol block containing this UUID
     # Strategy: find the (instances block within the symbol that contains our UUID,
-    # and append the new project entry before the closing \t\t)
+    # and append the new project entry before the closing )
     block_pattern = re.compile(
-        r'(\t\(symbol\n'
-        r'\t\t\(lib_id "[^"]+"\)'
+        r'(' + _WS + r'\(symbol\n'
+        + _WS + r'\(lib_id "[^"]+"\)'
         r'.*?'
         r'\(uuid "' + re.escape(sym_uuid) + r'"\)'
         r'.*?)'
-        r'(\t\t\(instances\n)'
+        r'(' + _WS + r'\(instances\n)'
         r'(.*?)'
-        r'(\t\t\)\n\t\))',
+        r'(' + _WS + r'\)\n' + _WS + r'\))',
         re.DOTALL,
     )
 
     match = block_pattern.search(text)
     if match:
-        # Has instances block — append new project entry before closing \t\t)
+        # Has instances block — append new project entry before closing )
         before = match.group(1)
         instances_start = match.group(2)
         instances_body = match.group(3)
@@ -272,25 +311,25 @@ def _add_project_instance(
         new_block = before + instances_start + instances_body + instance_entry + instances_end
         return text[:match.start()] + new_block + text[match.end():]
 
-    # No instances block — find the symbol block and add one before closing \t)
-    # The symbol block ends with pin entries then \t)
+    # No instances block — find the symbol block and add one before closing )
+    # The symbol block ends with pin entries then )
     no_inst_pattern = re.compile(
-        r'(\t\(symbol\n'
-        r'\t\t\(lib_id "[^"]+"\)'
+        r'(' + _WS + r'\(symbol\n'
+        + _WS + r'\(lib_id "[^"]+"\)'
         r'.*?'
         r'\(uuid "' + re.escape(sym_uuid) + r'"\)'
         r'.*?'
-        r'(?:\t\t\(pin "[^"]+"\n\t\t\t\(uuid "[^"]+"\)\n\t\t\)\n))'
-        r'(\t\))',
+        r'(?:' + _WS + r'\(pin "[^"]+"\n' + _WS + r'\(uuid "[^"]+"\)\n' + _WS + r'\)\n))'
+        r'(' + _WS + r'\))',
         re.DOTALL,
     )
 
     match = no_inst_pattern.search(text)
     if match:
         instances_block = (
-            f'\t\t(instances\n'
+            f'{i2}(instances\n'
             f'{instance_entry}'
-            f'\t\t)\n'
+            f'{i2})\n'
         )
         return text[:match.start(2)] + instances_block + match.group(2) + text[match.end():]
 
