@@ -1126,7 +1126,7 @@ class TestLibraryManager:
     def test_load_embedded_does_not_overwrite_existing(self):
         """Test that load_embedded does not overwrite symbols loaded from disk."""
         manager = LibraryManager()
-        # Pre-load a symbol
+        # Pre-load a symbol under Device:R
         existing_sym = LibrarySymbol(name="R", properties={"Reference": "R"}, pins=[])
         lib = SymbolLibrary(path="Device.kicad_sym", symbols={"R": existing_sym})
         manager.add_library("Device", lib)
@@ -1136,9 +1136,9 @@ class TestLibraryManager:
             def lib_symbols(self):
                 return parse_string(
                     """(lib_symbols
-                    (symbol "Device:C"
-                        (property "Reference" "C")
-                        (symbol "Device:C_1_1"
+                    (symbol "Device:R"
+                        (property "Reference" "R")
+                        (symbol "Device:R_1_1"
                             (pin passive line (at 0 0 0) (length 2.54)
                                 (name "1") (number "1"))
                         )
@@ -1148,10 +1148,8 @@ class TestLibraryManager:
 
         manager.load_embedded(FakeSchematic())
 
-        # Existing symbol should still be there
+        # Existing symbol loaded from disk must be preserved
         assert manager.get_symbol("Device:R") is existing_sym
-        # New embedded symbol should also be available
-        assert manager.get_symbol("Device:C") is not None
 
 
 class TestHierarchySheetPin:

@@ -1123,7 +1123,8 @@ class LibraryManager:
                 self.libraries[lib_name] = SymbolLibrary(
                     path="<embedded>", symbols={}
                 )
-            self.libraries[lib_name].symbols[short_name] = sym
+            if short_name not in self.libraries[lib_name].symbols:
+                self.libraries[lib_name].symbols[short_name] = sym
 
     def add_search_path(self, path: str) -> None:
         """Add a directory to search for libraries."""
