@@ -1253,3 +1253,294 @@ class TestSpaceIndentedHierarchical:
         # Child: R14 -> R3, C5 -> C1
         assert '"Reference" "R3"' in child_text
         assert '"Reference" "C1"' in child_text
+
+
+# ---------------------------------------------------------------------------
+# --unannotated-only mode tests
+# ---------------------------------------------------------------------------
+
+# Schematic with R1, R2, and R? -- R? should become R3 (avoiding 1 and 2)
+COLLISION_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 65 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 63 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 67 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 69 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R?"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "1k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "R?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+
+class TestUnannotatedOnly:
+    def test_skips_assigned(self, tmp_path):
+        """With --unannotated-only, R1 stays R1 and R? becomes R2."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # R1 must remain unchanged
+        assert '"Reference" "R1"' in text
+        # R? should be assigned R2 (next after R1)
+        assert '"Reference" "R2"' in text
+        # C? should be assigned C1
+        assert '"Reference" "C1"' in text
+        # No unannotated refs remain
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+    def test_avoids_collisions(self, tmp_path):
+        """R1, R2 exist; R? must become R3, not R1 or R2."""
+        sch = _write_sch(tmp_path, COLLISION_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Existing refs unchanged
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+        # R? -> R3 (skipping 1 and 2)
+        assert '"Reference" "R3"' in text
+        assert '"Reference" "R?"' not in text
+
+    def test_no_unannotated(self, tmp_path, capsys):
+        """All refs already assigned -> no changes needed."""
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True,
+        )
+        assert ret == 0
+        assert sch.read_text() == original
+        captured = capsys.readouterr()
+        assert "No references to renumber" in captured.out
+
+    def test_with_prefix_filter(self, tmp_path):
+        """--unannotated-only with --prefix R: only unannotated R refs assigned."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            prefixes=["R"], unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # R? should be assigned
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "R2"' in text
+        # C? should remain unannotated (prefix filter excludes C)
+        assert '"Reference" "C?"' in text
+
+    def test_with_start_from(self, tmp_path):
+        """--unannotated-only with --start-from should respect start value."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            start_from=10, unannotated_only=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # R1 stays R1 (already assigned)
+        assert '"Reference" "R1"' in text
+        # R? should become R10 (start_from=10, no collision with R1)
+        assert '"Reference" "R10"' in text
+        # C? should become C10
+        assert '"Reference" "C10"' in text
+
+    def test_assign_numbers_unit_level(self):
+        """_assign_numbers with unannotated_only preserves existing refs."""
+        symbols = [
+            {"reference": "R1", "prefix": "R", "number": 1, "unit_suffix": ""},
+            {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
+            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
+             "uuid": "uuid-rq"},
+        ]
+        raw = _assign_numbers(symbols, None, 1, unannotated_only=True)
+        # Only the unannotated ref should be in the mapping
+        assert len(raw) == 1
+        assert raw["uuid-rq"]["old"] == "R?"
+        # Should get R2 (1 and 5 are reserved, next available from 1 is 2)
+        assert raw["uuid-rq"]["new"] == "R2"
+        assert raw["uuid-rq"]["unannotated"] is True
+
+    def test_per_sheet_mode(self, tmp_path):
+        """--unannotated-only with --per-sheet scopes reserved numbers per sheet."""
+        # Create a parent with R1 assigned and a child with R? unannotated
+        parent_sch = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet
+\t\t(at 150 50)
+\t\t(size 20 20)
+\t\t(property "Sheetname" "SubSheet"
+\t\t\t(at 150 48 0)
+\t\t)
+\t\t(property "Sheetfile" "sub.kicad_sch"
+\t\t\t(at 150 68 0)
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+        child_sch = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "44444444-4444-4444-4444-444444444444")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R?"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "55555555-5555-5555-5555-555555555555")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001/33333333-3333-3333-3333-333333333333" (reference "R?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/33333333-3333-3333-3333-333333333333" (page "2"))
+\t)
+)
+"""
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(parent_sch)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(child_sch)
+
+        ret = run_re_annotate(
+            schematic_path=parent, dry_run=False, backup=False,
+            per_sheet=True, unannotated_only=True,
+        )
+        assert ret == 0
+
+        parent_text = parent.read_text()
+        child_text = child.read_text()
+
+        # Parent: R1 stays R1 (already assigned, unannotated_only)
+        assert '"Reference" "R1"' in parent_text
+
+        # Child: R? gets assigned R1 (per-sheet restart, no reserved in child sheet)
+        assert '"Reference" "R1"' in child_text
+        assert '"Reference" "R?"' not in child_text

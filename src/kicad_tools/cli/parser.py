@@ -892,6 +892,11 @@ def _add_sch_parser(subparsers) -> None:
         action="store_true",
         help="Restart numbering per sheet instead of continuous",
     )
+    sch_reannotate.add_argument(
+        "--unannotated-only",
+        action="store_true",
+        help="Only assign numbers to unannotated (?) references",
+    )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
 
