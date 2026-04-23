@@ -83,31 +83,6 @@ def _point_on_wire_midpoint(
     return dist < tolerance
 
 
-def _point_on_wire_segment(
-    point: tuple[float, float],
-    wire_start: tuple[float, float],
-    wire_end: tuple[float, float],
-    tolerance: float = 0.1,
-) -> bool:
-    """Check if a point lies on a wire segment (including endpoints)."""
-    x, y = point
-    x1, y1 = wire_start
-    x2, y2 = wire_end
-
-    # Bounding box check
-    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
-        return False
-    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
-        return False
-
-    # Perpendicular distance check
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length < tolerance:
-        return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5 < tolerance
-
-    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
-    return dist < tolerance
-
 
 def _auto_reference(sch: Schematic, prefix: str = "C") -> str:
     """Find the next available reference designator for a given prefix.
@@ -332,6 +307,27 @@ def run_add_bypass_cap(args) -> int:
     cap_pin1_pos = (_snap(cap_pin1_pos[0]), _snap(cap_pin1_pos[1]))
     cap_pin2_pos = (_snap(cap_pin2_pos[0]), _snap(cap_pin2_pos[1]))
 
+    # --- Select near (VDD) and far (GND) cap pins based on distance from IC pin ---
+    # The cap pin closer to the IC pin connects to VDD; the other connects to GND.
+    # This handles all orientations correctly: for left/down-pointing pins the
+    # physical pin numbering would create a short if we always used pin 1 for VDD.
+    dist1 = (
+        (cap_pin1_pos[0] - pin_pos[0]) ** 2 + (cap_pin1_pos[1] - pin_pos[1]) ** 2
+    ) ** 0.5
+    dist2 = (
+        (cap_pin2_pos[0] - pin_pos[0]) ** 2 + (cap_pin2_pos[1] - pin_pos[1]) ** 2
+    ) ** 0.5
+    if dist1 <= dist2:
+        cap_vdd_pin_pos = cap_pin1_pos
+        cap_gnd_pin_pos = cap_pin2_pos
+        cap_vdd_pin_num = "1"
+        cap_gnd_pin_num = "2"
+    else:
+        cap_vdd_pin_pos = cap_pin2_pos
+        cap_gnd_pin_pos = cap_pin1_pos
+        cap_vdd_pin_num = "2"
+        cap_gnd_pin_num = "1"
+
     # --- Collect planned actions ---
     planned: list[PlannedAction] = []
 
@@ -361,24 +357,31 @@ def run_add_bypass_cap(args) -> int:
         )
     )
 
-    # Wire from target pin to cap pin 1
-    if abs(pin_pos[0] - cap_pin1_pos[0]) > 0.01 or abs(pin_pos[1] - cap_pin1_pos[1]) > 0.01:
+    # Wire from target pin to near (VDD) cap pin
+    if (
+        abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01
+        or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01
+    ):
         planned.append(
             PlannedAction(
                 "wire",
                 f"Wire from target pin {args.pin} at"
                 f" ({pin_pos[0]:.2f}, {pin_pos[1]:.2f})"
-                f" to cap pin 1 at ({cap_pin1_pos[0]:.2f}, {cap_pin1_pos[1]:.2f})",
+                f" to cap pin {cap_vdd_pin_num} at"
+                f" ({cap_vdd_pin_pos[0]:.2f}, {cap_vdd_pin_pos[1]:.2f})",
             )
         )
 
-    # Wire from cap pin 2 to ground symbol
-    if abs(cap_pin2_pos[0] - gnd_pos[0]) > 0.01 or abs(cap_pin2_pos[1] - gnd_pos[1]) > 0.01:
+    # Wire from far (GND) cap pin to ground symbol
+    if (
+        abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01
+        or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01
+    ):
         planned.append(
             PlannedAction(
                 "wire",
-                f"Wire from cap pin 2 at"
-                f" ({cap_pin2_pos[0]:.2f}, {cap_pin2_pos[1]:.2f})"
+                f"Wire from cap pin {cap_gnd_pin_num} at"
+                f" ({cap_gnd_pin_pos[0]:.2f}, {cap_gnd_pin_pos[1]:.2f})"
                 f" to ground at ({gnd_pos[0]:.2f}, {gnd_pos[1]:.2f})",
             )
         )
@@ -440,13 +443,19 @@ def run_add_bypass_cap(args) -> int:
     sch.add_power(args.ground_net, gnd_pos)
 
     # 4. Add wires
-    # Wire from target pin to cap pin 1
-    if abs(pin_pos[0] - cap_pin1_pos[0]) > 0.01 or abs(pin_pos[1] - cap_pin1_pos[1]) > 0.01:
-        sch.add_wire(pin_pos, cap_pin1_pos)
+    # Wire from target pin to near (VDD) cap pin
+    if (
+        abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01
+        or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01
+    ):
+        sch.add_wire(pin_pos, cap_vdd_pin_pos)
 
-    # Wire from cap pin 2 to ground
-    if abs(cap_pin2_pos[0] - gnd_pos[0]) > 0.01 or abs(cap_pin2_pos[1] - gnd_pos[1]) > 0.01:
-        sch.add_wire(cap_pin2_pos, gnd_pos)
+    # Wire from far (GND) cap pin to ground
+    if (
+        abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01
+        or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01
+    ):
+        sch.add_wire(cap_gnd_pin_pos, gnd_pos)
 
     # 5. Add junction if target pin lands on existing wire midpoint
     if needs_junction:

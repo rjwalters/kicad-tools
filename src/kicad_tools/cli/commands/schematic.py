@@ -305,8 +305,7 @@ def run_sch_command(args) -> int:
             sub_argv.extend(["--footprint", args.footprint])
         if args.reference:
             sub_argv.extend(["--reference", args.reference])
-        if args.offset != 5.08:
-            sub_argv.extend(["--offset", str(args.offset)])
+        sub_argv.extend(["--offset", str(args.offset)])
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.backup:

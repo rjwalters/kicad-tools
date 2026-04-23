@@ -147,6 +147,122 @@ SCHEMATIC_WITH_BUS = SCHEMATIC_WITH_IC.replace(
   (sheet_instances""",
 )
 
+# Schematic with an IC whose VDD pin (pin 5) points LEFT (rotation=180).
+# Pin 5 is at library position (5.08, 0) with rotation 180 (stub points left).
+# Instance is at (100, 80) rotation 0.
+# Pin schematic position: approximately (105.08, 80).
+SCHEMATIC_LEFT_PIN = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000002")
+  (paper "A4")
+  (lib_symbols
+    (symbol "test:IC2"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "IC2" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "test:IC2_1_1"
+        (pin power_in line (at 5.08 0 180) (length 1.27) (name "VDD" (effects (font (size 1.27 1.27)))) (number "5" (effects (font (size 1.27 1.27)))))
+      )
+    )
+    (symbol "Device:C"
+      (property "Reference" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "Device:C_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+    (symbol "power:GND"
+      (property "Reference" "#PWR" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "GND" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (symbol "power:GND_1_1"
+        (pin power_in line (at 0 0 0) (length 0) (name "GND" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol (lib_id "test:IC2") (at 100 80 0) (unit 1)
+    (in_bom yes) (on_board yes)
+    (uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    (property "Reference" "U2" (at 100 75 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "IC2" (at 100 77 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "5" (uuid "pin-5-uuid"))
+    (instances
+      (project "test_project"
+        (path "/" (reference "U2") (unit 1))
+      )
+    )
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+# Schematic with an IC whose VDD pin (pin 6) points UP (rotation=90).
+# Pin 6 is at library position (0, 5.08) with rotation 90 (stub points up, i.e. negative Y in KiCad).
+# Instance is at (100, 80) rotation 0.
+# Pin schematic position: approximately (100, 85.08).
+SCHEMATIC_UP_PIN = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000003")
+  (paper "A4")
+  (lib_symbols
+    (symbol "test:IC3"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "IC3" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "test:IC3_1_1"
+        (pin power_in line (at 0 5.08 90) (length 1.27) (name "VDD" (effects (font (size 1.27 1.27)))) (number "6" (effects (font (size 1.27 1.27)))))
+      )
+    )
+    (symbol "Device:C"
+      (property "Reference" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "Device:C_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+    (symbol "power:GND"
+      (property "Reference" "#PWR" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "GND" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (symbol "power:GND_1_1"
+        (pin power_in line (at 0 0 0) (length 0) (name "GND" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol (lib_id "test:IC3") (at 100 80 0) (unit 1)
+    (in_bom yes) (on_board yes)
+    (uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    (property "Reference" "U3" (at 100 75 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "IC3" (at 100 77 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "6" (uuid "pin-6-uuid"))
+    (instances
+      (project "test_project"
+        (path "/" (reference "U3") (unit 1))
+      )
+    )
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
 
 def _write_sch(tmp_path: Path, content: str = SCHEMATIC_WITH_IC) -> Path:
     p = tmp_path / "test_bypass.kicad_sch"
@@ -272,6 +388,158 @@ class TestBasicPlacement:
         sch = Schematic.load(sch_path)
         gndd_symbols = [s for s in sch.symbols if s.lib_id == "power:GNDD"]
         assert len(gndd_symbols) >= 1
+
+
+def _wire_distance(
+    w_start: tuple[float, float],
+    w_end: tuple[float, float],
+    pt: tuple[float, float],
+    tol: float = 0.1,
+) -> bool:
+    """Return True if ``pt`` lies on the wire segment (including endpoints)."""
+    x, y = pt
+    x1, y1 = w_start
+    x2, y2 = w_end
+    if not (min(x1, x2) - tol <= x <= max(x1, x2) + tol):
+        return False
+    if not (min(y1, y2) - tol <= y <= max(y1, y2) + tol):
+        return False
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length < tol:
+        return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5 < tol
+    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
+    return dist < tol
+
+
+def _check_no_short(
+    sch: Schematic,
+    ic_pin_pos: tuple[float, float],
+    gnd_pos: tuple[float, float],
+    tol: float = 0.5,
+) -> None:
+    """Assert that no single wire connects the IC pin to the GND symbol.
+
+    A short circuit is present when a wire starts (or ends) at the IC pin
+    position AND ends (or starts) at the GND symbol position, bypassing
+    the capacitor entirely.
+    """
+    for wire in sch.wires:
+        starts_at_ic = _wire_distance(wire.start, wire.end, ic_pin_pos, tol) or (
+            abs(wire.start[0] - ic_pin_pos[0]) < tol
+            and abs(wire.start[1] - ic_pin_pos[1]) < tol
+        )
+        ends_at_gnd = (
+            abs(wire.end[0] - gnd_pos[0]) < tol
+            and abs(wire.end[1] - gnd_pos[1]) < tol
+        ) or (
+            abs(wire.start[0] - gnd_pos[0]) < tol
+            and abs(wire.start[1] - gnd_pos[1]) < tol
+        )
+        starts_at_gnd = (
+            abs(wire.start[0] - gnd_pos[0]) < tol
+            and abs(wire.start[1] - gnd_pos[1]) < tol
+        ) or (
+            abs(wire.end[0] - gnd_pos[0]) < tol
+            and abs(wire.end[1] - gnd_pos[1]) < tol
+        )
+        ends_at_ic = (
+            abs(wire.end[0] - ic_pin_pos[0]) < tol
+            and abs(wire.end[1] - ic_pin_pos[1]) < tol
+        ) or (
+            abs(wire.start[0] - ic_pin_pos[0]) < tol
+            and abs(wire.start[1] - ic_pin_pos[1]) < tol
+        )
+        # A single wire from IC pin to GND (or GND to IC pin) is a short circuit
+        if (starts_at_ic and ends_at_gnd) or (starts_at_gnd and ends_at_ic):
+            raise AssertionError(
+                f"Short circuit detected: wire from {wire.start} to {wire.end} "
+                f"connects IC pin at {ic_pin_pos} directly to GND at {gnd_pos}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Orientation-specific placement tests (verifies no short circuits)
+# ---------------------------------------------------------------------------
+
+
+class TestPinOrientations:
+    def test_left_pointing_pin_no_short(self, tmp_path: Path):
+        """Bypass cap on a left-pointing pin must not create a VDD-GND short.
+
+        For a left-pointing pin the cap is placed to the left. At cap
+        rotation=90, pin 2 (right side) is nearest the IC -- it must connect
+        to VDD. Pin 1 (left side) connects to GND. The old code always wired
+        pin 1 to VDD, which would short VDD→GND.
+        """
+        sch_path = _write_sch(tmp_path, SCHEMATIC_LEFT_PIN)
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U2",
+            "--pin", "5",
+            "--value", "100nF",
+            "--ground-net", "GND",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+
+        # Verify cap was placed
+        cap_refs = [s.reference for s in sch.symbols if s.reference.startswith("C")]
+        assert len(cap_refs) >= 1
+
+        # Verify GND symbol was placed
+        gnd_syms = [s for s in sch.symbols if "GND" in s.lib_id]
+        assert len(gnd_syms) >= 1
+        gnd_pos = gnd_syms[0].position
+
+        # Resolve IC pin position (pin 5 at library (5.08, 0), instance at (100, 80))
+        # pin schematic pos ≈ (105.08, 80) snapped
+        ic_pin_x = _snap(100 + 5.08)
+        ic_pin_y = _snap(80 + 0)
+        ic_pin_pos = (ic_pin_x, ic_pin_y)
+
+        # No single wire should bridge IC pin directly to GND
+        _check_no_short(sch, ic_pin_pos, gnd_pos)
+
+        # Wires must exist
+        assert len(sch.wires) >= 2
+
+    def test_upward_pointing_pin_no_short(self, tmp_path: Path):
+        """Bypass cap on an upward-pointing pin must not create a VDD-GND short.
+
+        For an upward-pointing pin the cap is placed above the IC pin. At
+        cap rotation=0, pin 1 is at the bottom (nearest IC) and pin 2 is at
+        the top. The placement must connect pin 1 to VDD and pin 2 to GND --
+        this was correct already; this test guards against regression.
+        """
+        sch_path = _write_sch(tmp_path, SCHEMATIC_UP_PIN)
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U3",
+            "--pin", "6",
+            "--value", "100nF",
+            "--ground-net", "GND",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+
+        cap_refs = [s.reference for s in sch.symbols if s.reference.startswith("C")]
+        assert len(cap_refs) >= 1
+
+        gnd_syms = [s for s in sch.symbols if "GND" in s.lib_id]
+        assert len(gnd_syms) >= 1
+        gnd_pos = gnd_syms[0].position
+
+        # Pin 6 at library (0, 5.08) with rotation=90 (points up), instance at (100, 80)
+        # In KiCad Y-down coords, pin at (0, 5.08) in library transforms to (100, 85.08)
+        ic_pin_x = _snap(100 + 0)
+        ic_pin_y = _snap(80 + 5.08)
+        ic_pin_pos = (ic_pin_x, ic_pin_y)
+
+        _check_no_short(sch, ic_pin_pos, gnd_pos)
+
+        assert len(sch.wires) >= 2
 
 
 # ---------------------------------------------------------------------------
