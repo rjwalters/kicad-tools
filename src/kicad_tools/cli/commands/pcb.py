@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -26,6 +26,10 @@ def run_pcb_command(args) -> int:
     # Handle reannotate command separately (doesn't use pcb_query)
     if args.pcb_command == "reannotate":
         return _run_reannotate_command(args, pcb_path)
+
+    # Handle sync-netlist command
+    if args.pcb_command == "sync-netlist":
+        return _run_sync_netlist_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -464,3 +468,31 @@ def _run_reannotate_command(args, pcb_path: Path) -> int:
                 print(f"  Warning: {w}")
 
     return 0
+
+
+def _run_sync_netlist_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb sync-netlist' command."""
+    from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+    schematic = getattr(args, "schematic", None)
+    if not schematic:
+        print("Error: --schematic is required", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(schematic)
+    if not schematic_path.exists():
+        print(f"Error: Schematic not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    return run_sync_netlist(
+        schematic_path=schematic_path,
+        pcb_path=pcb_path,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+    )
