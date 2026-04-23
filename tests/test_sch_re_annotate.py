@@ -13,9 +13,13 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_re_annotate import (
+    _add_project_instance,
     _apply_reference_rename,
+    _apply_uuid_reference_rename,
     _assign_numbers,
     _build_continuous_mapping,
+    _detect_indent,
+    _detect_project_info,
     _extract_symbols_from_text,
     _parse_reference,
     run_re_annotate,
@@ -521,6 +525,85 @@ UNANNOTATED_SCHEMATIC = """\
 """
 
 
+def _tabs_to_spaces(text: str, width: int = 2) -> str:
+    """Convert tab-indented schematic text to space-indented."""
+    lines = []
+    for line in text.splitlines(True):
+        # Count leading tabs
+        stripped = line.lstrip('\t')
+        n_tabs = len(line) - len(stripped)
+        lines.append(' ' * (n_tabs * width) + stripped)
+    return ''.join(lines)
+
+
+# Space-indented variants of key test fixtures
+SPACE_INDENTED_SCHEMATIC = _tabs_to_spaces(MINIMAL_SCHEMATIC)
+SPACE_INDENTED_POWER_SCHEMATIC = _tabs_to_spaces(POWER_SCHEMATIC)
+SPACE_INDENTED_NO_INSTANCES_SCHEMATIC = _tabs_to_spaces(NO_INSTANCES_SCHEMATIC)
+SPACE_INDENTED_UNANNOTATED_SCHEMATIC = _tabs_to_spaces(UNANNOTATED_SCHEMATIC)
+SPACE_INDENTED_SEQUENTIAL_SCHEMATIC = _tabs_to_spaces(SEQUENTIAL_SCHEMATIC)
+
+# Mixed indentation: first symbol uses tabs, second uses spaces
+MIXED_INDENTATION_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+  (symbol
+    (lib_id "Device:R")
+    (at 100 80 0)
+    (property "Reference" "R5"
+      (at 100 78 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "4.7k"
+      (at 100 82 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" ""
+      (at 100 84 0)
+      (effects (font (size 1.27 1.27)) (hide yes))
+    )
+    (uuid "22222222-2222-2222-2222-222222222222")
+    (instances
+      (project "test"
+        (path "/" (reference "R5") (unit 1))
+      )
+    )
+  )
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+
 def _write_sch(
     tmp_path: Path,
     content: str = MINIMAL_SCHEMATIC,
@@ -972,3 +1055,201 @@ class TestUnannotatedComponents:
         assert "11111111-1111-1111-1111-111111111111" in by_uuid
         assert "22222222-2222-2222-2222-222222222222" in by_uuid
         assert by_uuid["22222222-2222-2222-2222-222222222222"]["reference"] == "R?"
+
+
+# ---------------------------------------------------------------------------
+# Space-indented schematic support
+# ---------------------------------------------------------------------------
+
+
+class TestDetectIndent:
+    def test_detects_tabs(self):
+        assert _detect_indent(MINIMAL_SCHEMATIC) == '\t'
+
+    def test_detects_spaces(self):
+        assert _detect_indent(SPACE_INDENTED_SCHEMATIC) == '  '
+
+    def test_detects_four_spaces(self):
+        text = _tabs_to_spaces(MINIMAL_SCHEMATIC, width=4)
+        assert _detect_indent(text) == '    '
+
+
+class TestSpaceIndentedExtractSymbols:
+    def test_extracts_all_symbols(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert refs == {"R1", "R5", "C3"}
+
+    def test_extracts_positions(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_SCHEMATIC)
+        by_ref = {s["reference"]: s for s in symbols}
+        assert by_ref["R1"]["position_x"] == 100
+        assert by_ref["R1"]["position_y"] == 50
+        assert by_ref["R5"]["position_y"] == 80
+
+    def test_extracts_lib_id(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_SCHEMATIC)
+        by_ref = {s["reference"]: s for s in symbols}
+        assert by_ref["R1"]["lib_id"] == "Device:R"
+        assert by_ref["C3"]["lib_id"] == "Device:C"
+
+    def test_power_symbols_extracted(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_POWER_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert "#PWR01" in refs
+
+    def test_no_instances_format(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_NO_INSTANCES_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert refs == {"R5", "R10"}
+
+    def test_unannotated_symbols(self):
+        symbols = _extract_symbols_from_text(SPACE_INDENTED_UNANNOTATED_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert "R?" in refs
+        assert "C?" in refs
+        assert "R1" in refs
+
+
+class TestSpaceIndentedRunReAnnotate:
+    def test_closes_gaps(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+        assert '"Reference" "C1"' in text
+        assert '"Reference" "R5"' not in text
+        assert '"Reference" "C3"' not in text
+
+    def test_updates_instances(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '(reference "R2")' in text
+        assert '(reference "C1")' in text
+
+    def test_already_sequential(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SEQUENTIAL_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        assert sch.read_text() == original
+
+    def test_power_symbols_excluded(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_POWER_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "#PWR01"' in text
+
+    def test_no_instances_format(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_NO_INSTANCES_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+
+    def test_annotates_unannotated_refs(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+        assert '"Reference" "C1"' in text
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+
+class TestSpaceIndentedApplyUuidRename:
+    def test_renames_in_space_indented_file(self):
+        text = _apply_uuid_reference_rename(
+            SPACE_INDENTED_SCHEMATIC,
+            "22222222-2222-2222-2222-222222222222",
+            "R99",
+        )
+        assert '"Reference" "R99"' in text
+        # R1 should be unchanged
+        assert '"Reference" "R1"' in text
+
+    def test_renames_in_tab_indented_file(self):
+        text = _apply_uuid_reference_rename(
+            MINIMAL_SCHEMATIC,
+            "22222222-2222-2222-2222-222222222222",
+            "R99",
+        )
+        assert '"Reference" "R99"' in text
+        assert '"Reference" "R1"' in text
+
+
+class TestSpaceIndentedDetectProjectInfo:
+    def test_finds_root_uuid_in_space_indented(self, tmp_path):
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SCHEMATIC)
+        project_name, root_uuid, file_paths = _detect_project_info(sch, [sch])
+        assert root_uuid == "00000000-0000-0000-0000-000000000001"
+        assert project_name == "test"
+
+    def test_finds_root_uuid_in_tab_indented(self, tmp_path):
+        sch = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
+        project_name, root_uuid, file_paths = _detect_project_info(sch, [sch])
+        assert root_uuid == "00000000-0000-0000-0000-000000000001"
+
+
+class TestSpaceIndentedAddProjectInstance:
+    def test_adds_instance_with_space_indentation(self):
+        text = _add_project_instance(
+            SPACE_INDENTED_UNANNOTATED_SCHEMATIC,
+            "33333333-3333-3333-3333-333333333333",
+            "newproject",
+            "/root-uuid",
+            "C1",
+        )
+        assert '(project "newproject"' in text
+        assert '(reference "C1")' in text
+        # Instance entry should use space indentation matching the file
+        assert '\t\t\t(project "newproject"' not in text
+
+
+class TestMixedIndentation:
+    def test_extracts_both_tab_and_space_symbols(self):
+        symbols = _extract_symbols_from_text(MIXED_INDENTATION_SCHEMATIC)
+        refs = {s["reference"] for s in symbols}
+        assert refs == {"R1", "R5"}
+
+    def test_run_re_annotate_on_mixed(self, tmp_path):
+        sch = _write_sch(tmp_path, MIXED_INDENTATION_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+        assert '"Reference" "R5"' not in text
+
+
+class TestSpaceIndentedHierarchical:
+    def test_continuous_across_space_indented_sheets(self, tmp_path):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(_tabs_to_spaces(PARENT_SCHEMATIC))
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(_tabs_to_spaces(CHILD_SCHEMATIC))
+
+        ret = run_re_annotate(
+            schematic_path=parent, dry_run=False, backup=False
+        )
+        assert ret == 0
+
+        parent_text = parent.read_text()
+        child_text = child.read_text()
+
+        # Parent: R3 -> R1, R7 -> R2
+        assert '"Reference" "R1"' in parent_text
+        assert '"Reference" "R2"' in parent_text
+
+        # Child: R14 -> R3, C5 -> C1
+        assert '"Reference" "R3"' in child_text
+        assert '"Reference" "C1"' in child_text
