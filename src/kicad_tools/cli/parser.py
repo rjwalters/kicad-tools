@@ -1121,6 +1121,38 @@ def _add_pcb_parser(subparsers) -> None:
         help="Preview renames without modifying the PCB file",
     )
 
+    # pcb sync-netlist
+    pcb_sync_netlist = pcb_subparsers.add_parser(
+        "sync-netlist",
+        help="Sync PCB footprints from schematic netlist",
+        description="Compare schematic components against PCB footprints. "
+        "Adds missing footprints (placed at board edge), detects renamed "
+        "references, and reports orphaned footprints.",
+    )
+    pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_sync_netlist.add_argument(
+        "--schematic",
+        required=True,
+        help="Path to root .kicad_sch file",
+    )
+    pcb_sync_netlist.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_sync_netlist.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_sync_netlist.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview sync actions without modifying the PCB file",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
