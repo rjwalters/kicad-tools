@@ -14,7 +14,7 @@ from ..violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import Footprint, PCB
+    from kicad_tools.schema.pcb import PCB, Footprint
 
 # Silkscreen layer names
 SILKSCREEN_LAYERS = ("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen")
