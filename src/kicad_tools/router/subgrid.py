@@ -526,6 +526,7 @@ class SubGridRouter:
         self,
         sgp: SubGridPad,
         fine_resolution: float,
+        min_clearance_factor: float = 1.0,
     ) -> list[tuple[float, int, int, float, float]]:
         """Generate escape candidates on a fine grid, bridging to the coarse grid.
 
@@ -538,6 +539,9 @@ class SubGridRouter:
         Args:
             sgp: The off-grid pad to generate candidates for.
             fine_resolution: Fine grid resolution in mm.
+            min_clearance_factor: Multiplier applied to ``trace_clearance``
+                for the hard-reject threshold.  1.0 uses normal clearance;
+                values < 1.0 relax the requirement (used in fallback modes).
 
         Returns:
             List of ``(score, gx, gy, snap_x, snap_y)`` tuples where
@@ -559,7 +563,7 @@ class SubGridRouter:
             if self.rules.min_trace_width is None
             else self.rules.min_trace_width / 2
         )
-        required_clearance = self.rules.trace_clearance
+        required_clearance = self.rules.trace_clearance * min_clearance_factor
         pitches = self.grid.compute_component_pitches()
         pad_pitch = pitches.get(pad.ref)
         if pad_pitch is not None:
@@ -653,51 +657,36 @@ class SubGridRouter:
 
         return candidates
 
-    def _find_escape_for_pad(self, sgp: SubGridPad) -> SubGridEscape | None:
-        """Find the best escape point for a single off-grid pad.
+    def _collect_coarse_candidates(
+        self,
+        sgp: SubGridPad,
+        radius: int,
+        check_layers: list[int],
+        width: float,
+        min_clearance_factor: float = 1.0,
+    ) -> list[tuple[float, int, int, float, float]]:
+        """Collect accessible coarse-grid escape candidates around a pad.
 
-        Searches nearby grid points for the best escape target, considering
-        blockage, distance, escape direction, and clearance validation.
-
-        Issue #1626: Candidate escape segments are now validated against
-        ``validate_segment_clearance()`` before being accepted. If the
-        best-scoring candidate fails clearance, the next-best candidate is
-        tried, and so on. This prevents escape segments from creating DRC
-        violations against neighboring pads/traces of other nets.
+        Searches grid points in a square region of ``radius`` cells around
+        the pad's nearest grid point.  Each candidate is scored by distance,
+        escape-direction alignment, and clearance to neighboring pads.
 
         Args:
-            sgp: SubGridPad to find escape for
+            sgp: The off-grid pad to find candidates for.
+            radius: Number of grid cells to search in each direction.
+            check_layers: Grid layer indices to check for accessibility.
+            width: Trace width for clearance calculations.
+            min_clearance_factor: Multiplier applied to ``trace_clearance``
+                for the hard-reject threshold.  1.0 uses normal clearance;
+                values < 1.0 relax the requirement (used in fallback modes).
 
         Returns:
-            SubGridEscape if found, None if no valid escape point exists
+            List of ``(score, gx, gy, snap_x, snap_y)`` tuples.
         """
         pad = sgp.pad
-
-        # Determine the layer to check
-        if pad.through_hole:
-            check_layers = list(range(self.grid.num_layers))
-        else:
-            check_layers = [self.grid.layer_to_index(pad.layer.value)]
-
-        # Determine trace width for escape segment (needed for clearance scoring)
-        layer = pad.layer
-        width = self.rules.trace_width
-
-        # Apply neck-down if configured for fine-pitch
-        if self.rules.min_trace_width is not None:
-            ref = pad.ref
-            pin_pitch = None
-            if ref:
-                pitches = self.grid.compute_component_pitches()
-                pin_pitch = pitches.get(ref)
-            if self.rules.should_apply_neck_down(ref, pin_pitch):
-                width = self.rules.min_trace_width
-
-        # Collect all accessible candidates with their scores
         candidates: list[tuple[float, int, int, float, float]] = []
+        required_clearance = self.rules.trace_clearance * min_clearance_factor
 
-        # Search in a spiral pattern around the nearest grid point
-        radius = self.escape_search_radius
         for dy in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
                 gx = sgp.grid_x + dx
@@ -762,10 +751,8 @@ class SubGridRouter:
                 if dist > self.grid.resolution * radius:
                     score += dist * 2
 
-                # Issue #1834: Hard-reject coarse candidates that violate
-                # minimum clearance against neighboring pads, consistent
-                # with the fine-grid hard-reject added in the same issue.
-                required_clearance = self.rules.trace_clearance
+                # Hard-reject coarse candidates that violate minimum
+                # clearance against neighboring pads (Issue #1834).
                 neighbor_clearance = self._min_clearance_to_neighbors(
                     snap_x, snap_y, width / 2, pad.net, check_layers[0],
                 )
@@ -773,9 +760,6 @@ class SubGridRouter:
                     continue  # Physically impossible -- skip
 
                 # Clearance-aware scoring (Phase 2, Issue #1642)
-                # Penalize candidates that are close to different-net pads.
-                # This re-orders candidates so that high-clearance points are
-                # preferred, reducing DRC violations on tightly-packed ICs.
                 if self.clearance_weight > 0:
                     threshold = required_clearance * 2
                     if neighbor_clearance < threshold:
@@ -786,52 +770,62 @@ class SubGridRouter:
 
                 candidates.append((score, gx, gy, snap_x, snap_y))
 
-        # Issue #1828: When the pad falls within a fine zone, generate
-        # additional candidates on the fine grid.  Fine-grid candidates
-        # produce shorter escape segments that better match dense IC pin
-        # spacing (e.g. 0.05mm vs 0.17mm coarse).  Each fine-grid candidate
-        # is mapped back to the nearest coarse grid cell so the main A*
-        # router can connect to it.
-        fine_res = self._get_pad_fine_resolution(pad)
-        if fine_res is not None and fine_res < self.grid.resolution:
-            fine_candidates = self._generate_fine_grid_candidates(sgp, fine_res)
-            candidates.extend(fine_candidates)
-            logger.debug(
-                "Fine-zone escape for %s.%s: %d fine candidates + %d coarse candidates "
-                "(fine_res=%.4fmm)",
-                pad.ref, pad.pin,
-                len(fine_candidates),
-                len(candidates) - len(fine_candidates),
-                fine_res,
-            )
+        return candidates
 
-        if not candidates:
-            return None
+    def _deduplicate_candidates(
+        self,
+        candidates: list[tuple[float, int, int, float, float]],
+    ) -> list[tuple[float, int, int, float, float]]:
+        """Deduplicate candidates that share the same coarse grid cell.
 
-        # Deduplicate candidates that share the same coarse grid cell.
-        # When fine-grid candidates map to the same (gx, gy) as a coarse
-        # candidate, keep only the one with the best (lowest) score.
-        # However, different snap points for the same grid cell ARE useful
-        # if they produce different escape segment geometry, so we deduplicate
-        # by the full (gx, gy, snap_x_rounded, snap_y_rounded) key.
+        When fine-grid candidates map to the same (gx, gy) as a coarse
+        candidate, keep only the one with the best (lowest) score.
+        Different snap points for the same grid cell ARE useful if they
+        produce different escape segment geometry, so we deduplicate by
+        the full (gx, gy, snap_x_rounded, snap_y_rounded) key.
+
+        Args:
+            candidates: Raw candidate list.
+
+        Returns:
+            Deduplicated candidate list sorted by score (lowest first).
+        """
         seen: dict[tuple[int, int, int, int], tuple[float, int, int, float, float]] = {}
         for cand in candidates:
             score, gx, gy, sx, sy = cand
-            # Round snap points to fine-grid precision to merge near-duplicates
             key = (gx, gy, round(sx * 10000), round(sy * 10000))
             if key not in seen or score < seen[key][0]:
                 seen[key] = cand
-        candidates = list(seen.values())
+        result = list(seen.values())
+        result.sort(key=lambda c: c[0])
+        return result
 
-        # Sort candidates by score (lowest = best)
-        candidates.sort(key=lambda c: c[0])
+    def _try_candidates_with_clearance(
+        self,
+        sgp: SubGridPad,
+        candidates: list[tuple[float, int, int, float, float]],
+        width: float,
+        layer: Layer,
+        component_pitches: dict[str, float],
+        min_clearance: float | None = None,
+    ) -> SubGridEscape | None:
+        """Try candidates in score order, validating clearance.
 
-        # Compute component pitches once for clearance validation
-        component_pitches = self.grid.compute_component_pitches()
+        Args:
+            sgp: The off-grid pad being escaped.
+            candidates: Sorted candidate list (lowest score first).
+            width: Trace width for the escape segment.
+            layer: Layer for the escape segment.
+            component_pitches: Component pitch map for clearance validation.
+            min_clearance: If provided, use this as the clearance threshold
+                for ALL pads (overriding per-component clearance).  This is
+                the relaxed-clearance fallback for escape segments.
 
-        # Issue #1626: Try candidates in score order, validate clearance
-        # before accepting. Skip candidates whose escape segments would
-        # violate clearance against neighboring pads/traces.
+        Returns:
+            SubGridEscape if a valid candidate is found, None otherwise.
+        """
+        pad = sgp.pad
+
         for _score, gx, gy, snap_x, snap_y in candidates:
             segment = Segment(
                 x1=pad.x,
@@ -844,12 +838,21 @@ class SubGridRouter:
                 net_name=pad.net_name,
             )
 
-            # Validate segment clearance against all obstacles
-            is_valid, _clearance, violation_loc = self.grid.validate_segment_clearance(
-                segment,
-                exclude_net=pad.net,
-                component_pitches=component_pitches,
-            )
+            if min_clearance is not None:
+                # Relaxed mode: manually check clearance against neighbor
+                # pads using the reduced threshold, bypassing per-component
+                # clearance overrides that would use the stricter value.
+                is_valid = self._validate_segment_relaxed(
+                    segment, pad.net, min_clearance,
+                )
+                violation_loc = None
+            else:
+                # Normal mode: use full validate_segment_clearance
+                is_valid, _clearance, violation_loc = self.grid.validate_segment_clearance(
+                    segment,
+                    exclude_net=pad.net,
+                    component_pitches=component_pitches,
+                )
 
             if is_valid:
                 return SubGridEscape(
@@ -870,13 +873,343 @@ class SubGridRouter:
                     violation_loc[1] if violation_loc else 0.0,
                 )
 
-        # All candidates failed clearance validation
-        logger.debug(
-            "All %d escape candidates for %s.%s failed clearance validation",
-            len(candidates),
-            pad.ref,
-            pad.pin,
+        return None
+
+    def _validate_segment_relaxed(
+        self,
+        seg: Segment,
+        exclude_net: int,
+        min_clearance: float,
+    ) -> bool:
+        """Validate a segment's clearance using a relaxed threshold.
+
+        Unlike ``grid.validate_segment_clearance()``, this method uses a
+        single flat clearance threshold for ALL neighboring pads, ignoring
+        per-component clearance overrides.  This is used in the relaxed-
+        clearance fallback (Issue #1965) where the normal clearance is too
+        strict for escape segments.
+
+        The check still ensures no actual copper overlap (clearance > 0)
+        even if ``min_clearance`` is very small.
+
+        Args:
+            seg: The escape segment to validate.
+            exclude_net: Net ID to exclude (same-net pads are skipped).
+            min_clearance: Relaxed clearance threshold in mm.
+
+        Returns:
+            True if the segment passes the relaxed clearance check.
+        """
+        seg_half_width = seg.width / 2
+        seg_layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+        for pad in self.grid._pads:
+            if pad.net == exclude_net:
+                continue
+
+            # Layer filtering
+            if not pad.through_hole:
+                try:
+                    pad_li = self.grid.layer_to_index(pad.layer.value)
+                except Exception:
+                    continue
+                if pad_li != seg_layer_idx:
+                    continue
+
+            pad_radius = max(pad.width, pad.height) / 2
+            dist = self.grid._point_to_segment_distance(
+                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2,
+            )
+            clearance = dist - seg_half_width - pad_radius
+
+            if clearance < min_clearance:
+                return False
+
+        return True
+
+    def _find_escape_for_pad(self, sgp: SubGridPad) -> SubGridEscape | None:
+        """Find the best escape point for a single off-grid pad.
+
+        Searches nearby grid points for the best escape target, considering
+        blockage, distance, escape direction, and clearance validation.
+
+        Issue #1626: Candidate escape segments are now validated against
+        ``validate_segment_clearance()`` before being accepted. If the
+        best-scoring candidate fails clearance, the next-best candidate is
+        tried, and so on. This prevents escape segments from creating DRC
+        violations against neighboring pads/traces of other nets.
+
+        Issue #1965: When all candidates at the initial search radius fail,
+        three fallback strategies are attempted in order:
+        1. **Expanded search radius** -- doubles the radius to find grid
+           points beyond the initial clearance-blocked zone.
+        2. **Relaxed clearance** -- reduces the clearance threshold to 50%
+           for escape segments only, since escape segments are short and
+           directly connect pad copper to the grid.
+        3. **Multi-hop escape** -- routes through an intermediate grid
+           point when a direct segment cannot satisfy clearance.
+
+        Args:
+            sgp: SubGridPad to find escape for
+
+        Returns:
+            SubGridEscape if found, None if no valid escape point exists
+        """
+        pad = sgp.pad
+
+        # Determine the layer to check
+        if pad.through_hole:
+            check_layers = list(range(self.grid.num_layers))
+        else:
+            check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+        # Determine trace width for escape segment (needed for clearance scoring)
+        layer = pad.layer
+        width = self.rules.trace_width
+
+        # Apply neck-down if configured for fine-pitch
+        if self.rules.min_trace_width is not None:
+            ref = pad.ref
+            pin_pitch = None
+            if ref:
+                pitches = self.grid.compute_component_pitches()
+                pin_pitch = pitches.get(ref)
+            if self.rules.should_apply_neck_down(ref, pin_pitch):
+                width = self.rules.min_trace_width
+
+        # Compute component pitches once for clearance validation
+        component_pitches = self.grid.compute_component_pitches()
+
+        # --- Phase 1: Normal search radius with full clearance ---
+        radius = self.escape_search_radius
+        candidates = self._collect_coarse_candidates(
+            sgp, radius, check_layers, width,
         )
+
+        # Issue #1828: When the pad falls within a fine zone, generate
+        # additional candidates on the fine grid.
+        fine_res = self._get_pad_fine_resolution(pad)
+        if fine_res is not None and fine_res < self.grid.resolution:
+            fine_candidates = self._generate_fine_grid_candidates(sgp, fine_res)
+            candidates.extend(fine_candidates)
+            logger.debug(
+                "Fine-zone escape for %s.%s: %d fine candidates + %d coarse candidates "
+                "(fine_res=%.4fmm)",
+                pad.ref, pad.pin,
+                len(fine_candidates),
+                len(candidates) - len(fine_candidates),
+                fine_res,
+            )
+
+        if not candidates:
+            # No accessible candidates at all -- try expanded radius
+            # before giving up (Phase 2 below).
+            pass
+        else:
+            candidates = self._deduplicate_candidates(candidates)
+
+            escape = self._try_candidates_with_clearance(
+                sgp, candidates, width, layer, component_pitches,
+            )
+            if escape is not None:
+                return escape
+
+        # --- Phase 2: Expanded search radius (2x) ---
+        # The initial radius may be too small for pads surrounded by
+        # clearance zones of neighboring components.  Doubling the radius
+        # reaches grid points beyond the congested zone.
+        expanded_radius = radius * 2
+        expanded_candidates = self._collect_coarse_candidates(
+            sgp, expanded_radius, check_layers, width,
+        )
+
+        # Include fine-grid candidates at expanded radius if applicable
+        if fine_res is not None and fine_res < self.grid.resolution:
+            expanded_candidates.extend(
+                self._generate_fine_grid_candidates(sgp, fine_res)
+            )
+
+        if expanded_candidates:
+            expanded_candidates = self._deduplicate_candidates(expanded_candidates)
+
+            escape = self._try_candidates_with_clearance(
+                sgp, expanded_candidates, width, layer, component_pitches,
+            )
+            if escape is not None:
+                logger.debug(
+                    "Escape for %s.%s succeeded with expanded radius %d",
+                    pad.ref, pad.pin, expanded_radius,
+                )
+                return escape
+
+        # --- Phase 3: Relaxed clearance mode ---
+        # For escape segments specifically, reduce the clearance requirement
+        # to 50% of the design rule.  Escape segments are very short (sub-
+        # grid distance) and connect directly to pad copper, so slightly
+        # reduced clearance is acceptable and preferable to no connection.
+        relaxed_clearance = self.rules.trace_clearance * 0.5
+
+        # Re-collect candidates with relaxed clearance for the hard-reject
+        # filter so previously rejected candidates are now included.
+        relaxed_candidates = self._collect_coarse_candidates(
+            sgp, expanded_radius, check_layers, width,
+            min_clearance_factor=0.5,
+        )
+        if fine_res is not None and fine_res < self.grid.resolution:
+            # Generate fine-grid candidates with relaxed clearance
+            relaxed_candidates.extend(
+                self._generate_fine_grid_candidates(
+                    sgp, fine_res, min_clearance_factor=0.5,
+                )
+            )
+
+        if relaxed_candidates:
+            relaxed_candidates = self._deduplicate_candidates(relaxed_candidates)
+
+            escape = self._try_candidates_with_clearance(
+                sgp, relaxed_candidates, width, layer, component_pitches,
+                min_clearance=relaxed_clearance,
+            )
+            if escape is not None:
+                logger.debug(
+                    "Escape for %s.%s succeeded with relaxed clearance "
+                    "(%.3fmm vs normal %.3fmm)",
+                    pad.ref, pad.pin,
+                    relaxed_clearance, self.rules.trace_clearance,
+                )
+                return escape
+
+        # --- Phase 4: Multi-hop escape ---
+        # When direct escape fails, try routing through an intermediate
+        # grid point.  The first hop goes from the pad to a nearby grid
+        # point (even if that point is in a clearance zone), and the
+        # second hop connects from that intermediate point to a free grid
+        # point the main router can reach.
+        escape = self._try_multi_hop_escape(
+            sgp, check_layers, width, layer, component_pitches,
+        )
+        if escape is not None:
+            logger.debug(
+                "Escape for %s.%s succeeded via multi-hop",
+                pad.ref, pad.pin,
+            )
+            return escape
+
+        # All strategies exhausted
+        logger.debug(
+            "All escape strategies failed for %s.%s "
+            "(normal, expanded, relaxed, multi-hop)",
+            pad.ref, pad.pin,
+        )
+        return None
+
+    def _try_multi_hop_escape(
+        self,
+        sgp: SubGridPad,
+        check_layers: list[int],
+        width: float,
+        layer: Layer,
+        component_pitches: dict[str, float],
+    ) -> SubGridEscape | None:
+        """Attempt a multi-hop escape through an intermediate grid point.
+
+        When a direct escape from pad to grid point fails clearance, this
+        method tries a two-segment path: pad -> intermediate -> target.
+        The intermediate point is chosen from same-net or unblocked cells
+        near the pad, and the target is a free grid cell reachable from
+        the intermediate.
+
+        The resulting escape uses the intermediate point as the segment
+        endpoint (the main router handles the rest).  Only the first hop
+        (pad to intermediate) is stored as the escape segment; the second
+        hop from intermediate to target is implicit since both are on the
+        grid and the A* router can connect them.
+
+        Args:
+            sgp: The off-grid pad to escape.
+            check_layers: Grid layer indices to check.
+            width: Trace width for escape segments.
+            layer: Layer for escape segments.
+            component_pitches: Component pitch map for clearance validation.
+
+        Returns:
+            SubGridEscape if a valid multi-hop path is found, None otherwise.
+        """
+        pad = sgp.pad
+        radius = self.escape_search_radius
+
+        # Collect intermediate candidates: grid points near the pad that
+        # might be accessible even with clearance issues (we use relaxed
+        # clearance for the first hop).
+        relaxed_clearance = self.rules.trace_clearance * 0.5
+
+        # Search for intermediate points (within normal radius)
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                mid_gx = sgp.grid_x + dx
+                mid_gy = sgp.grid_y + dy
+
+                if not (0 <= mid_gx < self.grid.cols and 0 <= mid_gy < self.grid.rows):
+                    continue
+
+                mid_x, mid_y = self.grid.grid_to_world(mid_gx, mid_gy)
+
+                # The intermediate must be accessible (free or clearance-zone)
+                accessible = False
+                for layer_idx in check_layers:
+                    cell = self.grid.grid[layer_idx][mid_gy][mid_gx]
+                    if not cell.blocked or not cell.pad_blocked:
+                        accessible = True
+                        break
+                if not accessible:
+                    continue
+
+                # Check that the first hop (pad -> intermediate) passes
+                # relaxed clearance (using flat threshold, not per-component)
+                hop1 = Segment(
+                    x1=pad.x, y1=pad.y,
+                    x2=mid_x, y2=mid_y,
+                    width=width, layer=layer,
+                    net=pad.net, net_name=pad.net_name,
+                )
+                if not self._validate_segment_relaxed(
+                    hop1, pad.net, relaxed_clearance,
+                ):
+                    continue
+
+                # Now check that a free grid cell is reachable from the
+                # intermediate point within 1-2 cells (the second hop).
+                # We only need the intermediate to be adjacent to a free cell.
+                for dy2 in range(-2, 3):
+                    for dx2 in range(-2, 3):
+                        if dx2 == 0 and dy2 == 0:
+                            continue
+                        tgt_gx = mid_gx + dx2
+                        tgt_gy = mid_gy + dy2
+
+                        if not (0 <= tgt_gx < self.grid.cols and 0 <= tgt_gy < self.grid.rows):
+                            continue
+
+                        # Target must be a free cell (not blocked at all)
+                        target_free = False
+                        for layer_idx in check_layers:
+                            cell = self.grid.grid[layer_idx][tgt_gy][tgt_gx]
+                            if not cell.blocked:
+                                target_free = True
+                                break
+                        if not target_free:
+                            continue
+
+                        # The escape terminates at the intermediate point.
+                        # apply_escape_segments will unblock it, and the
+                        # main router can then path from there to the target.
+                        return SubGridEscape(
+                            pad=pad,
+                            segment=hop1,
+                            grid_point=(mid_gx, mid_gy),
+                            snap_point=(mid_x, mid_y),
+                        )
+
         return None
 
     def get_escape_routes(self, result: SubGridResult) -> list[Route]:
