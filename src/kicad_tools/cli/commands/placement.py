@@ -7,7 +7,7 @@ def run_placement_command(args) -> int:
     """Handle placement command."""
     if not args.placement_command:
         print("Usage: kicad-tools placement <command> [options] <file>")
-        print("Commands: check, fix, optimize, snap, align, distribute, suggest, refine")
+        print("Commands: check, fix, nudge, optimize, snap, align, distribute, suggest, refine")
         return 1
 
     from ..placement_cmd import main as placement_main
@@ -39,6 +39,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--strategy", args.strategy])
         if args.anchor:
             sub_argv.extend(["--anchor", args.anchor])
+        if getattr(args, "only", None):
+            sub_argv.extend(["--only", args.only])
         if args.dry_run:
             sub_argv.append("--dry-run")
         if getattr(args, "timeout", None) is not None:
@@ -46,6 +48,22 @@ def run_placement_command(args) -> int:
         if args.verbose:
             sub_argv.append("--verbose")
         # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "nudge":
+        sub_argv = ["nudge", args.pcb]
+        if getattr(args, "output", None):
+            sub_argv.extend(["-o", args.output])
+        if getattr(args, "anchor", None):
+            sub_argv.extend(["--anchor", args.anchor])
+        if getattr(args, "pad_clearance", 0.1) != 0.1:
+            sub_argv.extend(["--pad-clearance", str(args.pad_clearance)])
+        if getattr(args, "dry_run", False):
+            sub_argv.append("--dry-run")
+        if getattr(args, "verbose", False):
+            sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         return placement_main(sub_argv) or 0

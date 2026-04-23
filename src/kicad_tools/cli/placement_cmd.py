@@ -92,6 +92,67 @@ def cmd_check(args) -> int:
     return 1 if errors else 0
 
 
+def cmd_nudge(args) -> int:
+    """Fast targeted pad clearance violation repair.
+
+    Nudges the smaller component in each conflicting pair the minimum
+    distance to resolve pad overlap.  Designed to complete in under 5 seconds.
+    """
+    from kicad_tools.cli.progress import spinner
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # Build design rules
+    rules = DesignRules(
+        min_pad_clearance=args.pad_clearance,
+        min_hole_to_hole=getattr(args, "hole_clearance", 0.5),
+        min_edge_clearance=getattr(args, "edge_clearance", 0.3),
+        courtyard_margin=getattr(args, "courtyard_margin", 0.25),
+    )
+
+    # Parse anchored components
+    anchored = set()
+    if getattr(args, "anchor", None):
+        anchored = set(args.anchor.split(","))
+        if not quiet:
+            print(f"Anchored components: {anchored}")
+
+    # Create fixer
+    fixer = PlacementFixer(
+        strategy=FixStrategy.SPREAD,
+        anchored=anchored,
+        verbose=args.verbose and not quiet,
+    )
+
+    output_path = args.output or pcb_path
+
+    with spinner("Nudging components to resolve pad clearance violations...", quiet=quiet):
+        result = fixer.nudge_pad_clearance(
+            pcb_path,
+            rules=rules,
+            output_path=output_path,
+            dry_run=args.dry_run,
+        )
+
+    if not quiet:
+        print(f"\n{result.message}")
+
+        if result.new_conflicts > 0:
+            print(f"Warning: {result.new_conflicts} new conflict(s) introduced")
+
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+        return 0
+
+    return 0 if result.success else 1
+
+
 def cmd_fix(args) -> int:
     """Suggest and apply fixes for placement conflicts."""
     from kicad_tools.cli.progress import spinner
@@ -110,6 +171,45 @@ def cmd_fix(args) -> int:
         min_edge_clearance=args.edge_clearance,
         courtyard_margin=args.courtyard_margin,
     )
+
+    # Check for --only pad_clearance shortcut
+    only_type = getattr(args, "only", None)
+    if only_type == "pad_clearance":
+        # Fast path: delegate to nudge_pad_clearance for targeted repair
+        fix_strategy = FixStrategy(args.strategy)
+        fix_anchored = set()
+        if args.anchor:
+            fix_anchored = set(args.anchor.split(","))
+            if not quiet:
+                print(f"Anchored components: {fix_anchored}")
+
+        fixer = PlacementFixer(
+            strategy=fix_strategy,
+            anchored=fix_anchored,
+            verbose=args.verbose and not quiet,
+        )
+
+        fix_output_path = args.output or pcb_path
+
+        with spinner("Resolving pad clearance violations...", quiet=quiet):
+            fix_result = fixer.nudge_pad_clearance(
+                pcb_path,
+                rules=rules,
+                output_path=fix_output_path,
+                dry_run=args.dry_run,
+            )
+
+        if not quiet:
+            print(f"\n{fix_result.message}")
+            if fix_result.new_conflicts > 0:
+                print(f"Warning: {fix_result.new_conflicts} new conflict(s) introduced")
+
+        if args.dry_run:
+            if not quiet:
+                print("\n(Dry run - no changes made)")
+            return 0
+
+        return 0 if fix_result.success else 1
 
     # Parse strategy
     strategy = FixStrategy(args.strategy)
@@ -1483,8 +1583,43 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Maximum wall-clock seconds; returns best result so far on expiry",
     )
+    fix_parser.add_argument(
+        "--only",
+        choices=["pad_clearance", "courtyard_overlap", "hole_to_hole", "edge_clearance"],
+        default=None,
+        help="Fix only a specific conflict type (e.g., pad_clearance for fast targeted repair)",
+    )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+
+    # Nudge subcommand (fast pad clearance repair)
+    nudge_parser = subparsers.add_parser(
+        "nudge",
+        help="Fast targeted pad clearance violation repair",
+    )
+    nudge_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    nudge_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    nudge_parser.add_argument(
+        "--anchor",
+        help="Comma-separated list of component references to keep fixed",
+    )
+    nudge_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show proposed moves without applying",
+    )
+    nudge_parser.add_argument(
+        "--pad-clearance",
+        type=float,
+        default=0.1,
+        help="Minimum pad-to-pad clearance in mm (default: 0.1)",
+    )
+    nudge_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    nudge_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     # Snap subcommand
     snap_parser = subparsers.add_parser("snap", help="Snap components to grid")
@@ -1752,6 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     elif args.command == "fix":
         return cmd_fix(args)
+    elif args.command == "nudge":
+        return cmd_nudge(args)
     elif args.command == "snap":
         return cmd_snap(args)
     elif args.command == "align":

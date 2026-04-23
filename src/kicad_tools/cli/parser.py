@@ -2353,6 +2353,12 @@ def _add_placement_parser(subparsers) -> None:
         help="Fix strategy",
     )
     placement_fix.add_argument("--anchor", help="Comma-separated components to keep fixed")
+    placement_fix.add_argument(
+        "--only",
+        choices=["pad_clearance", "courtyard_overlap", "hole_to_hole", "edge_clearance"],
+        default=None,
+        help="Fix only a specific conflict type (e.g., pad_clearance for fast targeted repair)",
+    )
     placement_fix.add_argument("--dry-run", action="store_true")
     placement_fix.add_argument(
         "--timeout",
@@ -2362,6 +2368,22 @@ def _add_placement_parser(subparsers) -> None:
     )
     placement_fix.add_argument("-v", "--verbose", action="store_true")
     placement_fix.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement nudge (fast pad clearance repair)
+    placement_nudge = placement_subparsers.add_parser(
+        "nudge", help="Fast targeted pad clearance violation repair"
+    )
+    placement_nudge.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_nudge.add_argument("-o", "--output", help="Output file path")
+    placement_nudge.add_argument("--anchor", help="Comma-separated components to keep fixed")
+    placement_nudge.add_argument(
+        "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
+    )
+    placement_nudge.add_argument("--dry-run", action="store_true", help="Show proposed moves only")
+    placement_nudge.add_argument("-v", "--verbose", action="store_true")
+    placement_nudge.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
