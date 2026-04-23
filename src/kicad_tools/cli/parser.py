@@ -997,6 +997,24 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
+    # sch repair-instances
+    sch_repair_instances = sch_subparsers.add_parser(
+        "repair-instances",
+        help="Fix symbols missing project instances blocks",
+    )
+    sch_repair_instances.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_repair_instances.add_argument(
+        "--dry-run", "-n", action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_repair_instances.add_argument(
+        "--backup", action="store_true",
+        help="Create backup before modifying",
+    )
+    sch_repair_instances.add_argument(
+        "--format", choices=["text", "json"], default="text",
+    )
+
 
 def _add_pcb_parser(subparsers) -> None:
     """Add PCB subcommand parser with its subcommands."""

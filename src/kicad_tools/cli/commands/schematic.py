@@ -21,8 +21,9 @@ def run_sch_command(args) -> int:
         )
         print(
             "          add-wire, add-junction,"
-            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate"
+            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate,"
         )
+        print("          repair-instances")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -433,6 +434,16 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return disconnect_main(sub_argv) or 0
+
+    elif args.sch_command == "repair-instances":
+        from ..sch_repair_instances import run_repair_instances
+
+        return run_repair_instances(
+            schematic_path=schematic_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", True),
+            format=getattr(args, "format", "text"),
+        )
 
     elif args.sch_command == "re-annotate":
         from ..sch_re_annotate import run_re_annotate
