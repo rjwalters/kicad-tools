@@ -51,9 +51,19 @@ class DRCViolation:
         return self.severity == "warning"
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization.
+
+        Includes a ``type`` field that mirrors ``rule_id`` so that
+        downstream consumers (e.g., ``drc.report._parse_kct_check_json``)
+        can resolve the violation to a ``ViolationType`` enum member via
+        ``ViolationType.from_string()``.
+        """
+        from kicad_tools.drc.violation import ViolationType
+
+        resolved_type = ViolationType.from_string(self.rule_id)
         return {
             "rule_id": self.rule_id,
+            "type": resolved_type.value,
             "severity": self.severity,
             "message": self.message,
             "location": list(self.location) if self.location else None,

@@ -676,9 +676,10 @@ class TestViolationTypeMapping:
         assert ViolationType.from_string("drill_clearance") == ViolationType.DRILL_CLEARANCE
 
     def test_dimension_drill_clearance(self):
-        """Should parse 'dimension_drill_clearance' to DRILL_CLEARANCE."""
+        """Should parse 'dimension_drill_clearance' to DIMENSION_DRILL_CLEARANCE."""
         assert (
-            ViolationType.from_string("dimension_drill_clearance") == ViolationType.DRILL_CLEARANCE
+            ViolationType.from_string("dimension_drill_clearance")
+            == ViolationType.DIMENSION_DRILL_CLEARANCE
         )
 
     def test_clearance_still_works(self):
@@ -686,8 +687,11 @@ class TestViolationTypeMapping:
         assert ViolationType.from_string("clearance") == ViolationType.CLEARANCE
 
     def test_clearance_segment_segment(self):
-        """clearance_segment_segment should map to CLEARANCE via partial match."""
-        assert ViolationType.from_string("clearance_segment_segment") == ViolationType.CLEARANCE
+        """clearance_segment_segment should map to CLEARANCE_SEGMENT_SEGMENT."""
+        assert (
+            ViolationType.from_string("clearance_segment_segment")
+            == ViolationType.CLEARANCE_SEGMENT_SEGMENT
+        )
 
     def test_clearance_segment_via(self):
         """clearance_segment_via should map to CLEARANCE_SEGMENT_VIA."""

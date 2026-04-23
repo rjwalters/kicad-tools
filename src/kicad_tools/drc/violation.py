@@ -19,7 +19,15 @@ class ViolationType(Enum):
     CLEARANCE_SEGMENT_VIA = "clearance_segment_via"
     CLEARANCE_PAD_SEGMENT = "clearance_pad_segment"
     CLEARANCE_PAD_VIA = "clearance_pad_via"
+    CLEARANCE_PAD_PAD = "clearance_pad_pad"
+    CLEARANCE_SEGMENT_SEGMENT = "clearance_segment_segment"
+    CLEARANCE_VIA_VIA = "clearance_via_via"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
+    EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
+    EDGE_CLEARANCE_PAD = "edge_clearance_pad"
+    EDGE_CLEARANCE_PAD_HOLE = "edge_clearance_pad_hole"
+    EDGE_CLEARANCE_VIA = "edge_clearance_via"
+    EDGE_CLEARANCE_ZONE = "edge_clearance_zone"
     COURTYARD_OVERLAP = "courtyard_overlap"
 
     # Connection issues
@@ -31,9 +39,14 @@ class ViolationType(Enum):
     VIA_ANNULAR_WIDTH = "via_annular_width"
     MICRO_VIA_HOLE_TOO_SMALL = "micro_via_hole_too_small"
 
-    # Track issues
+    # Track/trace dimension issues
     TRACK_WIDTH = "track_width"
     TRACK_ANGLE = "track_angle"
+    DIMENSION_TRACE_WIDTH = "dimension_trace_width"
+    DIMENSION_VIA_DRILL = "dimension_via_drill"
+    DIMENSION_VIA_DIAMETER = "dimension_via_diameter"
+    DIMENSION_ANNULAR_RING = "dimension_annular_ring"
+    DIMENSION_DRILL_CLEARANCE = "dimension_drill_clearance"
 
     # Hole issues
     DRILL_HOLE_TOO_SMALL = "drill_hole_too_small"
@@ -44,9 +57,18 @@ class ViolationType(Enum):
     # Silkscreen
     SILK_OVER_COPPER = "silk_over_copper"
     SILK_OVERLAP = "silk_overlap"
+    SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
+    SILKSCREEN_TEXT_HEIGHT = "silkscreen_text_height"
+    SILKSCREEN_OVER_PAD = "silkscreen_over_pad"
 
     # Solder mask
     SOLDER_MASK_BRIDGE = "solder_mask_bridge"
+    SOLDER_MASK_CLEARANCE = "solder_mask_clearance"
+    MIN_PAD_SIZE = "min_pad_size"
+    PTH_ANNULAR_RING = "pth_annular_ring"
+
+    # Impedance
+    IMPEDANCE = "impedance"
 
     # Misc
     FOOTPRINT = "footprint"
@@ -60,15 +82,66 @@ class ViolationType(Enum):
 
     @classmethod
     def from_string(cls, s: str) -> "ViolationType":
-        """Parse violation type from string."""
+        """Parse violation type from string.
+
+        Handles three sources of type strings:
+        - KiCad-cli DRC report types (e.g., "clearance", "track_width")
+        - Validate-module rule_id values (e.g., "clearance_pad_pad",
+          "dimension_trace_width", "silkscreen_line_width")
+        - Free-form descriptions from older reports
+        """
         s_lower = s.lower().strip()
 
-        # Try direct match
+        # Try direct enum value match first (covers both legacy and new members)
         for vtype in cls:
             if vtype.value == s_lower:
                 return vtype
 
-        # Try partial matches for common patterns
+        # Explicit alias table for validate-module rule_ids and common
+        # variants that don't match an enum value directly.  This table
+        # is checked before the fuzzy heuristics so that specific rule
+        # names are never misclassified.
+        _ALIASES: dict[str, ViolationType] = {
+            # clearance subtypes produced by validate clearance checker
+            "clearance_pad_pad": cls.CLEARANCE_PAD_PAD,
+            "clearance_pad_segment": cls.CLEARANCE_PAD_SEGMENT,
+            "clearance_pad_via": cls.CLEARANCE_PAD_VIA,
+            "clearance_segment_segment": cls.CLEARANCE_SEGMENT_SEGMENT,
+            "clearance_segment_via": cls.CLEARANCE_SEGMENT_VIA,
+            "clearance_via_via": cls.CLEARANCE_VIA_VIA,
+            # clearance subtypes using "trace" (synonym for "segment")
+            "clearance_pad_trace": cls.CLEARANCE_PAD_SEGMENT,
+            "clearance_trace_trace": cls.CLEARANCE_SEGMENT_SEGMENT,
+            "clearance_trace_via": cls.CLEARANCE_SEGMENT_VIA,
+            # edge clearance subtypes
+            "edge_clearance_trace": cls.EDGE_CLEARANCE_TRACE,
+            "edge_clearance_pad": cls.EDGE_CLEARANCE_PAD,
+            "edge_clearance_pad_hole": cls.EDGE_CLEARANCE_PAD_HOLE,
+            "edge_clearance_via": cls.EDGE_CLEARANCE_VIA,
+            "edge_clearance_zone": cls.EDGE_CLEARANCE_ZONE,
+            # dimension rules from validate dimensions checker
+            "dimension_trace_width": cls.DIMENSION_TRACE_WIDTH,
+            "dimension_via_drill": cls.DIMENSION_VIA_DRILL,
+            "dimension_via_diameter": cls.DIMENSION_VIA_DIAMETER,
+            "dimension_annular_ring": cls.DIMENSION_ANNULAR_RING,
+            "dimension_drill_clearance": cls.DIMENSION_DRILL_CLEARANCE,
+            # silkscreen rules from validate silkscreen checker
+            "silkscreen_line_width": cls.SILKSCREEN_LINE_WIDTH,
+            "silkscreen_text_height": cls.SILKSCREEN_TEXT_HEIGHT,
+            "silkscreen_over_pad": cls.SILKSCREEN_OVER_PAD,
+            # solder mask rules from validate solder_mask checker
+            "solder_mask_clearance": cls.SOLDER_MASK_CLEARANCE,
+            "min_pad_size": cls.MIN_PAD_SIZE,
+            "pth_annular_ring": cls.PTH_ANNULAR_RING,
+            # impedance rule from validate impedance checker
+            "impedance": cls.IMPEDANCE,
+        }
+
+        alias_match = _ALIASES.get(s_lower)
+        if alias_match is not None:
+            return alias_match
+
+        # Fuzzy heuristics for free-form strings (e.g., KiCad-cli descriptions)
         # Check drill_clearance before general clearance (both contain "clearance")
         if "drill" in s_lower and "clearance" in s_lower:
             return cls.DRILL_CLEARANCE
@@ -88,7 +161,7 @@ class ViolationType(Enum):
             return cls.SHORTING_ITEMS
         if "courtyard" in s_lower:
             return cls.COURTYARD_OVERLAP
-        if "track" in s_lower and "width" in s_lower:
+        if ("track" in s_lower or "trace" in s_lower) and "width" in s_lower:
             return cls.TRACK_WIDTH
         if "via" in s_lower:
             if "annular" in s_lower:
@@ -102,9 +175,19 @@ class ViolationType(Enum):
         if "silk" in s_lower:
             if "copper" in s_lower:
                 return cls.SILK_OVER_COPPER
+            if "line" in s_lower and "width" in s_lower:
+                return cls.SILKSCREEN_LINE_WIDTH
+            if "text" in s_lower and "height" in s_lower:
+                return cls.SILKSCREEN_TEXT_HEIGHT
+            if "over" in s_lower and "pad" in s_lower:
+                return cls.SILKSCREEN_OVER_PAD
             return cls.SILK_OVERLAP
         if "solder" in s_lower and "mask" in s_lower:
+            if "clearance" in s_lower:
+                return cls.SOLDER_MASK_CLEARANCE
             return cls.SOLDER_MASK_BRIDGE
+        if "impedance" in s_lower:
+            return cls.IMPEDANCE
         if "footprint" in s_lower:
             if "duplicate" in s_lower:
                 return cls.DUPLICATE_FOOTPRINT
@@ -195,7 +278,15 @@ class DRCViolation:
             ViolationType.CLEARANCE_SEGMENT_VIA,
             ViolationType.CLEARANCE_PAD_SEGMENT,
             ViolationType.CLEARANCE_PAD_VIA,
+            ViolationType.CLEARANCE_PAD_PAD,
+            ViolationType.CLEARANCE_SEGMENT_SEGMENT,
+            ViolationType.CLEARANCE_VIA_VIA,
             ViolationType.COPPER_EDGE_CLEARANCE,
+            ViolationType.EDGE_CLEARANCE_TRACE,
+            ViolationType.EDGE_CLEARANCE_PAD,
+            ViolationType.EDGE_CLEARANCE_PAD_HOLE,
+            ViolationType.EDGE_CLEARANCE_VIA,
+            ViolationType.EDGE_CLEARANCE_ZONE,
         )
 
     @property
