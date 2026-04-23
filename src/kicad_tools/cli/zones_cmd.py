@@ -243,7 +243,11 @@ def _run_add(args) -> int:
     if not quiet:
         print(f"\nSaving to: {output_path}")
 
-    gen.save(output_path)
+    try:
+        gen.save(output_path)
+    except Exception as e:
+        print(f"Error: Write verification failed: {e}", file=sys.stderr)
+        return 1
 
     if not quiet:
         print("Done!")
@@ -381,7 +385,11 @@ def _run_batch(args) -> int:
     if not quiet:
         print(f"\nSaving to: {output_path}")
 
-    gen.save(output_path)
+    try:
+        gen.save(output_path)
+    except Exception as e:
+        print(f"Error: Write verification failed: {e}", file=sys.stderr)
+        return 1
 
     if not quiet:
         stats = gen.get_statistics()

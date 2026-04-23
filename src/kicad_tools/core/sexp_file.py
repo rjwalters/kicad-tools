@@ -182,6 +182,65 @@ def save_pcb(sexp: SExp, path: str | Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+class WriteVerificationError(Exception):
+    """Raised when post-write verification detects missing structures."""
+
+    pass
+
+
+def verify_pcb_write(
+    path: str | Path,
+    expected_zones: int = 0,
+    expected_vias: int = 0,
+    expected_segments: int = 0,
+) -> None:
+    """Re-read a PCB file and verify expected structures are present.
+
+    This catches silent persistence failures where in-memory modifications
+    are not reflected in the written file (e.g., serializer bugs, append
+    targeting wrong node, truncation).
+
+    Args:
+        path: Path to the PCB file to verify
+        expected_zones: Minimum number of ``(zone ...)`` nodes expected
+        expected_vias: Minimum number of ``(via ...)`` nodes expected
+        expected_segments: Minimum number of ``(segment ...)`` nodes expected
+
+    Raises:
+        WriteVerificationError: If the file does not contain the expected
+            number of structures.
+    """
+    sexp = load_pcb(path)
+    errors: list[str] = []
+
+    if expected_zones > 0:
+        actual = len(sexp.find_all("zone"))
+        if actual < expected_zones:
+            errors.append(
+                f"Expected at least {expected_zones} zone(s), found {actual}"
+            )
+
+    if expected_vias > 0:
+        actual = len(sexp.find_all("via"))
+        if actual < expected_vias:
+            errors.append(
+                f"Expected at least {expected_vias} via(s), found {actual}"
+            )
+
+    if expected_segments > 0:
+        actual = len(sexp.find_all("segment"))
+        if actual < expected_segments:
+            errors.append(
+                f"Expected at least {expected_segments} segment(s), found {actual}"
+            )
+
+    if errors:
+        raise WriteVerificationError(
+            f"Post-write verification failed for {path}: "
+            + "; ".join(errors)
+        )
+
+
 def load_footprint(path: str | Path) -> SExp:
     """
     Load a KiCad footprint file.
