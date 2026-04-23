@@ -2683,15 +2683,18 @@ def main(argv: list[str] | None = None) -> int:
     # If output specified, copy to output first
     if args.output and not args.dry_run:
         output_path = Path(args.output)
-        import shutil
 
-        shutil.copy(pcb_path, output_path)
+        # Skip copy when input and output resolve to the same file
+        if not (output_path.exists() and output_path.resolve() == pcb_path.resolve()):
+            import shutil
 
-        # Also copy project file for DRC compatibility
-        pro_path = pcb_path.with_suffix(".kicad_pro")
-        if pro_path.exists():
-            output_pro = output_path.with_suffix(".kicad_pro")
-            shutil.copy(pro_path, output_pro)
+            shutil.copy(pcb_path, output_path)
+
+            # Also copy project file for DRC compatibility
+            pro_path = pcb_path.with_suffix(".kicad_pro")
+            if pro_path.exists():
+                output_pro = output_path.with_suffix(".kicad_pro")
+                shutil.copy(pro_path, output_pro)
 
         pcb_path = output_path
 
