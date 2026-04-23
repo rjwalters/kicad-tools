@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.sexp_file import save_pcb, verify_pcb_write
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.sexp.builders import zone_node
@@ -110,6 +111,7 @@ class ZoneGenerator:
         self._doc = doc
         self._zones: list[GeneratedZone] = []
         self._board_outline: list[tuple[float, float]] | None = None
+        self._applied = False
 
     @classmethod
     def from_pcb(cls, path: str | Path) -> ZoneGenerator:
@@ -314,21 +316,31 @@ class ZoneGenerator:
 
         Modifies the internal document by appending zone definitions.
         Call save() after this to write changes to disk.
+
+        Safe to call multiple times -- zones are only appended once.
         """
         if not self._doc:
             raise ValueError("No document loaded - use from_pcb() to load a PCB")
 
+        if self._applied:
+            return
+
         for zone in self._zones:
             self._doc.append(zone.to_sexp_node())
 
+        self._applied = True
+
     def save(self, output_path: str | Path | None = None) -> Path:
-        """Save PCB with generated zones.
+        """Save PCB with generated zones and verify persistence.
 
         Args:
-            output_path: Output file path, or None to return path only
+            output_path: Output file path
 
         Returns:
             Path to the output file
+
+        Raises:
+            WriteVerificationError: If zones are missing from the written file.
         """
         if not self._doc:
             raise ValueError("No document loaded - use from_pcb() to load a PCB")
@@ -340,7 +352,12 @@ class ZoneGenerator:
             raise ValueError("Output path required")
 
         output_path = Path(output_path)
-        output_path.write_text(self._doc.to_string())
+        save_pcb(self._doc, output_path)
+
+        # Post-write verification: re-read and confirm zones are present
+        if self._zones:
+            verify_pcb_write(output_path, expected_zones=len(self._zones))
+
         return output_path
 
     def get_statistics(self) -> dict:

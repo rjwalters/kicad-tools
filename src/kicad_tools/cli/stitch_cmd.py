@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.core.sexp_file import load_pcb, save_pcb
+from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
 
@@ -2276,6 +2276,9 @@ def run_blanket_stitch(
             add_via_to_pcb(sexp, placement)
         save_pcb(sexp, pcb_path)
 
+        # Post-write verification
+        verify_pcb_write(pcb_path, expected_vias=len(result.vias_added))
+
     return result
 
 
@@ -2529,6 +2532,13 @@ def run_stitch(
         for trace in result.traces_added:
             add_trace_to_pcb(sexp, trace)
         save_pcb(sexp, pcb_path)
+
+        # Post-write verification
+        verify_pcb_write(
+            pcb_path,
+            expected_vias=len(result.vias_added),
+            expected_segments=len(result.traces_added),
+        )
 
     return result
 
