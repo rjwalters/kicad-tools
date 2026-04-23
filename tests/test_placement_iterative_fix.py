@@ -454,6 +454,56 @@ class TestIterativeFixCLI:
         assert "Pass" in captured.out or "conflicts" in captured.out.lower()
 
 
+class TestIterativeFixTimeout:
+    """Timeout returns best-effort results."""
+
+    def test_timeout_returns_partial_result(self, dense_pcb: Path, tmp_path: Path):
+        """When timeout is set, the fixer returns whatever progress it made."""
+        fixer = PlacementFixer()
+        output = tmp_path / "out.kicad_pcb"
+        # Use a generous timeout so it doesn't actually time out on this
+        # tiny PCB, but the parameter is exercised.
+        result = fixer.iterative_fix(dense_pcb, output_path=output, timeout=60.0)
+        assert result.total_passes >= 1
+        assert result.initial_conflicts >= 1
+
+    def test_timeout_zero_returns_immediately(self, dense_pcb: Path, tmp_path: Path):
+        """A timeout of 0 should return after the first pass at most."""
+        fixer = PlacementFixer()
+        output = tmp_path / "out.kicad_pcb"
+        result = fixer.iterative_fix(dense_pcb, output_path=output, timeout=0.0)
+        # Should have timed out and message should mention it
+        assert "timed out" in result.message
+        # Should still report the initial conflict count
+        assert result.initial_conflicts >= 1
+
+    def test_cli_timeout_flag(self, simple_overlap_pcb: Path, tmp_path: Path):
+        """CLI --timeout flag is accepted and passed through."""
+        from kicad_tools.cli.placement_cmd import main
+
+        output = tmp_path / "cli_timeout.kicad_pcb"
+        result = main([
+            "fix", str(simple_overlap_pcb),
+            "-o", str(output),
+            "--timeout", "30",
+            "--quiet",
+        ])
+        assert result == 0
+
+
+class TestIterativeFixProgress:
+    """Progress output is emitted during computation."""
+
+    def test_progress_output_emitted(self, simple_overlap_pcb: Path, tmp_path: Path, capsys):
+        """Fixer emits progress lines to stderr."""
+        fixer = PlacementFixer(verbose=True)
+        output = tmp_path / "out.kicad_pcb"
+        fixer.iterative_fix(simple_overlap_pcb, output_path=output)
+        captured = capsys.readouterr()
+        # Progress goes to stderr
+        assert "conflicts" in captured.err.lower() or "Pass" in captured.err
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

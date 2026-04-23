@@ -2294,6 +2294,12 @@ def _add_placement_parser(subparsers) -> None:
     )
     placement_fix.add_argument("--anchor", help="Comma-separated components to keep fixed")
     placement_fix.add_argument("--dry-run", action="store_true")
+    placement_fix.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Maximum wall-clock seconds; returns best result so far on expiry",
+    )
     placement_fix.add_argument("-v", "--verbose", action="store_true")
     placement_fix.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
