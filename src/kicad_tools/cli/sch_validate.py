@@ -30,6 +30,7 @@ from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.erc.cross_sheet import filter_cross_sheet_global_labels
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
+from kicad_tools.schematic.blocks.interface.debug import DebugHeader
 
 
 @dataclass
@@ -521,6 +522,191 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Connector pinout verification against known interface standards
+# ---------------------------------------------------------------------------
+
+# Interface standard catalog: each entry maps a standard name to its
+# identifier signals (used for matching) and expected pin-to-signal map.
+# The catalog is data-driven so new standards can be added without
+# changing check logic.
+
+_INTERFACE_CATALOG: list[dict] = [
+    {
+        "name": "ARM SWD 6-pin",
+        "identifier_signals": {"SWDIO", "SWCLK"},
+        "pin_count": 6,
+        "pinout": DebugHeader.SWD_6PIN_PINOUT,
+    },
+    {
+        "name": "ARM SWD 10-pin",
+        "identifier_signals": {"SWDIO", "SWCLK"},
+        "pin_count": 10,
+        "pinout": DebugHeader.SWD_10PIN_PINOUT,
+    },
+    {
+        "name": "ARM JTAG 20-pin",
+        "identifier_signals": {"TDI", "TDO", "TMS", "TCK"},
+        "pin_count": 20,
+        "pinout": DebugHeader.JTAG_20PIN_PINOUT,
+    },
+]
+
+# Power-rail net names that should be normalised to generic labels when
+# comparing against the standard pinout.  For example, "+3.3V" on a VCC
+# pin is correct, not a mismatch.
+_POWER_ALIASES: dict[str, str] = {
+    "+3.3V": "VCC",
+    "+3V3": "VCC",
+    "+5V": "VCC",
+    "+1.8V": "VCC",
+    "VBUS": "VCC",
+    "VDD": "VCC",
+    "VREF": "VCC",
+}
+
+
+def _normalise_signal(net_name: str | None) -> str | None:
+    """Normalise a net name for comparison against standard pinouts.
+
+    Strips common power-rail prefixes to their generic form so that
+    ``+3.3V`` matches the ``VCC`` entry in the standard pinout.
+    """
+    if net_name is None:
+        return None
+    return _POWER_ALIASES.get(net_name, net_name)
+
+
+def _match_interface(
+    signal_set: set[str], pin_count: int
+) -> dict | None:
+    """Find the best matching interface standard for a set of signals.
+
+    Returns the catalog entry or ``None`` if no standard matches.
+    Matching requires all identifier signals to be present and the
+    connector pin count to equal the standard's expected count.
+    """
+    for entry in _INTERFACE_CATALOG:
+        if entry["pin_count"] != pin_count:
+            continue
+        if entry["identifier_signals"].issubset(signal_set):
+            return entry
+    return None
+
+
+def check_connector_pinout(schematic_path: str) -> list[ValidationIssue]:
+    """Verify connector pinouts against known interface standards.
+
+    For each generic connector symbol, builds a pin-to-net map using
+    the wire-graph flood-fill from ``sch_pin_map``, then checks whether
+    the net assignment matches a known standard (SWD, JTAG, etc.).
+
+    Only connectors whose signals match a known interface are checked;
+    connectors with arbitrary nets are silently skipped.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Only check generic connectors and pin headers
+                    if not (
+                        lib_id.startswith("Connector_Generic:")
+                        or lib_id.startswith("Connector_PinHeader_")
+                        or lib_id.startswith("Connector:")
+                    ):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+                    pin_count = len(pins_data)
+
+                    # Build {pin_number: normalised_net_name}
+                    actual_pinout: dict[str, str | None] = {}
+                    signal_set: set[str] = set()
+                    for pin_num, pin_info in pins_data.items():
+                        raw_net = pin_info.get("net")
+                        norm = _normalise_signal(raw_net)
+                        actual_pinout[pin_num] = norm
+                        if norm is not None:
+                            signal_set.add(norm)
+
+                    # Try to match against a known interface
+                    matched = _match_interface(signal_set, pin_count)
+                    if matched is None:
+                        continue
+
+                    standard_name = matched["name"]
+                    expected_pinout = matched["pinout"]
+
+                    # Compare each pin
+                    for pin_num, expected_signal in expected_pinout.items():
+                        # Skip non-functional pins (NC, KEY)
+                        if expected_signal in ("NC", "KEY"):
+                            continue
+
+                        actual_signal = actual_pinout.get(pin_num)
+                        expected_norm = _normalise_signal(expected_signal)
+
+                        if actual_signal is None:
+                            # Unconnected pin where a signal is expected
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="connector_pinout",
+                                    message=(
+                                        f"{ref} pin {pin_num}: expected "
+                                        f"{expected_signal}, got unconnected "
+                                        f"({standard_name})"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+                        elif actual_signal != expected_norm:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="connector_pinout",
+                                    message=(
+                                        f"{ref} pin {pin_num}: expected "
+                                        f"{expected_signal}, got {actual_signal} "
+                                        f"({standard_name})"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="connector_pinout",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="connector_pinout",
+                message=f"Connector pinout check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue]:
     """Check for symbols missing the ``instances`` block.
 
@@ -597,6 +783,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
                         # Mark as seen even when instances are present, so
                         # other units of the same IC don't get flagged.
                         seen.add(dedup_key)
+
             except Exception as e:
                 issues.append(
                     ValidationIssue(
@@ -646,6 +833,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Global label directions
     result.checks_run.append("global_label_directions")
     result.issues.extend(check_global_label_directions(schematic_path))
+
+    # Connector pinout verification
+    result.checks_run.append("connector_pinout")
+    result.issues.extend(check_connector_pinout(schematic_path))
 
     # Missing project instances
     result.checks_run.append("project_instances")
