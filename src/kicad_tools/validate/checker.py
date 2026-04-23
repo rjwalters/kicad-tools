@@ -52,6 +52,7 @@ class DRCChecker:
         manufacturer: str = "jlcpcb",
         layers: int = 4,
         copper_oz: float = 1.0,
+        suppress_library: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -60,6 +61,8 @@ class DRCChecker:
             manufacturer: Manufacturer ID (e.g., "jlcpcb", "oshpark")
             layers: Number of PCB layers (2, 4, 6, etc.)
             copper_oz: Copper weight in oz
+            suppress_library: If True, suppress silkscreen warnings for
+                footprints originating from standard KiCad libraries
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -68,6 +71,7 @@ class DRCChecker:
         self.manufacturer = manufacturer
         self.layers = layers
         self.copper_oz = copper_oz
+        self.suppress_library = suppress_library
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
@@ -144,7 +148,9 @@ class DRCChecker:
         Returns:
             DRCResults containing silkscreen violations
         """
-        return check_all_silkscreen(self.pcb, self.design_rules)
+        return check_all_silkscreen(
+            self.pcb, self.design_rules, suppress_library=self.suppress_library
+        )
 
     def check_solder_mask_pads(self) -> DRCResults:
         """Check solder mask and pad dimension rules.

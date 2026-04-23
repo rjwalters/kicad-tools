@@ -131,6 +131,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show detailed violation information",
     )
+    parser.add_argument(
+        "--suppress-library",
+        action="store_true",
+        help="Suppress silkscreen warnings from standard KiCad library footprints",
+    )
 
     args = parser.parse_args(argv)
 
@@ -202,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             manufacturer=args.mfr,
             layers=layers,
             copper_oz=args.copper,
+            suppress_library=args.suppress_library,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -296,6 +302,11 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if results.suppressed_count > 0:
+        print(
+            f"  Suppressed: {results.suppressed_count} "
+            f"(standard library footprints)"
+        )
 
     if not violations:
         print(f"\n{'=' * 60}")
@@ -378,16 +389,20 @@ def output_json(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
 
+    summary_data: dict = {
+        "errors": error_count,
+        "warnings": warning_count,
+        "rules_checked": results.rules_checked,
+        "passed": error_count == 0,
+    }
+    if results.suppressed_count > 0:
+        summary_data["suppressed"] = results.suppressed_count
+
     data = {
         "file": str(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
-        "summary": {
-            "errors": error_count,
-            "warnings": warning_count,
-            "rules_checked": results.rules_checked,
-            "passed": error_count == 0,
-        },
+        "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
     }
     print(json.dumps(data, indent=2))
@@ -405,16 +420,20 @@ def write_json_report(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
 
+    summary_data: dict = {
+        "errors": error_count,
+        "warnings": warning_count,
+        "rules_checked": results.rules_checked,
+        "passed": error_count == 0,
+    }
+    if results.suppressed_count > 0:
+        summary_data["suppressed"] = results.suppressed_count
+
     data = {
         "file": str(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
-        "summary": {
-            "errors": error_count,
-            "warnings": warning_count,
-            "rules_checked": results.rules_checked,
-            "passed": error_count == 0,
-        },
+        "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
     }
     output_path.write_text(json.dumps(data, indent=2) + "\n")
@@ -427,8 +446,14 @@ def output_summary(
 ) -> None:
     """Output violation summary by rule."""
     if not violations:
+        msg = f"  {results.rules_checked} rules checked, no violations found."
+        if results.suppressed_count > 0:
+            msg += (
+                f"\n  ({results.suppressed_count} silkscreen warnings suppressed"
+                f" -- standard library footprints)"
+            )
         print(f"DRC PASSED: {pcb_path.name}")
-        print(f"  {results.rules_checked} rules checked, no violations found.")
+        print(msg)
         return
 
     print(f"DRC Summary: {pcb_path.name}")

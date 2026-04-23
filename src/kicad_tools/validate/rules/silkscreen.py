@@ -14,7 +14,7 @@ from ..violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import Footprint, PCB
 
 # Silkscreen layer names
 SILKSCREEN_LAYERS = ("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen")
@@ -25,9 +25,28 @@ def is_silkscreen_layer(layer: str) -> bool:
     return layer in SILKSCREEN_LAYERS
 
 
+def is_library_footprint(footprint: Footprint) -> bool:
+    """Check if a footprint comes from a standard KiCad library.
+
+    A footprint is considered a library footprint if its ``name`` field
+    contains a colon separator (e.g., ``Capacitor_SMD:C_0402_1005Metric``).
+    Footprints placed from custom libraries or edited in-place typically
+    lose this prefix.
+
+    Args:
+        footprint: The footprint to check.
+
+    Returns:
+        True if the footprint appears to originate from a KiCad library.
+    """
+    return ":" in footprint.name
+
+
 def check_silkscreen_line_width(
     pcb: PCB,
     design_rules: DesignRules,
+    *,
+    suppress_library: bool = False,
 ) -> DRCResults:
     """Check silkscreen line width against minimum.
 
@@ -38,6 +57,8 @@ def check_silkscreen_line_width(
     Args:
         pcb: The PCB to check
         design_rules: Design rules with min_silkscreen_width_mm
+        suppress_library: If True, suppress warnings for footprints that
+            originate from standard KiCad libraries (name contains ``:``)
 
     Returns:
         DRCResults containing any violations
@@ -45,7 +66,7 @@ def check_silkscreen_line_width(
     results = DRCResults(rules_checked=1)
     min_width = design_rules.min_silkscreen_width_mm
 
-    # Check board-level graphics
+    # Check board-level graphics (never suppressed -- no footprint context)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -68,6 +89,15 @@ def check_silkscreen_line_width(
 
     # Check footprint graphics
     for footprint in pcb.footprints:
+        if suppress_library and is_library_footprint(footprint):
+            # Count suppressed violations for this footprint instead of reporting
+            for graphic in footprint.graphics:
+                if not is_silkscreen_layer(graphic.layer):
+                    continue
+                if graphic.stroke_width < min_width and graphic.stroke_width > 0:
+                    results.suppressed_count += 1
+            continue
+
         for graphic in footprint.graphics:
             if not is_silkscreen_layer(graphic.layer):
                 continue
@@ -94,6 +124,8 @@ def check_silkscreen_line_width(
 def check_silkscreen_text_height(
     pcb: PCB,
     design_rules: DesignRules,
+    *,
+    suppress_library: bool = False,
 ) -> DRCResults:
     """Check silkscreen text height against minimum.
 
@@ -104,6 +136,8 @@ def check_silkscreen_text_height(
     Args:
         pcb: The PCB to check
         design_rules: Design rules with min_silkscreen_height_mm
+        suppress_library: If True, suppress warnings for footprints that
+            originate from standard KiCad libraries (name contains ``:``)
 
     Returns:
         DRCResults containing any violations
@@ -111,7 +145,7 @@ def check_silkscreen_text_height(
     results = DRCResults(rules_checked=1)
     min_height = design_rules.min_silkscreen_height_mm
 
-    # Check board-level text
+    # Check board-level text (never suppressed -- no footprint context)
     for text in pcb.texts:
         if not is_silkscreen_layer(text.layer):
             continue
@@ -136,6 +170,17 @@ def check_silkscreen_text_height(
 
     # Check footprint text
     for footprint in pcb.footprints:
+        if suppress_library and is_library_footprint(footprint):
+            # Count suppressed violations for this footprint
+            for fp_text in footprint.texts:
+                if not is_silkscreen_layer(fp_text.layer):
+                    continue
+                if fp_text.hidden:
+                    continue
+                if fp_text.font_height < min_height:
+                    results.suppressed_count += 1
+            continue
+
         for fp_text in footprint.texts:
             if not is_silkscreen_layer(fp_text.layer):
                 continue
@@ -244,20 +289,28 @@ def check_silkscreen_over_pads(
 def check_all_silkscreen(
     pcb: PCB,
     design_rules: DesignRules,
+    *,
+    suppress_library: bool = False,
 ) -> DRCResults:
     """Run all silkscreen checks.
 
     Args:
         pcb: The PCB to check
         design_rules: Design rules from manufacturer profile
+        suppress_library: If True, suppress warnings for footprints that
+            originate from standard KiCad libraries (name contains ``:``)
 
     Returns:
         DRCResults containing all silkscreen violations
     """
     results = DRCResults()
 
-    results.merge(check_silkscreen_line_width(pcb, design_rules))
-    results.merge(check_silkscreen_text_height(pcb, design_rules))
+    results.merge(
+        check_silkscreen_line_width(pcb, design_rules, suppress_library=suppress_library)
+    )
+    results.merge(
+        check_silkscreen_text_height(pcb, design_rules, suppress_library=suppress_library)
+    )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
 
     return results

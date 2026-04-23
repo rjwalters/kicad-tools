@@ -87,6 +87,7 @@ class DRCResults:
 
     violations: list[DRCViolation] = field(default_factory=list)
     rules_checked: int = 0
+    suppressed_count: int = 0
 
     @property
     def error_count(self) -> int:
@@ -133,6 +134,7 @@ class DRCResults:
         """Merge violations from another DRCResults into this one."""
         self.violations.extend(other.violations)
         self.rules_checked += other.rules_checked
+        self.suppressed_count += other.suppressed_count
 
     def filter_by_rule(self, rule_id: str) -> list[DRCViolation]:
         """Get violations for a specific rule."""
