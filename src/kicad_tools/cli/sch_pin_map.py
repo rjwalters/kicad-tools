@@ -179,7 +179,7 @@ def resolve_pin_map(
         ref_filter: If provided, only include this reference designator
 
     Returns:
-        Dict mapping reference -> {"lib_id": str, "pins": {pin_num: {name, net, type}}}
+        Dict mapping reference -> {"lib_id": str, "pins": {pin_num: {name, net, type, position}}}
     """
     adjacency, net_names = _build_wire_graph(schematic)
     result: dict[str, dict] = {}
