@@ -191,6 +191,9 @@ class WorkflowConfig:
     enable_clustering: bool = False
     edge_detect: bool = False
 
+    # Board boundary parameters
+    boundary_margin: float | None = None  # Extra margin in mm (None = use PlacementConfig default)
+
     # Fixed components (list of reference designators)
     fixed_refs: list[str] = field(default_factory=list)
 
@@ -276,11 +279,14 @@ class OptimizationWorkflow:
         """Run force-directed (physics-based) optimization."""
         from kicad_tools.optim import PlacementConfig, PlacementOptimizer, add_keepout_zones
 
-        config = PlacementConfig(
-            grid_size=self.config.grid if self.config.grid > 0 else 0.0,
-            rotation_grid=90.0,
-            thermal_enabled=self.config.thermal,
-        )
+        config_kwargs: dict = {
+            "grid_size": self.config.grid if self.config.grid > 0 else 0.0,
+            "rotation_grid": 90.0,
+            "thermal_enabled": self.config.thermal,
+        }
+        if self.config.boundary_margin is not None:
+            config_kwargs["boundary_margin"] = self.config.boundary_margin
+        config = PlacementConfig(**config_kwargs)
 
         optimizer = PlacementOptimizer.from_pcb(
             self.pcb,
@@ -395,10 +401,13 @@ class OptimizationWorkflow:
             grid_snap=self.config.grid if self.config.grid > 0 else 0.127,
         )
 
-        physics_config = PlacementConfig(
-            grid_size=self.config.grid if self.config.grid > 0 else 0.0,
-            rotation_grid=90.0,
-        )
+        physics_kwargs: dict = {
+            "grid_size": self.config.grid if self.config.grid > 0 else 0.0,
+            "rotation_grid": 90.0,
+        }
+        if self.config.boundary_margin is not None:
+            physics_kwargs["boundary_margin"] = self.config.boundary_margin
+        physics_config = PlacementConfig(**physics_kwargs)
 
         evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
             self.pcb,
