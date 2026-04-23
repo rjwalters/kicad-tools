@@ -15,7 +15,7 @@ Before exporting, verify the board is manufacturing-ready.
 ### 1.1 DRC check
 
 ```bash
-kicad-tools check <pcb> --format json --strict
+PYTHONPATH=src python3 -m kicad_tools.cli check <pcb> --format json --strict
 ```
 
 Review results. A few inherent violations (e.g., fine-pitch pad clearance on QFP/QFN parts) are acceptable — flag them but don't block export. True routing or placement errors should be fixed first.
@@ -23,7 +23,7 @@ Review results. A few inherent violations (e.g., fine-pitch pad clearance on QFP
 ### 1.2 Net connectivity
 
 ```bash
-kicad-tools net-status <pcb>
+PYTHONPATH=src python3 -m kicad_tools.cli net-status <pcb>
 ```
 
 All nets must be fully routed. Incomplete nets block export — tell the user to run `/build-pcb` or `/repair-pcb` first.
@@ -31,7 +31,7 @@ All nets must be fully routed. Incomplete nets block export — tell the user to
 ### 1.3 Board summary
 
 ```bash
-kicad-tools pcb summary <pcb> --format json
+PYTHONPATH=src python3 -m kicad_tools.cli pcb summary <pcb> --format json
 ```
 
 Note the board dimensions, layer count, component count, and net count for the export report.
@@ -55,8 +55,10 @@ If the schematic mentions "Seeed", "JLCPCB", or "OPL", use `jlcpcb`.
 
 ### 3.1 Run export
 
+Use the project venv for full dependency support (cairosvg, markdown, weasyprint):
+
 ```bash
-kicad-tools export <pcb> \
+PYTHONPATH=src .venv/bin/python -m kicad_tools.cli export <pcb> \
   --mfr <manufacturer> \
   -o <output-dir>
 ```
@@ -66,9 +68,14 @@ The default output directory is `manufacturing/` alongside the PCB file. This ge
 - **gerbers.zip** — Copper, mask, silk, drill files
 - **bom_<mfr>.csv** — Bill of materials with LCSC part numbers (for JLCPCB)
 - **cpl_<mfr>.csv** — Component placement list for SMT assembly
-- **kicad_project.zip** — Source project files (excludes backups)
-- **report/** — Design report (PDF via pandoc+TeX if available, otherwise Markdown)
-- **manifest.json** — SHA256 checksums of all files
+- **kicad_project.zip** — Source project files (only the exported PCB, schematics, and project file; excludes backups)
+- **report/** — Design report directory containing:
+  - **report.pdf** — Full report with schematic figures, PCB layout renders, BOM, DRC status, routing status, and manufacturing readiness assessment (rendered via weasyprint or pandoc+TeX)
+  - **report.md** — Source Markdown (always generated)
+  - **figures/** — PCB renders (front, back, copper, assembly) and per-sheet schematic screenshots
+  - **data/** — JSON snapshots of all collected design data
+  - **metadata.json** — Generation timestamp and checksums
+- **manifest.json** — SHA256 checksums of all top-level files
 
 ### 3.2 Verify the package
 
@@ -76,17 +83,36 @@ Check that all expected files were generated:
 
 ```bash
 ls -la <output-dir>/
-cat <output-dir>/manifest.json
+ls -la <output-dir>/report/
+ls -la <output-dir>/report/figures/
 ```
 
 Verify:
 - Gerber ZIP exists and is non-empty
 - BOM CSV has the expected component count
 - CPL CSV has placement data for SMT parts
-- Report was generated (PDF preferred over raw Markdown)
+- Report PDF was generated with figures embedded
+- Schematic and PCB figures exist in report/figures/
 - Manifest includes checksums for all files
 
-### 3.3 Review the BOM
+### 3.3 Review the report PDF
+
+**Read the PDF** to verify visual quality:
+
+```bash
+# Read the PDF to check rendering
+```
+
+Check for:
+- Title page renders correctly (project name, revision, date, manufacturer)
+- Schematic figures are visible (not blank — known KiCad 10 issue with some sub-sheets)
+- PCB layout renders show the board
+- BOM table is readable (no overflow, footprints stripped of library prefixes)
+- Tables are properly formatted
+- Page breaks between major sections
+- No raw markdown or LaTeX artifacts
+
+### 3.4 Review the BOM
 
 Spot-check the BOM for:
 - Missing LCSC part numbers (for JLCPCB orders)
@@ -95,7 +121,23 @@ Spot-check the BOM for:
 
 ---
 
-## Phase 4: Copy to destination
+## Phase 4: Report quality cycle (optional)
+
+If the report PDF has quality issues, run a review/revise cycle:
+
+```bash
+# Review the report
+/report-review <output-dir>
+
+# Apply fixes based on review
+/report-revise <output-dir>
+```
+
+Target score: >= 30/35 with 0 critical issues.
+
+---
+
+## Phase 5: Copy to destination
 
 If the user specified a destination (e.g., Desktop), copy the entire package:
 
@@ -105,7 +147,7 @@ cp -r <output-dir> <destination>
 
 ---
 
-## Phase 5: Report results
+## Phase 6: Report results
 
 Print a summary:
 
@@ -118,12 +160,16 @@ Manufacturer: <mfr>
 Output: <output-dir>
 
 Package contents:
-  gerbers.zip       <size>
-  bom_<mfr>.csv     <N> components
-  cpl_<mfr>.csv     <N> placements
-  kicad_project.zip <N> files
-  report.pdf        <size>  (or report/report.md)
-  manifest.json     <size>
+  gerbers.zip         <size>
+  bom_<mfr>.csv       <N> components
+  cpl_<mfr>.csv       <N> placements
+  kicad_project.zip   <size>
+  report/report.pdf   <size> (<N> pages, <N> figures)
+  manifest.json       <size>
+
+Report figures:
+  PCB renders:  <N> (front, back, copper, assembly)
+  Schematics:   <N> sheets
 
 DRC: <N errors>, <N warnings>
 Nets: <N>/<N> complete
@@ -134,7 +180,27 @@ Status: READY TO ORDER / NEEDS ATTENTION
 
 ---
 
-## Phase 6: Tool Reflection
+## Known Issues
+
+### Blank schematic sheets in SVG export
+
+KiCad 10.0.1's `kicad-cli sch export svg` may produce blank SVGs for hierarchical sub-sheets that were generated programmatically (by kicad-tools). Sheets edited in KiCad GUI render correctly. This is an upstream kicad-cli bug — the workaround is to open and re-save affected sheets in KiCad's schematic editor.
+
+### cairosvg on macOS
+
+The figure generator requires `cairosvg` which depends on the native `libcairo` C library. On macOS with Homebrew, the tool auto-detects `/opt/homebrew/lib/libcairo.dylib`. If figure generation fails, ensure cairo is installed:
+
+```bash
+brew install cairo
+```
+
+### PDF renderer selection
+
+The report renderer tries weasyprint first (styled HTML tables, better visual quality), then falls back to pandoc+TeX (simpler tables but proper LaTeX rendering). Both handle the YAML front matter and page breaks correctly.
+
+---
+
+## Phase 7: Tool Reflection
 
 After the export completes, reflect on tools used during this session:
 

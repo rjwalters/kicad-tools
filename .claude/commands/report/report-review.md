@@ -70,11 +70,14 @@ Score each 1-5 (total /35). Be adversarial -- find problems before the manufactu
 
 Read the PDF and assess:
 - Do tables render correctly? (columns aligned, no overflow, readable)
-- Is there a proper title/cover section?
+- Is there a proper title/cover section with project name, revision, date?
 - Are there page breaks between major sections?
 - Do long strings (paths, footprint names) wrap or overflow?
 - Is the overall layout professional enough to send to a manufacturer?
-- Are there rendering artifacts (raw HTML, unprocessed markdown syntax)?
+- Are there rendering artifacts (raw HTML, YAML front matter, unprocessed markdown, raw `\newpage`)?
+- Are schematic figures present and readable? (Known issue: KiCad 10.0.1 may produce blank SVGs for some sub-sheets)
+- Are PCB layout renders included (front, back, copper, assembly)?
+- Are figures properly sized and not pixelated?
 
 ### 6. Manufacturing Readiness Assessment (weight: HIGH)
 
@@ -177,7 +180,9 @@ Also present the summary to the user in conversation.
 Report problems fall into two categories:
 
 1. **Template issues** -- the markdown generator in `src/kicad_tools/report/` emits bad content. These need code changes.
-2. **Rendering issues** -- pandoc+TeX doesn't handle the markdown well. These need pandoc flags, a YAML header, or a TeX template.
+2. **Rendering issues** -- the PDF renderer doesn't handle the markdown well. Two rendering paths exist:
+   - **weasyprint** (HTML): Higher visual quality, styled tables. The HTML renderer strips YAML front matter and converts `\newpage` to CSS page-break divs.
+   - **pandoc+TeX**: Simpler tables but handles LaTeX natively. Uses YAML front matter for title metadata.
 
 Clearly label which category each issue falls into so `/report-revise` knows where to fix it.
 
