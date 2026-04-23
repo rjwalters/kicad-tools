@@ -1169,6 +1169,162 @@ class TestSchValidateHierarchy:
         assert len(hierarchy_issues) == 0
 
 
+class TestSchValidateNoConnectInput:
+    """Tests for check_no_connect_on_input_pins in sch_validate.py."""
+
+    def _make_schematic(self, tmp_path: Path, pin_type: str, pin_name: str = "XSMT") -> Path:
+        """Create a schematic with a symbol that has a pin of the given type
+        and a no-connect marker placed on that pin.
+
+        The symbol is placed at (100, 100) with no rotation.  The pin is
+        defined at (-2.54, 0) relative to symbol centre, so its absolute
+        position is (97.46, 100).  A no-connect marker is placed there.
+        """
+        sch_text = f"""(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "TestLib:IC1"
+      (pin {pin_type} line
+        (at -2.54 0 0)
+        (length 2.54)
+        (name "{pin_name}"
+          (effects (font (size 1.27 1.27)))
+        )
+        (number "1"
+          (effects (font (size 1.27 1.27)))
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "TestLib:IC1")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "U1" (at 100 90 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "IC1" (at 100 110 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (no_connect
+    (at 97.46 100)
+    (uuid "00000000-0000-0000-0000-000000000010")
+  )
+)"""
+        sch_file = tmp_path / "test_nc.kicad_sch"
+        sch_file.write_text(sch_text)
+        return sch_file
+
+    def test_input_pin_with_no_connect_triggers_info(self, tmp_path: Path):
+        """NC marker on an input-typed pin should produce an info-level issue."""
+        from kicad_tools.cli.sch_validate import check_no_connect_on_input_pins
+
+        sch_file = self._make_schematic(tmp_path, pin_type="input")
+        issues = check_no_connect_on_input_pins(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "info"
+        assert issues[0].category == "no_connect"
+        assert "XSMT" in issues[0].message
+        assert "U1" in issues[0].message
+
+    def test_passive_pin_with_no_connect_no_issue(self, tmp_path: Path):
+        """NC marker on a passive-typed pin should produce no issue."""
+        from kicad_tools.cli.sch_validate import check_no_connect_on_input_pins
+
+        sch_file = self._make_schematic(tmp_path, pin_type="passive", pin_name="PAD")
+        issues = check_no_connect_on_input_pins(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_no_connect_typed_pin_no_issue(self, tmp_path: Path):
+        """NC marker on a no_connect-typed pin should produce no issue."""
+        from kicad_tools.cli.sch_validate import check_no_connect_on_input_pins
+
+        sch_file = self._make_schematic(tmp_path, pin_type="no_connect", pin_name="NC")
+        issues = check_no_connect_on_input_pins(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_output_pin_with_no_connect_no_issue(self, tmp_path: Path):
+        """NC marker on an output-typed pin should produce no issue."""
+        from kicad_tools.cli.sch_validate import check_no_connect_on_input_pins
+
+        sch_file = self._make_schematic(tmp_path, pin_type="output", pin_name="DOUT")
+        issues = check_no_connect_on_input_pins(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_quiet_mode_suppresses_info(self, tmp_path: Path, capsys, monkeypatch):
+        """Info-level issues should be filtered out in --quiet mode."""
+        from kicad_tools.cli.sch_validate import main
+
+        sch_file = self._make_schematic(tmp_path, pin_type="input")
+        monkeypatch.setattr(
+            "sys.argv", ["sch-validate", str(sch_file), "--quiet"]
+        )
+        with contextlib.suppress(SystemExit):
+            main()
+
+        captured = capsys.readouterr()
+        # In quiet mode only errors are shown; the info-level NC warning must
+        # not appear in text output.
+        assert "No-connect on input pin" not in captured.out
+
+    def test_json_output_includes_no_connect_category(self, tmp_path: Path, capsys, monkeypatch):
+        """JSON output should include the no_connect category issue."""
+        from kicad_tools.cli.sch_validate import main
+
+        sch_file = self._make_schematic(tmp_path, pin_type="input")
+        monkeypatch.setattr(
+            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
+        )
+        with contextlib.suppress(SystemExit):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        nc_issues = [i for i in data["issues"] if i["category"] == "no_connect"]
+        assert len(nc_issues) == 1
+        assert nc_issues[0]["severity"] == "info"
+
+    def test_validate_schematic_includes_no_connect_input_check(self, tmp_path: Path):
+        """validate_schematic should include no_connect_input in checks_run."""
+        from kicad_tools.cli.sch_validate import validate_schematic
+
+        sch_file = self._make_schematic(tmp_path, pin_type="input")
+        result = validate_schematic(str(sch_file))
+
+        assert "no_connect_input" in result.checks_run
+
+    def test_pin_name_fallback_to_number(self, tmp_path: Path):
+        """When pin name is '~', the message should use the pin number."""
+        from kicad_tools.cli.sch_validate import check_no_connect_on_input_pins
+
+        sch_file = self._make_schematic(tmp_path, pin_type="input", pin_name="~")
+        issues = check_no_connect_on_input_pins(str(sch_file))
+
+        assert len(issues) == 1
+        # Pin number "1" should appear as the display name
+        assert "(pin 1)" in issues[0].message
+
+
 class TestSchCheckConnections:
     """Tests for sch_check_connections.py CLI."""
 
