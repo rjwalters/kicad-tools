@@ -137,18 +137,28 @@ def _create_project_zip(
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
 
-    Includes .kicad_pcb, .kicad_sch, and .kicad_pro files found in
-    the same directory as the PCB file.
+    Includes only the specific PCB being exported, plus .kicad_sch and
+    .kicad_pro files.  Other .kicad_pcb variants (intermediate builds,
+    working copies, etc.) and backup files are excluded to keep the
+    manufacturing package clean.
     """
     project_dir = pcb_path.parent
     zip_path = output_dir / zip_name
 
-    extensions = {".kicad_pcb", ".kicad_sch", ".kicad_pro"}
-    project_files = [
+    # Always include the specific PCB being exported
+    project_files: list[Path] = []
+    if pcb_path.exists():
+        project_files.append(pcb_path)
+
+    # Include schematics and project files (not PCBs — only the exported one)
+    sch_pro_extensions = {".kicad_sch", ".kicad_pro"}
+    project_files.extend(
         f
         for f in project_dir.iterdir()
-        if f.is_file() and f.suffix in extensions and "_backup_" not in f.stem
-    ]
+        if f.is_file()
+        and f.suffix in sch_pro_extensions
+        and "_backup_" not in f.stem
+    )
 
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
