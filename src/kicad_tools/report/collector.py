@@ -229,8 +229,8 @@ class ReportDataCollector:
             "footprint_tht": tht_count,
             "footprint_other": other_count,
             "net_count": len(pcb.nets),
-            "segment_count": len(pcb.segments),
-            "via_count": len(pcb.vias),
+            "segment_count": pcb.segment_count,
+            "via_count": pcb.via_count,
             "board_width_mm": round(board_width, 2),
             "board_height_mm": round(board_height, 2),
         }
