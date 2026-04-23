@@ -17,8 +17,11 @@ def run_sch_command(args) -> int:
         )
         print(
             "          set-label-direction, add-no-connect, add-component,"
-            " add-wire, add-junction,"
-            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate"
+            " add-bypass-cap, add-wire,"
+        )
+        print(
+            "          add-junction, add-label, cleanup-wires, remove-wire,"
+            " disconnect, re-annotate"
         )
         return 1
 
@@ -289,6 +292,25 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return add_comp_main(sub_argv) or 0
+
+    elif args.sch_command == "add-bypass-cap":
+        from ..sch_add_bypass_cap import main as add_bypass_main
+
+        sub_argv = [str(schematic_path), "--ref", args.ref, "--pin", args.pin]
+        if args.value:
+            sub_argv.extend(["--value", args.value])
+        if args.ground_net:
+            sub_argv.extend(["--ground-net", args.ground_net])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        if args.reference:
+            sub_argv.extend(["--reference", args.reference])
+        sub_argv.extend(["--offset", str(args.offset)])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return add_bypass_main(sub_argv) or 0
 
     elif args.sch_command == "add-wire":
         from ..sch_add_wire import main as add_wire_main

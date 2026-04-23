@@ -700,6 +700,47 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch add-bypass-cap
+    sch_add_bypass = sch_subparsers.add_parser(
+        "add-bypass-cap",
+        help="Add a bypass/decoupling capacitor to an IC power pin",
+    )
+    sch_add_bypass.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_bypass.add_argument(
+        "--ref", required=True, help="Target IC reference designator (e.g., U8)"
+    )
+    sch_add_bypass.add_argument(
+        "--pin", required=True, help="Target pin number on that IC (e.g., 4)"
+    )
+    sch_add_bypass.add_argument(
+        "--value", default="100nF", help="Capacitor value (default: 100nF)"
+    )
+    sch_add_bypass.add_argument(
+        "--ground-net",
+        default="GND",
+        help="Ground power symbol name (default: GND)",
+    )
+    sch_add_bypass.add_argument(
+        "--footprint",
+        default="Capacitor_SMD:C_0402_1005Metric",
+        help="Capacitor footprint (default: Capacitor_SMD:C_0402_1005Metric)",
+    )
+    sch_add_bypass.add_argument(
+        "--reference", default=None, help="Capacitor reference (auto-assigned if omitted)"
+    )
+    sch_add_bypass.add_argument(
+        "--offset",
+        type=float,
+        default=5.08,
+        help="Distance from pin to cap body centre in mm (default: 5.08)",
+    )
+    sch_add_bypass.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_bypass.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch add-wire
     sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add wire segments to the schematic")
     sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")
