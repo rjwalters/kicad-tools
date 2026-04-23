@@ -1921,13 +1921,33 @@ class PCB:
 
     @property
     def segment_count(self) -> int:
-        """Number of trace segments."""
-        return len(self._segments)
+        """Number of trace segments.
+
+        Counts top-level ``(segment ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_segments`` list has drifted.
+        """
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "segment")
 
     @property
     def via_count(self) -> int:
-        """Number of vias."""
-        return len(self._vias)
+        """Number of vias.
+
+        Counts top-level ``(via ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_vias`` list has drifted.
+        """
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "via")
+
+    @property
+    def zone_count(self) -> int:
+        """Number of zones (copper pours).
+
+        Counts top-level ``(zone ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_zones`` list has drifted.
+        """
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "zone")
 
     @property
     def net_count(self) -> int:
@@ -1947,7 +1967,13 @@ class PCB:
         return total
 
     def summary(self) -> dict:
-        """Get board summary statistics."""
+        """Get board summary statistics.
+
+        Via and zone counts are derived from the S-expression tree (the
+        authoritative on-disk representation) rather than the in-memory
+        cache lists, ensuring accuracy even after in-place modifications
+        by other tools.
+        """
         return {
             "title": self.title,
             "revision": self.revision,
@@ -1956,7 +1982,7 @@ class PCB:
             "nets": self.net_count,
             "segments": self.segment_count,
             "vias": self.via_count,
-            "zones": len(self._zones),
+            "zones": self.zone_count,
             "trace_length_mm": round(self.total_trace_length(), 2),
         }
 
@@ -3203,8 +3229,8 @@ class PCB:
                     unrouted_pads.append((fp.reference, pad.number, pad.net_name))
 
         return {
-            "segments": len(self._segments),
-            "vias": len(self._vias),
+            "segments": self.segment_count,
+            "vias": self.via_count,
             "trace_length_mm": total_length,
             "nets_with_traces": nets_with_traces,
             "unrouted_pads": unrouted_pads,
