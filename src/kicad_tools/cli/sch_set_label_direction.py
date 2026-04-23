@@ -179,9 +179,13 @@ def set_label_direction(
 
     all_files = _collect_schematic_files(root_path)
 
-    # Optionally filter to a single sheet
+    # Optionally filter to a single sheet (case-insensitive)
     if sheet_filter:
-        all_files = [f for f in all_files if sheet_filter in f.name or sheet_filter in str(f)]
+        sf_lower = sheet_filter.lower()
+        all_files = [
+            f for f in all_files
+            if sf_lower in f.name.lower() or sf_lower in str(f).lower()
+        ]
 
     all_changes: list[LabelChange] = []
     files_modified: set[str] = set()

@@ -279,6 +279,40 @@ class TestSetLabelDirection:
         root_text = root_file.read_text(encoding="utf-8")
         assert '(global_label "SDA" (shape input)' in root_text
 
+    def test_sheet_filter_case_insensitive(self, tmp_path):
+        """Sheet filter should match regardless of case (e.g., 'DAC' matches 'dac.kicad_sch')."""
+        root_file = tmp_path / "root.kicad_sch"
+        sub_file = tmp_path / "dac.kicad_sch"
+        root_file.write_text(ROOT_SCHEMATIC_WITH_SUBSHEET, encoding="utf-8")
+        sub_file.write_text(SUBSHEET_CONTENT, encoding="utf-8")
+
+        # Uppercase filter against lowercase filename
+        result = set_label_direction(
+            str(root_file), name="SDA", new_shape="bidirectional", sheet_filter="DAC"
+        )
+
+        assert result.success
+        assert len(result.changes) == 1
+        assert str(sub_file) in result.files_modified
+        # Root should be unmodified
+        root_text = root_file.read_text(encoding="utf-8")
+        assert '(global_label "SDA" (shape input)' in root_text
+
+    def test_sheet_filter_mixed_case(self, tmp_path):
+        """Mixed-case filter (e.g., 'dAc') should also match."""
+        root_file = tmp_path / "root.kicad_sch"
+        sub_file = tmp_path / "dac.kicad_sch"
+        root_file.write_text(ROOT_SCHEMATIC_WITH_SUBSHEET, encoding="utf-8")
+        sub_file.write_text(SUBSHEET_CONTENT, encoding="utf-8")
+
+        result = set_label_direction(
+            str(root_file), name="SDA", new_shape="bidirectional", sheet_filter="dAc"
+        )
+
+        assert result.success
+        assert len(result.changes) == 1
+        assert str(sub_file) in result.files_modified
+
     def test_backup_created(self, tmp_path):
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_WITH_GLOBAL_LABELS, encoding="utf-8")
