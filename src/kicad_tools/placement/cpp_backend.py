@@ -8,14 +8,22 @@ falling back to pure Python.
 The C++ backend provides significant speedup for the O(N^2) pairwise
 AABB loops in compute_overlap, compute_drc_violations, and
 compute_boundary_violation.
+
+If placement optimization is slow, the C++ backend is likely not
+installed. Build it with:
+
+    kct build-native
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
     from .cost import BoardOutline, ComponentPlacement, DesignRuleSet
+
+logger = logging.getLogger(__name__)
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -297,6 +305,11 @@ class BatchCostEvaluatorWrapper:
             )
         else:
             self._cpp_evaluator = None
+            if not force_python:
+                logger.warning(
+                    "C++ placement backend not available -- using pure Python (slower). "
+                    "Build the native backend for faster placement: kct build-native"
+                )
 
     @property
     def backend(self) -> str:

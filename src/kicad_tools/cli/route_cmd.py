@@ -725,6 +725,13 @@ def route_with_layer_escalation(
     elif args.backend == "python":
         force_python = True
 
+    # Warn prominently when auto-backend falls back to Python
+    if args.backend == "auto" and not is_cpp_available() and not quiet:
+        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
+        flush_print("  Build it now:  kct build-native")
+        flush_print("  Check status:  kct build-native --check")
+        flush_print()
+
     # Configure design rules
     rules = DesignRules(
         grid_resolution=args.grid,
@@ -1087,6 +1094,13 @@ def route_with_rule_relaxation(
             return 1
     elif args.backend == "python":
         force_python = True
+
+    # Warn prominently when auto-backend falls back to Python
+    if args.backend == "auto" and not is_cpp_available() and not quiet:
+        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
+        flush_print("  Build it now:  kct build-native")
+        flush_print("  Check status:  kct build-native --check")
+        flush_print()
 
     # Parse skip nets
     skip_nets = []
@@ -1483,6 +1497,13 @@ def route_with_combined_escalation(
             return 1
     elif args.backend == "python":
         force_python = True
+
+    # Warn prominently when auto-backend falls back to Python
+    if args.backend == "auto" and not is_cpp_available() and not quiet:
+        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
+        flush_print("  Build it now:  kct build-native")
+        flush_print("  Check status:  kct build-native --check")
+        flush_print()
 
     # Parse skip nets
     skip_nets = []

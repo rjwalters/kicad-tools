@@ -6,10 +6,20 @@ uses the C++ implementation when available, falling back to pure Python.
 
 The C++ backend provides 10-100x speedup for the core A* loop and grid
 operations, making fine-grid routing (0.0635mm) practical for production use.
+
+If you are seeing slow routing performance, the C++ backend is likely not
+installed. Build it with:
+
+    kct build-native
+
+Or check its status with:
+
+    kct build-native --check
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -17,6 +27,8 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
+
+logger = logging.getLogger(__name__)
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -630,6 +642,12 @@ def create_hybrid_router(
             pass
 
     # Fall back to Python implementation
+    if not force_python:
+        logger.warning(
+            "C++ router backend not available -- using pure Python (10-100x slower). "
+            "Build the native backend for dramatically faster routing: kct build-native"
+        )
+
     from .pathfinder import Router
 
     return Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)

@@ -1427,7 +1427,16 @@ def _add_stitch_parser(subparsers) -> None:
 
 def _add_route_parser(subparsers) -> None:
     """Add route subcommand parser."""
-    route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
+    route_parser = subparsers.add_parser(
+        "route",
+        help="Autoroute a PCB",
+        epilog=(
+            "PERFORMANCE: The C++ backend provides 10-100x faster routing. "
+            "Check status with 'kct build-native --check' and build with "
+            "'kct build-native'. The --backend flag defaults to 'auto' which "
+            "uses C++ when available and falls back to Python otherwise."
+        ),
+    )
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     route_parser.add_argument("-o", "--output", help="Output file path")
     route_parser.add_argument(
@@ -1582,8 +1591,9 @@ def _add_route_parser(subparsers) -> None:
         choices=["auto", "cpp", "python"],
         default="auto",
         help=(
-            "Router backend: 'auto' = C++ if available (default); "
-            "'cpp' = require C++; 'python' = force Python"
+            "Router backend: 'auto' = C++ if available, Python fallback (default); "
+            "'cpp' = require C++ (fails if not built); 'python' = force Python. "
+            "The C++ backend is 10-100x faster; build with 'kct build-native'."
         ),
     )
 
@@ -2585,6 +2595,11 @@ def _add_optimize_placement_parser(subparsers) -> None:
     op_parser = subparsers.add_parser(
         "optimize-placement",
         help="Run CMA-ES placement optimization on a KiCad PCB",
+        epilog=(
+            "PERFORMANCE: A C++ backend is available for faster placement "
+            "evaluation. Check status with 'kct build-native --check' and "
+            "build with 'kct build-native'."
+        ),
     )
     op_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     op_parser.add_argument(
