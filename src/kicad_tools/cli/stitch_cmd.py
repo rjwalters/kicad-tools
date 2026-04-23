@@ -47,6 +47,7 @@ class PadInfo:
     layer: str  # "F.Cu" or "B.Cu"
     width: float  # Pad width
     height: float  # Pad height
+    pad_type: str = "smd"  # "smd", "thru_hole", etc.
 
 
 @dataclass
@@ -255,7 +256,7 @@ def find_all_plane_nets(sexp: SExp) -> dict[str, str]:
 
 
 def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
-    """Find all SMD pads on the specified nets."""
+    """Find all pads (SMD and through-hole) on the specified nets."""
     net_map = get_net_map(sexp)
     target_net_nums = {num for num, name in net_map.items() if name in net_names}
 
@@ -297,8 +298,9 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
             pad_number = pad.get_string(0)
             pad_type = pad.get_string(1)  # smd, thru_hole, etc.
 
-            # Only consider SMD pads (need vias for plane connection)
-            if pad_type != "smd":
+            # Include SMD and through-hole pads; skip other types
+            # (e.g., "np_thru_hole" non-plated holes have no copper)
+            if pad_type not in ("smd", "thru_hole"):
                 continue
 
             # Check if pad is on a target net
@@ -341,6 +343,7 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
                     layer=fp_layer,
                     width=pad_width,
                     height=pad_height,
+                    pad_type=pad_type or "smd",
                 )
             )
 
@@ -648,8 +651,27 @@ def is_pad_connected(
     vias: list[tuple[float, float, int]],
     track_points: list[tuple[float, float, int]],
     connection_radius: float = 0.5,
+    same_net_filled_polygons: list[FilledPolygon] | None = None,
+    same_net_zone_polygons: list[ZonePolygon] | None = None,
 ) -> bool:
-    """Check if a pad has any connection (via or track) nearby."""
+    """Check if a pad has any connection (via or track) nearby.
+
+    For through-hole pads, also checks whether the pad overlaps with a
+    filled zone polygon (actual copper pour) or, when zones are unfilled,
+    whether the pad falls within a zone boundary polygon on the same net.
+    A through-hole pad inside a same-net filled zone is already connected
+    to that plane and does not need an additional stitching via.
+
+    Args:
+        pad: The pad to check connectivity for
+        vias: Existing vias as (x, y, net_num)
+        track_points: Track endpoints as (x, y, net_num)
+        connection_radius: Radius for proximity-based via/track matching
+        same_net_filled_polygons: Filled zone polygons on the same net
+            (actual copper pour after zone fill)
+        same_net_zone_polygons: Zone boundary polygons on the same net
+            (used as fallback when zones are unfilled)
+    """
     # Check for nearby vias on the same net
     for vx, vy, vnet in vias:
         if vnet != pad.net_number:
@@ -665,6 +687,34 @@ def is_pad_connected(
         dist = math.sqrt((tx - pad.x) ** 2 + (ty - pad.y) ** 2)
         if dist < connection_radius + max(pad.width, pad.height) / 2:
             return True
+
+    # For through-hole pads, check zone connectivity.
+    # Through-hole pads span all copper layers, so if they sit inside a
+    # same-net zone fill they are already connected to that plane.
+    if pad.pad_type == "thru_hole":
+        # First check filled polygons (actual copper pour -- most accurate)
+        if same_net_filled_polygons:
+            for fp in same_net_filled_polygons:
+                if fp.net_name != pad.net_name:
+                    continue
+                # Fast bounding-box pre-filter
+                if (
+                    pad.x < fp.min_x
+                    or pad.x > fp.max_x
+                    or pad.y < fp.min_y
+                    or pad.y > fp.max_y
+                ):
+                    continue
+                if point_in_polygon(pad.x, pad.y, fp.points):
+                    return True
+
+        # Fallback: check zone boundary polygons (when zones are unfilled)
+        if same_net_zone_polygons:
+            for zp in same_net_zone_polygons:
+                if zp.net_name != pad.net_name:
+                    continue
+                if point_in_polygon(pad.x, pad.y, zp.points):
+                    return True
 
     return False
 
@@ -1726,6 +1776,80 @@ def find_all_filled_polygons(
     return polygons
 
 
+def find_same_net_filled_polygons(
+    sexp: SExp, net_numbers: set[int]
+) -> list[FilledPolygon]:
+    """Extract filled polygon geometry for specific nets (same-net connectivity).
+
+    Similar to ``find_all_filled_polygons`` but includes only the specified nets,
+    for use in checking whether through-hole pads overlap with same-net zone fills.
+
+    Args:
+        sexp: PCB S-expression
+        net_numbers: Net numbers to include
+
+    Returns:
+        List of FilledPolygon objects for the specified nets
+    """
+    polygons: list[FilledPolygon] = []
+    net_map = get_net_map(sexp)
+
+    for child in sexp.iter_children():
+        if child.tag != "zone":
+            continue
+
+        net_node = child.find_child("net")
+        if not net_node:
+            continue
+        net_num = net_node.get_int(0)
+        if net_num is None:
+            net_name_str = net_node.get_string(0)
+            if net_name_str:
+                for num, name in net_map.items():
+                    if name == net_name_str:
+                        net_num = num
+                        break
+            if net_num is None:
+                continue
+        if net_num not in net_numbers:
+            continue
+
+        zone_net_name = net_map.get(net_num, "")
+        net_name_node = child.find_child("net_name")
+        if net_name_node:
+            zone_net_name = net_name_node.get_string(0) or zone_net_name
+
+        layer_node = child.find_child("layer")
+        if not layer_node:
+            continue
+        zone_layer = layer_node.get_string(0)
+        if not zone_layer:
+            continue
+
+        for filled_poly_node in child.find_children("filled_polygon"):
+            pts_node = filled_poly_node.find_child("pts")
+            if not pts_node:
+                continue
+
+            points: list[tuple[float, float]] = []
+            for xy_node in pts_node.find_children("xy"):
+                x = xy_node.get_float(0) or 0.0
+                y = xy_node.get_float(1) or 0.0
+                points.append((x, y))
+
+            if len(points) >= 3:
+                polygons.append(
+                    FilledPolygon(
+                        net_number=net_num,
+                        net_name=zone_net_name,
+                        layer=zone_layer,
+                        points=points,
+                    )
+                )
+
+    return polygons
+
+
 def _check_point_filled_polygon_clearance(
     px: float,
     py: float,
@@ -2223,6 +2347,12 @@ def run_stitch(
     existing_vias = find_existing_vias(sexp, net_numbers)
     track_points = find_existing_tracks(sexp, net_numbers)
 
+    # Find same-net zone data for through-hole pad connectivity checking
+    same_net_filled_polys = find_same_net_filled_polygons(sexp, net_numbers)
+    same_net_zone_polys: list[ZonePolygon] = []
+    for net_name in net_names:
+        same_net_zone_polys.extend(extract_zone_polygons(sexp, net_name))
+
     # Find other-net copper for clearance checking to prevent shorts
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
@@ -2232,7 +2362,13 @@ def run_stitch(
     # Process each pad
     for pad in pads:
         # Check if already connected
-        if is_pad_connected(pad, existing_vias, track_points):
+        if is_pad_connected(
+            pad,
+            existing_vias,
+            track_points,
+            same_net_filled_polygons=same_net_filled_polys,
+            same_net_zone_polygons=same_net_zone_polys,
+        ):
             result.already_connected += 1
             continue
 
