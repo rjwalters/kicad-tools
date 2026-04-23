@@ -2098,3 +2098,190 @@ class TestSchRenameSignal:
         # Should find sheet pins and hierarchical labels
         assert "VCC" in captured.out
         assert "VCC_3V3" in captured.out
+
+
+class TestSchValidateMissingProjectInstances:
+    """Tests for check_missing_project_instances in sch_validate.py."""
+
+    # -- helpers ----------------------------------------------------------
+
+    _BASE_SYMBOL = """\
+  (symbol
+    (lib_id "{lib_id}")
+    (at 100 100 0)
+    (unit {unit})
+    (in_bom {in_bom})
+    (on_board {on_board})
+    (dnp no)
+    (uuid "{uuid}")
+    (property "Reference" "{ref}" (at 100 90 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "{value}" (at 100 110 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-f00000000001"))
+    (pin "2" (uuid "00000000-0000-0000-0000-f00000000002"))
+{instances}  )"""
+
+    _INSTANCES_BLOCK = """\
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "{ref}")
+          (unit {unit})
+        )
+      )
+    )
+"""
+
+    def _make_schematic(
+        self,
+        tmp_path: Path,
+        *,
+        lib_id: str = "Device:R",
+        ref: str = "R1",
+        value: str = "100k",
+        include_instances: bool = True,
+        in_bom: str = "yes",
+        on_board: str = "yes",
+        uuid: str = "00000000-0000-0000-0000-000000000002",
+        unit: int = 1,
+        extra_symbols: str = "",
+    ) -> Path:
+        instances = ""
+        if include_instances:
+            instances = self._INSTANCES_BLOCK.format(ref=ref, unit=unit)
+        sym = self._BASE_SYMBOL.format(
+            lib_id=lib_id,
+            ref=ref,
+            value=value,
+            in_bom=in_bom,
+            on_board=on_board,
+            uuid=uuid,
+            unit=unit,
+            instances=instances,
+        )
+        sch_text = f"""(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+{sym}
+{extra_symbols}
+)"""
+        sch_file = tmp_path / "test_inst.kicad_sch"
+        sch_file.write_text(sch_text)
+        return sch_file
+
+    # -- tests ------------------------------------------------------------
+
+    def test_symbol_without_instances_flagged(self, tmp_path: Path):
+        """A symbol missing its instances block should produce a warning."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        sch_file = self._make_schematic(tmp_path, include_instances=False)
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "warning"
+        assert issues[0].category == "project_instances"
+        assert "R1" in issues[0].message
+        assert "100k" in issues[0].message
+
+    def test_power_symbol_not_flagged(self, tmp_path: Path):
+        """Power symbols should never be reported."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        sch_file = self._make_schematic(
+            tmp_path,
+            lib_id="power:GND",
+            ref="#PWR01",
+            value="GND",
+            include_instances=False,
+        )
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_in_bom_false_on_board_false_skipped(self, tmp_path: Path):
+        """Symbols with both in_bom=no and on_board=no should be skipped."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        sch_file = self._make_schematic(
+            tmp_path,
+            include_instances=False,
+            in_bom="no",
+            on_board="no",
+        )
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_symbol_with_valid_instances_clean(self, tmp_path: Path):
+        """A symbol with a valid instances block should produce no issues."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        sch_file = self._make_schematic(tmp_path, include_instances=True)
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 0
+
+    def test_multi_unit_ic_flagged_once(self, tmp_path: Path):
+        """A two-unit IC with both units missing instances produces one warning."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        # Build a second unit of the same IC (same ref + lib_id, different uuid)
+        unit2 = self._BASE_SYMBOL.format(
+            lib_id="Device:R",
+            ref="R1",
+            value="100k",
+            in_bom="yes",
+            on_board="yes",
+            uuid="00000000-0000-0000-0000-000000000099",
+            unit=2,
+            instances="",
+        )
+        sch_file = self._make_schematic(
+            tmp_path,
+            include_instances=False,
+            extra_symbols=unit2,
+        )
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert "R1" in issues[0].message
+
+    def test_validate_schematic_includes_project_instances_check(self, tmp_path: Path):
+        """validate_schematic should include project_instances in checks_run."""
+        from kicad_tools.cli.sch_validate import validate_schematic
+
+        sch_file = self._make_schematic(tmp_path, include_instances=False)
+        result = validate_schematic(str(sch_file))
+
+        assert "project_instances" in result.checks_run
+        pi_issues = [i for i in result.issues if i.category == "project_instances"]
+        assert len(pi_issues) == 1
+
+    def test_json_output_includes_project_instances(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """JSON output should include the project_instances category."""
+        from kicad_tools.cli.sch_validate import main
+
+        sch_file = self._make_schematic(tmp_path, include_instances=False)
+        monkeypatch.setattr(
+            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
+        )
+        with contextlib.suppress(SystemExit):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        pi_issues = [i for i in data["issues"] if i["category"] == "project_instances"]
+        assert len(pi_issues) == 1
+        assert pi_issues[0]["severity"] == "warning"
