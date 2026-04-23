@@ -806,6 +806,125 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     return issues
 
 
+def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
+    """Detect duplicate reference designators across hierarchical sheets.
+
+    Collects all component references across the full sheet hierarchy and
+    flags any reference that appears on multiple sheets with different
+    component UUIDs.  Multi-unit symbols (e.g. U1 unit 1 and U1 unit 2)
+    are expected to share the same reference and ``lib_id`` but occupy
+    different unit slots -- these are **not** flagged as duplicates.
+
+    A conflict is reported when a reference appears more than once with
+    either:
+    - a different ``lib_id`` (definitively different components), or
+    - the same ``lib_id`` but duplicate ``unit`` numbers (same unit placed
+      on two sheets -- not a multi-unit split).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # ref -> list of (uuid, lib_id, value, unit, sheet_path)
+        ref_map: dict[str, list[tuple[str, str, str, int, str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                sheet_path = node.get_path_string()
+                for sym in sch.symbols:
+                    # Skip power symbols -- they reuse refs like #PWR01
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    ref = sym.reference
+                    if not ref or ref == "?" or ref.startswith("#"):
+                        continue
+
+                    if ref not in ref_map:
+                        ref_map[ref] = []
+                    ref_map[ref].append(
+                        (sym.uuid, sym.lib_id, sym.value, sym.unit, sheet_path)
+                    )
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="duplicate_reference",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        for ref, entries in sorted(ref_map.items()):
+            if len(entries) < 2:
+                continue
+
+            # Check whether all entries share the same lib_id
+            lib_ids = {lib_id for _, lib_id, _, _, _ in entries}
+
+            if len(lib_ids) > 1:
+                # Different components with same reference -- always a conflict
+                sheets = sorted({sp for _, _, _, _, sp in entries})
+                values = sorted({v for _, _, v, _, _ in entries if v})
+                val_str = f" (values: {', '.join(values)})" if values else ""
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="duplicate_reference",
+                        message=(
+                            f"Duplicate reference {ref} across sheets"
+                            f"{val_str}"
+                        ),
+                        location=", ".join(sheets),
+                    )
+                )
+            else:
+                # Same lib_id -- check for duplicate unit numbers which
+                # would indicate distinct components rather than a
+                # multi-unit split.
+                unit_counts: dict[int, list[str]] = {}
+                for _, _, _, unit, sheet_path in entries:
+                    if unit not in unit_counts:
+                        unit_counts[unit] = []
+                    unit_counts[unit].append(sheet_path)
+
+                dup_units = {
+                    u: sheets
+                    for u, sheets in unit_counts.items()
+                    if len(sheets) > 1
+                }
+                if dup_units:
+                    all_sheets = sorted(
+                        {s for sheets in dup_units.values() for s in sheets}
+                    )
+                    value = entries[0][2]
+                    val_str = f" ({value})" if value else ""
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="duplicate_reference",
+                            message=(
+                                f"Duplicate reference {ref}{val_str} "
+                                f"-- same unit on multiple sheets"
+                            ),
+                            location=", ".join(all_sheets),
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="duplicate_reference",
+                message=f"Duplicate reference check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -841,6 +960,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Missing project instances
     result.checks_run.append("project_instances")
     result.issues.extend(check_missing_project_instances(schematic_path))
+
+    # Duplicate references across sheets
+    result.checks_run.append("duplicate_references")
+    result.issues.extend(check_duplicate_references(schematic_path))
 
     return result
 
