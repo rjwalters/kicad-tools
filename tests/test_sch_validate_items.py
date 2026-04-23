@@ -8,10 +8,7 @@ ERC JSON and populates both ``ValidationIssue.items`` and an enriched
 from __future__ import annotations
 
 import json
-import textwrap
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from kicad_tools.cli.sch_validate import (
     ValidationIssue,

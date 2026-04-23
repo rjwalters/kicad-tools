@@ -64,6 +64,18 @@ class ValidationResult:
         return self.error_count == 0
 
 
+# Violation types whose messages benefit from label/net name enrichment.
+_LABEL_TYPES: frozenset[str] = frozenset({
+    "isolated_pin_label",
+    "single_global_label",
+    "label_dangling",
+    "global_label_dangling",
+    "similar_labels",
+    "multiple_net_names",
+    "hier_label_mismatch",
+})
+
+
 def run_erc(schematic_path: str) -> list[ValidationIssue]:
     """Run KiCad ERC check."""
     issues = []
@@ -131,18 +143,6 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                         raw_violations = filter_cross_sheet_global_labels(
                             raw_violations, schematic_path
                         )
-
-                        # Violation types whose messages benefit from
-                        # label/net name enrichment.
-                        _LABEL_TYPES = {
-                            "isolated_pin_label",
-                            "single_global_label",
-                            "label_dangling",
-                            "global_label_dangling",
-                            "similar_labels",
-                            "multiple_net_names",
-                            "hier_label_mismatch",
-                        }
 
                         for violation in raw_violations:
                             item_descs = [
