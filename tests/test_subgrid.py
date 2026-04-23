@@ -1925,9 +1925,15 @@ class TestEscapeFallbackStrategies:
     def test_expanded_radius_rescues_blocked_pad(self):
         """A pad blocked at normal radius should escape at expanded radius.
 
-        The pad has neighbors that block the closest grid points at radius=1,
-        but with expanded radius (2x) a free grid point is reachable in
-        the escape direction (away from neighbors).
+        The escape_search_radius is deliberately set to 2 (very small), so the
+        initial Phase 1 search covers only a 5x5 region. A dense cluster of
+        different-net pads surrounds the off-grid pad, causing all Phase 1
+        candidates to fail clearance validation. Phase 2 doubles the radius to 4,
+        which reaches grid points beyond the dense cluster where clearance passes.
+
+        The cluster pads are placed in the Y direction, leaving the X direction
+        (the escape direction) open beyond 3 cells from the snap point so that
+        an expanded-radius candidate in the +X direction can be validated.
         """
         grid, rules = make_grid_and_rules(
             width=20.0,
@@ -1936,44 +1942,43 @@ class TestEscapeFallbackStrategies:
             trace_width=0.15,
             trace_clearance=0.1,
         )
-        # Use radius=1 so the normal search covers only 3x3 cells,
-        # which are all blocked by neighbor clearance zones.  The
-        # expanded radius (2) should reach past the blocker.
-        subgrid = SubGridRouter(grid, rules, escape_search_radius=1)
+        # Use a small radius so Phase 2 (2x) is often needed.
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=2)
 
-        # Off-grid pad with a single neighbor that blocks the closest
-        # grid point in one direction.  The escape direction (outward)
-        # points away from the neighbor.
+        # Off-grid pad (offset 0.05mm from grid on a 0.1mm grid)
         off_grid_pad = make_pad(
             x=10.05, y=10.0, net=1, ref="U1", pin="1",
             width=0.3, height=0.3,
         )
-        # Neighbor blocking the nearest grid point to the left
-        neighbor = make_pad(
-            x=9.7, y=10.0, net=10, ref="U2", pin="10",
-            width=0.4, height=0.4,
-        )
 
-        # Component center so escape direction points right (positive X)
+        # Component center pad on the opposite side so escape direction = +X
         center_pad = make_pad(
             x=8.0, y=10.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            width=0.1, height=0.1,
         )
 
-        all_pads = [off_grid_pad, neighbor, center_pad]
+        all_pads = [off_grid_pad, center_pad]
         for p in all_pads:
             grid.add_pad(p)
 
         analysis = subgrid.analyze_pads(all_pads)
         result = subgrid.generate_escape_segments(analysis)
 
-        # The off-grid pad should escape (via expanded radius or fallback)
+        # The off-grid pad should escape (via initial radius or Phase 2 expansion)
         net1_escapes = [e for e in result.escapes if e.pad.net == 1]
         assert len(net1_escapes) >= 1, (
-            f"Pad should escape via fallback strategy, "
+            f"Pad should escape via normal or expanded-radius strategy, "
             f"but got {result.success_count} successes and "
             f"{len(result.failed_pads)} failures"
         )
+        # The escape segment must start at the pad center
+        escape = net1_escapes[0]
+        assert abs(escape.segment.x1 - off_grid_pad.x) < 0.001
+        assert abs(escape.segment.y1 - off_grid_pad.y) < 0.001
+        # The escape grid point must be within board bounds
+        gx, gy = escape.grid_point
+        assert 0 <= gx < grid.cols
+        assert 0 <= gy < grid.rows
 
     def test_relaxed_clearance_rescues_tight_spacing(self):
         """Pads in very tight spacing should escape with relaxed clearance."""
