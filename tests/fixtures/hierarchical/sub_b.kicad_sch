@@ -1,0 +1,77 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "sub-b-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Sub Sheet B - Output Stage")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "sub-b-r3-uuid")
+		(property "Reference" "R3"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "1k"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 80 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "sub-b-r3-pin1"))
+		(pin "2" (uuid "sub-b-r3-pin2"))
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "sub-b-r4-uuid")
+		(property "Reference" "R4"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "2.2k"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "sub-b-r4-pin1"))
+		(pin "2" (uuid "sub-b-r4-pin2"))
+	)
+	(global_label "DATA_BUS"
+		(shape bidirectional)
+		(at 60 50 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "sub-b-gl-databus")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 60 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+)

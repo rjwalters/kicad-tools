@@ -394,6 +394,127 @@ class Netlist:
 
 
 
+def _get_sheet_filenames(sch_path: Path) -> list[str]:
+    """Extract sub-sheet filenames from a schematic file.
+
+    Parses the raw S-expression tree to find ``(sheet ...)`` entries and
+    extracts the ``Sheetfile`` property from each.
+
+    Args:
+        sch_path: Path to the .kicad_sch file.
+
+    Returns:
+        List of sub-sheet filenames (relative to the schematic directory).
+    """
+    doc = parse_string(sch_path.read_text(encoding="utf-8"))
+    filenames: list[str] = []
+    for child in doc.children:
+        if getattr(child, "name", None) == "sheet" or getattr(child, "tag", None) == "sheet":
+            # Look for (property "Sheetfile" "filename.kicad_sch")
+            for prop in child.find_all("property"):
+                prop_name = prop.get_string(0)
+                if prop_name == "Sheetfile":
+                    filename = prop.get_string(1)
+                    if filename:
+                        filenames.append(filename)
+    return filenames
+
+
+def _collect_hierarchy_components(
+    sch_path: Path,
+    sheet_path: str,
+    visited: set[Path] | None = None,
+) -> tuple[list[NetlistComponent], dict[str, list]]:
+    """Recursively collect components and nets from a schematic hierarchy.
+
+    Loads the schematic at *sch_path*, collects its components and
+    per-sheet netlist, then recurses into any ``(sheet ...)`` sub-sheets.
+    Global labels with matching names across sheets are merged into the
+    same net.  Circular references (the same file appearing again in the
+    traversal) are detected and skipped with a warning.
+
+    Args:
+        sch_path: Absolute path to a ``.kicad_sch`` file.
+        sheet_path: Hierarchical sheet path string for this level
+            (e.g. ``"/"`` for root).
+        visited: Set of already-visited *resolved* paths used for
+            circular-reference detection.  Callers should pass ``None``;
+            the function creates the set internally.
+
+    Returns:
+        A ``(components, net_dict)`` tuple where *components* is a flat
+        list of :class:`NetlistComponent` from all sheets and *net_dict*
+        maps net names to lists of :class:`PinRef`-like objects (each
+        with ``symbol_ref`` and ``pin`` attributes).
+    """
+    from kicad_tools.schematic.models import Schematic
+
+    if visited is None:
+        visited = set()
+
+    resolved = sch_path.resolve()
+    if resolved in visited:
+        logger.warning("Circular sheet reference detected, skipping: %s", sch_path)
+        return [], {}
+    visited.add(resolved)
+
+    if not sch_path.exists():
+        logger.warning("Sub-sheet file not found, skipping: %s", sch_path)
+        return [], {}
+
+    # Load single sheet
+    sch = Schematic.load(str(sch_path))
+
+    # Collect components from this sheet
+    components: list[NetlistComponent] = []
+    for sym in sch.symbols:
+        footprint = ""
+        if hasattr(sym, "footprint") and sym.footprint:
+            footprint = sym.footprint
+        elif hasattr(sym, "properties"):
+            footprint = sym.properties.get("Footprint", "")
+
+        lib_id = ""
+        if sym.symbol_def and hasattr(sym.symbol_def, "lib_id"):
+            lib_id = sym.symbol_def.lib_id
+
+        components.append(
+            NetlistComponent(
+                reference=sym.reference,
+                value=sym.value,
+                footprint=footprint,
+                lib_id=lib_id,
+                sheet_path=sheet_path,
+            )
+        )
+
+    # Extract per-sheet connectivity
+    net_dict: dict[str, list] = {}
+    try:
+        sheet_nets = sch.extract_netlist()
+        for net_name, pins in sheet_nets.items():
+            net_dict.setdefault(net_name, []).extend(pins)
+    except Exception:
+        logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
+
+    # Recurse into sub-sheets
+    sub_filenames = _get_sheet_filenames(sch_path)
+    parent_dir = sch_path.parent
+    for filename in sub_filenames:
+        sub_path = parent_dir / filename
+        sub_sheet_path = f"{sheet_path}{filename}/"
+        sub_components, sub_nets = _collect_hierarchy_components(
+            sub_path, sub_sheet_path, visited
+        )
+        components.extend(sub_components)
+        # Merge nets -- global labels with the same name across sheets
+        # produce entries in the same net bucket.
+        for net_name, pins in sub_nets.items():
+            net_dict.setdefault(net_name, []).extend(pins)
+
+    return components, net_dict
+
+
 def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
     """
     Build a Netlist from a schematic using pure Python extraction.
@@ -401,6 +522,11 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
     This provides a fallback when kicad-cli is unavailable or crashes.
     Uses the Schematic.extract_netlist() method to analyze connectivity
     directly from the schematic file.
+
+    For hierarchical schematics the function recursively loads all
+    sub-sheets referenced via ``(sheet ...)`` entries and merges their
+    components and nets.  Global labels with matching names across
+    sheets are unified into the same net.
 
     Args:
         sch_path: Path to .kicad_sch file
@@ -412,44 +538,14 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
         FileNotFoundError: If schematic not found
         ValueError: If schematic parsing fails
     """
-    # Late import to avoid circular dependencies
-    from kicad_tools.schematic.models import Schematic
-
     sch_path = Path(sch_path)
     if not sch_path.exists():
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
-    # Load schematic
-    sch = Schematic.load(str(sch_path))
+    # Recursively collect components and nets from all sheets
+    components, net_dict = _collect_hierarchy_components(sch_path, "/")
 
-    # Build components from schematic symbols
-    components: list[NetlistComponent] = []
-    for sym in sch.symbols:
-        # Get footprint from properties or use empty string
-        footprint = ""
-        if hasattr(sym, "footprint") and sym.footprint:
-            footprint = sym.footprint
-        elif hasattr(sym, "properties"):
-            footprint = sym.properties.get("Footprint", "")
-
-        # Get lib_id from symbol definition
-        lib_id = ""
-        if sym.symbol_def and hasattr(sym.symbol_def, "lib_id"):
-            lib_id = sym.symbol_def.lib_id
-
-        components.append(
-            NetlistComponent(
-                reference=sym.reference,
-                value=sym.value,
-                footprint=footprint,
-                lib_id=lib_id,
-            )
-        )
-
-    # Extract connectivity using pure Python
-    net_dict = sch.extract_netlist()
-
-    # Build nets from connectivity data
+    # Build nets from merged connectivity data
     nets: list[NetlistNet] = []
     for code, (net_name, pins) in enumerate(net_dict.items(), 1):
         nodes = [NetNode(reference=pin.symbol_ref, pin=pin.pin) for pin in pins]

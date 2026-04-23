@@ -1,0 +1,101 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "sub-a-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Sub Sheet A - Amplifier")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+		(symbol "Device:C"
+			(symbol "C_0_1"
+				(polyline (pts (xy -2.032 -0.762) (xy 2.032 -0.762)) (stroke (width 0.508)) (fill (type none)))
+				(polyline (pts (xy -2.032 0.762) (xy 2.032 0.762)) (stroke (width 0.508)) (fill (type none)))
+			)
+			(symbol "C_1_1"
+				(pin passive line (at 0 3.81 270) (length 2.794) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 2.794) (name "~") (number "2"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "sub-a-r2-uuid")
+		(property "Reference" "R2"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "4.7k"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 80 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "sub-a-r2-pin1"))
+		(pin "2" (uuid "sub-a-r2-pin2"))
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "sub-a-c1-uuid")
+		(property "Reference" "C1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "100nF"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "sub-a-c1-pin1"))
+		(pin "2" (uuid "sub-a-c1-pin2"))
+	)
+	(global_label "DATA_BUS"
+		(shape bidirectional)
+		(at 60 50 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "sub-a-gl-databus")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 60 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+	(sheet
+		(at 130 40) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-nested-uuid")
+		(property "Sheetname" "Nested"
+			(at 130 39 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "nested.kicad_sch"
+			(at 130 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+)
