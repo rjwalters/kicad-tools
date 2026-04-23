@@ -21,6 +21,7 @@ from kicad_tools.cli.sch_re_annotate import (
     _detect_indent,
     _detect_project_info,
     _extract_symbols_from_text,
+    _format_reference,
     _parse_reference,
     run_re_annotate,
 )
@@ -1544,3 +1545,287 @@ class TestUnannotatedOnly:
         # Child: R? gets assigned R1 (per-sheet restart, no reserved in child sheet)
         assert '"Reference" "R1"' in child_text
         assert '"Reference" "R?"' not in child_text
+
+
+# ---------------------------------------------------------------------------
+# --include-power flag tests
+# ---------------------------------------------------------------------------
+
+# Schematic with unannotated power and flag symbols
+POWER_UNANNOTATED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "power:+5V")
+\t\t(at 100 30 0)
+\t\t(property "Reference" "#PWR?"
+\t\t\t(at 100 26 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(property "Value" "+5V"
+\t\t\t(at 100 23 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 30 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "#PWR?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "power:PWR_FLAG")
+\t\t(at 120 30 0)
+\t\t(property "Reference" "#FLG?"
+\t\t\t(at 120 26 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(property "Value" "PWR_FLAG"
+\t\t\t(at 120 23 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 30 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "bbbb1111-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "#FLG?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Schematic with existing #PWR01 and unannotated #PWR?
+POWER_COLLISION_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "power:GND")
+\t\t(at 100 70 0)
+\t\t(property "Reference" "#PWR01"
+\t\t\t(at 100 76 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(property "Value" "GND"
+\t\t\t(at 100 73 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 70 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "44444444-4444-4444-4444-444444444444")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "#PWR01") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "power:+5V")
+\t\t(at 100 30 0)
+\t\t(property "Reference" "#PWR?"
+\t\t\t(at 100 26 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(property "Value" "+5V"
+\t\t\t(at 100 23 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 30 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "#PWR?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+
+class TestFormatReference:
+    def test_normal_prefix(self):
+        assert _format_reference("R", 1) == "R1"
+        assert _format_reference("C", 10) == "C10"
+
+    def test_power_prefix_zero_padded(self):
+        assert _format_reference("#PWR", 1) == "#PWR01"
+        assert _format_reference("#PWR", 10) == "#PWR10"
+        assert _format_reference("#PWR", 99) == "#PWR99"
+        assert _format_reference("#PWR", 100) == "#PWR100"
+
+    def test_flag_prefix_zero_padded(self):
+        assert _format_reference("#FLG", 1) == "#FLG01"
+        assert _format_reference("#FLG", 12) == "#FLG12"
+
+    def test_unit_suffix(self):
+        assert _format_reference("U", 1, "A") == "U1A"
+        assert _format_reference("#PWR", 1, "") == "#PWR01"
+
+
+class TestIncludePower:
+    def test_power_symbols_annotated_with_flag(self, tmp_path):
+        """--include-power annotates #PWR? and #FLG? symbols."""
+        sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            include_power=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Power and flag symbols should be annotated with zero-padding
+        assert '"Reference" "#PWR01"' in text
+        assert '"Reference" "#FLG01"' in text
+        assert '"Reference" "#PWR?"' not in text
+        assert '"Reference" "#FLG?"' not in text
+        # R1 should still be present (renumbered to R1)
+        assert '"Reference" "R1"' in text
+
+    def test_power_symbols_excluded_without_flag(self, tmp_path):
+        """Without --include-power, #PWR? and #FLG? remain unannotated."""
+        sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            include_power=False,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Power/flag symbols should remain unannotated
+        assert '"Reference" "#PWR?"' in text
+        assert '"Reference" "#FLG?"' in text
+
+    def test_power_annotation_collision_avoidance(self, tmp_path):
+        """#PWR? avoids collision with existing #PWR01."""
+        sch = _write_sch(tmp_path, POWER_COLLISION_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True, include_power=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Existing #PWR01 should remain unchanged
+        assert '"Reference" "#PWR01"' in text
+        # #PWR? should become #PWR02 (avoiding collision with 01)
+        assert '"Reference" "#PWR02"' in text
+        assert '"Reference" "#PWR?"' not in text
+
+    def test_power_annotation_zero_padding(self):
+        """Number 1 produces #PWR01, number 10 produces #PWR10."""
+        symbols = [
+            {"reference": "#PWR?", "prefix": "#PWR", "number": None,
+             "unit_suffix": "", "uuid": "uuid-pwr1"},
+        ]
+        raw = _assign_numbers(symbols, None, 1, include_power=True)
+        assert raw["uuid-pwr1"]["new"] == "#PWR01"
+
+        symbols2 = [
+            {"reference": "#PWR?", "prefix": "#PWR", "number": None,
+             "unit_suffix": "", "uuid": "uuid-pwr1"},
+        ]
+        raw2 = _assign_numbers(symbols2, None, 10, include_power=True)
+        assert raw2["uuid-pwr1"]["new"] == "#PWR10"
+
+    def test_include_power_without_unannotated_only(self, tmp_path):
+        """Full renumber mode with --include-power re-sequences power symbols."""
+        sch = _write_sch(tmp_path, POWER_COLLISION_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            include_power=True,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Both power symbols should be sequentially numbered
+        assert '"Reference" "#PWR01"' in text
+        assert '"Reference" "#PWR02"' in text
+        assert '"Reference" "#PWR?"' not in text
+
+    def test_sym_prefix_always_excluded(self):
+        """#SYM symbols are never annotated even with --include-power."""
+        symbols = [
+            {"reference": "#SYM1", "prefix": "#SYM", "number": 1,
+             "unit_suffix": ""},
+            {"reference": "R3", "prefix": "R", "number": 3, "unit_suffix": ""},
+        ]
+        mapping = _old_new_map(_assign_numbers(symbols, None, 1,
+                                               include_power=True))
+        assert "#SYM1" not in mapping
+        assert mapping["R3"] == "R1"
+
+    def test_json_output_includes_power_mappings(self, tmp_path, capsys):
+        """--format json output includes power symbol mappings."""
+        sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=True, backup=False,
+            format="json", include_power=True,
+        )
+        assert ret == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        new_refs = {m["new"] for m in data["mappings"]}
+        assert "#PWR01" in new_refs
+        assert "#FLG01" in new_refs
+
+    def test_unannotated_only_without_include_power_skips_power(self, tmp_path):
+        """--unannotated-only without --include-power skips #PWR? symbols."""
+        sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=False, backup=False,
+            unannotated_only=True, include_power=False,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        # Power symbols remain unannotated
+        assert '"Reference" "#PWR?"' in text
+        assert '"Reference" "#FLG?"' in text

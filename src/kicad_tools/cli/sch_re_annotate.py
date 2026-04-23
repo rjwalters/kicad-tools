@@ -32,10 +32,27 @@ from kicad_tools.cli.modify_schematic import create_backup
 from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
 
 # Prefixes for power/flag symbols that should be excluded from renumbering
+# by default.  When ``include_power=True`` is passed, ``#PWR`` and ``#FLG``
+# are allowed through; ``#SYM`` is always excluded (internal KiCad artifact).
 EXCLUDED_PREFIXES = {"#PWR", "#FLG", "#SYM"}
+
+# Prefixes that may be included when ``--include-power`` is active.
+_POWER_PREFIXES = {"#PWR", "#FLG"}
 
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r'[ \t]+'
+
+
+def _format_reference(prefix: str, number: int, unit_suffix: str = "") -> str:
+    """Format a reference designator, applying zero-padding for power prefixes.
+
+    KiCad uses 2-digit zero-padded numbers for power symbols
+    (``#PWR01``, ``#FLG01``, ``#PWR12``).  All other prefixes use
+    plain integers (``R1``, ``C10``).
+    """
+    if prefix in _POWER_PREFIXES:
+        return f"{prefix}{number:02d}{unit_suffix}"
+    return f"{prefix}{number}{unit_suffix}"
 
 
 def _detect_indent(text: str) -> str:
@@ -345,6 +362,7 @@ def run_re_annotate(
     per_sheet: bool = False,
     format: str = "text",
     unannotated_only: bool = False,
+    include_power: bool = False,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -358,6 +376,8 @@ def run_re_annotate(
         format: Output format ("text" or "json").
         unannotated_only: If True, only assign numbers to unannotated (``?``)
             references, leaving already-assigned references unchanged.
+        include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
+            symbols (excluded by default).
 
     Returns:
         0 on success, 1 on error.
@@ -399,11 +419,13 @@ def run_re_annotate(
         uuid_mapping = _build_per_sheet_mapping(
             all_files, file_symbols, prefixes, start_from,
             unannotated_only=unannotated_only,
+            include_power=include_power,
         )
     else:
         uuid_mapping = _build_continuous_mapping(
             all_files, file_symbols, prefixes, start_from,
             unannotated_only=unannotated_only,
+            include_power=include_power,
         )
 
     if not uuid_mapping:
@@ -551,6 +573,7 @@ def _build_continuous_mapping(
     start_from: int,
     *,
     unannotated_only: bool = False,
+    include_power: bool = False,
 ) -> dict[str, dict]:
     """Build a continuous UUID-keyed mapping across all files.
 
@@ -568,7 +591,8 @@ def _build_continuous_mapping(
         ordered_symbols.extend(syms_sorted)
 
     return _assign_numbers(ordered_symbols, prefixes, start_from,
-                           unannotated_only=unannotated_only)
+                           unannotated_only=unannotated_only,
+                           include_power=include_power)
 
 
 def _build_per_sheet_mapping(
@@ -578,6 +602,7 @@ def _build_per_sheet_mapping(
     start_from: int,
     *,
     unannotated_only: bool = False,
+    include_power: bool = False,
 ) -> dict[str, dict]:
     """Build a per-sheet UUID-keyed mapping, restarting numbering per file."""
     mapping: dict[str, dict] = {}
@@ -586,7 +611,8 @@ def _build_per_sheet_mapping(
         syms = file_symbols[sch_file]
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
         sheet_mapping = _assign_numbers(syms_sorted, prefixes, start_from,
-                                        unannotated_only=unannotated_only)
+                                        unannotated_only=unannotated_only,
+                                        include_power=include_power)
         mapping.update(sheet_mapping)
 
     return mapping
@@ -598,6 +624,7 @@ def _assign_numbers(
     start_from: int,
     *,
     unannotated_only: bool = False,
+    include_power: bool = False,
 ) -> dict[str, dict]:
     """Assign sequential numbers to symbols, handling multi-unit components.
 
@@ -609,6 +636,9 @@ def _assign_numbers(
     references are left unchanged and their numbers are reserved so that
     new assignments do not collide with them.
 
+    When *include_power* is ``True``, ``#PWR`` and ``#FLG`` prefixes are
+    no longer excluded, allowing power/flag symbols to be annotated.
+
     Returns:
         Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
     """
@@ -617,6 +647,7 @@ def _assign_numbers(
     if unannotated_only:
         return _assign_numbers_unannotated_only(
             symbols, prefixes, start_from,
+            include_power=include_power,
         )
 
     # Track next number per prefix
@@ -633,7 +664,8 @@ def _assign_numbers(
 
         # Skip excluded prefixes (power symbols, flags, ground symbols)
         if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
-            continue
+            if not (include_power and prefix in _POWER_PREFIXES):
+                continue
 
         # Skip if prefix filter is active and this prefix isn't included
         if prefixes is not None and prefix not in prefixes:
@@ -650,11 +682,11 @@ def _assign_numbers(
                 new_number = counters.get(prefix, start_from)
                 counters[prefix] = new_number + 1
                 multi_unit_assigned[key] = new_number
-            new_ref = f"{prefix}{new_number}{unit_suffix}"
+            new_ref = _format_reference(prefix, new_number, unit_suffix)
         else:
             new_number = counters.get(prefix, start_from)
             counters[prefix] = new_number + 1
-            new_ref = f"{prefix}{new_number}"
+            new_ref = _format_reference(prefix, new_number)
 
         mapping[sym_uuid] = {
             "old": ref,
@@ -669,6 +701,8 @@ def _assign_numbers_unannotated_only(
     symbols: list[dict],
     prefixes: list[str] | None,
     start_from: int,
+    *,
+    include_power: bool = False,
 ) -> dict[str, dict]:
     """Assign numbers only to unannotated symbols, preserving existing refs.
 
@@ -676,10 +710,21 @@ def _assign_numbers_unannotated_only(
     new sequential numbers to unannotated (``?``) symbols while skipping
     over reserved numbers.
 
+    When *include_power* is ``True``, ``#PWR`` and ``#FLG`` prefixes are
+    no longer excluded.
+
     Returns:
         Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
     """
     mapping: dict[str, dict] = {}
+
+    def _is_excluded(prefix: str) -> bool:
+        """Return True if *prefix* should be skipped."""
+        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
+            if include_power and prefix in _POWER_PREFIXES:
+                return False
+            return True
+        return False
 
     # Phase 1: Collect existing (reserved) numbers per prefix
     existing: dict[str, set[int]] = {}
@@ -691,7 +736,7 @@ def _assign_numbers_unannotated_only(
         number = sym["number"]
         unit_suffix = sym["unit_suffix"]
 
-        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
+        if _is_excluded(prefix):
             continue
         if prefixes is not None and prefix not in prefixes:
             continue
@@ -717,7 +762,7 @@ def _assign_numbers_unannotated_only(
         unit_suffix = sym["unit_suffix"]
         sym_uuid = sym.get("uuid") or ref
 
-        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
+        if _is_excluded(prefix):
             continue
         if prefixes is not None and prefix not in prefixes:
             continue
@@ -734,10 +779,10 @@ def _assign_numbers_unannotated_only(
             else:
                 new_number = _next_available(prefix)
                 multi_unit_assigned[key] = new_number
-            new_ref = f"{prefix}{new_number}{unit_suffix}"
+            new_ref = _format_reference(prefix, new_number, unit_suffix)
         else:
             new_number = _next_available(prefix)
-            new_ref = f"{prefix}{new_number}"
+            new_ref = _format_reference(prefix, new_number)
 
         mapping[sym_uuid] = {
             "old": ref,
@@ -785,6 +830,11 @@ def main(argv: list[str] | None = None):
         help="Only assign numbers to unannotated (?) references, leaving existing ones unchanged",
     )
     parser.add_argument(
+        "--include-power",
+        action="store_true",
+        help="Also annotate unannotated #PWR? and #FLG? power symbols",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -806,6 +856,7 @@ def main(argv: list[str] | None = None):
         per_sheet=args.per_sheet,
         format=args.format,
         unannotated_only=args.unannotated_only,
+        include_power=args.include_power,
     )
 
 
