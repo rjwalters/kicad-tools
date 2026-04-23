@@ -651,6 +651,24 @@ class TestCLIMain:
         output_pro = output_file.with_suffix(".kicad_pro")
         assert not output_pro.exists()
 
+    def test_main_output_same_file(self, stitch_test_pcb: Path):
+        """Main with -o pointing to the same file should not raise SameFileError."""
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", str(stitch_test_pcb)])
+
+        assert exit_code == 0
+        assert "(via" in stitch_test_pcb.read_text()
+
+    def test_main_output_same_file_relative(self, stitch_test_pcb: Path):
+        """Main with -o as relative path resolving to input should succeed."""
+        # Build a relative path that resolves to the same file
+        parent = stitch_test_pcb.parent
+        relative_output = str(parent / "." / stitch_test_pcb.name)
+
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", relative_output])
+
+        assert exit_code == 0
+        assert "(via" in stitch_test_pcb.read_text()
+
     def test_main_dry_run_skips_project_copy(self, stitch_test_pcb: Path, tmp_path):
         """Dry-run should not copy project file."""
         # Create matching project file
