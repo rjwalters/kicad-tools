@@ -3,7 +3,9 @@
 Re-annotate reference designators in KiCad schematics.
 
 Renumbers reference designators sequentially across the hierarchy,
-closing gaps and making numbering contiguous.
+closing gaps and making numbering contiguous.  Also annotates
+unannotated components (``R?``, ``C?``, etc.) and creates missing
+``(instances)`` blocks for multi-project schematics.
 
 Usage:
     # Preview changes
@@ -58,7 +60,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     """Extract symbol references and their positions from schematic text.
 
     Returns list of dicts with keys: reference, prefix, number, unit_suffix,
-    position_y, position_x, lib_id.
+    position_y, position_x, lib_id, uuid, has_project_instance.
     """
     ref_pattern = re.compile(r'\(property "Reference" "([^"]+)"')
     symbols = []
@@ -77,12 +79,14 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         lib_match = re.search(r'\(lib_id "([^"]+)"\)', block)
         at_match = re.search(r'\(at ([\d.eE+-]+) ([\d.eE+-]+)', block)
         ref_match = ref_pattern.search(block)
+        uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
 
         if not ref_match or not lib_match:
             continue
 
         ref = ref_match.group(1)
         lib_id = lib_match.group(1)
+        sym_uuid = uuid_match.group(1) if uuid_match else ""
         x = float(at_match.group(1)) if at_match else 0.0
         y = float(at_match.group(2)) if at_match else 0.0
 
@@ -96,6 +100,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
             "position_x": x,
             "position_y": y,
             "lib_id": lib_id,
+            "uuid": sym_uuid,
         })
 
     return symbols
@@ -121,6 +126,173 @@ def _apply_reference_rename(text: str, old_ref: str, new_ref: str) -> str:
         r'\g<1>' + new_ref + '")',
         text,
     )
+
+    return text
+
+
+def _apply_uuid_reference_rename(text: str, sym_uuid: str, new_ref: str) -> str:
+    """Rename a reference designator for a specific symbol identified by UUID.
+
+    This is needed for unannotated components (``R?``, ``C?``) where the
+    reference string is shared by multiple components in the same file.
+    Targets the symbol block containing the given UUID.
+    """
+    # Strategy: find the symbol block boundaries first, then modify within.
+    # Symbol blocks start with \t(symbol\n and end with \t).
+    # We find the block that contains our UUID and replace within it.
+    uuid_str = f'(uuid "{sym_uuid}")'
+    uuid_pos = text.find(uuid_str)
+    if uuid_pos == -1:
+        return text
+
+    # Walk backward to find the start of this symbol block
+    block_start = text.rfind('\t(symbol\n', 0, uuid_pos)
+    if block_start == -1:
+        return text
+
+    # Walk forward to find the end of this symbol block (\n\t) at the right depth)
+    block_end = text.find('\n\t)', uuid_pos)
+    if block_end == -1:
+        return text
+    block_end += 3  # include the \n\t)
+
+    block = text[block_start:block_end]
+
+    # Replace the Reference property within this specific block
+    new_block = re.sub(
+        r'(\(property "Reference" ")[^"]+"',
+        r'\g<1>' + new_ref + '"',
+        block,
+        count=1,
+    )
+
+    return text[:block_start] + new_block + text[block_end:]
+
+
+def _detect_project_info(
+    root_path: Path,
+    all_files: list[Path],
+) -> tuple[str, str, dict[Path, str]]:
+    """Detect project name, root UUID, and sheet UUID paths.
+
+    For multi-project schematics, the project name is derived from the
+    root schematic filename.  The instance path for each sub-sheet is
+    ``/<root_uuid>/<sheet_uuid>``.
+
+    Returns:
+        Tuple of (project_name, root_uuid, file_to_instance_path_map).
+    """
+    project_name = root_path.stem
+    root_text = root_path.read_text(encoding="utf-8")
+
+    # Find root schematic UUID (first uuid at top level)
+    root_uuid_match = re.search(r'^\t\(uuid "([^"]+)"\)', root_text, re.MULTILINE)
+    root_uuid = root_uuid_match.group(1) if root_uuid_match else ""
+
+    # Build map of sub-sheet file -> instance path
+    # Parse sheet blocks from root: (sheet ... (uuid "XXX") ... (property "Sheetfile" "file.kicad_sch"))
+    file_paths: dict[Path, str] = {
+        root_path: f"/{root_uuid}",
+    }
+
+    sheet_pattern = re.compile(
+        r'\(sheet\b.*?\(uuid "([^"]+)"\).*?\(property "Sheetfile" "([^"]+)".*?\)',
+        re.DOTALL,
+    )
+    for m in sheet_pattern.finditer(root_text):
+        sheet_uuid = m.group(1)
+        sheet_file = m.group(2)
+        sheet_path = root_path.parent / sheet_file
+        file_paths[sheet_path] = f"/{root_uuid}/{sheet_uuid}"
+
+    return project_name, root_uuid, file_paths
+
+
+def _add_project_instance(
+    text: str,
+    sym_uuid: str,
+    project_name: str,
+    instance_path: str,
+    new_ref: str,
+    unit: int = 1,
+) -> str:
+    """Add a project instance entry to a symbol's (instances) block.
+
+    If the symbol has an ``(instances)`` block, appends a new
+    ``(project "name" ...)`` entry.  If the symbol has no
+    ``(instances)`` block, creates one before the closing ``\\t)``.
+
+    Args:
+        text: Full schematic text.
+        sym_uuid: UUID of the target symbol.
+        project_name: Project name for the instance entry.
+        instance_path: Full hierarchy path (e.g. ``/root-uuid/sheet-uuid``).
+        new_ref: Reference designator to use in the instance.
+        unit: Unit number (default 1).
+
+    Returns:
+        Modified schematic text.
+    """
+    instance_entry = (
+        f'\t\t\t(project "{project_name}"\n'
+        f'\t\t\t\t(path "{instance_path}"\n'
+        f'\t\t\t\t\t(reference "{new_ref}")\n'
+        f'\t\t\t\t\t(unit {unit})\n'
+        f'\t\t\t\t)\n'
+        f'\t\t\t)\n'
+    )
+
+    # Find the symbol block containing this UUID
+    # Strategy: find the (instances block within the symbol that contains our UUID,
+    # and append the new project entry before the closing \t\t)
+    block_pattern = re.compile(
+        r'(\t\(symbol\n'
+        r'\t\t\(lib_id "[^"]+"\)'
+        r'.*?'
+        r'\(uuid "' + re.escape(sym_uuid) + r'"\)'
+        r'.*?)'
+        r'(\t\t\(instances\n)'
+        r'(.*?)'
+        r'(\t\t\)\n\t\))',
+        re.DOTALL,
+    )
+
+    match = block_pattern.search(text)
+    if match:
+        # Has instances block — append new project entry before closing \t\t)
+        before = match.group(1)
+        instances_start = match.group(2)
+        instances_body = match.group(3)
+        instances_end = match.group(4)
+
+        # Check if this project already has an entry
+        if f'(project "{project_name}"' in instances_body:
+            return text
+
+        new_block = before + instances_start + instances_body + instance_entry + instances_end
+        return text[:match.start()] + new_block + text[match.end():]
+
+    # No instances block — find the symbol block and add one before closing \t)
+    # The symbol block ends with pin entries then \t)
+    no_inst_pattern = re.compile(
+        r'(\t\(symbol\n'
+        r'\t\t\(lib_id "[^"]+"\)'
+        r'.*?'
+        r'\(uuid "' + re.escape(sym_uuid) + r'"\)'
+        r'.*?'
+        r'(?:\t\t\(pin "[^"]+"\n\t\t\t\(uuid "[^"]+"\)\n\t\t\)\n))'
+        r'(\t\))',
+        re.DOTALL,
+    )
+
+    match = no_inst_pattern.search(text)
+    if match:
+        instances_block = (
+            f'\t\t(instances\n'
+            f'{instance_entry}'
+            f'\t\t)\n'
+        )
+        return text[:match.start(2)] + instances_block + match.group(2) + text[match.end():]
 
     return text
 
@@ -159,6 +331,11 @@ def run_re_annotate(
         print("Error: No schematic files found", file=sys.stderr)
         return 1
 
+    # Detect project info for multi-project instance handling
+    project_name, root_uuid, file_instance_paths = _detect_project_info(
+        schematic_path, all_files
+    )
+
     # Phase 1: Collect all symbols across hierarchy
     file_symbols: dict[Path, list[dict]] = {}
     file_texts: dict[Path, str] = {}
@@ -173,26 +350,27 @@ def run_re_annotate(
         file_symbols[sch_file] = _extract_symbols_from_text(text)
 
     # Phase 2: Build rename mapping
-    # Group symbols by prefix, maintaining file/position order
-    # For multi-unit components, all units share the same base ref number
+    # The mapping is now keyed by UUID to handle unannotated refs (R?, C?)
+    # that share the same reference string across multiple components.
 
     if per_sheet:
-        # Per-sheet mode: restart numbering for each file
-        mapping = _build_per_sheet_mapping(
+        uuid_mapping = _build_per_sheet_mapping(
             all_files, file_symbols, prefixes, start_from
         )
     else:
-        # Continuous mode: number across all files
-        mapping = _build_continuous_mapping(
+        uuid_mapping = _build_continuous_mapping(
             all_files, file_symbols, prefixes, start_from
         )
 
-    if not mapping:
+    if not uuid_mapping:
         print("No references to renumber.")
         return 0
 
     # Filter out identity mappings
-    effective_mapping = {old: new for old, new in mapping.items() if old != new}
+    effective_mapping = {
+        uid: info for uid, info in uuid_mapping.items()
+        if info["old"] != info["new"]
+    }
 
     if not effective_mapping:
         print("All references are already sequential. No changes needed.")
@@ -203,8 +381,10 @@ def run_re_annotate(
         import json
         output = {
             "mappings": [
-                {"old": old, "new": new}
-                for old, new in sorted(effective_mapping.items())
+                {"old": info["old"], "new": info["new"], "uuid": uid}
+                for uid, info in sorted(
+                    effective_mapping.items(), key=lambda x: x[1]["new"]
+                )
             ],
             "total": len(effective_mapping),
             "dry_run": dry_run,
@@ -216,9 +396,11 @@ def run_re_annotate(
 
         # Group by prefix for display
         by_prefix: dict[str, list[tuple[str, str]]] = {}
-        for old, new in sorted(effective_mapping.items()):
-            prefix, _, _ = _parse_reference(old)
-            by_prefix.setdefault(prefix, []).append((old, new))
+        for uid, info in sorted(
+            effective_mapping.items(), key=lambda x: x[1]["new"]
+        ):
+            prefix, _, _ = _parse_reference(info["new"])
+            by_prefix.setdefault(prefix, []).append((info["old"], info["new"]))
 
         for prefix in sorted(by_prefix):
             changes = by_prefix[prefix]
@@ -233,41 +415,66 @@ def run_re_annotate(
         return 0
 
     # Phase 4: Apply the full mapping to each file
-    # We need a two-pass rename to avoid collisions (e.g., R1->R2 and R2->R3).
-    # First rename all to temporary unique refs, then rename to final refs.
+    # For annotated refs (unique reference strings), use the two-pass rename.
+    # For unannotated refs (R?, C?), use UUID-targeted replacement.
     modified_files: dict[Path, str] = {}
 
     for sch_file in all_files:
         text = file_texts[sch_file]
         syms = file_symbols[sch_file]
-        refs_in_file = {s["reference"] for s in syms}
+        uuids_in_file = {s["uuid"] for s in syms}
 
-        # Find which mappings apply to this file
-        file_mapping = {
-            old: new for old, new in mapping.items() if old in refs_in_file
-        }
-        file_effective = {
-            old: new for old, new in file_mapping.items() if old != new
-        }
+        # Partition mappings for this file into annotated vs unannotated
+        annotated_mapping: dict[str, str] = {}  # old_ref -> new_ref
+        unannotated_entries: list[dict] = []  # [{uuid, new_ref}, ...]
 
-        if not file_effective:
+        for uid, info in uuid_mapping.items():
+            if uid not in uuids_in_file:
+                continue
+            if info["unannotated"]:
+                unannotated_entries.append({
+                    "uuid": uid,
+                    "old": info["old"],
+                    "new": info["new"],
+                })
+            else:
+                if info["old"] != info["new"]:
+                    annotated_mapping[info["old"]] = info["new"]
+
+        if not annotated_mapping and not unannotated_entries:
             continue
 
-        # Two-pass rename to avoid collisions
-        # Pass 1: rename to temporary placeholders
-        temp_mapping: dict[str, str] = {}
-        for i, old_ref in enumerate(file_effective):
-            temp_ref = f"__REANNOTATE_TEMP_{i}__"
-            temp_mapping[old_ref] = temp_ref
-
         current_text = text
-        for old_ref, temp_ref in temp_mapping.items():
-            current_text = _apply_reference_rename(current_text, old_ref, temp_ref)
 
-        # Pass 2: rename from temp to final
-        for old_ref, temp_ref in temp_mapping.items():
-            new_ref = file_effective[old_ref]
-            current_text = _apply_reference_rename(current_text, temp_ref, new_ref)
+        # Step A: Handle annotated refs with two-pass rename to avoid collisions
+        if annotated_mapping:
+            temp_mapping: dict[str, str] = {}
+            for i, old_ref in enumerate(annotated_mapping):
+                temp_ref = f"__REANNOTATE_TEMP_{i}__"
+                temp_mapping[old_ref] = temp_ref
+
+            for old_ref, temp_ref in temp_mapping.items():
+                current_text = _apply_reference_rename(current_text, old_ref, temp_ref)
+
+            for old_ref, temp_ref in temp_mapping.items():
+                new_ref = annotated_mapping[old_ref]
+                current_text = _apply_reference_rename(current_text, temp_ref, new_ref)
+
+        # Step B: Handle unannotated refs with UUID-targeted replacement
+        instance_path = file_instance_paths.get(sch_file, "")
+        for entry in unannotated_entries:
+            current_text = _apply_uuid_reference_rename(
+                current_text, entry["uuid"], entry["new"]
+            )
+            # Add project instance entry
+            if instance_path:
+                current_text = _add_project_instance(
+                    current_text,
+                    entry["uuid"],
+                    project_name,
+                    instance_path,
+                    entry["new"],
+                )
 
         modified_files[sch_file] = current_text
 
@@ -298,18 +505,19 @@ def _build_continuous_mapping(
     file_symbols: dict[Path, list[dict]],
     prefixes: list[str] | None,
     start_from: int,
-) -> dict[str, str]:
-    """Build a continuous mapping across all files.
+) -> dict[str, dict]:
+    """Build a continuous UUID-keyed mapping across all files.
 
     Symbols are ordered by file order, then by position (top-to-bottom,
     left-to-right) within each file. Multi-unit components share a base
     number.
+
+    Returns:
+        Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
     """
-    # Collect all symbols in order
     ordered_symbols: list[dict] = []
     for sch_file in all_files:
         syms = file_symbols[sch_file]
-        # Sort by position: top-to-bottom (Y ascending), left-to-right (X ascending)
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
         ordered_symbols.extend(syms_sorted)
 
@@ -321,9 +529,9 @@ def _build_per_sheet_mapping(
     file_symbols: dict[Path, list[dict]],
     prefixes: list[str] | None,
     start_from: int,
-) -> dict[str, str]:
-    """Build a per-sheet mapping, restarting numbering per file."""
-    mapping: dict[str, str] = {}
+) -> dict[str, dict]:
+    """Build a per-sheet UUID-keyed mapping, restarting numbering per file."""
+    mapping: dict[str, dict] = {}
 
     for sch_file in all_files:
         syms = file_symbols[sch_file]
@@ -338,13 +546,16 @@ def _assign_numbers(
     symbols: list[dict],
     prefixes: list[str] | None,
     start_from: int,
-) -> dict[str, str]:
+) -> dict[str, dict]:
     """Assign sequential numbers to symbols, handling multi-unit components.
 
     Multi-unit components (e.g., U1A and U1B) share the same base reference
     number but differ by their unit suffix.
+
+    Returns:
+        Dict mapping UUID -> {"old": str, "new": str, "unannotated": bool}.
     """
-    mapping: dict[str, str] = {}
+    mapping: dict[str, dict] = {}
     # Track next number per prefix
     counters: dict[str, int] = {}
     # Track base number assignments for multi-unit: (prefix, old_number) -> new_number
@@ -355,18 +566,17 @@ def _assign_numbers(
         prefix = sym["prefix"]
         number = sym["number"]
         unit_suffix = sym["unit_suffix"]
+        sym_uuid = sym.get("uuid") or ref
 
-        # Skip excluded prefixes (power symbols, flags)
-        if prefix in EXCLUDED_PREFIXES:
+        # Skip excluded prefixes (power symbols, flags, ground symbols)
+        if prefix in EXCLUDED_PREFIXES or prefix.startswith("#"):
             continue
 
         # Skip if prefix filter is active and this prefix isn't included
         if prefixes is not None and prefix not in prefixes:
             continue
 
-        # Skip unannotated refs
-        if number is None:
-            continue
+        unannotated = number is None
 
         # Handle multi-unit components
         if unit_suffix:
@@ -379,13 +589,15 @@ def _assign_numbers(
                 multi_unit_assigned[key] = new_number
             new_ref = f"{prefix}{new_number}{unit_suffix}"
         else:
-            # Check if this is a multi-unit component without suffix
-            # (unit > 1 would share the same ref)
             new_number = counters.get(prefix, start_from)
             counters[prefix] = new_number + 1
             new_ref = f"{prefix}{new_number}"
 
-        mapping[ref] = new_ref
+        mapping[sym_uuid] = {
+            "old": ref,
+            "new": new_ref,
+            "unannotated": unannotated,
+        }
 
     return mapping
 

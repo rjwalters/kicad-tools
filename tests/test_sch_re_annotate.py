@@ -435,6 +435,92 @@ SEQUENTIAL_SCHEMATIC = """\
 """
 
 
+# Schematic with unannotated components (multi-project scenario)
+UNANNOTATED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R?"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "R?") (unit 1))
+\t\t\t)
+\t\t\t(project "other-project"
+\t\t\t\t(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/00000000-0000-0000-0000-000000000001" (reference "R6") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "C?"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "100nF"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/00000000-0000-0000-0000-000000000001" (reference "C?") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+
 def _write_sch(
     tmp_path: Path,
     content: str = MINIMAL_SCHEMATIC,
@@ -552,6 +638,11 @@ class TestApplyRename:
 # ---------------------------------------------------------------------------
 
 
+def _old_new_map(uuid_mapping: dict[str, dict]) -> dict[str, str]:
+    """Convert UUID-keyed mapping to old->new for simpler test assertions."""
+    return {info["old"]: info["new"] for info in uuid_mapping.values()}
+
+
 class TestAssignNumbers:
     def test_closes_gaps(self):
         symbols = [
@@ -559,7 +650,7 @@ class TestAssignNumbers:
             {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
             {"reference": "C3", "prefix": "C", "number": 3, "unit_suffix": ""},
         ]
-        mapping = _assign_numbers(symbols, None, 1)
+        mapping = _old_new_map(_assign_numbers(symbols, None, 1))
         assert mapping == {"R1": "R1", "R5": "R2", "C3": "C1"}
 
     def test_prefix_filter(self):
@@ -567,7 +658,7 @@ class TestAssignNumbers:
             {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
             {"reference": "C3", "prefix": "C", "number": 3, "unit_suffix": ""},
         ]
-        mapping = _assign_numbers(symbols, ["R"], 1)
+        mapping = _old_new_map(_assign_numbers(symbols, ["R"], 1))
         assert mapping == {"R5": "R1"}
         assert "C3" not in mapping
 
@@ -575,7 +666,7 @@ class TestAssignNumbers:
         symbols = [
             {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
         ]
-        mapping = _assign_numbers(symbols, None, 100)
+        mapping = _old_new_map(_assign_numbers(symbols, None, 100))
         assert mapping == {"R5": "R100"}
 
     def test_multi_unit_shares_number(self):
@@ -584,7 +675,7 @@ class TestAssignNumbers:
             {"reference": "U1B", "prefix": "U", "number": 1, "unit_suffix": "B"},
             {"reference": "U5A", "prefix": "U", "number": 5, "unit_suffix": "A"},
         ]
-        mapping = _assign_numbers(symbols, None, 1)
+        mapping = _old_new_map(_assign_numbers(symbols, None, 1))
         assert mapping["U1A"] == "U1A"
         assert mapping["U1B"] == "U1B"
         assert mapping["U5A"] == "U2A"
@@ -594,18 +685,36 @@ class TestAssignNumbers:
             {"reference": "#PWR01", "prefix": "#PWR", "number": 1, "unit_suffix": ""},
             {"reference": "R3", "prefix": "R", "number": 3, "unit_suffix": ""},
         ]
-        mapping = _assign_numbers(symbols, None, 1)
+        mapping = _old_new_map(_assign_numbers(symbols, None, 1))
         assert "#PWR01" not in mapping
         assert mapping["R3"] == "R1"
 
-    def test_skips_unannotated(self):
+    def test_annotates_unannotated(self):
+        """Unannotated refs (R?) should be assigned numbers."""
         symbols = [
-            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": ""},
+            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
+             "uuid": "uuid-r-question"},
             {"reference": "R3", "prefix": "R", "number": 3, "unit_suffix": ""},
         ]
-        mapping = _assign_numbers(symbols, None, 1)
-        assert "R?" not in mapping
-        assert mapping["R3"] == "R1"
+        raw = _assign_numbers(symbols, None, 1)
+        mapping = _old_new_map(raw)
+        assert mapping["R?"] == "R1"
+        assert mapping["R3"] == "R2"
+        # Verify the unannotated flag is set
+        assert raw["uuid-r-question"]["unannotated"] is True
+
+    def test_multiple_unannotated_get_unique_numbers(self):
+        """Multiple R? components should each get a unique number."""
+        symbols = [
+            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
+             "uuid": "uuid-r1"},
+            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
+             "uuid": "uuid-r2"},
+            {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
+        ]
+        raw = _assign_numbers(symbols, None, 1)
+        new_refs = {info["new"] for info in raw.values()}
+        assert new_refs == {"R1", "R2", "R3"}
 
 
 # ---------------------------------------------------------------------------
@@ -799,3 +908,67 @@ class TestHierarchicalReAnnotate:
         # Both files should have backups
         backups = list(tmp_path.glob("*_backup_*"))
         assert len(backups) == 2
+
+
+# ---------------------------------------------------------------------------
+# Unannotated component support
+# ---------------------------------------------------------------------------
+
+
+class TestUnannotatedComponents:
+    def test_annotates_unannotated_refs(self, tmp_path):
+        """R? and C? should get assigned numbers."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        # R1 stays R1, R? becomes R2, C? becomes C1
+        assert '"Reference" "R1"' in text
+        assert '"Reference" "R2"' in text
+        assert '"Reference" "C1"' in text
+        # No more unannotated refs
+        assert '"Reference" "R?"' not in text
+        assert '"Reference" "C?"' not in text
+
+    def test_adds_project_instance(self, tmp_path):
+        """Unannotated components should get project instance entries."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        # Should have a project instance for the test project
+        assert '(project "test"' in text
+        # The new ref should appear in an instance entry
+        assert '(reference "R2")' in text
+        assert '(reference "C1")' in text
+
+    def test_preserves_other_project_instances(self, tmp_path):
+        """Existing project instances (other-project) should be preserved."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False)
+        assert ret == 0
+        text = sch.read_text()
+        assert '(project "other-project"' in text
+        assert '(reference "R6")' in text
+
+    def test_dry_run_shows_unannotated(self, tmp_path, capsys):
+        """Dry run should show unannotated components in the mapping."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        ret = run_re_annotate(
+            schematic_path=sch, dry_run=True, backup=False, format="json"
+        )
+        assert ret == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Should include mappings for unannotated refs
+        old_refs = {m["old"] for m in data["mappings"]}
+        assert "R?" in old_refs
+        assert "C?" in old_refs
+
+    def test_extract_uuid(self):
+        """_extract_symbols_from_text should extract UUIDs."""
+        symbols = _extract_symbols_from_text(UNANNOTATED_SCHEMATIC)
+        by_uuid = {s["uuid"]: s for s in symbols}
+        assert "11111111-1111-1111-1111-111111111111" in by_uuid
+        assert "22222222-2222-2222-2222-222222222222" in by_uuid
+        assert by_uuid["22222222-2222-2222-2222-222222222222"]["reference"] == "R?"

@@ -110,6 +110,8 @@ class SymbolInstance:
     dnp: bool = False
     properties: dict[str, SymbolProperty] = field(default_factory=dict)
     pins: list[SymbolPin] = field(default_factory=list)
+    project_name: str = field(default="", repr=False)
+    instance_path: str = field(default="", repr=False)
     _sexp: SExp | None = field(default=None, repr=False)
 
     @property
@@ -182,6 +184,20 @@ class SymbolInstance:
         # Pins
         for pin in self.pins:
             sym.append(pin.to_sexp())
+
+        # Instances block for multi-project schematics
+        if self.project_name and self.instance_path:
+            ref = self.reference or ""
+            path_node = SExp.list("path", self.instance_path)
+            path_node.append(SExp.list("reference", ref))
+            path_node.append(SExp.list("unit", self.unit))
+
+            project_node = SExp.list("project", self.project_name)
+            project_node.append(path_node)
+
+            instances_node = SExp.list("instances")
+            instances_node.append(project_node)
+            sym.append(instances_node)
 
         return sym
 

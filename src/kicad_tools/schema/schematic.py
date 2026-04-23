@@ -317,6 +317,8 @@ class Schematic:
         unit: int = 1,
         pin_numbers: list[str] | None = None,
         datasheet: str = "",
+        project_name: str = "",
+        instance_path: str = "",
     ) -> SymbolInstance:
         """Add a new component symbol to the schematic.
 
@@ -336,6 +338,10 @@ class Schematic:
             pin_numbers: Optional list of pin numbers.  When *None*, pins
                 are auto-detected from the embedded ``lib_symbols`` entry.
             datasheet: Optional datasheet URL.
+            project_name: Optional project name for ``(instances)`` block
+                in multi-project schematics.
+            instance_path: Optional hierarchy path (e.g.
+                ``/root-uuid/sheet-uuid``) for the ``(instances)`` block.
 
         Returns:
             The created :class:`SymbolInstance`.
@@ -404,6 +410,8 @@ class Schematic:
             dnp=False,
             properties=props,
             pins=pins,
+            project_name=project_name,
+            instance_path=instance_path,
         )
 
         # Insert into S-expression tree before sentinel sections
