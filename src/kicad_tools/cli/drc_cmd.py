@@ -25,6 +25,7 @@ from pathlib import Path
 from ..drc import (
     DRCReport,
     DRCViolation,
+    ViolationCategory,
     check_manufacturer_rules,
     generate_fix_suggestions,
 )
@@ -73,6 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--net",
         help="Filter by net name",
+    )
+    parser.add_argument(
+        "--category",
+        "-c",
+        choices=[c.value for c in ViolationCategory],
+        help="Filter by root-cause category (placement, routing, manufacturing, connectivity, cosmetic)",
     )
     parser.add_argument(
         "--mfr",
@@ -185,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.net:
         violations = [v for v in violations if args.net in v.nets]
+
+    if args.category:
+        cat = ViolationCategory(args.category)
+        violations = [v for v in violations if v.category == cat]
 
     # Generate suggestions if requested
     if args.suggest:
@@ -304,6 +315,29 @@ def output_table(
         if counts["warnings"]:
             parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
         print(f"  {vtype}: {', '.join(parts)}")
+
+    # Group by category summary
+    by_category: dict = {}
+    for v in violations:
+        cat = v.category.value
+        if cat not in by_category:
+            by_category[cat] = {"errors": 0, "warnings": 0}
+        if v.is_error:
+            by_category[cat]["errors"] += 1
+        else:
+            by_category[cat]["warnings"] += 1
+
+    print(f"\n{'-' * 60}")
+    print("BY CATEGORY:")
+    for cat, counts in sorted(
+        by_category.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
+    ):
+        parts = []
+        if counts["errors"]:
+            parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
+        if counts["warnings"]:
+            parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
+        print(f"  {cat}: {', '.join(parts)}")
 
     # Detailed output
     errors = [v for v in violations if v.is_error]

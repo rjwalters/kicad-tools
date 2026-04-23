@@ -1,5 +1,6 @@
 """DRC violation data structures."""
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
@@ -9,6 +10,87 @@ from kicad_tools.core.types import Severity
 if TYPE_CHECKING:
     from kicad_tools.drc.suggestions import FixSuggestion
     from kicad_tools.exceptions import SourcePosition
+
+
+class ViolationCategory(Enum):
+    """Root-cause category for DRC violations.
+
+    Helps agents distinguish actionable errors from inherent IC behavior:
+    - PLACEMENT: inherent to component placement (pad spacing, courtyard)
+    - ROUTING: fixable by rerouting (trace clearance, via placement)
+    - MANUFACTURING: depends on fab house capabilities (mask dam, drill)
+    - CONNECTIVITY: netlist issues (shorts, unconnected)
+    - COSMETIC: visual only (silk overlap)
+    """
+
+    PLACEMENT = "placement"
+    ROUTING = "routing"
+    MANUFACTURING = "manufacturing"
+    CONNECTIVITY = "connectivity"
+    COSMETIC = "cosmetic"
+
+
+# Mapping from ViolationType to default ViolationCategory
+_TYPE_CATEGORY_MAP: dict["ViolationType", ViolationCategory] = {}
+
+
+def _init_type_category_map() -> None:
+    """Populate the type-to-category mapping after ViolationType is defined."""
+    _TYPE_CATEGORY_MAP.update(
+        {
+            # Routing: fixable by rerouting traces/vias
+            ViolationType.CLEARANCE: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_SEGMENT_VIA: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_PAD_SEGMENT: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_PAD_VIA: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_SEGMENT_SEGMENT: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_VIA_VIA: ViolationCategory.ROUTING,
+            ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
+            ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
+            ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
+            ViolationType.DIMENSION_DRILL_CLEARANCE: ViolationCategory.ROUTING,
+            # Placement: inherent to component placement
+            ViolationType.CLEARANCE_PAD_PAD: ViolationCategory.PLACEMENT,
+            ViolationType.COURTYARD_OVERLAP: ViolationCategory.PLACEMENT,
+            ViolationType.SOLDER_MASK_BRIDGE: ViolationCategory.PLACEMENT,
+            # Manufacturing: depends on fab capabilities
+            ViolationType.COPPER_EDGE_CLEARANCE: ViolationCategory.MANUFACTURING,
+            ViolationType.EDGE_CLEARANCE_TRACE: ViolationCategory.MANUFACTURING,
+            ViolationType.EDGE_CLEARANCE_PAD: ViolationCategory.MANUFACTURING,
+            ViolationType.EDGE_CLEARANCE_PAD_HOLE: ViolationCategory.MANUFACTURING,
+            ViolationType.EDGE_CLEARANCE_VIA: ViolationCategory.MANUFACTURING,
+            ViolationType.EDGE_CLEARANCE_ZONE: ViolationCategory.MANUFACTURING,
+            ViolationType.VIA_HOLE_LARGER_THAN_PAD: ViolationCategory.MANUFACTURING,
+            ViolationType.VIA_ANNULAR_WIDTH: ViolationCategory.MANUFACTURING,
+            ViolationType.MICRO_VIA_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
+            ViolationType.DRILL_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
+            ViolationType.DRILL_CLEARANCE: ViolationCategory.MANUFACTURING,
+            ViolationType.NPTH_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
+            ViolationType.HOLE_NEAR_HOLE: ViolationCategory.MANUFACTURING,
+            ViolationType.DIMENSION_VIA_DRILL: ViolationCategory.MANUFACTURING,
+            ViolationType.DIMENSION_VIA_DIAMETER: ViolationCategory.MANUFACTURING,
+            ViolationType.DIMENSION_ANNULAR_RING: ViolationCategory.MANUFACTURING,
+            ViolationType.SOLDER_MASK_CLEARANCE: ViolationCategory.MANUFACTURING,
+            ViolationType.MIN_PAD_SIZE: ViolationCategory.MANUFACTURING,
+            ViolationType.PTH_ANNULAR_RING: ViolationCategory.MANUFACTURING,
+            ViolationType.IMPEDANCE: ViolationCategory.MANUFACTURING,
+            # Connectivity: netlist issues
+            ViolationType.UNCONNECTED_ITEMS: ViolationCategory.CONNECTIVITY,
+            ViolationType.SHORTING_ITEMS: ViolationCategory.CONNECTIVITY,
+            # Cosmetic: visual only
+            ViolationType.SILK_OVER_COPPER: ViolationCategory.COSMETIC,
+            ViolationType.SILK_OVERLAP: ViolationCategory.COSMETIC,
+            ViolationType.SILKSCREEN_LINE_WIDTH: ViolationCategory.COSMETIC,
+            ViolationType.SILKSCREEN_TEXT_HEIGHT: ViolationCategory.COSMETIC,
+            ViolationType.SILKSCREEN_OVER_PAD: ViolationCategory.COSMETIC,
+            # Placement: footprint/outline issues
+            ViolationType.FOOTPRINT: ViolationCategory.PLACEMENT,
+            ViolationType.MALFORMED_OUTLINE: ViolationCategory.PLACEMENT,
+            ViolationType.DUPLICATE_FOOTPRINT: ViolationCategory.PLACEMENT,
+            ViolationType.EXTRA_FOOTPRINT: ViolationCategory.PLACEMENT,
+            ViolationType.MISSING_FOOTPRINT: ViolationCategory.PLACEMENT,
+        }
+    )
 
 
 class ViolationType(Enum):
@@ -266,6 +348,58 @@ class DRCViolation:
     suggestions: list["FixSuggestion"] = field(default_factory=list)
 
     @property
+    def category(self) -> ViolationCategory:
+        """Infer root-cause category from violation type and context.
+
+        For SOLDER_MASK_BRIDGE violations, checks whether both items reference
+        pads on the same component (placement-inherent) or involve different
+        components/vias (routing-fixable).
+        """
+        # Special case: solder mask bridge between same-component pads is
+        # placement-inherent; between different components or vias is routing
+        if self.type == ViolationType.SOLDER_MASK_BRIDGE:
+            refs = _extract_component_refs(self.items)
+            if len(refs) == 1:
+                # Both items on same component -- placement-inherent
+                return ViolationCategory.PLACEMENT
+            elif len(refs) >= 2:
+                # Different components -- potentially routing-fixable
+                return ViolationCategory.ROUTING
+
+        return _TYPE_CATEGORY_MAP.get(self.type, ViolationCategory.ROUTING)
+
+    def is_fine_pitch_inherent(self, min_solder_mask_dam_mm: float = 0.1) -> bool:
+        """Check if this solder mask bridge is inherent to a fine-pitch IC.
+
+        A solder mask bridge violation is fine-pitch-inherent when:
+        - The violation type is SOLDER_MASK_BRIDGE
+        - Both items reference pads on the same component (same ref designator)
+        - The actual solder mask dam width is below the manufacturer's minimum
+
+        Args:
+            min_solder_mask_dam_mm: The manufacturer's minimum solder mask dam
+                width. Defaults to 0.1mm (JLCPCB standard).
+
+        Returns:
+            True if this violation is inherent to the IC footprint geometry
+            and cannot be fixed by layout changes.
+        """
+        if self.type != ViolationType.SOLDER_MASK_BRIDGE:
+            return False
+
+        # Both items must be on the same component
+        refs = _extract_component_refs(self.items)
+        if len(refs) != 1:
+            return False
+
+        # The actual mask dam must be below the manufacturer's minimum
+        if self.actual_value_mm is not None:
+            return self.actual_value_mm < min_solder_mask_dam_mm
+
+        # No measurement available -- fall through to False
+        return False
+
+    @property
     def is_error(self) -> bool:
         """Check if this is an error (vs warning)."""
         return self.severity == Severity.ERROR
@@ -325,6 +459,7 @@ class DRCViolation:
             "type": self.type.value,
             "type_str": self.type_str,
             "severity": self.severity.value,
+            "category": self.category.value,
             "message": self.message,
             "rule": self.rule,
             "locations": [
@@ -353,3 +488,25 @@ class DRCViolation:
         if self.primary_location:
             loc_str = f" at {self.primary_location}"
         return f"[{self.type_str}]: {self.message}{loc_str}"
+
+
+# Regex to extract component reference designators from DRC item strings.
+# Matches patterns like "Pad 1 of U3", "Pad A1 of U3", "of C12", etc.
+_REF_PATTERN = re.compile(r"\bof\s+([A-Z]+\d+)\b", re.IGNORECASE)
+
+
+def _extract_component_refs(items: list[str]) -> set[str]:
+    """Extract unique component reference designators from DRC item strings.
+
+    Looks for patterns like "Pad 1 of U3" or "Pad A1 of C12" in item
+    descriptions and returns the set of unique references found.
+    """
+    refs: set[str] = set()
+    for item in items:
+        for match in _REF_PATTERN.finditer(item):
+            refs.add(match.group(1).upper())
+    return refs
+
+
+# Initialize the type-to-category map now that ViolationType is defined
+_init_type_category_map()

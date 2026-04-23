@@ -352,6 +352,31 @@ def compare_with_manufacturer(
             message=msg,
         )
 
+    # Solder mask bridge -- fine-pitch IC bridges are inherent
+    if violation.type == ViolationType.SOLDER_MASK_BRIDGE:
+        mfr_limit = rules.min_solder_mask_dam_mm
+        if violation.is_fine_pitch_inherent(mfr_limit):
+            msg = (
+                f"Fine-pitch IC bridge inherent to footprint "
+                f"({mfr_name} accepts for fine-pitch ICs)"
+            )
+            return ManufacturerComparison(
+                violation=violation,
+                is_false_positive=True,
+                manufacturer_limit=mfr_limit,
+                actual_value=actual,
+                message=msg,
+            )
+        is_false_positive = actual >= mfr_limit
+        msg = f"{mfr_name} accepts {mfr_limit:.3f}mm" if is_false_positive else ""
+        return ManufacturerComparison(
+            violation=violation,
+            is_false_positive=is_false_positive,
+            manufacturer_limit=mfr_limit,
+            actual_value=actual,
+            message=msg,
+        )
+
     return None
 
 

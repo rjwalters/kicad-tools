@@ -47,6 +47,7 @@ from .violation import (
     DRCViolation,
     Location,
     Severity,
+    ViolationCategory,
     ViolationType,
 )
 
@@ -54,6 +55,7 @@ __all__ = [
     # Violation types
     "DRCViolation",
     "ViolationType",
+    "ViolationCategory",
     "Severity",
     "Location",
     # Report parsing
