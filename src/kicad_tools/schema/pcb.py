@@ -1585,6 +1585,44 @@ class PCB:
 
         return True
 
+    def footprint_has_traces(self, reference: str) -> bool:
+        """Check whether a footprint has any routed traces connected to its pads.
+
+        Examines each pad of the footprint and checks if any trace segment
+        in the same net touches the pad position (within 0.01mm tolerance).
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "C1")
+
+        Returns:
+            True if at least one pad has a connected trace segment, False
+            if the footprint has no traces or does not exist.
+        """
+        import math
+
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        for pad in fp.pads:
+            if pad.net_number == 0:
+                continue
+            pos = self.get_pad_position(reference, pad.number)
+            if not pos:
+                continue
+            for seg in self.segments_in_net(pad.net_number):
+                tolerance = 0.01  # mm
+                start_dist = math.sqrt(
+                    (seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2
+                )
+                end_dist = math.sqrt(
+                    (seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2
+                )
+                if start_dist < tolerance or end_dist < tolerance:
+                    return True
+
+        return False
+
     def remove_segments(self, segments: list[Segment]) -> int:
         """Remove specific trace segments from the PCB.
 

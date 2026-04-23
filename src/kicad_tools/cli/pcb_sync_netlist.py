@@ -19,7 +19,7 @@ from pathlib import Path
 class SyncAction:
     """A single sync action to perform or report."""
 
-    action: str  # "add", "rename", "orphan"
+    action: str  # "add", "rename", "orphan", "remove"
     reference: str
     footprint: str = ""
     value: str = ""
@@ -34,11 +34,12 @@ class SyncResult:
     added: list[SyncAction] = field(default_factory=list)
     renamed: list[SyncAction] = field(default_factory=list)
     orphaned: list[SyncAction] = field(default_factory=list)
+    removed: list[SyncAction] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.added or self.renamed or self.orphaned)
+        return bool(self.added or self.renamed or self.orphaned or self.removed)
 
 
 def _normalize_footprint(fp: str) -> str:
@@ -57,6 +58,8 @@ def sync_netlist(
     pcb_path: Path,
     dry_run: bool = False,
     output_path: Path | None = None,
+    remove_orphans: bool = False,
+    force: bool = False,
 ) -> SyncResult:
     """Sync PCB footprints from schematic.
 
@@ -65,6 +68,8 @@ def sync_netlist(
         pcb_path: Path to .kicad_pcb file.
         dry_run: If True, compute diff without modifying files.
         output_path: If set, write modified PCB here instead of overwriting.
+        remove_orphans: If True, delete orphaned footprints from the PCB.
+        force: If True, remove orphans even if they have routed traces.
 
     Returns:
         SyncResult describing all actions taken or planned.
@@ -175,16 +180,39 @@ def sync_netlist(
             detail=f"Add {ref} ({item.value}, {item.footprint})",
         ))
 
-    # Orphaned footprints
+    # Orphaned footprints -- categorize as remove or report-only
     for ref in sorted(truly_orphaned):
         info = pcb_refs[ref]
-        result.orphaned.append(SyncAction(
-            action="orphan",
-            reference=ref,
-            footprint=info["footprint"],
-            value=info["value"],
-            detail=f"Orphan: {ref} ({info['value']}, {info['footprint']})",
-        ))
+        if remove_orphans:
+            # Check for connected traces (safety check)
+            has_traces = pcb.footprint_has_traces(ref)
+            if has_traces and not force:
+                result.errors.append(
+                    f"Orphan {ref} has routed traces; use --force to remove"
+                )
+                result.orphaned.append(SyncAction(
+                    action="orphan",
+                    reference=ref,
+                    footprint=info["footprint"],
+                    value=info["value"],
+                    detail=f"Orphan: {ref} ({info['value']}, {info['footprint']}) - has traces",
+                ))
+            else:
+                result.removed.append(SyncAction(
+                    action="remove",
+                    reference=ref,
+                    footprint=info["footprint"],
+                    value=info["value"],
+                    detail=f"Remove: {ref} ({info['value']}, {info['footprint']})",
+                ))
+        else:
+            result.orphaned.append(SyncAction(
+                action="orphan",
+                reference=ref,
+                footprint=info["footprint"],
+                value=info["value"],
+                detail=f"Orphan: {ref} ({info['value']}, {info['footprint']})",
+            ))
 
     # --- Apply changes if not dry-run ---
     if not dry_run and result.has_changes:
@@ -208,6 +236,13 @@ def sync_netlist(
             except Exception as e:
                 result.errors.append(
                     f"Failed to add footprint for {action.reference}: {e}"
+                )
+
+        # Remove orphaned footprints
+        for action in result.removed:
+            if not pcb.remove_footprint(action.reference):
+                result.errors.append(
+                    f"Failed to remove footprint {action.reference}"
                 )
 
         # Update net assignments from schematic netlist (covers renamed refs
@@ -296,6 +331,12 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             lines.append(f"    {action.reference}: {action.value} ({action.footprint})")
         lines.append("")
 
+    if result.removed:
+        lines.append(f"  Removed footprints ({len(result.removed)}):")
+        for action in result.removed:
+            lines.append(f"    {action.reference}: {action.value} ({action.footprint})")
+        lines.append("")
+
     if result.orphaned:
         lines.append(f"  Orphaned footprints ({len(result.orphaned)}):")
         for action in result.orphaned:
@@ -341,6 +382,14 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             }
             for a in result.orphaned
         ],
+        "removed": [
+            {
+                "reference": a.reference,
+                "footprint": a.footprint,
+                "value": a.value,
+            }
+            for a in result.removed
+        ],
         "errors": result.errors,
     }
     return json.dumps(output, indent=2)
@@ -352,6 +401,8 @@ def run_sync_netlist(
     dry_run: bool = False,
     output_path: Path | None = None,
     output_format: str = "text",
+    remove_orphans: bool = False,
+    force: bool = False,
 ) -> int:
     """Run the sync-netlist command.
 
@@ -361,6 +412,8 @@ def run_sync_netlist(
         dry_run: Preview changes without modifying.
         output_path: Alternative output path for modified PCB.
         output_format: "text" or "json".
+        remove_orphans: If True, delete orphaned footprints.
+        force: If True, remove orphans even with routed traces.
 
     Returns:
         Exit code (0 for success, 1 for errors).
@@ -370,6 +423,8 @@ def run_sync_netlist(
         pcb_path=pcb_path,
         dry_run=dry_run,
         output_path=output_path,
+        remove_orphans=remove_orphans,
+        force=force,
     )
 
     if output_format == "json":
