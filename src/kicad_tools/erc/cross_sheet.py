@@ -1,9 +1,17 @@
-"""Cross-sheet duplicate reference designator detection.
+"""Cross-sheet ERC helpers.
 
-Detects duplicate reference designators that span different hierarchical
-sheets in a KiCad schematic project. KiCad's built-in ERC only reliably
-detects duplicates within a single flat schematic; this module fills the
-gap for hierarchical designs.
+Provides two cross-sheet checks that complement KiCad's built-in ERC:
+
+1. **Duplicate reference detection** -- detects duplicate reference
+   designators that span different hierarchical sheets.  KiCad's built-in
+   ERC only reliably detects duplicates within a single flat schematic;
+   this module fills the gap for hierarchical designs.
+
+2. **False-positive global label filtering** -- KiCad reports
+   ``single_global_label`` / ``isolated_pin_label`` on a per-sheet basis
+   without aggregating across the full hierarchy.  A global label that
+   appears in multiple sheets is *not* truly isolated; this module
+   suppresses those false positives.
 """
 
 from __future__ import annotations
@@ -162,3 +170,126 @@ def _suggest_next_available(
     max_num = max(nums) if nums else 0
     next_num = min(n for n in range(1, max_num + 2) if n not in nums)
     return f"Consider renaming the duplicate to {prefix}{next_num}"
+
+
+# ---------------------------------------------------------------------------
+# Cross-sheet global label false-positive filtering
+# ---------------------------------------------------------------------------
+
+
+def build_global_label_inventory(root_schematic: str) -> dict[str, set[str]]:
+    """Build an inventory of global label names to the sheets they appear on.
+
+    Traverses the full schematic hierarchy and collects every
+    ``global_label`` element.
+
+    Args:
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        A mapping of label name to the set of sheet paths where it appears.
+    """
+    from kicad_tools.schema.hierarchy import build_hierarchy
+    from kicad_tools.schema.schematic import Schematic
+
+    hierarchy = build_hierarchy(root_schematic)
+
+    inventory: dict[str, set[str]] = defaultdict(set)
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+
+        sheet_path = node.get_path_string()
+
+        for gl in sch.global_labels:
+            inventory[gl.text].add(sheet_path)
+
+    return dict(inventory)
+
+
+def _extract_label_name(description: str) -> str | None:
+    """Extract a label name from a KiCad ERC violation description.
+
+    KiCad formats these descriptions in several ways:
+
+    * ``Label 'AUDIO_L' appears only once in the design``
+    * ``Pin connected to only other pins or labels on the sheet``
+      (followed by items that contain the label name)
+    * ``Global label 'AUDIO_L' is not connected anywhere else in the
+      schematic``
+
+    Returns the extracted label name, or ``None`` if no label name
+    could be parsed.
+    """
+    # Match quoted label name patterns
+    m = re.search(r"[Ll]abel\s+'([^']+)'", description)
+    if m:
+        return m.group(1)
+
+    m = re.search(r'"([^"]+)"', description)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def filter_cross_sheet_global_labels(
+    violations: list[dict],
+    root_schematic: str,
+) -> list[dict]:
+    """Remove false-positive ``single_global_label`` and ``isolated_pin_label``
+    violations for global labels that appear on multiple sheets.
+
+    KiCad's ERC engine reports these violations per-sheet without aggregating
+    across the hierarchy.  A global label such as ``AUDIO_L`` that appears in
+    ``/DAC``, ``/Connectors``, and ``/Sync`` may get reported as
+    "only appears once" when KiCad processes each sheet in isolation.
+
+    This function builds a cross-sheet global label inventory and suppresses
+    violations whose label name appears on two or more distinct sheets.
+
+    Args:
+        violations: List of raw violation dicts as parsed from KiCad's JSON
+            report.  Each dict must have at least ``"type"`` and
+            ``"description"`` keys.
+        root_schematic: Path to the root ``.kicad_sch`` file used to build
+            the global label inventory.
+
+    Returns:
+        A new list with false-positive violations removed.  Violations of
+        other types pass through unchanged.
+    """
+    target_types = {"single_global_label", "isolated_pin_label"}
+
+    # Quick check: if no target violations exist, skip the expensive
+    # hierarchy traversal.
+    has_target = any(v.get("type", "") in target_types for v in violations)
+    if not has_target:
+        return violations
+
+    inventory = build_global_label_inventory(root_schematic)
+
+    filtered: list[dict] = []
+    for v in violations:
+        vtype = v.get("type", "")
+        if vtype not in target_types:
+            filtered.append(v)
+            continue
+
+        label_name = _extract_label_name(v.get("description", ""))
+        if label_name is None:
+            # Could not parse label name -- keep the violation to be safe.
+            filtered.append(v)
+            continue
+
+        sheets = inventory.get(label_name, set())
+        if len(sheets) >= 2:
+            # Label appears on multiple sheets -- this is a false positive.
+            continue
+
+        filtered.append(v)
+
+    return filtered
