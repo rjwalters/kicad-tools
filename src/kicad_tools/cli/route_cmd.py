@@ -3239,7 +3239,7 @@ def main(argv: list[str] | None = None) -> int:
         # Check if interrupted and save partial results
         if _interrupt_state["interrupted"]:
             _save_partial_results()
-            return 2  # Exit code 2 indicates interruption with partial results saved
+            return 5  # Exit code 5 indicates interruption with partial results saved
 
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
