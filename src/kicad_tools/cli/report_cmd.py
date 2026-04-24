@@ -354,6 +354,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "schematic_sheets.json": "schematic_sheets",
         "pcb_figures.json": "pcb_figures",
         "analog_components.json": "analog_components",
+        "narrative.json": "_narrative",
     }
 
     for filename, field_name in mappings.items():
@@ -378,6 +379,23 @@ def _load_data_dir(data_dir_str: str) -> dict:
     # ReportData.analog_components expects a plain list[dict].
     if "analog_components" in result and isinstance(result["analog_components"], dict):
         result["analog_components"] = result["analog_components"].get("components", [])
+
+    # Narrative: the collector writes a single dict with sub-keys;
+    # unpack into individual ReportData fields.
+    if "_narrative" in result and isinstance(result["_narrative"], dict):
+        narrative = result.pop("_narrative")
+        for key in (
+            "design_narrative",
+            "functional_blocks",
+            "interfaces",
+            "power_architecture",
+            "assembly_notes",
+        ):
+            val = narrative.get(key)
+            if val is not None:
+                result[key] = val
+    else:
+        result.pop("_narrative", None)
 
     # Load notes from text file
     notes_path = data_dir / "notes.txt"

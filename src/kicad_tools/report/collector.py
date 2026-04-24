@@ -146,9 +146,17 @@ class ReportDataCollector:
                 files,
                 lambda: self.collect_bom(sch_path),
             )
+
+            # Narrative (design description, interfaces, power rails, assembly notes)
+            self._safe_collect(
+                "narrative",
+                output_dir,
+                files,
+                lambda: self.collect_narrative(sch_path, pcb),
+            )
         else:
             logger.warning(
-                "No schematic found for %s; skipping BOM collection. "
+                "No schematic found for %s; skipping BOM and narrative collection. "
                 "Use --sch to specify explicitly.",
                 self.pcb_path,
             )
@@ -512,6 +520,333 @@ class ReportDataCollector:
         return {
             "count": len(components),
             "components": [c.to_dict() for c in components],
+        }
+
+    def collect_narrative(self, sch_path: Path, pcb: Any) -> dict[str, Any]:
+        """Collect design narrative from schematic metadata.
+
+        Extracts title-block comments, hierarchical sheet names,
+        interface labels, power rail symbols, and assembly guidance.
+        Each sub-section is collected independently; failures in one
+        do not prevent the others from populating.
+
+        Args:
+            sch_path: Path to root ``.kicad_sch`` file.
+            pcb: Loaded PCB object (used for assembly note heuristics).
+
+        Returns:
+            Dictionary with ``design_narrative``, ``functional_blocks``,
+            ``interfaces``, ``power_architecture``, and ``assembly_notes``
+            keys. Any section may be ``None`` on error or when no data
+            is available.
+        """
+        from kicad_tools.schema.schematic import Schematic
+
+        sch = Schematic.load(sch_path)
+        result: dict[str, Any] = {
+            "design_narrative": None,
+            "functional_blocks": None,
+            "interfaces": None,
+            "power_architecture": None,
+            "assembly_notes": None,
+        }
+
+        # --- Title-block narrative ---
+        try:
+            result["design_narrative"] = self._extract_design_narrative(
+                sch, sch_path
+            )
+        except Exception:
+            logger.warning("Design narrative extraction failed", exc_info=True)
+
+        # --- Functional blocks from hierarchical sheets ---
+        try:
+            result["functional_blocks"] = self._extract_functional_blocks(sch)
+        except Exception:
+            logger.warning("Functional block extraction failed", exc_info=True)
+
+        # --- Interface detection from labels ---
+        try:
+            result["interfaces"] = self._detect_interfaces(sch, sch_path)
+        except Exception:
+            logger.warning("Interface detection failed", exc_info=True)
+
+        # --- Power architecture from symbols ---
+        try:
+            result["power_architecture"] = self._extract_power_architecture(
+                sch, sch_path
+            )
+        except Exception:
+            logger.warning("Power architecture extraction failed", exc_info=True)
+
+        # --- Assembly notes from PCB footprints ---
+        try:
+            result["assembly_notes"] = self._extract_assembly_notes(pcb)
+        except Exception:
+            logger.warning("Assembly note extraction failed", exc_info=True)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Narrative sub-extractors
+    # ------------------------------------------------------------------
+
+    def _extract_design_narrative(
+        self, sch: Any, sch_path: Path
+    ) -> str | None:
+        """Build a narrative string from title-block comments.
+
+        Concatenates the root title-block title and numbered comments,
+        then appends title-block comments from sub-sheets.
+
+        Returns ``None`` when no narrative text is found.
+        """
+        from kicad_tools.schema.schematic import Schematic
+
+        parts: list[str] = []
+
+        # Root title block
+        tb = sch.title_block
+        if tb.title:
+            parts.append(tb.title)
+        for _num in sorted(tb.comments.keys()):
+            text = tb.comments[_num].strip()
+            if text:
+                parts.append(text)
+
+        # Sub-sheet title blocks
+        for sheet in sch.sheets:
+            if not sheet.filename:
+                continue
+            sub_path = sch_path.parent / sheet.filename
+            if not sub_path.exists():
+                continue
+            try:
+                sub_sch = Schematic.load(sub_path)
+                sub_tb = sub_sch.title_block
+                for _num in sorted(sub_tb.comments.keys()):
+                    text = sub_tb.comments[_num].strip()
+                    if text:
+                        parts.append(text)
+            except Exception:
+                logger.debug(
+                    "Could not load sub-sheet %s for narrative",
+                    sub_path,
+                    exc_info=True,
+                )
+
+        return "\n\n".join(parts) if parts else None
+
+    def _extract_functional_blocks(self, sch: Any) -> list[dict[str, str]] | None:
+        """Return hierarchical sheet names as functional block summaries.
+
+        Returns ``None`` when the schematic has no hierarchical sheets.
+        """
+        if not sch.sheets:
+            return None
+
+        blocks = []
+        for sheet in sch.sheets:
+            name = sheet.name or sheet.filename or "Unnamed"
+            blocks.append({"name": name, "filename": sheet.filename})
+        return blocks if blocks else None
+
+    # Interface detection patterns (protocol -> list of signal name patterns).
+    # Each pattern is matched as a case-insensitive substring in label text.
+    _INTERFACE_PATTERNS: dict[str, list[str]] = {
+        "I2C": ["SDA", "SCL"],
+        "SPI": ["MOSI", "MISO", "SCK", "SCLK", "SDI", "SDO"],
+        "I2S": ["BCLK", "LRCLK", "DOUT", "DIN", "MCLK"],
+        "UART": ["TX", "RX"],
+        "USB": ["D+", "D-", "VBUS", "USB_D"],
+    }
+
+    def _detect_interfaces(
+        self, sch: Any, sch_path: Path
+    ) -> list[dict[str, Any]] | None:
+        """Heuristically detect communication interfaces from label names.
+
+        Scans global labels and local labels in the root schematic and
+        sub-sheets.  A protocol is reported when at least two of its
+        characteristic signal names are found.
+
+        Returns ``None`` when no interfaces are detected.
+        """
+        from kicad_tools.schema.schematic import Schematic
+
+        all_labels: set[str] = set()
+
+        # Collect labels from root schematic
+        for lbl in sch.global_labels:
+            all_labels.add(lbl.text.upper())
+        for lbl in sch.labels:
+            all_labels.add(lbl.text.upper())
+
+        # Collect labels from sub-sheets
+        for sheet in sch.sheets:
+            if not sheet.filename:
+                continue
+            sub_path = sch_path.parent / sheet.filename
+            if not sub_path.exists():
+                continue
+            try:
+                sub_sch = Schematic.load(sub_path)
+                for lbl in sub_sch.global_labels:
+                    all_labels.add(lbl.text.upper())
+                for lbl in sub_sch.labels:
+                    all_labels.add(lbl.text.upper())
+            except Exception:
+                logger.debug(
+                    "Could not load sub-sheet %s for interface detection",
+                    sub_path,
+                    exc_info=True,
+                )
+
+        detected: list[dict[str, Any]] = []
+        for protocol, patterns in self._INTERFACE_PATTERNS.items():
+            matched = []
+            for pattern in patterns:
+                for label_text in all_labels:
+                    if pattern in label_text:
+                        matched.append(label_text)
+                        break  # one match per pattern is enough
+            if len(matched) >= 2:
+                detected.append(
+                    {"protocol": protocol, "signals": sorted(set(matched))}
+                )
+
+        return detected if detected else None
+
+    def _extract_power_architecture(
+        self, sch: Any, sch_path: Path
+    ) -> list[dict[str, str | None]] | None:
+        """Enumerate power rails and regulators.
+
+        Finds symbols with ``power:`` library prefix and regulator
+        components (``Regulator_Linear:`` or ``Regulator_Switching:``
+        lib_id prefix).
+
+        Returns ``None`` when no power information is found.
+        """
+        from kicad_tools.schema.schematic import Schematic
+
+        rails: set[str] = set()
+        regulators: list[dict[str, str | None]] = []
+
+        def _scan_schematic(s: Any) -> None:
+            for sym in s.symbols:
+                lib_id = sym.lib_id or ""
+                if lib_id.startswith("power:"):
+                    # Extract rail name from Value property
+                    value = ""
+                    if "Value" in sym.properties:
+                        value = sym.properties["Value"].value
+                    if value:
+                        rails.add(value)
+                elif lib_id.startswith(
+                    ("Regulator_Linear:", "Regulator_Switching:")
+                ):
+                    ref = sym.reference or ""
+                    value = ""
+                    if "Value" in sym.properties:
+                        value = sym.properties["Value"].value
+                    regulators.append({"reference": ref, "value": value})
+
+        _scan_schematic(sch)
+
+        # Scan sub-sheets
+        for sheet in sch.sheets:
+            if not sheet.filename:
+                continue
+            sub_path = sch_path.parent / sheet.filename
+            if not sub_path.exists():
+                continue
+            try:
+                sub_sch = Schematic.load(sub_path)
+                _scan_schematic(sub_sch)
+            except Exception:
+                logger.debug(
+                    "Could not load sub-sheet %s for power architecture",
+                    sub_path,
+                    exc_info=True,
+                )
+
+        if not rails and not regulators:
+            return None
+
+        result: list[dict[str, str | None]] = []
+        for rail in sorted(rails):
+            result.append({"rail": rail, "type": "power_symbol"})
+        for reg in regulators:
+            result.append(
+                {
+                    "rail": reg["reference"],
+                    "type": "regulator",
+                    "value": reg["value"],
+                }
+            )
+        return result if result else None
+
+    def _extract_assembly_notes(self, pcb: Any) -> dict[str, Any] | None:
+        """Generate assembly guidance from PCB footprint analysis.
+
+        Detects fine-pitch packages (QFP, BGA), thermal pads, and
+        polarized components. Returns ``None`` when no noteworthy
+        assembly observations are found.
+        """
+        import re
+
+        fine_pitch_count = 0
+        thermal_pad_count = 0
+        polarized_count = 0
+        fine_pitch_parts: list[str] = []
+        _FINE_PITCH_CAP = 10  # cap listed parts for readability
+
+        for fp in pcb.footprints:
+            fp_name = getattr(fp, "name", "") or ""
+            ref = getattr(fp, "reference", "") or ""
+
+            # Fine-pitch detection: QFP, BGA, QFN patterns
+            if re.search(r"(QFP|BGA|QFN)", fp_name, re.IGNORECASE):
+                fine_pitch_count += 1
+                if len(fine_pitch_parts) < _FINE_PITCH_CAP:
+                    fine_pitch_parts.append(ref or fp_name)
+
+            # Thermal pad detection
+            if re.search(
+                r"(ThermalVia|ExposedPad|Thermal)", fp_name, re.IGNORECASE
+            ):
+                thermal_pad_count += 1
+
+            # Polarized component detection (electrolytic caps, diodes, LEDs)
+            if ref.startswith("D") or re.search(
+                r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE
+            ):
+                polarized_count += 1
+
+        if fine_pitch_count == 0 and thermal_pad_count == 0 and polarized_count == 0:
+            return None
+
+        summary_parts: list[str] = []
+        if fine_pitch_count:
+            summary_parts.append(
+                f"{fine_pitch_count} fine-pitch component{'s' if fine_pitch_count != 1 else ''}"
+            )
+        if thermal_pad_count:
+            summary_parts.append(
+                f"{thermal_pad_count} thermal pad{'s' if thermal_pad_count != 1 else ''}"
+            )
+        if polarized_count:
+            summary_parts.append(
+                f"{polarized_count} polarized component{'s' if polarized_count != 1 else ''}"
+            )
+
+        return {
+            "fine_pitch_count": fine_pitch_count,
+            "fine_pitch_parts": fine_pitch_parts,
+            "thermal_pad_count": thermal_pad_count,
+            "polarized_count": polarized_count,
+            "summary": "; ".join(summary_parts),
         }
 
     # ------------------------------------------------------------------

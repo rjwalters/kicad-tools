@@ -38,6 +38,69 @@ header-includes:
 {% endif %}
 
 {% endif %}
+{% if design_narrative or functional_blocks or interfaces or power_architecture %}
+## Design Overview
+
+{% if design_narrative %}
+### Theory of Operation
+
+{{ design_narrative }}
+
+{% endif %}
+{% if functional_blocks %}
+### Functional Blocks
+
+{% for block in functional_blocks %}
+- **{{ block.name }}**{% if block.filename %} ({{ block.filename }}){% endif %}
+
+{% endfor %}
+{% endif %}
+{% if interfaces %}
+### Communication Interfaces
+
+| Protocol | Signals |
+|----------|---------|
+{% for iface in interfaces %}
+| {{ iface.protocol }} | {{ iface.signals | join(", ") }} |
+{% endfor %}
+
+{% endif %}
+{% if power_architecture %}
+### Power Architecture
+
+{% set power_symbols = power_architecture | selectattr('type', 'equalto', 'power_symbol') | list %}
+{% set regulators = power_architecture | selectattr('type', 'equalto', 'regulator') | list %}
+{% if power_symbols %}
+**Power Rails**: {{ power_symbols | map(attribute='rail') | join(", ") }}
+
+{% endif %}
+{% if regulators %}
+| Regulator | Device |
+|-----------|--------|
+{% for reg in regulators %}
+| {{ reg.rail }} | {{ reg.value | default("", true) }} |
+{% endfor %}
+
+{% endif %}
+{% endif %}
+{% endif %}
+{% if assembly_notes %}
+## Assembly Notes
+
+{{ assembly_notes.summary }}
+
+{% if assembly_notes.fine_pitch_count is defined and assembly_notes.fine_pitch_count > 0 %}
+- **Fine-pitch components**: {{ assembly_notes.fine_pitch_count }}{% if assembly_notes.fine_pitch_parts %} ({{ assembly_notes.fine_pitch_parts | join(", ") }}){% endif %}
+
+{% endif %}
+{% if assembly_notes.thermal_pad_count is defined and assembly_notes.thermal_pad_count > 0 %}
+- **Thermal pads**: {{ assembly_notes.thermal_pad_count }} -- verify solder paste apertures
+{% endif %}
+{% if assembly_notes.polarized_count is defined and assembly_notes.polarized_count > 0 %}
+- **Polarized components**: {{ assembly_notes.polarized_count }} -- check orientation markings
+{% endif %}
+
+{% endif %}
 {% if erc %}
 ## ERC Status
 
