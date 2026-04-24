@@ -57,6 +57,7 @@ class DesignRules:
     via_clearance: float = 0.2  # mm
     min_drill_clearance: float = 0.102  # mm (minimum drill-to-drill spacing, including same-net)
     grid_resolution: float = 0.1  # mm (routing grid)
+    grid_origin_offset: tuple[float, float] = (0.0, 0.0)  # mm (grid origin shift for mixed-pitch alignment)
 
     # Per-component clearance overrides (Issue #1016)
     # Maps component reference (e.g., "U1") to clearance in mm
