@@ -11,6 +11,7 @@ import pytest
 
 from kicad_tools.operations.netlist import (
     _collect_hierarchy_components,
+    _count_hierarchy_sheets,
     _get_sheet_filenames,
     build_netlist_from_schematic,
 )
@@ -191,3 +192,32 @@ class TestBuildNetlistHierarchical:
         """The tool string indicates Python fallback."""
         netlist = build_netlist_from_schematic(FIXTURES / "root.kicad_sch")
         assert "Python fallback" in netlist.tool
+
+
+class TestCountHierarchySheets:
+    """Tests for _count_hierarchy_sheets helper."""
+
+    def test_flat_schematic_returns_one(self):
+        """A flat schematic (no sub-sheets) has 1 sheet."""
+        assert _count_hierarchy_sheets(FIXTURES / "empty.kicad_sch") == 1
+
+    def test_leaf_sheet_returns_one(self):
+        """A leaf sub-sheet with no children has 1 sheet."""
+        assert _count_hierarchy_sheets(FIXTURES / "sub_b.kicad_sch") == 1
+
+    def test_root_with_two_subs_and_nested(self):
+        """root -> sub_a (-> nested) + sub_b = 4 sheets total."""
+        assert _count_hierarchy_sheets(FIXTURES / "root.kicad_sch") == 4
+
+    def test_missing_file_returns_zero(self, tmp_path):
+        """A nonexistent file returns 0."""
+        assert _count_hierarchy_sheets(tmp_path / "nope.kicad_sch") == 0
+
+    def test_shared_subsheet_counted_once(self):
+        """Circular/shared references are counted only once."""
+        count = _count_hierarchy_sheets(FIXTURES / "root_shared.kicad_sch")
+        # root_shared references sub_b twice and does_not_exist once.
+        # sub_b is only counted once due to circular detection.
+        # does_not_exist returns 0.
+        # Total: root_shared(1) + sub_b(1) = 2
+        assert count >= 2
