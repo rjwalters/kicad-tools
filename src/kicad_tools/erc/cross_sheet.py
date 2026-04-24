@@ -1,6 +1,6 @@
 """Cross-sheet ERC helpers.
 
-Provides two cross-sheet checks that complement KiCad's built-in ERC:
+Provides cross-sheet checks that complement KiCad's built-in ERC:
 
 1. **Duplicate reference detection** -- detects duplicate reference
    designators that span different hierarchical sheets.  KiCad's built-in
@@ -12,6 +12,12 @@ Provides two cross-sheet checks that complement KiCad's built-in ERC:
    without aggregating across the full hierarchy.  A global label that
    appears in multiple sheets is *not* truly isolated; this module
    suppresses those false positives.
+
+3. **False-positive power-pin filtering** -- KiCad reports
+   ``power_pin_not_driven`` on a per-sheet basis without checking for
+   ``power_out`` drivers on other sheets.  A power net driven by a
+   ``PWR_FLAG`` or voltage regulator output on one sheet should not be
+   flagged as undriven on another sheet.
 """
 
 from __future__ import annotations
@@ -362,6 +368,172 @@ def filter_cross_sheet_global_labels(
         sheets = inventory.get(label_name, set())
         if len(sheets) >= 2:
             # Label appears on multiple sheets -- this is a false positive.
+            continue
+
+        filtered.append(v)
+
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Cross-sheet power-pin false-positive filtering
+# ---------------------------------------------------------------------------
+
+
+def build_power_driver_inventory(root_schematic: str) -> set[str]:
+    """Build an inventory of power net names that have a ``power_out`` driver.
+
+    Traverses the full schematic hierarchy and inspects every symbol's
+    library definition for ``power_out`` pins.  Power symbols (lib_id
+    starting with ``power:``) contribute their *value* as the net name
+    (e.g. a ``power:+3V3`` symbol drives the ``+3V3`` net).  Non-power
+    symbols contribute the pin *name* for each ``power_out`` pin (e.g. a
+    voltage regulator with a ``power_out`` pin named ``VOUT``).
+
+    ``PWR_FLAG`` symbols are included -- they have a single ``power_out``
+    pin and act as explicit power-source declarations.
+
+    Args:
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        A set of net names that have at least one ``power_out`` driver
+        somewhere in the hierarchy.
+    """
+    from kicad_tools.schema.hierarchy import build_hierarchy
+    from kicad_tools.schema.library import LibraryPin
+    from kicad_tools.schema.schematic import Schematic
+
+    hierarchy = build_hierarchy(root_schematic)
+
+    driven_nets: set[str] = set()
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+
+        for sym in sch.symbols:
+            lib_sym = sch.get_lib_symbol(sym.lib_id)
+            if lib_sym is None:
+                continue
+
+            # Collect all pins with power_out type from the library def.
+            power_out_pins: list[LibraryPin] = []
+            for sub_sym in lib_sym.find_all("symbol"):
+                for pin_sexp in sub_sym.find_all("pin"):
+                    pin = LibraryPin.from_sexp(pin_sexp)
+                    if pin.type == "power_out":
+                        power_out_pins.append(pin)
+
+            if not power_out_pins:
+                continue
+
+            # For power symbols the net name is the symbol's value
+            # property (e.g. "+3V3", "GND").  For non-power symbols
+            # (e.g. a voltage regulator) the net name is the pin name.
+            if sym.lib_id.startswith("power:"):
+                net_name = sym.value
+                if net_name:
+                    driven_nets.add(net_name)
+            else:
+                for pin in power_out_pins:
+                    if pin.name:
+                        driven_nets.add(pin.name)
+
+    return driven_nets
+
+
+def _extract_power_net_name(
+    description: str, items: list[dict] | None = None
+) -> str | None:
+    """Extract the power net / pin name from a ``power_pin_not_driven`` violation.
+
+    KiCad formats these violations as:
+
+    * Description: ``"Power input pin not driven by any power output"``
+      (or similar generic text)
+    * Item description: ``"Pin VCC (power_in) of U1"``
+
+    The pin name (``VCC``) is used as the power net name because KiCad
+    power pins are named after the net they connect to.
+
+    Returns:
+        The extracted net name, or ``None`` if parsing fails.
+    """
+    # Try items first -- more reliable in modern KiCad
+    if items:
+        for item in items:
+            item_desc = item.get("description", "")
+            # Match "Pin <name> (power_in) of <ref>"
+            m = re.search(r"Pin\s+(\S+)\s+\(power_in\)", item_desc)
+            if m:
+                return m.group(1)
+            # Also match "Pin <name> of <ref>" without the type qualifier
+            m = re.search(r"Pin\s+(\S+)\s+of\s+", item_desc)
+            if m:
+                return m.group(1)
+
+    # Fall back to the top-level description
+    m = re.search(r"Pin\s+(\S+)", description)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def filter_cross_sheet_power_violations(
+    violations: list[dict],
+    root_schematic: str,
+) -> list[dict]:
+    """Remove false-positive ``power_pin_not_driven`` violations for power
+    nets that have a ``power_out`` driver on another sheet.
+
+    KiCad's ERC engine evaluates ``power_pin_not_driven`` on a per-sheet
+    basis without aggregating power drivers across the full hierarchy.
+    A ``power_in`` pin connected to ``+3V3`` is flagged as "not driven"
+    even when a ``PWR_FLAG`` or voltage regulator output on a different
+    sheet drives that same net.
+
+    This function builds a cross-sheet inventory of ``power_out`` drivers
+    and suppresses violations whose power net has a driver anywhere in
+    the hierarchy.
+
+    Args:
+        violations: List of raw violation dicts as parsed from KiCad's
+            JSON report.  Each dict must have at least ``"type"`` and
+            ``"description"`` keys.
+        root_schematic: Path to the root ``.kicad_sch`` file used to
+            build the power driver inventory.
+
+    Returns:
+        A new list with false-positive ``power_pin_not_driven``
+        violations removed.  All other violation types pass through
+        unchanged.
+    """
+    target_type = "power_pin_not_driven"
+
+    # Quick check: skip the expensive hierarchy traversal if there are
+    # no power_pin_not_driven violations.
+    has_target = any(v.get("type", "") == target_type for v in violations)
+    if not has_target:
+        return violations
+
+    driven_nets = build_power_driver_inventory(root_schematic)
+
+    filtered: list[dict] = []
+    for v in violations:
+        if v.get("type", "") != target_type:
+            filtered.append(v)
+            continue
+
+        net_name = _extract_power_net_name(
+            v.get("description", ""), v.get("items")
+        )
+
+        if net_name is not None and net_name in driven_nets:
+            # Power net has a driver on some sheet -- false positive.
             continue
 
         filtered.append(v)

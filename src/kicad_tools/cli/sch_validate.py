@@ -27,7 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli.runner import find_kicad_cli
-from kicad_tools.erc.cross_sheet import filter_cross_sheet_global_labels
+from kicad_tools.erc.cross_sheet import (
+    filter_cross_sheet_global_labels,
+    filter_cross_sheet_power_violations,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
 from kicad_tools.schematic.blocks.interface.debug import DebugHeader
@@ -142,6 +145,13 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                         # isolated_pin_label violations for labels that
                         # actually appear on multiple sheets.
                         raw_violations = filter_cross_sheet_global_labels(
+                            raw_violations, schematic_path
+                        )
+
+                        # Filter false-positive power_pin_not_driven
+                        # violations for power nets that have a
+                        # power_out driver on another sheet.
+                        raw_violations = filter_cross_sheet_power_violations(
                             raw_violations, schematic_path
                         )
 
