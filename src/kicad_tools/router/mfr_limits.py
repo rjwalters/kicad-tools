@@ -8,11 +8,13 @@ This module provides:
 
 Supported Manufacturers:
 - JLCPCB: Chinese low-cost PCB manufacturer
+- Seeed (Seeed Fusion): Uses JLCPCB-compatible manufacturing rules
 - OSHPark: US-based high-quality purple boards
 - PCBWay: Chinese manufacturer with good middle-ground specs
 """
 
 from dataclasses import dataclass
+from difflib import get_close_matches
 
 
 @dataclass(frozen=True)
@@ -73,13 +75,26 @@ MFR_PCBWAY = MfrLimits(
 # Mapping of manufacturer names to their limits
 MFR_LIMITS: dict[str, MfrLimits] = {
     "jlcpcb": MFR_JLCPCB,
+    "seeed": MFR_JLCPCB,  # Seeed Fusion uses JLCPCB-compatible rules
+    "seeed-fusion": MFR_JLCPCB,
     "oshpark": MFR_OSHPARK,
     "pcbway": MFR_PCBWAY,
+}
+
+# Aliases mapping alternative names to canonical MFR_LIMITS keys
+_MFR_ALIASES: dict[str, str] = {
+    "seeed_fusion": "seeed-fusion",
+    "seeedfusion": "seeed-fusion",
+    "seeedstudio": "seeed",
 }
 
 
 def get_mfr_limits(manufacturer: str) -> MfrLimits:
     """Get manufacturer limits by name.
+
+    Supports aliases (e.g., "seeed_fusion" -> "seeed-fusion") and
+    case-insensitive lookup. On unknown manufacturer, suggests close
+    matches via difflib.
 
     Args:
         manufacturer: Manufacturer name (case-insensitive)
@@ -91,10 +106,20 @@ def get_mfr_limits(manufacturer: str) -> MfrLimits:
         ValueError: If manufacturer is not recognized
     """
     mfr_lower = manufacturer.lower()
-    if mfr_lower not in MFR_LIMITS:
-        valid_mfrs = ", ".join(sorted(MFR_LIMITS.keys()))
-        raise ValueError(f"Unknown manufacturer '{manufacturer}'. Valid options: {valid_mfrs}")
-    return MFR_LIMITS[mfr_lower]
+
+    # Resolve aliases
+    mfr_lower = _MFR_ALIASES.get(mfr_lower, mfr_lower)
+
+    if mfr_lower in MFR_LIMITS:
+        return MFR_LIMITS[mfr_lower]
+
+    # Build error message with closest-match suggestions
+    all_names = sorted(set(MFR_LIMITS.keys()) | set(_MFR_ALIASES.keys()))
+    suggestions = get_close_matches(mfr_lower, all_names, n=3, cutoff=0.5)
+    msg = f"Unknown manufacturer '{manufacturer}'. Valid options: {', '.join(sorted(MFR_LIMITS.keys()))}"
+    if suggestions:
+        msg += f". Did you mean: {', '.join(suggestions)}?"
+    raise ValueError(msg)
 
 
 @dataclass
