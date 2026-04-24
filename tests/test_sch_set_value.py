@@ -76,6 +76,45 @@ MINIMAL_SCHEMATIC = """\
 """
 
 
+# Space-indented schematic matching real KiCad 8 output (4 spaces per level)
+SPACE_INDENTED_SCHEMATIC = """\
+(kicad_sch
+    (version 20231120)
+    (generator "test")
+    (generator_version "8.0")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (paper "A4")
+    (lib_symbols
+    )
+    (symbol
+        (lib_id "Device:R_Small")
+        (at 100 50 0)
+        (property "Reference" "R8"
+            (at 100 48 0)
+            (effects (font (size 1.27 1.27)))
+        )
+        (property "Value" "1k"
+            (at 100 52 0)
+            (effects (font (size 1.27 1.27)))
+        )
+        (property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+            (at 100 54 0)
+            (effects (font (size 1.27 1.27)) (hide yes))
+        )
+        (uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        (instances
+            (project "dac"
+                (path "/" (reference "R8") (unit 1))
+            )
+        )
+    )
+    (sheet_instances
+        (path "/" (page "1"))
+    )
+)
+"""
+
+
 def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch") -> Path:
     p = tmp_path / name
     p.write_text(content)
@@ -128,6 +167,51 @@ class TestSetValueText:
         result, success, _ = set_value_text(MINIMAL_SCHEMATIC, "R1", new_val)
         assert success is True
         assert new_val in result
+
+
+# ---------------------------------------------------------------------------
+# Space-indented schematic tests (KiCad 8 real output format)
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceIndentedSetValue:
+    def test_find_symbol_in_space_indented(self):
+        """find_symbol_text_range works with space-indented schematics."""
+        result = find_symbol_text_range(SPACE_INDENTED_SCHEMATIC, "R8")
+        assert result is not None
+        _, _, info = result
+        assert info["lib_id"] == "Device:R_Small"
+        assert info["value"] == "1k"
+        assert info["footprint"] == "Resistor_SMD:R_0402_1005Metric"
+
+    def test_set_value_space_indented(self):
+        """set_value_text works with space-indented schematics."""
+        result, success, msg = set_value_text(SPACE_INDENTED_SCHEMATIC, "R8", "470R")
+        assert success is True
+        assert '"Value" "470R"' in result
+        assert '"Value" "1k"' not in result
+        assert "Changed R8 value" in msg
+
+    def test_nonexistent_ref_space_indented(self):
+        """Non-existent ref returns failure on space-indented schematic."""
+        result, success, msg = set_value_text(SPACE_INDENTED_SCHEMATIC, "U99", "x")
+        assert success is False
+        assert "not found" in msg
+
+    def test_run_set_value_space_indented(self, tmp_path):
+        """run_set_value integration test with space-indented schematic."""
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SCHEMATIC)
+        ret = run_set_value(
+            schematic_path=sch,
+            ref="R8",
+            value="470R",
+            dry_run=False,
+            backup=False,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        assert '"Value" "470R"' in text
+        assert '"Value" "1k"' not in text
 
 
 # ---------------------------------------------------------------------------

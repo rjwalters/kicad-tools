@@ -80,6 +80,45 @@ MINIMAL_SCHEMATIC = """\
 """
 
 
+# Space-indented schematic matching real KiCad 8 output (4 spaces per level)
+SPACE_INDENTED_SCHEMATIC = """\
+(kicad_sch
+    (version 20231120)
+    (generator "test")
+    (generator_version "8.0")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (paper "A4")
+    (lib_symbols
+    )
+    (symbol
+        (lib_id "Device:R_Small")
+        (at 100 50 0)
+        (property "Reference" "R8"
+            (at 100 48 0)
+            (effects (font (size 1.27 1.27)))
+        )
+        (property "Value" "1k"
+            (at 100 52 0)
+            (effects (font (size 1.27 1.27)))
+        )
+        (property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+            (at 100 54 0)
+            (effects (font (size 1.27 1.27)) (hide yes))
+        )
+        (uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        (instances
+            (project "dac"
+                (path "/" (reference "R8") (unit 1))
+            )
+        )
+    )
+    (sheet_instances
+        (path "/" (page "1"))
+    )
+)
+"""
+
+
 def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch") -> Path:
     p = tmp_path / name
     p.write_text(content)
@@ -133,6 +172,45 @@ class TestSetFootprintText:
         result, success, _ = set_footprint_text(MINIMAL_SCHEMATIC, "R1", new_fp)
         assert success is True
         assert new_fp in result
+
+
+# ---------------------------------------------------------------------------
+# Space-indented schematic tests (KiCad 8 real output format)
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceIndentedSetFootprint:
+    def test_find_symbol_in_space_indented(self):
+        """find_symbol_text_range works with space-indented schematics."""
+        result = find_symbol_text_range(SPACE_INDENTED_SCHEMATIC, "R8")
+        assert result is not None
+        _, _, info = result
+        assert info["lib_id"] == "Device:R_Small"
+        assert info["footprint"] == "Resistor_SMD:R_0402_1005Metric"
+
+    def test_set_footprint_space_indented(self):
+        """set_footprint_text works with space-indented schematics."""
+        new_fp = "Resistor_SMD:R_0805_2012Metric"
+        result, success, msg = set_footprint_text(SPACE_INDENTED_SCHEMATIC, "R8", new_fp)
+        assert success is True
+        assert new_fp in result
+        assert "R_0402_1005Metric" not in result
+        assert "Changed R8 footprint" in msg
+
+    def test_run_set_footprint_space_indented(self, tmp_path):
+        """run_set_footprint integration test with space-indented schematic."""
+        sch = _write_sch(tmp_path, SPACE_INDENTED_SCHEMATIC)
+        ret = run_set_footprint(
+            schematic_path=sch,
+            ref="R8",
+            footprint="Resistor_SMD:R_0805_2012Metric",
+            dry_run=False,
+            backup=False,
+        )
+        assert ret == 0
+        text = sch.read_text()
+        assert "Resistor_SMD:R_0805_2012Metric" in text
+        assert "R_0402_1005Metric" not in text
 
 
 # ---------------------------------------------------------------------------

@@ -55,11 +55,11 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
 
     # First find all symbol instance blocks (not lib_symbols)
     symbol_pattern = re.compile(
-        r"\n(\t\(symbol\n"
-        r'\t\t\(lib_id "[^"]+"\)'
+        r"\n(\s+\(symbol\n"
+        r'\s+\(lib_id "[^"]+"\)'
         r".*?"
-        r"\t\t\(instances\n.*?\t\t\)\n"
-        r"\t\))",
+        r"\s+\(instances\n.*?\s+\)\n"
+        r"\s+\))",
         re.DOTALL,
     )
 
