@@ -172,6 +172,154 @@ SCHEMATIC_WITH_SAME_ORDER_DUPLICATE_WIRES = """\
 """
 
 
+# Schematic with a resistor at (100, 50) and wires connecting to its actual
+# pin positions (pin 1 at y=53.81, pin 2 at y=46.19) -- NOT the symbol center.
+# The old center-based heuristic would incorrectly flag these as dangling.
+SCHEMATIC_WITH_PIN_CONNECTED_WIRES = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000020")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "Device:R_0_1"
+        (polyline (pts (xy -1.016 -2.54) (xy -1.016 2.54)) (stroke (width 0) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "sym-r1")
+    (property "Reference" "R1" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pin-r1-1"))
+    (pin "2" (uuid "pin-r1-2"))
+    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 100 53.81) (xy 100 60))
+    (stroke (width 0) (type default))
+    (uuid "wire-pin1")
+  )
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default))
+    (uuid "wire-pin2")
+  )
+  (label "VCC" (at 100 60 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-vcc")
+  )
+  (label "GND" (at 100 40 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-gnd")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a rotated resistor (90 degrees) and wires to its pins.
+# At rotation=90, pin 1 (originally at 0, 3.81) maps to (3.81, 0) from center,
+# and pin 2 (originally at 0, -3.81) maps to (-3.81, 0) from center.
+# Symbol at (100, 50): pin 1 at (103.81, 50), pin 2 at (96.19, 50).
+SCHEMATIC_WITH_ROTATED_SYMBOL = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000021")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "Device:R_0_1"
+        (polyline (pts (xy -1.016 -2.54) (xy -1.016 2.54)) (stroke (width 0) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 50 90) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "sym-r2")
+    (property "Reference" "R1" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pin-r2-1"))
+    (pin "2" (uuid "pin-r2-2"))
+    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 103.81 50) (xy 110 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-rot-pin1")
+  )
+  (wire (pts (xy 96.19 50) (xy 90 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-rot-pin2")
+  )
+  (label "VCC" (at 110 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-vcc")
+  )
+  (label "GND" (at 90 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-gnd")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a symbol but no lib_symbols entry -- tests graceful fallback
+SCHEMATIC_WITH_MISSING_LIB_SYMBOL = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000022")
+  (paper "A4")
+  (lib_symbols)
+  (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "sym-missing")
+    (property "Reference" "R1" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pin-m1"))
+    (pin "2" (uuid "pin-m2"))
+    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 100 50) (xy 100 60))
+    (stroke (width 0) (type default))
+    (uuid "wire-center")
+  )
+  (label "NET1" (at 100 60 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-net1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -370,6 +518,47 @@ class TestCleanupWires:
         captured = capsys.readouterr()
         assert "Duplicate: 1" in captured.out
         assert "[duplicate]" in captured.out
+
+    def test_wire_to_pin_not_flagged_as_dangling(self, tmp_path):
+        """Wires connected to actual component pin positions are not flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_PIN_CONNECTED_WIRES)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        dangling = [i for i in issues if i.reason == "dangling"]
+        assert len(dangling) == 0, (
+            f"Expected no dangling wires but found {len(dangling)}: "
+            f"{[(d.start, d.end) for d in dangling]}"
+        )
+
+    def test_rotated_symbol_pin_wires_not_flagged(self, tmp_path):
+        """Wires to pins on a 90-degree rotated symbol are not flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_ROTATED_SYMBOL)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        dangling = [i for i in issues if i.reason == "dangling"]
+        assert len(dangling) == 0, (
+            f"Expected no dangling wires but found {len(dangling)}: "
+            f"{[(d.start, d.end) for d in dangling]}"
+        )
+
+    def test_missing_lib_symbol_falls_back_to_center(self, tmp_path):
+        """When library symbol is missing, symbol center is used as fallback."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_MISSING_LIB_SYMBOL)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        # Wire from (100, 50) to (100, 60): one end at symbol center (fallback),
+        # other end at a label -- should NOT be flagged as dangling
+        dangling = [i for i in issues if i.reason == "dangling"]
+        assert len(dangling) == 0
 
 
 # ---------------------------------------------------------------------------
