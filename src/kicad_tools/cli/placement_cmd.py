@@ -1890,6 +1890,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     optimize_parser.add_argument(
         "--boundary-margin",
+        "--board-margin",
         type=float,
         default=None,
         dest="boundary_margin",

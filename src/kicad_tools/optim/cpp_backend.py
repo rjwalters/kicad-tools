@@ -146,6 +146,8 @@ def compute_boundary_forces_cpp(
     components: list[Component],
     board_outline: Polygon,
     config: PlacementConfig,
+    *,
+    effective_boundary_charge: float | None = None,
 ) -> tuple[dict[str, Vector2D], dict[str, float]]:
     """Compute boundary forces using C++ backend.
 
@@ -153,6 +155,9 @@ def compute_boundary_forces_cpp(
         components: List of components.
         board_outline: Board outline polygon.
         config: Placement configuration.
+        effective_boundary_charge: Pre-computed boundary charge (auto-scaled
+            for component density).  When *None* the raw
+            ``config.boundary_charge`` is used.
 
     Returns:
         Tuple of (forces dict, torques dict) keyed by component ref.
@@ -180,12 +185,17 @@ def compute_boundary_forces_cpp(
         center = comp.position()
         inside_flags.append(board_outline.contains_point(center))
 
-    # Build ForceConfig
+    # Build ForceConfig -- use effective charge when provided
+    boundary_charge = (
+        effective_boundary_charge
+        if effective_boundary_charge is not None
+        else config.boundary_charge
+    )
     cpp_config = placement_cpp.ForceConfig()
     cpp_config.charge_density = config.charge_density
     cpp_config.min_distance = config.min_distance
     cpp_config.edge_samples = config.edge_samples
-    cpp_config.boundary_charge = config.boundary_charge
+    cpp_config.boundary_charge = boundary_charge
 
     result = placement_cpp.compute_boundary_forces(
         positions_x, positions_y,

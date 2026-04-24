@@ -39,6 +39,7 @@ class PlacementConfig:
     # Board boundary parameters
     boundary_charge: float = 200.0  # Extra charge on board edges
     boundary_margin: float = 1.0  # Minimum distance from board edge
+    auto_scale_boundary: bool = True  # Auto-scale boundary forces by component density
 
     # Edge constraint parameters
     edge_stiffness: float = 50.0  # Spring constant for edge constraints
