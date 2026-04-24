@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 #: embedded in documents, not sent to a vision model.
 REPORT_MAX_SIZE_PX = 3000
 
+#: Minimum PNG file size (bytes) for a schematic sheet to be considered
+#: non-blank.  Title-block-only PNGs rendered at 3000 px max dimension
+#: are typically under 50 KB, while sheets with component graphics are
+#: 100 KB+.  A 60 KB threshold provides a reasonable safety margin.
+_BLANK_PNG_THRESHOLD_BYTES = 60_000
+
 #: PCB presets to render, in order.
 #: Each tuple is (preset_name, output_filename, caption).
 _PCB_PRESETS: list[tuple[str, str, str]] = [
@@ -235,13 +241,27 @@ class ReportFigureGenerator:
                     try:
                         ok, err, _w, _h = _svg_to_png(svg_file, png_path, self.max_size_px)
                         if ok:
-                            entries.append(
-                                FigureEntry(
-                                    filename=png_name,
-                                    caption=f"Schematic: {svg_file.stem}",
-                                    figure_type="schematic",
+                            # Detect blank sheets: kicad-cli may produce SVGs
+                            # that contain only the title block and page border
+                            # (no component graphics).  These render to small
+                            # PNGs that would be misleading in the report.
+                            png_size = png_path.stat().st_size if png_path.exists() else 0
+                            if png_size < _BLANK_PNG_THRESHOLD_BYTES:
+                                logger.warning(
+                                    "Excluding blank schematic sheet '%s' "
+                                    "(PNG size %d bytes < %d byte threshold)",
+                                    svg_file.stem,
+                                    png_size,
+                                    _BLANK_PNG_THRESHOLD_BYTES,
                                 )
-                            )
+                            else:
+                                entries.append(
+                                    FigureEntry(
+                                        filename=png_name,
+                                        caption=f"Schematic: {svg_file.stem}",
+                                        figure_type="schematic",
+                                    )
+                                )
                         else:
                             logger.warning(
                                 "Failed to render schematic sheet '%s': %s",
