@@ -152,6 +152,15 @@ class FilledPolygon:
             self.max_y = max(ys)
 
 
+@dataclass
+class ZonePolygon:
+    """A zone boundary polygon with its net and layer."""
+
+    net_name: str
+    layer: str
+    points: list[tuple[float, float]]
+
+
 def get_net_map(sexp: SExp) -> dict[int, str]:
     """Build a mapping of net number to net name."""
     net_map = {}
@@ -209,6 +218,70 @@ def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
                 layers.append(zone_layer)
 
     return layers
+
+
+def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
+    """Extract zone boundary polygons for a given net.
+
+    Parses the S-expression structure:
+        (zone ... (polygon (pts (xy X Y) (xy X Y) ...)))
+
+    Supports both KiCad 8 (net_name node) and KiCad 9 (name-only net node)
+    formats.
+
+    Args:
+        sexp: PCB S-expression
+        net_name: Net name to find zone polygons for
+
+    Returns:
+        List of ZonePolygon objects with boundary points
+    """
+    polygons = []
+    for child in sexp.iter_children():
+        if child.tag != "zone":
+            continue
+
+        # Get net name from zone (same dual-format logic as find_zones_for_net)
+        zone_net_name = None
+        net_name_node = child.find_child("net_name")
+        if net_name_node:
+            zone_net_name = net_name_node.get_string(0)
+        else:
+            # KiCad 9 name-only format: (net "GND") without separate net_name node
+            net_node = child.find_child("net")
+            if net_node and net_node.get_int(0) is None:
+                zone_net_name = net_node.get_string(0)
+
+        if zone_net_name != net_name:
+            continue
+
+        # Get layer
+        layer_node = child.find_child("layer")
+        if not layer_node:
+            continue
+        zone_layer = layer_node.get_string(0)
+        if not zone_layer:
+            continue
+
+        # Get polygon boundary
+        polygon_node = child.find_child("polygon")
+        if not polygon_node:
+            continue
+
+        pts_node = polygon_node.find_child("pts")
+        if not pts_node:
+            continue
+
+        points: list[tuple[float, float]] = []
+        for xy_node in pts_node.find_children("xy"):
+            x = xy_node.get_float(0) or 0.0
+            y = xy_node.get_float(1) or 0.0
+            points.append((x, y))
+
+        if len(points) >= 3:
+            polygons.append(ZonePolygon(net_name=net_name, layer=zone_layer, points=points))
+
+    return polygons
 
 
 def find_all_plane_nets(sexp: SExp) -> dict[str, str]:
@@ -1616,79 +1689,6 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
             uuid_str=str(uuid.uuid4()),
         )
         sexp.append(seg)
-
-
-@dataclass
-class ZonePolygon:
-    """A zone boundary polygon with its net and layer."""
-
-    net_name: str
-    layer: str
-    points: list[tuple[float, float]]
-
-
-def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
-    """Extract zone boundary polygons for a given net.
-
-    Parses the S-expression structure:
-        (zone ... (polygon (pts (xy X Y) (xy X Y) ...)))
-
-    Supports both KiCad 8 (net_name node) and KiCad 9 (name-only net node)
-    formats.
-
-    Args:
-        sexp: PCB S-expression
-        net_name: Net name to find zone polygons for
-
-    Returns:
-        List of ZonePolygon objects with boundary points
-    """
-    polygons = []
-    for child in sexp.iter_children():
-        if child.tag != "zone":
-            continue
-
-        # Get net name from zone (same dual-format logic as find_zones_for_net)
-        zone_net_name = None
-        net_name_node = child.find_child("net_name")
-        if net_name_node:
-            zone_net_name = net_name_node.get_string(0)
-        else:
-            # KiCad 9 name-only format: (net "GND") without separate net_name node
-            net_node = child.find_child("net")
-            if net_node and net_node.get_int(0) is None:
-                zone_net_name = net_node.get_string(0)
-
-        if zone_net_name != net_name:
-            continue
-
-        # Get layer
-        layer_node = child.find_child("layer")
-        if not layer_node:
-            continue
-        zone_layer = layer_node.get_string(0)
-        if not zone_layer:
-            continue
-
-        # Get polygon boundary
-        polygon_node = child.find_child("polygon")
-        if not polygon_node:
-            continue
-
-        pts_node = polygon_node.find_child("pts")
-        if not pts_node:
-            continue
-
-        points: list[tuple[float, float]] = []
-        for xy_node in pts_node.find_children("xy"):
-            x = xy_node.get_float(0) or 0.0
-            y = xy_node.get_float(1) or 0.0
-            points.append((x, y))
-
-        if len(points) >= 3:
-            polygons.append(ZonePolygon(net_name=net_name, layer=zone_layer, points=points))
-
-    return polygons
 
 
 def find_all_filled_polygons(

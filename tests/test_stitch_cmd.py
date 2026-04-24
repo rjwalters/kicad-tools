@@ -39,6 +39,31 @@ from kicad_tools.cli.stitch_cmd import (
     segment_to_segment_distance,
 )
 from kicad_tools.core.sexp_file import load_pcb
+
+
+class TestStitchModuleImport:
+    """Verify stitch_cmd imports without NameError (regression for #1988).
+
+    ZonePolygon is referenced in the type annotation of is_pad_connected().
+    If ZonePolygon is defined after is_pad_connected and annotations are
+    eagerly evaluated, a NameError would occur on import.
+    """
+
+    def test_import_does_not_crash(self) -> None:
+        """Importing stitch_cmd must not raise NameError for ZonePolygon."""
+        import importlib
+        mod = importlib.import_module("kicad_tools.cli.stitch_cmd")
+        assert hasattr(mod, "ZonePolygon")
+        assert hasattr(mod, "is_pad_connected")
+
+    def test_type_hints_resolve(self) -> None:
+        """typing.get_type_hints on is_pad_connected must resolve ZonePolygon."""
+        import typing
+        hints = typing.get_type_hints(is_pad_connected)
+        # same_net_zone_polygons should resolve to list[ZonePolygon] | None
+        assert "same_net_zone_polygons" in hints
+
+
 # PCB with SMD components on GND and +3.3V nets for testing stitching
 STITCH_TEST_PCB = """(kicad_pcb
   (version 20240108)
