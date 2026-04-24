@@ -59,9 +59,13 @@ class TestMfrLimits:
     def test_all_manufacturers_in_limits_dict(self):
         """Test that all manufacturer presets are in the MFR_LIMITS dict."""
         assert "jlcpcb" in MFR_LIMITS
+        assert "seeed" in MFR_LIMITS
+        assert "seeed-fusion" in MFR_LIMITS
         assert "oshpark" in MFR_LIMITS
         assert "pcbway" in MFR_LIMITS
         assert MFR_LIMITS["jlcpcb"] is MFR_JLCPCB
+        assert MFR_LIMITS["seeed"] is MFR_JLCPCB
+        assert MFR_LIMITS["seeed-fusion"] is MFR_JLCPCB
         assert MFR_LIMITS["oshpark"] is MFR_OSHPARK
         assert MFR_LIMITS["pcbway"] is MFR_PCBWAY
 
@@ -92,6 +96,54 @@ class TestGetMfrLimits:
         assert "jlcpcb" in error_msg
         assert "oshpark" in error_msg
         assert "pcbway" in error_msg
+
+    def test_seeed_alias_resolves_to_jlcpcb(self):
+        """Test that 'seeed' resolves to JLCPCB limits."""
+        result = get_mfr_limits("seeed")
+        assert result is MFR_JLCPCB
+
+    def test_seeed_fusion_alias_resolves_to_jlcpcb(self):
+        """Test that 'seeed-fusion' resolves to JLCPCB limits."""
+        assert get_mfr_limits("seeed-fusion") is MFR_JLCPCB
+        # Underscore variant via alias
+        assert get_mfr_limits("seeed_fusion") is MFR_JLCPCB
+        # No separator variant via alias
+        assert get_mfr_limits("seeedfusion") is MFR_JLCPCB
+
+    def test_seeedstudio_alias_resolves_to_jlcpcb(self):
+        """Test that 'seeedstudio' alias resolves to JLCPCB limits."""
+        assert get_mfr_limits("seeedstudio") is MFR_JLCPCB
+
+    def test_seeed_case_insensitive(self):
+        """Test that seeed aliases are case-insensitive."""
+        assert get_mfr_limits("Seeed") is MFR_JLCPCB
+        assert get_mfr_limits("SEEED") is MFR_JLCPCB
+        assert get_mfr_limits("Seeed-Fusion") is MFR_JLCPCB
+        assert get_mfr_limits("SEEED-FUSION") is MFR_JLCPCB
+        assert get_mfr_limits("SeeedStudio") is MFR_JLCPCB
+
+    def test_error_suggests_closest_match(self):
+        """Test that unknown manufacturer error includes 'Did you mean?' suggestion."""
+        with pytest.raises(ValueError) as exc_info:
+            get_mfr_limits("seeeeed")  # typo with extra 'e'
+        error_msg = str(exc_info.value)
+        assert "Did you mean" in error_msg
+        assert "seeed" in error_msg
+
+    def test_error_suggests_closest_match_for_jlcpcb_typo(self):
+        """Test that a JLCPCB typo gets a suggestion."""
+        with pytest.raises(ValueError) as exc_info:
+            get_mfr_limits("jlcpb")  # missing 'c'
+        error_msg = str(exc_info.value)
+        assert "Did you mean" in error_msg
+        assert "jlcpcb" in error_msg
+
+    def test_no_suggestion_for_completely_unrelated(self):
+        """Test that completely unrelated input does not produce suggestions."""
+        with pytest.raises(ValueError) as exc_info:
+            get_mfr_limits("xyz123")
+        error_msg = str(exc_info.value)
+        assert "Did you mean" not in error_msg
 
 
 class TestRelaxationTier:
