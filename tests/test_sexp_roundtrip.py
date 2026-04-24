@@ -96,16 +96,16 @@ class TestSExpRoundTripWithKiCad:
         doc = parse_file(demo_pcb_path)
         output = doc.to_string()
 
-        # Check indentation uses spaces, not tabs
-        assert "\t" not in output, "Output should use spaces, not tabs"
+        # Check indentation uses tabs, matching KiCad native format
+        assert "\t" in output, "Output should use tab indentation"
 
         # Check that known keywords are not quoted
         # These keywords appear in the demo file
-        assert " signal)" in output or " signal\n" in output, "signal keyword should not be quoted"
-        assert " user)" in output or " user " in output, "user keyword should not be quoted"
-        assert " no)" in output or " no\n" in output, "no keyword should not be quoted"
-        assert " none)" in output or " none\n" in output, "none keyword should not be quoted"
-        assert " default)" in output or " default\n" in output, (
+        assert "signal)" in output or "signal\n" in output, "signal keyword should not be quoted"
+        assert "user)" in output or "user " in output, "user keyword should not be quoted"
+        assert "no)" in output or "no\n" in output, "no keyword should not be quoted"
+        assert "none)" in output or "none\n" in output, "none keyword should not be quoted"
+        assert "default)" in output or "default\n" in output, (
             "default keyword should not be quoted"
         )
 

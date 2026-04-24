@@ -322,8 +322,8 @@ class SExp:
         if not self.name and not self.children:
             return "()"
 
-        # KiCad uses 2 spaces for indentation
-        tab = "  "
+        # KiCad uses tab indentation
+        tab = "\t"
         tabs = tab * indent
 
         # Check if should render inline

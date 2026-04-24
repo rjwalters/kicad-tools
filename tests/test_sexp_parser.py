@@ -525,8 +525,8 @@ class TestRoundTrip:
         # Layer names with dots should be quoted
         assert '"F.Cu"' in serialized
 
-    def test_roundtrip_uses_spaces_not_tabs(self):
-        """Serialization uses 2-space indentation, not tabs."""
+    def test_roundtrip_uses_tabs_not_spaces(self):
+        """Serialization uses tab indentation, matching KiCad native format."""
         sexp = """(kicad_pcb
             (version 20240108)
             (general
@@ -536,10 +536,9 @@ class TestRoundTrip:
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
-        # Should not contain tabs
-        assert "\t" not in serialized
-        # Should use 2-space indentation
-        assert "  (version" in serialized
+        # Should use tab indentation
+        assert "\t" in serialized
+        assert "\t(version" in serialized
 
     def test_roundtrip_fp_text_types_unquoted(self):
         """fp_text types like reference, value are not quoted."""
