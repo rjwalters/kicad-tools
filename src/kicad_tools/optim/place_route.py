@@ -93,6 +93,7 @@ class PlaceRouteOptimizer:
         drc_checker_factory: Callable[[PCB], DRCChecker] | None = None,
         verbose: bool = True,
         escape_routing: bool | None = None,
+        max_fix_attempts: int = 3,
     ) -> None:
         """Initialize the optimizer.
 
@@ -110,6 +111,8 @@ class PlaceRouteOptimizer:
                 True = always use escape routing before global routing.
                 False = never use escape routing.
                 None = auto-detect dense packages (default).
+            max_fix_attempts: Maximum DRC fix attempts per optimization
+                iteration before giving up and reporting failure.
         """
         self.pcb_path = Path(pcb_path)
         self.analyzer = analyzer
@@ -118,10 +121,12 @@ class PlaceRouteOptimizer:
         self.drc_checker_factory = drc_checker_factory
         self.verbose = verbose
         self.escape_routing = escape_routing
+        self.max_fix_attempts = max_fix_attempts
 
         # Track state across iterations
         self._current_routes: list[Route] = []
         self._failed_nets: list[int] = []
+        self._fix_attempts: int = 0
 
     @classmethod
     def from_pcb(
@@ -332,6 +337,9 @@ class PlaceRouteOptimizer:
         for iteration in range(max_iterations):
             if self.verbose:
                 print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
+
+            # Reset per-iteration DRC fix attempt counter
+            self._fix_attempts = 0
 
             # Phase 1: Fix placement conflicts
             if allow_placement_changes:
@@ -659,13 +667,14 @@ class PlaceRouteOptimizer:
             self.fixer.apply_fixes(self.pcb_path, fixes)
 
     def _fix_drc_violations(self, drc_results: DRCResults) -> bool:
-        """Attempt to fix DRC violations.
+        """Attempt to fix DRC violations using ClearanceRepairer.
 
-        Currently a placeholder - returns False to indicate no fix applied.
-        Future implementations could:
-        - Reroute specific nets causing violations
-        - Widen traces that violate minimum width
-        - Increase clearances
+        Converts the validate-module ``DRCResults`` into a ``DRCReport``
+        understood by the repair tools, then runs ``ClearanceRepairer``
+        to nudge traces/vias for clearance violations.  A per-iteration
+        attempt counter (``_fix_attempts``) prevents infinite fix-retry
+        cycles when the repairer makes changes that re-introduce the
+        same violations.
 
         Args:
             drc_results: DRC results containing violations
@@ -673,6 +682,52 @@ class PlaceRouteOptimizer:
         Returns:
             True if fixes were applied (should retry), False otherwise
         """
-        # For now, we don't have automated DRC fixing
-        # This is a hook for future implementation
+        # Guard: respect per-iteration attempt limit
+        if self._fix_attempts >= self.max_fix_attempts:
+            if self.verbose:
+                print(
+                    f"    DRC fix: max attempts ({self.max_fix_attempts}) "
+                    f"reached, giving up"
+                )
+            return False
+
+        self._fix_attempts += 1
+
+        # No violations to fix
+        if not drc_results.violations:
+            return False
+
+        try:
+            from kicad_tools.drc.compat import drc_results_to_report
+            from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+            # Convert validate DRCResults -> drc DRCReport
+            report = drc_results_to_report(drc_results, self.pcb_path)
+
+            if not report.violations:
+                return False
+
+            # Run ClearanceRepairer (non-destructive nudge/reroute)
+            repairer = ClearanceRepairer(str(self.pcb_path))
+            result = repairer.repair_from_report(
+                report,
+                max_displacement=0.5,
+                local_reroute=True,
+            )
+
+            if self.verbose:
+                print(
+                    f"    DRC fix attempt {self._fix_attempts}/"
+                    f"{self.max_fix_attempts}: "
+                    f"{result.repaired}/{result.total_violations} repaired"
+                )
+
+            if result.repaired > 0:
+                repairer.save()
+                return True
+
+        except Exception as exc:
+            if self.verbose:
+                print(f"    DRC fix: error during repair: {exc}")
+
         return False
