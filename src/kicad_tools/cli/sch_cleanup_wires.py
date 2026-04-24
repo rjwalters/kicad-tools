@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.schema import Schematic
+from kicad_tools.schema.library import LibrarySymbol
 from kicad_tools.sexp import SExp
 
 
@@ -90,14 +91,22 @@ def _build_connection_map(
             y = at.get_float(1) or 0
             points.add((int(x * 10), int(y * 10)))
 
-    # Symbol pin positions (approximate -- center of symbol)
-    # Full accuracy requires library data, but center-based is a
-    # reasonable heuristic for cleanup purposes
+    # Symbol pin positions -- use library data for accurate pin locations
     for sym in schematic.symbols:
-        if not sym.lib_id.startswith("power:"):
+        lib_sexp = schematic.get_lib_symbol(sym.lib_id)
+        if lib_sexp is not None:
+            lib_sym = LibrarySymbol.from_sexp(lib_sexp)
+            pin_positions = lib_sym.get_all_pin_positions(
+                sym.position, sym.rotation, sym.mirror
+            )
+            for pos in pin_positions.values():
+                points.add((int(pos[0] * 10), int(pos[1] * 10)))
+        else:
+            # Fallback to symbol center when library data is unavailable
             points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
-        # Power symbols connect via their position
-        points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
+        # Power symbols always connect via their position
+        if sym.lib_id.startswith("power:"):
+            points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
 
     return points
 
