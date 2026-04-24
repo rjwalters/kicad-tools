@@ -407,7 +407,18 @@ class BoardGraphic:
 
 @dataclass
 class Footprint:
-    """PCB component footprint."""
+    """PCB component footprint.
+
+    The ``position``, ``rotation``, and ``layer`` attributes are backed by
+    a ``__setattr__`` override that keeps the underlying S-expression node
+    in sync.  After a :class:`PCB` is fully constructed (parsing and
+    board-origin detection complete), the PCB links each ``Footprint`` to
+    its S-expression node via :pyattr:`_sexp_node` and stores the board
+    origin offset in :pyattr:`_board_origin`.  From that point on, any
+    assignment to ``position``, ``rotation``, or ``layer`` is
+    automatically reflected in the S-expression tree that
+    :meth:`PCB.save` serialises.
+    """
 
     name: str
     layer: str
@@ -426,10 +437,59 @@ class Footprint:
     exclude_from_bom: bool = False
     dnp: bool = False
     properties: dict[str, str] = field(default_factory=dict)
+    _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
+    _board_origin: tuple[float, float] = field(
+        default=(0.0, 0.0), repr=False, compare=False,
+    )
+
+    # ------------------------------------------------------------------
+    # __setattr__ override -- syncs position/rotation/layer to _sexp_node
+    # ------------------------------------------------------------------
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Always store the Python value first via the default mechanism.
+        super().__setattr__(name, value)
+
+        # Bail out during __init__ (before _sexp_node exists) or when
+        # there is no backing S-expression node.
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+
+        if name == "position":
+            at_node = sexp_node.find("at")
+            if at_node is not None:
+                x, y = value  # type: ignore[unpacking-non-sequence]
+                # ``fp.position`` stores board-relative coordinates but the
+                # S-expression ``(at ...)`` node uses sheet-absolute values.
+                # Add the board origin offset to convert.
+                origin = self.__dict__.get("_board_origin", (0.0, 0.0))
+                at_node.set_value(0, x + origin[0])
+                at_node.set_value(1, y + origin[1])
+
+        elif name == "rotation":
+            at_node = sexp_node.find("at")
+            if at_node is not None:
+                if len(at_node.children) >= 3:
+                    at_node.set_value(2, value)
+                elif value != 0.0:
+                    at_node.add(value)
+
+        elif name == "layer":
+            layer_node = sexp_node.find("layer")
+            if layer_node is not None:
+                layer_node.set_value(0, value)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Footprint:
-        """Parse footprint from S-expression."""
+        """Parse footprint from S-expression.
+
+        Note: ``_sexp_node`` is intentionally **not** set here.  It is
+        linked later by :meth:`PCB._link_footprint_sexp_nodes` after the
+        board origin has been detected and footprint positions have been
+        converted to board-relative coordinates.  This prevents the
+        ``__setattr__`` sync from writing stale values during parsing.
+        """
         name = sexp.get_string(0) or ""
 
         fp = cls(
@@ -954,6 +1014,7 @@ class PCB:
         self._board_origin: tuple[float, float] = (0.0, 0.0)
         self._parse()
         self._detect_board_origin()
+        self._link_footprint_sexp_nodes()
 
     @classmethod
     def load(cls, path: str | Path) -> PCB:
@@ -1435,6 +1496,52 @@ class PCB:
             for fp in self._footprints:
                 abs_x, abs_y = fp.position
                 fp.position = (abs_x - origin[0], abs_y - origin[1])
+
+    def _link_footprint_sexp_nodes(self) -> None:
+        """Attach S-expression back-references to parsed Footprint objects.
+
+        Called after ``_detect_board_origin()`` so that the ``__setattr__``
+        sync is only active once positions have been converted to
+        board-relative coordinates and the board origin is known.
+
+        Each ``Footprint`` receives:
+        * ``_sexp_node`` -- the S-expression ``(footprint ...)`` node from
+          the tree that :meth:`save` serialises.
+        * ``_board_origin`` -- the board origin offset so that the setter
+          can convert board-relative positions back to sheet-absolute
+          when writing to the S-expression.
+        """
+        # Build a UUID -> index lookup for fast matching.
+        fp_by_uuid: dict[str, int] = {}
+        for idx, fp in enumerate(self._footprints):
+            if fp.uuid:
+                fp_by_uuid[fp.uuid] = idx
+
+        # Walk the top-level S-expression children and match footprint
+        # nodes to parsed Footprint objects by UUID (preferred) or by
+        # iteration order (fallback for legacy files without UUIDs).
+        order_idx = 0
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            uuid_node = child.find("uuid")
+            child_uuid = uuid_node.get_string(0) if uuid_node else None
+
+            fp_idx: int | None = None
+            if child_uuid and child_uuid in fp_by_uuid:
+                fp_idx = fp_by_uuid[child_uuid]
+            elif order_idx < len(self._footprints):
+                fp_idx = order_idx
+
+            if fp_idx is not None:
+                fp = self._footprints[fp_idx]
+                # Use object.__setattr__ to avoid triggering sync before
+                # both _sexp_node and _board_origin are in place.
+                object.__setattr__(fp, "_board_origin", self._board_origin)
+                object.__setattr__(fp, "_sexp_node", child)
+
+            order_idx += 1
 
     # Public accessors
 
@@ -2056,16 +2163,23 @@ class PCB:
         if not fp:
             return False
 
-        # Apply board origin offset to convert board-relative to sheet-absolute
-        abs_x = x + self._board_origin[0]
-        abs_y = y + self._board_origin[1]
-
-        # Update the parsed footprint object with board-relative coordinates
+        # The Footprint.__setattr__ override automatically syncs the
+        # board-relative position to the S-expression ``(at ...)`` node,
+        # adding the board origin offset.  For footprints with a linked
+        # _sexp_node this is all that's needed.
         fp.position = (x, y)
         if rotation is not None:
             fp.rotation = rotation
 
-        # Find and update the footprint in the SExp tree
+        if fp._sexp_node is not None:
+            return True
+
+        # Fallback: walk the top-level S-expression tree when there is no
+        # back-reference (should not happen for footprints parsed via
+        # from_sexp, but kept for safety).
+        abs_x = x + self._board_origin[0]
+        abs_y = y + self._board_origin[1]
+
         for child in self._sexp.iter_children():
             if child.tag != "footprint":
                 continue
@@ -2862,8 +2976,16 @@ class PCB:
 
         # Parse and add to internal footprints list
         footprint = Footprint.from_sexp(fp_sexp)
-        # Store board-relative position in the footprint object for API consistency
+        # Store board-relative position in the footprint object for API consistency.
+        # _sexp_node is not yet set, so this won't sync to the S-expression
+        # (the S-expression already has the correct sheet-absolute coordinates).
         footprint.position = (x, y)
+
+        # Link the S-expression node so that future mutations to position,
+        # rotation, or layer are automatically persisted.
+        object.__setattr__(footprint, "_board_origin", self._board_origin)
+        object.__setattr__(footprint, "_sexp_node", fp_sexp)
+
         self._footprints.append(footprint)
 
         return footprint
