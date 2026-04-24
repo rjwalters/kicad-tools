@@ -13,7 +13,7 @@ from kicad_tools.report.figures import (
     REPORT_MAX_SIZE_PX,
     FigureEntry,
     ReportFigureGenerator,
-    _BLANK_PNG_THRESHOLD_BYTES,
+    _BLANK_SVG_THRESHOLD_BYTES,
 )
 
 # ---------------------------------------------------------------------------
@@ -49,10 +49,25 @@ def _make_failure_result(msg: str = "render failed"):
     }
 
 
+#: Default SVG size for "valid" (non-blank) schematic sheets in tests.
+#: Must exceed ``_BLANK_SVG_THRESHOLD_BYTES`` so sheets are not excluded.
+_VALID_SVG_SIZE = _BLANK_SVG_THRESHOLD_BYTES + 50_000
+
+#: Default SVG size for "blank" (title-block-only) schematic sheets in tests.
+#: Must be below ``_BLANK_SVG_THRESHOLD_BYTES`` so sheets are excluded.
+_BLANK_SVG_SIZE = _BLANK_SVG_THRESHOLD_BYTES - 50_000
+
+
+def _write_svg_stub(path: Path, size_bytes: int = _VALID_SVG_SIZE) -> None:
+    """Write an SVG stub file of approximately *size_bytes*."""
+    header = b"<svg>"
+    padding = max(0, size_bytes - len(header))
+    path.write_bytes(header + b" " * padding)
+
+
 def _svg_to_png_side_effect(size_bytes: int = 100_000):
     """Return a side_effect callable for ``_svg_to_png`` that writes a
-    PNG stub of *size_bytes* to the output path so blank-detection
-    logic sees a realistic file size.
+    PNG stub of *size_bytes* to the output path.
     """
 
     def _side_effect(svg_path, png_path, max_size_px=3000):
@@ -113,8 +128,8 @@ class TestGenerateAll:
             # The --output arg is at index 4 in the command list.
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "main_sheet.svg").write_text("<svg/>")
-            (svg_dir / "power_sheet.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "main_sheet.svg")
+            _write_svg_stub(svg_dir / "power_sheet.svg")
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
@@ -219,13 +234,13 @@ class TestGenerateAll:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "good_sheet.svg").write_text("<svg/>")
-            (svg_dir / "bad_sheet.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "good_sheet.svg")
+            _write_svg_stub(svg_dir / "bad_sheet.svg")
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
 
-        # First SVG fails, second succeeds (writes a valid-size file)
+        # First SVG fails PNG conversion, second succeeds
         def _mixed_side_effect(svg_path, png_path, max_size_px=3000):
             if "bad_sheet" in str(svg_path):
                 return (False, "bad conversion", 0, 0)
@@ -340,9 +355,9 @@ class TestMultiSheetSchematics:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "main.svg").write_text("<svg/>")
-            (svg_dir / "logic.svg").write_text("<svg/>")
-            (svg_dir / "output.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "main.svg")
+            _write_svg_stub(svg_dir / "logic.svg")
+            _write_svg_stub(svg_dir / "output.svg")
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
@@ -389,7 +404,7 @@ class TestFilenameDeterminism:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "sheet1.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "sheet1.svg")
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
@@ -457,7 +472,7 @@ class TestMaxSizePassedThrough:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "sheet.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "sheet.svg")
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
@@ -510,7 +525,8 @@ class TestOutputDirCreation:
 
 
 class TestBlankSchematicDetection:
-    """Verify that blank schematic sheets are excluded from the manifest."""
+    """Verify that blank schematic sheets are detected via SVG file size
+    and excluded from the manifest before PNG conversion."""
 
     @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
     @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
@@ -527,7 +543,7 @@ class TestBlankSchematicDetection:
         tmp_path,
         caplog,
     ):
-        """A schematic PNG below the size threshold is excluded with a warning."""
+        """A schematic SVG below the size threshold is excluded with a warning."""
         pcb = tmp_path / "board.kicad_pcb"
         pcb.touch()
         sch = tmp_path / "main.kicad_sch"
@@ -539,14 +555,12 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "blank_sheet.svg").write_text("<svg/>")
+            # Write a small SVG (below threshold) to simulate a blank sheet
+            _write_svg_stub(svg_dir / "blank_sheet.svg", size_bytes=_BLANK_SVG_SIZE)
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
-        # Write a small PNG (below threshold) to simulate a blank sheet
-        mock_svg_to_png.side_effect = _svg_to_png_side_effect(
-            size_bytes=_BLANK_PNG_THRESHOLD_BYTES - 1000
-        )
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
 
         gen = ReportFigureGenerator()
         with caplog.at_level(logging.WARNING):
@@ -557,6 +571,10 @@ class TestBlankSchematicDetection:
         assert len(sch_entries) == 0
         assert "Excluding blank schematic sheet" in caplog.text
         assert "blank_sheet" in caplog.text
+        assert "SVG size" in caplog.text
+
+        # PNG conversion should NOT have been called for the blank sheet
+        mock_svg_to_png.assert_not_called()
 
     @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
     @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
@@ -585,25 +603,14 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "dac.svg").write_text("<svg/>")       # blank
-            (svg_dir / "power.svg").write_text("<svg/>")     # valid
-            (svg_dir / "mcu.svg").write_text("<svg/>")       # blank
-            (svg_dir / "sync.svg").write_text("<svg/>")      # valid
+            _write_svg_stub(svg_dir / "dac.svg", size_bytes=_BLANK_SVG_SIZE)     # blank
+            _write_svg_stub(svg_dir / "power.svg", size_bytes=_VALID_SVG_SIZE)   # valid
+            _write_svg_stub(svg_dir / "mcu.svg", size_bytes=_BLANK_SVG_SIZE)     # blank
+            _write_svg_stub(svg_dir / "sync.svg", size_bytes=_VALID_SVG_SIZE)    # valid
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
-
-        # Blank sheets get small PNGs, valid sheets get large PNGs
-        def _mixed_size_effect(svg_path, png_path, max_size_px=3000):
-            blank_sheets = {"dac", "mcu"}
-            stem = svg_path.stem if hasattr(svg_path, "stem") else Path(svg_path).stem
-            if stem in blank_sheets:
-                png_path.write_bytes(b"\x00" * 30_000)  # below threshold
-            else:
-                png_path.write_bytes(b"\x00" * 150_000)  # above threshold
-            return (True, "", 2000, 1500)
-
-        mock_svg_to_png.side_effect = _mixed_size_effect
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
 
         gen = ReportFigureGenerator()
         with caplog.at_level(logging.WARNING):
@@ -617,6 +624,12 @@ class TestBlankSchematicDetection:
         # Warnings logged for blank sheets
         assert "dac" in caplog.text
         assert "mcu" in caplog.text
+
+        # PNG conversion should only be called for the two valid sheets
+        assert mock_svg_to_png.call_count == 2
+
+        # Summary warning should be logged
+        assert "Excluded 2 of 4 schematic sheets as blank" in caplog.text
 
     @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
     @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
@@ -632,7 +645,7 @@ class TestBlankSchematicDetection:
         mock_cairosvg,
         tmp_path,
     ):
-        """A schematic PNG at or above the threshold is included normally."""
+        """A schematic SVG at or above the threshold is included normally."""
         pcb = tmp_path / "board.kicad_pcb"
         pcb.touch()
         sch = tmp_path / "main.kicad_sch"
@@ -644,14 +657,15 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "valid_sheet.svg").write_text("<svg/>")
+            # Write an SVG exactly at the threshold -- should be included
+            _write_svg_stub(
+                svg_dir / "valid_sheet.svg",
+                size_bytes=_BLANK_SVG_THRESHOLD_BYTES,
+            )
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
-        # Write a PNG exactly at the threshold
-        mock_svg_to_png.side_effect = _svg_to_png_side_effect(
-            size_bytes=_BLANK_PNG_THRESHOLD_BYTES
-        )
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
 
         gen = ReportFigureGenerator()
         entries = gen.generate_all(pcb, sch, out_dir)
@@ -687,12 +701,12 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            (svg_dir / "sheet_a.svg").write_text("<svg/>")
-            (svg_dir / "sheet_b.svg").write_text("<svg/>")
+            _write_svg_stub(svg_dir / "sheet_a.svg", size_bytes=_BLANK_SVG_SIZE)
+            _write_svg_stub(svg_dir / "sheet_b.svg", size_bytes=_BLANK_SVG_SIZE)
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
-        mock_svg_to_png.side_effect = _svg_to_png_side_effect(size_bytes=10_000)
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
 
         gen = ReportFigureGenerator()
         with caplog.at_level(logging.WARNING):
@@ -706,6 +720,53 @@ class TestBlankSchematicDetection:
         # Warnings for both sheets
         assert "sheet_a" in caplog.text
         assert "sheet_b" in caplog.text
+
+        # PNG conversion should NOT have been called at all
+        mock_svg_to_png.assert_not_called()
+
+        # Summary warning should be logged
+        assert "Excluded 2 of 2 schematic sheets as blank" in caplog.text
+
+    @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
+    @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
+    @patch("kicad_tools.report.figures.subprocess.run")
+    @patch("kicad_tools.report.figures._svg_to_png")
+    @patch("kicad_tools.report.figures.screenshot_board")
+    def test_summary_warning_logged(
+        self,
+        mock_board,
+        mock_svg_to_png,
+        mock_subprocess,
+        mock_find_cli,
+        mock_cairosvg,
+        tmp_path,
+        caplog,
+    ):
+        """Summary warning is logged after the loop when sheets are excluded."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.touch()
+        sch = tmp_path / "main.kicad_sch"
+        sch.touch()
+        out_dir = tmp_path / "figures"
+
+        mock_board.return_value = _make_success_result()
+
+        def fake_subprocess_run(cmd, **kwargs):
+            output_idx = cmd.index("--output") + 1
+            svg_dir = Path(cmd[output_idx])
+            _write_svg_stub(svg_dir / "blank.svg", size_bytes=_BLANK_SVG_SIZE)
+            _write_svg_stub(svg_dir / "valid1.svg", size_bytes=_VALID_SVG_SIZE)
+            _write_svg_stub(svg_dir / "valid2.svg", size_bytes=_VALID_SVG_SIZE)
+            return MagicMock(returncode=0, stderr="")
+
+        mock_subprocess.side_effect = fake_subprocess_run
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
+
+        gen = ReportFigureGenerator()
+        with caplog.at_level(logging.WARNING):
+            gen.generate_all(pcb, sch, out_dir)
+
+        assert "Excluded 1 of 3 schematic sheets as blank" in caplog.text
 
 
 class TestReportPackageInit:

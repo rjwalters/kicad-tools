@@ -30,11 +30,11 @@ logger = logging.getLogger(__name__)
 #: embedded in documents, not sent to a vision model.
 REPORT_MAX_SIZE_PX = 3000
 
-#: Minimum PNG file size (bytes) for a schematic sheet to be considered
-#: non-blank.  Title-block-only PNGs rendered at 3000 px max dimension
-#: are typically under 50 KB, while sheets with component graphics are
-#: 100 KB+.  A 60 KB threshold provides a reasonable safety margin.
-_BLANK_PNG_THRESHOLD_BYTES = 60_000
+#: Minimum SVG file size (bytes) for a schematic sheet to be considered
+#: non-blank.  Title-block-only SVGs exported by kicad-cli are ~93 KB
+#: of XML, while sheets with actual schematic content are ~436 KB+.
+#: A 150 KB threshold sits well within the gap between the two.
+_BLANK_SVG_THRESHOLD_BYTES = 150_000
 
 #: PCB presets to render, in order.
 #: Each tuple is (preset_name, output_filename, caption).
@@ -235,33 +235,36 @@ class ReportFigureGenerator:
                     )
                     return []
 
+                blank_count = 0
+                total_count = len(svg_files)
                 for svg_file in svg_files:
                     png_name = f"schematic_{svg_file.stem}.png"
                     png_path = output_dir / png_name
                     try:
+                        # Detect blank sheets via SVG file size before
+                        # spending time on PNG conversion.  Title-block-only
+                        # SVGs are ~93 KB; sheets with content are 400 KB+.
+                        svg_size = svg_file.stat().st_size
+                        if svg_size < _BLANK_SVG_THRESHOLD_BYTES:
+                            blank_count += 1
+                            logger.warning(
+                                "Excluding blank schematic sheet '%s' "
+                                "(SVG size %d bytes < %d byte threshold)",
+                                svg_file.stem,
+                                svg_size,
+                                _BLANK_SVG_THRESHOLD_BYTES,
+                            )
+                            continue
+
                         ok, err, _w, _h = _svg_to_png(svg_file, png_path, self.max_size_px)
                         if ok:
-                            # Detect blank sheets: kicad-cli may produce SVGs
-                            # that contain only the title block and page border
-                            # (no component graphics).  These render to small
-                            # PNGs that would be misleading in the report.
-                            png_size = png_path.stat().st_size if png_path.exists() else 0
-                            if png_size < _BLANK_PNG_THRESHOLD_BYTES:
-                                logger.warning(
-                                    "Excluding blank schematic sheet '%s' "
-                                    "(PNG size %d bytes < %d byte threshold)",
-                                    svg_file.stem,
-                                    png_size,
-                                    _BLANK_PNG_THRESHOLD_BYTES,
+                            entries.append(
+                                FigureEntry(
+                                    filename=png_name,
+                                    caption=f"Schematic: {svg_file.stem}",
+                                    figure_type="schematic",
                                 )
-                            else:
-                                entries.append(
-                                    FigureEntry(
-                                        filename=png_name,
-                                        caption=f"Schematic: {svg_file.stem}",
-                                        figure_type="schematic",
-                                    )
-                                )
+                            )
                         else:
                             logger.warning(
                                 "Failed to render schematic sheet '%s': %s",
@@ -274,6 +277,13 @@ class ReportFigureGenerator:
                             svg_file.name,
                             exc_info=True,
                         )
+
+                if blank_count:
+                    logger.warning(
+                        "Excluded %d of %d schematic sheets as blank",
+                        blank_count,
+                        total_count,
+                    )
         except subprocess.TimeoutExpired:
             logger.warning(
                 "kicad-cli schematic SVG export timed out for %s",
