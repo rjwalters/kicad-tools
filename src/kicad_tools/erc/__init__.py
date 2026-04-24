@@ -14,6 +14,7 @@ Example:
 from .cross_sheet import (
     check_cross_sheet_duplicates,
     filter_cross_sheet_global_labels,
+    filter_cross_sheet_power_violations,
 )
 from .report import (
     ERCReport,
@@ -46,4 +47,5 @@ __all__ = [
     # Cross-sheet checks
     "check_cross_sheet_duplicates",
     "filter_cross_sheet_global_labels",
+    "filter_cross_sheet_power_violations",
 ]

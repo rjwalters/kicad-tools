@@ -1,6 +1,7 @@
 """Tests for kicad_tools.erc module."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -9,6 +10,10 @@ from kicad_tools.erc import (
     ERCReport,
     ERCViolationType,
     Severity,
+)
+from kicad_tools.erc.cross_sheet import (
+    _extract_power_net_name,
+    filter_cross_sheet_power_violations,
 )
 
 
@@ -301,3 +306,116 @@ class TestERCTypeDescriptions:
         assert ERC_TYPE_DESCRIPTIONS["pin_not_connected"] == "Unconnected pin"
         assert ERC_TYPE_DESCRIPTIONS["power_pin_not_driven"] == "Power input not driven"
         assert ERC_TYPE_DESCRIPTIONS["label_dangling"] == "Label not connected"
+
+
+class TestExtractPowerNetName:
+    """Tests for _extract_power_net_name helper."""
+
+    def test_extract_from_item_with_type(self):
+        """Extract net name from 'Pin VCC (power_in) of U1' format."""
+        items = [{"description": "Pin VCC (power_in) of U1"}]
+        assert _extract_power_net_name("Power pin not driven", items) == "VCC"
+
+    def test_extract_from_item_without_type(self):
+        """Extract net name from 'Pin +3V3 of U3' format."""
+        items = [{"description": "Pin +3V3 of U3"}]
+        assert _extract_power_net_name("Power pin not driven", items) == "+3V3"
+
+    def test_extract_from_description_fallback(self):
+        """Extract net name from top-level description when items empty."""
+        assert _extract_power_net_name("Pin GND not driven") == "GND"
+
+    def test_returns_none_for_unparseable(self):
+        """Return None when no pin name can be extracted."""
+        assert _extract_power_net_name("Some random text") is None
+        assert _extract_power_net_name("Some random text", []) is None
+
+    def test_prefers_power_in_match(self):
+        """When (power_in) qualifier is present, prefer that match."""
+        items = [{"description": "Pin +3.3V (power_in) of U3"}]
+        assert _extract_power_net_name("", items) == "+3.3V"
+
+
+class TestFilterCrossSheetPowerViolations:
+    """Tests for filter_cross_sheet_power_violations."""
+
+    def _make_violation(self, vtype: str, net_name: str) -> dict:
+        """Create a synthetic violation dict."""
+        return {
+            "type": vtype,
+            "severity": "error",
+            "description": "Power input pin not driven by any power output",
+            "items": [{"description": f"Pin {net_name} (power_in) of U1"}],
+        }
+
+    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
+    def test_suppresses_driven_net(self, mock_inventory):
+        """Violation for a net with a driver on another sheet is suppressed."""
+        mock_inventory.return_value = {"+3V3", "GND", "VCC"}
+
+        violations = [
+            self._make_violation("power_pin_not_driven", "VCC"),
+            {"type": "pin_not_connected", "description": "other"},
+        ]
+
+        result = filter_cross_sheet_power_violations(violations, "/fake/path")
+        assert len(result) == 1
+        assert result[0]["type"] == "pin_not_connected"
+
+    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
+    def test_preserves_undriven_net(self, mock_inventory):
+        """Violation for a net with NO driver anywhere is preserved (true positive)."""
+        mock_inventory.return_value = {"GND"}  # VCC is NOT driven
+
+        violations = [
+            self._make_violation("power_pin_not_driven", "VCC"),
+        ]
+
+        result = filter_cross_sheet_power_violations(violations, "/fake/path")
+        assert len(result) == 1
+        assert result[0]["type"] == "power_pin_not_driven"
+
+    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
+    def test_preserves_unparseable_violation(self, mock_inventory):
+        """Violation with unparseable description is preserved to be safe."""
+        mock_inventory.return_value = {"+3V3"}
+
+        violations = [
+            {
+                "type": "power_pin_not_driven",
+                "severity": "error",
+                "description": "Some generic message",
+                "items": [],
+            },
+        ]
+
+        result = filter_cross_sheet_power_violations(violations, "/fake/path")
+        assert len(result) == 1
+
+    def test_skips_traversal_when_no_target_violations(self):
+        """No hierarchy traversal if no power_pin_not_driven violations exist."""
+        violations = [
+            {"type": "pin_not_connected", "description": "other"},
+        ]
+
+        # Should return immediately without calling build_power_driver_inventory
+        result = filter_cross_sheet_power_violations(violations, "/nonexistent/path")
+        assert len(result) == 1
+
+    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
+    def test_other_types_pass_through(self, mock_inventory):
+        """Non-power violations pass through unchanged."""
+        mock_inventory.return_value = {"+3V3"}
+
+        violations = [
+            {"type": "label_dangling", "description": "Label issue"},
+            {"type": "pin_not_connected", "description": "Pin issue"},
+            self._make_violation("power_pin_not_driven", "+3V3"),
+        ]
+
+        result = filter_cross_sheet_power_violations(violations, "/fake/path")
+        assert len(result) == 2
+        types = [v["type"] for v in result]
+        assert "label_dangling" in types
+        assert "pin_not_connected" in types
+        assert "power_pin_not_driven" not in types
