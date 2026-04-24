@@ -129,12 +129,12 @@ def output_json(symbols, verbose):
             "value": sym.value,
             "lib_id": sym.lib_id,
             "footprint": sym.footprint,
+            "position": list(sym.position),
+            "rotation": sym.rotation,
         }
         if verbose:
             entry.update(
                 {
-                    "position": list(sym.position),
-                    "rotation": sym.rotation,
                     "unit": sym.unit,
                     "uuid": sym.uuid,
                     "in_bom": sym.in_bom,
@@ -157,9 +157,12 @@ def output_csv(symbols, verbose):
                 f"{sym.position[0]},{sym.position[1]},{sym.rotation},{sym.unit},{sym.uuid}"
             )
     else:
-        print("Reference,Value,Library ID,Footprint")
+        print("Reference,Value,Library ID,Footprint,X,Y,Rotation")
         for sym in symbols:
-            print(f"{sym.reference},{sym.value},{sym.lib_id},{sym.footprint}")
+            print(
+                f"{sym.reference},{sym.value},{sym.lib_id},{sym.footprint},"
+                f"{sym.position[0]},{sym.position[1]},{sym.rotation}"
+            )
 
 
 if __name__ == "__main__":
