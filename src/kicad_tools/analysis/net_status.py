@@ -518,6 +518,46 @@ class NetStatusAnalyzer:
                         graph[pad].add(other)
                         graph[other].add(pad)
 
+        # Connect segment chains to vias (Issue #1991 fix).
+        # If a segment endpoint coincides with a via position, all pads in
+        # that segment chain are electrically connected through the via.
+        # Without this link the pad->trace->via chain breaks whenever the
+        # zone-connection check fails (e.g. zone on inner layer, through-via
+        # not recognized, or via near zone boundary edge).
+        for component in segment_components:
+            component_endpoints: list[tuple[float, float]] = []
+            for seg_idx in component:
+                seg = segments[seg_idx]
+                component_endpoints.append(seg.start)
+                component_endpoints.append(seg.end)
+
+            # Check if any endpoint of this segment chain touches a via
+            for via in vias:
+                touches_via = any(
+                    self._points_close(ep, via.position) for ep in component_endpoints
+                )
+                if touches_via:
+                    # Collect all pads in this segment chain
+                    chain_pads: set[str] = set()
+                    for seg_idx in component:
+                        seg = segments[seg_idx]
+                        chain_pads.update(
+                            self._find_pads_at_point(seg.start, pad_positions)
+                        )
+                        chain_pads.update(
+                            self._find_pads_at_point(seg.end, pad_positions)
+                        )
+                    # Also include any pads at the via position itself
+                    chain_pads.update(
+                        self._find_pads_at_point(via.position, pad_positions)
+                    )
+                    # Connect all pads in this chain through the via
+                    chain_list = list(chain_pads)
+                    for i, pad in enumerate(chain_list):
+                        for other in chain_list[i + 1 :]:
+                            graph[pad].add(other)
+                            graph[other].add(pad)
+
         # Find zone connection points (via positions that touch zones)
         # Check BOTH filled polygons AND zone boundaries because:
         # - Filled polygons have thermal clearance cutouts around pads
@@ -526,10 +566,12 @@ class NetStatusAnalyzer:
         zone_connection_points: set[tuple[float, float]] = set()
 
         # Check vias against zone boundaries (Issue #479 fix)
-        # This catches vias in thermal clearance cutouts that are still in the zone
+        # This catches vias in thermal clearance cutouts that are still in the zone.
+        # Use _via_spans_layer to handle through-vias whose layer list is
+        # ["F.Cu", "B.Cu"] but which electrically connect all intermediate layers.
         for zone_layer, boundary in zone_boundaries:
             for via in vias:
-                if zone_layer not in via.layers:
+                if not self._via_spans_layer(via.layers, zone_layer):
                     continue
                 if self._point_in_polygon(via.position, boundary):
                     zone_connection_points.add(via.position)
@@ -537,7 +579,7 @@ class NetStatusAnalyzer:
         # Also check vias against filled polygons (original behavior)
         for zone_layer, filled_polys in net_zones:
             for via in vias:
-                if zone_layer not in via.layers:
+                if not self._via_spans_layer(via.layers, zone_layer):
                     continue
                 for poly in filled_polys:
                     if self._point_in_polygon(via.position, poly):
@@ -692,6 +734,83 @@ class NetStatusAnalyzer:
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
+
+    # Canonical copper layer ordering from top to bottom.
+    # Used to determine whether a through-via spans a given inner layer.
+    _COPPER_LAYER_ORDER: list[str] = [
+        "F.Cu",
+        "In1.Cu",
+        "In2.Cu",
+        "In3.Cu",
+        "In4.Cu",
+        "In5.Cu",
+        "In6.Cu",
+        "In7.Cu",
+        "In8.Cu",
+        "In9.Cu",
+        "In10.Cu",
+        "In11.Cu",
+        "In12.Cu",
+        "In13.Cu",
+        "In14.Cu",
+        "In15.Cu",
+        "In16.Cu",
+        "In17.Cu",
+        "In18.Cu",
+        "In19.Cu",
+        "In20.Cu",
+        "In21.Cu",
+        "In22.Cu",
+        "In23.Cu",
+        "In24.Cu",
+        "In25.Cu",
+        "In26.Cu",
+        "In27.Cu",
+        "In28.Cu",
+        "In29.Cu",
+        "In30.Cu",
+        "B.Cu",
+    ]
+
+    def _via_spans_layer(self, via_layers: list[str], target_layer: str) -> bool:
+        """Check if a via spans (connects to) a target copper layer.
+
+        In KiCad, a via with layers ["F.Cu", "B.Cu"] is a through-via that
+        connects ALL intermediate copper layers (In1.Cu, In2.Cu, etc.), not
+        just the two listed layers.  A blind/buried via ["F.Cu", "In1.Cu"]
+        connects F.Cu and In1.Cu only (no intermediates beyond those two).
+
+        Args:
+            via_layers: List of layer names from the via (e.g., ["F.Cu", "B.Cu"])
+            target_layer: Layer name to check (e.g., "In1.Cu")
+
+        Returns:
+            True if the via electrically connects the target layer
+        """
+        # Direct match -- layer explicitly listed on the via
+        if target_layer in via_layers:
+            return True
+
+        # Determine the span of the via in the copper stack
+        indices = []
+        for layer in via_layers:
+            try:
+                indices.append(self._COPPER_LAYER_ORDER.index(layer))
+            except ValueError:
+                # Unknown layer name -- skip (non-copper or custom)
+                continue
+
+        if len(indices) < 2:
+            return False
+
+        # Target must also be a recognised copper layer
+        try:
+            target_idx = self._COPPER_LAYER_ORDER.index(target_layer)
+        except ValueError:
+            return False
+
+        # Via spans from min to max index; any layer in between is connected
+        return min(indices) <= target_idx <= max(indices)
 
     def _pad_layer_matches_zone(
         self,

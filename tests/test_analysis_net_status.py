@@ -668,3 +668,338 @@ class TestAnalyzerHelperMethods:
 
         assert result[0] == pytest.approx(0.0, abs=0.001)
         assert result[1] == pytest.approx(1.0, abs=0.001)
+
+    def test_via_spans_layer_direct_match(self, fully_routed_pcb: Path):
+        """Test _via_spans_layer with direct layer match."""
+        analyzer = NetStatusAnalyzer(fully_routed_pcb)
+
+        # Direct match: via lists F.Cu, target is F.Cu
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "F.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "B.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "In1.Cu"], "F.Cu") is True
+
+    def test_via_spans_layer_through_via_inner_layers(self, fully_routed_pcb: Path):
+        """Test _via_spans_layer recognises through-via spanning inner layers."""
+        analyzer = NetStatusAnalyzer(fully_routed_pcb)
+
+        # Through-via F.Cu->B.Cu should span ALL intermediate copper layers
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "In1.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "In2.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "In3.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "In4.Cu") is True
+
+    def test_via_spans_layer_blind_via(self, fully_routed_pcb: Path):
+        """Test _via_spans_layer for blind/buried vias with limited span."""
+        analyzer = NetStatusAnalyzer(fully_routed_pcb)
+
+        # Blind via F.Cu->In1.Cu should span only those two layers
+        assert analyzer._via_spans_layer(["F.Cu", "In1.Cu"], "In1.Cu") is True
+        assert analyzer._via_spans_layer(["F.Cu", "In1.Cu"], "F.Cu") is True
+        # Should NOT span beyond In1.Cu
+        assert analyzer._via_spans_layer(["F.Cu", "In1.Cu"], "In2.Cu") is False
+        assert analyzer._via_spans_layer(["F.Cu", "In1.Cu"], "B.Cu") is False
+
+    def test_via_spans_layer_no_match(self, fully_routed_pcb: Path):
+        """Test _via_spans_layer returns False for unrelated layers."""
+        analyzer = NetStatusAnalyzer(fully_routed_pcb)
+
+        # Non-copper layer should not match
+        assert analyzer._via_spans_layer(["F.Cu", "B.Cu"], "F.Mask") is False
+        # Empty via layers
+        assert analyzer._via_spans_layer([], "F.Cu") is False
+        # Single layer via (degenerate case)
+        assert analyzer._via_spans_layer(["F.Cu"], "B.Cu") is False
+
+
+# ---- PCB fixtures for stitching via connectivity tests ----
+
+# 4-layer PCB: SMD pad on F.Cu -> trace stub -> via (F.Cu/In1.Cu) -> zone on In1.Cu
+# This is the canonical stitching-via pattern.
+STITCH_VIA_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 15 15.25) (end 15 17) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
+
+  (via (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+)
+"""
+
+# Same as STITCH_VIA_PCB but via uses through-via layers ["F.Cu", "B.Cu"]
+# instead of blind ["F.Cu", "In1.Cu"].  Zone is still on In1.Cu.
+THROUGH_VIA_STITCH_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 15 15.25) (end 15 17) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
+
+  (via (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+)
+"""
+
+# Dog-leg trace stub: pad -> two segment trace -> via -> zone
+DOGLEG_STITCH_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 15 15.25) (end 16 16) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 16 16) (end 16 17) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
+
+  (via (at 16 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000004")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def stitch_via_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with stitching vias (blind via F.Cu->In1.Cu)."""
+    pcb_file = tmp_path / "stitch_via.kicad_pcb"
+    pcb_file.write_text(STITCH_VIA_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def through_via_stitch_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with through-vias stitching to an inner layer zone."""
+    pcb_file = tmp_path / "through_via_stitch.kicad_pcb"
+    pcb_file.write_text(THROUGH_VIA_STITCH_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def dogleg_stitch_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with dog-leg trace stubs to stitching vias."""
+    pcb_file = tmp_path / "dogleg_stitch.kicad_pcb"
+    pcb_file.write_text(DOGLEG_STITCH_PCB)
+    return pcb_file
+
+
+class TestStitchingViaConnectivity:
+    """Tests for stitching via connectivity in net status analysis.
+
+    These tests verify the pad -> trace stub -> via -> zone connection
+    pattern used by the stitch command.
+    """
+
+    def test_blind_via_stitch_complete(self, stitch_via_pcb: Path):
+        """Blind via (F.Cu/In1.Cu) stitching to In1.Cu zone is complete."""
+        analyzer = NetStatusAnalyzer(stitch_via_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.total_pads == 2
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_through_via_stitch_complete(self, through_via_stitch_pcb: Path):
+        """Through-via (F.Cu/B.Cu) stitching to In1.Cu zone is complete."""
+        analyzer = NetStatusAnalyzer(through_via_stitch_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.total_pads == 2
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_dogleg_trace_stitch_complete(self, dogleg_stitch_pcb: Path):
+        """Dog-leg trace stub (2 segments) to stitching via is complete."""
+        analyzer = NetStatusAnalyzer(dogleg_stitch_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.total_pads == 2
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_stitch_via_is_plane_net(self, stitch_via_pcb: Path):
+        """Stitched net is correctly identified as a plane net."""
+        analyzer = NetStatusAnalyzer(stitch_via_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.is_plane_net is True
+        assert gnd.plane_layer == "In1.Cu"
+
+    def test_stitch_via_has_vias(self, stitch_via_pcb: Path):
+        """Stitched net correctly reports having vias."""
+        analyzer = NetStatusAnalyzer(stitch_via_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.has_vias is True
+        assert gnd.has_routing is True
