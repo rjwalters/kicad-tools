@@ -419,8 +419,8 @@ class TestLabelOnWireMidpoint:
         sch = Schematic.load(_write_sch(tmp_path, sch_content))
         pin_map = resolve_pin_map(sch)
 
-        # R1 pin 2 at (100, 46.19) -> wire to (100,40) -> wire to (110,40) label "SIG"
-        assert pin_map["R1"]["pins"]["2"]["net"] == "SIG"
+        # R1 pin 1 at (100, 46.19) -> wire to (100,40) -> wire to (110,40) label "SIG"
+        assert pin_map["R1"]["pins"]["1"]["net"] == "SIG"
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +433,7 @@ class TestFloodFill:
         sch = Schematic.load(_write_sch(tmp_path, MINIMAL_SCHEMATIC))
         adjacency, net_names = _build_wire_graph(sch)
 
-        # R1 pin 2 at (100, 46.19) -> wire to (100, 40) -> label "VIN"
+        # R1 pin 1 at (100, 46.19) -> wire to (100, 40) -> label "VIN"
         pin_coord = _to_coord(100, 46.19)
         net = _flood_fill_net(pin_coord, adjacency, net_names)
         assert net == "VIN"
@@ -442,7 +442,7 @@ class TestFloodFill:
         sch = Schematic.load(_write_sch(tmp_path, MINIMAL_SCHEMATIC))
         adjacency, net_names = _build_wire_graph(sch)
 
-        # C1 pin 2 at (120, 46.19) -> wire to (120, 40) -> wire to (100, 40) -> "VIN"
+        # C1 pin 1 at (120, 46.19) -> wire to (120, 40) -> wire to (100, 40) -> "VIN"
         pin_coord = _to_coord(120, 46.19)
         net = _flood_fill_net(pin_coord, adjacency, net_names)
         assert net == "VIN"
@@ -451,7 +451,7 @@ class TestFloodFill:
         sch = Schematic.load(_write_sch(tmp_path, UNCONNECTED_SCHEMATIC))
         adjacency, net_names = _build_wire_graph(sch)
 
-        # R1 pin 1 at (100, 46.19), no wires at all
+        # R1 pin 1 at (100, 46.19) (after Y-negation), no wires at all
         pin_coord = _to_coord(100, 46.19)
         net = _flood_fill_net(pin_coord, adjacency, net_names)
         assert net is None
@@ -470,21 +470,21 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         assert "C1" in pin_map
 
-        # Pin 1 is at (0, 3.81) -> y=50+3.81=53.81 -> connects to GND at y=60
-        # Pin 2 is at (0, -3.81) -> y=50-3.81=46.19 -> connects to VIN at y=40
-        assert pin_map["R1"]["pins"]["1"]["net"] == "GND"
-        assert pin_map["R1"]["pins"]["2"]["net"] == "VIN"
+        # Pin 1 lib (0, 3.81) -> negate Y -> (0, -3.81) -> schematic (100, 46.19) -> VIN
+        # Pin 2 lib (0, -3.81) -> negate Y -> (0, 3.81) -> schematic (100, 53.81) -> GND
+        assert pin_map["R1"]["pins"]["1"]["net"] == "VIN"
+        assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
         assert pin_map["R1"]["lib_id"] == "Device:R"
 
         # Verify absolute pin positions (R1 at (100, 50), pin offsets +-3.81)
-        assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 53.81]
-        assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 46.19]
+        assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 46.19]
+        assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 53.81]
 
         # C1 follows the same pin layout (at (120, 50))
-        assert pin_map["C1"]["pins"]["1"]["net"] == "GND"
-        assert pin_map["C1"]["pins"]["2"]["net"] == "VIN"
-        assert pin_map["C1"]["pins"]["1"]["position"] == [120.0, 53.81]
-        assert pin_map["C1"]["pins"]["2"]["position"] == [120.0, 46.19]
+        assert pin_map["C1"]["pins"]["1"]["net"] == "VIN"
+        assert pin_map["C1"]["pins"]["2"]["net"] == "GND"
+        assert pin_map["C1"]["pins"]["1"]["position"] == [120.0, 46.19]
+        assert pin_map["C1"]["pins"]["2"]["position"] == [120.0, 53.81]
 
     def test_pin_type(self, tmp_path):
         sch = Schematic.load(_write_sch(tmp_path, MINIMAL_SCHEMATIC))
@@ -510,10 +510,10 @@ class TestResolvePinMap:
         pin_map = resolve_pin_map(sch)
 
         assert "R1" in pin_map
-        # R1 pin 2 at (100, 46.19) connected via wire to +3.3V power symbol at (100, 40)
-        assert pin_map["R1"]["pins"]["2"]["net"] == "+3.3V"
-        # R1 pin 1 at (100, 53.81) is unconnected (no wire)
-        assert pin_map["R1"]["pins"]["1"]["net"] is None
+        # R1 pin 1 at (100, 46.19) connected via wire to +3.3V power symbol at (100, 40)
+        assert pin_map["R1"]["pins"]["1"]["net"] == "+3.3V"
+        # R1 pin 2 at (100, 53.81) is unconnected (no wire)
+        assert pin_map["R1"]["pins"]["2"]["net"] is None
 
     def test_power_symbols_excluded(self, tmp_path):
         sch = Schematic.load(_write_sch(tmp_path, POWER_SYMBOL_SCHEMATIC))
@@ -531,15 +531,15 @@ class TestResolvePinMap:
         assert pin_map["R1"]["pins"]["1"]["net"] is None
         assert pin_map["R1"]["pins"]["2"]["net"] is None
         # Position should still be present even for unconnected pins
-        assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 53.81]
-        assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 46.19]
+        assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 46.19]
+        assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 53.81]
 
     def test_rotated_symbol_positions(self, tmp_path):
         """Symbol rotated 90 degrees: pin offsets rotate accordingly.
 
-        KiCad rotates pin positions around the symbol origin before translating.
-        For a 90-degree rotation, pin (0, 3.81) maps to (-3.81, 0) in KiCad's
-        coordinate system, yielding absolute (96.19, 50).
+        KiCad library coordinates use Y-up; schematic coordinates use Y-down.
+        After negating Y, pin 1 (0, 3.81) becomes (0, -3.81), which rotated
+        90 degrees yields (3.81, 0), giving absolute (103.81, 50).
         """
         sch = Schematic.load(_write_sch(tmp_path, ROTATED_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
@@ -547,18 +547,19 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         pos1 = pin_map["R1"]["pins"]["1"]["position"]
         pos2 = pin_map["R1"]["pins"]["2"]["position"]
-        # Pin 1: (0, 3.81) rotated 90 -> (-3.81, 0) + (100, 50) = (96.19, 50)
-        assert abs(pos1[0] - 96.19) < 0.01
+        # Pin 1: (0, 3.81) negate Y -> (0, -3.81) rotated 90 -> (3.81, 0) + (100, 50)
+        assert abs(pos1[0] - 103.81) < 0.01
         assert abs(pos1[1] - 50.0) < 0.01
-        # Pin 2: (0, -3.81) rotated 90 -> (3.81, 0) + (100, 50) = (103.81, 50)
-        assert abs(pos2[0] - 103.81) < 0.01
+        # Pin 2: (0, -3.81) negate Y -> (0, 3.81) rotated 90 -> (-3.81, 0) + (100, 50)
+        assert abs(pos2[0] - 96.19) < 0.01
         assert abs(pos2[1] - 50.0) < 0.01
 
     def test_mirrored_symbol_positions(self, tmp_path):
-        """Symbol mirrored in X: for a symmetric resistor, positions remain unchanged.
+        """Symbol mirrored in X: for a symmetric resistor with pins on the Y-axis,
+        mirror X (which negates X) does not change pin positions.
 
-        The resistor has pins at (0, +3.81) and (0, -3.81). Mirror X on a
-        vertically-symmetric component does not change pin positions.
+        After Y-negation, pin 1 is at (0, -3.81) and pin 2 at (0, 3.81).
+        Mirror X negates X which is 0, so positions are unchanged.
         """
         sch = Schematic.load(_write_sch(tmp_path, MIRRORED_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
@@ -566,11 +567,11 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         pos1 = pin_map["R1"]["pins"]["1"]["position"]
         pos2 = pin_map["R1"]["pins"]["2"]["position"]
-        # Mirror X on symmetric resistor: positions unchanged from non-mirrored
+        # Mirror X on symmetric resistor: positions same as non-mirrored (with Y fix)
         assert abs(pos1[0] - 100.0) < 0.01
-        assert abs(pos1[1] - 53.81) < 0.01
+        assert abs(pos1[1] - 46.19) < 0.01
         assert abs(pos2[0] - 100.0) < 0.01
-        assert abs(pos2[1] - 46.19) < 0.01
+        assert abs(pos2[1] - 53.81) < 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -613,10 +614,10 @@ class TestCLI:
         data = json.loads(captured.out)
         assert "R1" in data
         assert "C1" in data
-        assert data["R1"]["pins"]["1"]["net"] == "GND"
+        assert data["R1"]["pins"]["1"]["net"] == "VIN"
         # Verify position is present in JSON output
-        assert data["R1"]["pins"]["1"]["position"] == [100.0, 53.81]
-        assert data["R1"]["pins"]["2"]["position"] == [100.0, 46.19]
+        assert data["R1"]["pins"]["1"]["position"] == [100.0, 46.19]
+        assert data["R1"]["pins"]["2"]["position"] == [100.0, 53.81]
 
     def test_table_output(self, tmp_path, capsys):
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)

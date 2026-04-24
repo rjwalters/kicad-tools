@@ -445,9 +445,10 @@ class TestCollisionWarning:
         """Place a pull resistor near an existing symbol to trigger collision warning."""
         sch_path = _write_sch(tmp_path)
 
-        # Pin 3 (VCC) is at local (0, 5.08) direction 270 on U1 at (100, 80).
-        # With offset=2.0 the resistor center lands very close to U1 (100, 80),
-        # within the default tolerance of 2.54mm — collision is expected.
+        # Pin 3 (VCC) is at local (0, 5.08); after Y-negation the schematic
+        # position is (100, 74.92).  With direction "down" and offset=2.0 the
+        # resistor center lands at approximately (100, 77.47) which is within
+        # the default 2.54mm tolerance of U1 at (100, 80) — collision expected.
         rc = add_pull_main(
             [
                 str(sch_path),
@@ -456,7 +457,7 @@ class TestCollisionWarning:
                 "--pin",
                 "3",
                 "--direction",
-                "up",
+                "down",
                 "--value",
                 "10k",
                 "--offset",

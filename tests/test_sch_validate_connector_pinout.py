@@ -114,7 +114,7 @@ def _make_schematic_with_connector(
     labels = []
     for pin_num_str, net_name in pin_nets.items():
         pin_idx = int(pin_num_str) - 1
-        pin_y = sym_y + pin_idx * 2.54
+        pin_y = sym_y - pin_idx * 2.54  # Library Y-up -> schematic Y-down
         pin_x = sym_x  # pin is at (sym_x, pin_y)
         label_x = pin_x + 10.0
 

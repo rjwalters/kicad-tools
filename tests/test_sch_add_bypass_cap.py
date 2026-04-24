@@ -135,12 +135,12 @@ SCHEMATIC_WITH_IC = """\
 # to test junction insertion.
 # Pin 4 is at library position (0, -5.08) with rotation 270.
 # Instance is at (100, 80) rotation 0.
-# Pin schematic position: approximately (100.33, 74.93) after snapping.
-# Place the bus wire at y=74.93 crossing through pin 4.
+# Library Y-up -> schematic Y-down: negate Y -> (0, 5.08) -> snapped to (100, 85.09).
+# Place the bus wire at y=85.09 crossing through pin 4.
 SCHEMATIC_WITH_BUS = SCHEMATIC_WITH_IC.replace(
     "  (sheet_instances",
     """\
-  (wire (pts (xy 80 74.93) (xy 120 74.93))
+  (wire (pts (xy 80 85.09) (xy 120 85.09))
     (stroke (width 0) (type default))
     (uuid "bus-wire-1")
   )
@@ -208,7 +208,7 @@ SCHEMATIC_LEFT_PIN = """\
 # Schematic with an IC whose VDD pin (pin 6) points UP (rotation=90).
 # Pin 6 is at library position (0, 5.08) with rotation 90 (stub points up, i.e. negative Y in KiCad).
 # Instance is at (100, 80) rotation 0.
-# Pin schematic position: approximately (100, 85.08).
+# Library Y-up -> schematic Y-down: negate Y -> (0, -5.08) -> (100, 74.92).
 SCHEMATIC_UP_PIN = """\
 (kicad_sch
   (version 20231120)
@@ -532,9 +532,9 @@ class TestPinOrientations:
         gnd_pos = gnd_syms[0].position
 
         # Pin 6 at library (0, 5.08) with rotation=90 (points up), instance at (100, 80)
-        # In KiCad Y-down coords, pin at (0, 5.08) in library transforms to (100, 85.08)
+        # Library Y-up -> schematic Y-down: negate Y offset -> (0, -5.08) -> (100, 74.92)
         ic_pin_x = _snap(100 + 0)
-        ic_pin_y = _snap(80 + 5.08)
+        ic_pin_y = _snap(80 - 5.08)
         ic_pin_pos = (ic_pin_x, ic_pin_y)
 
         _check_no_short(sch, ic_pin_pos, gnd_pos)
