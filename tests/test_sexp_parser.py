@@ -390,6 +390,24 @@ class TestSerialization:
         result = node.to_string(compact=True)
         assert result == "(test value)"  # 'value' is a keyword
 
+    def test_serialize_power_global_unquoted(self):
+        """Keyword 'global' is not quoted (power symbol scope)."""
+        node = SExp.list("power", "global")
+        result = node.to_string(compact=True)
+        assert result == "(power global)"
+
+    def test_serialize_power_local_unquoted(self):
+        """Keyword 'local' is not quoted (power symbol scope)."""
+        node = SExp.list("power", "local")
+        result = node.to_string(compact=True)
+        assert result == "(power local)"
+
+    def test_serialize_power_symbols_unquoted(self):
+        """Keyword 'symbols' is not quoted."""
+        node = SExp.list("power", "symbols")
+        result = node.to_string(compact=True)
+        assert result == "(power symbols)"
+
     def test_serialize_roundtrip(self):
         """Parse and serialize preserves structure."""
         original = '(test 1 "hello" (nested 2))'
@@ -584,6 +602,44 @@ class TestRoundTrip:
 
             assert hatch_type in serialized
             assert f'"{hatch_type}"' not in serialized
+
+    def test_roundtrip_power_global_unquoted(self):
+        """Power scope keyword 'global' should not be quoted."""
+        sexp = "(power global)"
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert "global" in serialized
+        assert '"global"' not in serialized
+        assert serialized.strip() == "(power global)"
+
+    def test_roundtrip_power_local_unquoted(self):
+        """Power scope keyword 'local' should not be quoted."""
+        sexp = "(power local)"
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert "local" in serialized
+        assert '"local"' not in serialized
+        assert serialized.strip() == "(power local)"
+
+    def test_roundtrip_symbols_unquoted(self):
+        """Keyword 'symbols' should not be quoted."""
+        sexp = "(power symbols)"
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert "symbols" in serialized
+        assert '"symbols"' not in serialized
+        assert serialized.strip() == "(power symbols)"
+
+    def test_roundtrip_global_with_spaces_still_quoted(self):
+        """Strings containing 'global' with spaces are still quoted."""
+        sexp = '(test "global warming")'
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert '"global warming"' in serialized
 
     def test_roundtrip_boolean_values_unquoted(self):
         """Boolean values like yes, no are not quoted."""

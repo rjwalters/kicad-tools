@@ -605,6 +605,11 @@ class SExp:
             "uvia_drill",
             "diff_pair_width",
             "diff_pair_gap",
+            # Scope keywords (power symbol scope)
+            "global",
+            "local",
+            # Symbol types
+            "symbols",
             # Other
             "allow_missing_courtyard",
             "allow_soldermask_bridges",
