@@ -967,7 +967,7 @@ class TestLibrarySymbol:
             ],
         )
         pos = sym.get_pin_position("1", instance_pos=(100, 100), mirror="y")
-        assert pos == (100.0, 95.0)
+        assert pos == (100.0, 105.0)
 
     def test_library_symbol_get_all_pin_positions(self):
         """Test getting all pin positions."""

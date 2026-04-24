@@ -473,8 +473,11 @@ class LibrarySymbol:
         if not pin:
             return None
 
-        # Start with pin's local position
+        # Start with pin's local position in library coordinates (Y-up).
+        # Negate Y to convert to schematic coordinates (Y-down) before
+        # applying mirror/rotation transforms.
         x, y = pin.position
+        y = -y
 
         # Apply mirror
         if mirror == "x":
