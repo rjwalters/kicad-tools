@@ -58,6 +58,7 @@ import logging
 import math
 import signal
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -138,9 +139,10 @@ def _handle_interrupt(signum, frame):
         print("\n\n⚠ Interrupt received! Saving partial results...")
     # Save partial results immediately
     saved = _save_partial_results()
-    # Exit with code 2 to indicate partial results (interruption with saved output)
-    # Code 2 is shared with partial routing completion — both mean "some useful output exists"
-    sys.exit(2 if saved else 130)  # 130 = 128 + SIGINT (2)
+    # Exit with code 5 to indicate SIGINT interruption with saved partial results.
+    # This is distinct from code 2 (partial routing below threshold) so scripts can
+    # distinguish user-interrupted from router-decided-partial.
+    sys.exit(5 if saved else 130)  # 130 = 128 + SIGINT (2)
 
 
 def _save_partial_results() -> bool:
@@ -1941,6 +1943,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
+        epilog=textwrap.dedent("""\
+            exit codes:
+              0  all nets routed (or meets --min-completion), DRC clean
+              1  fatal failure -- no nets routed
+              2  partial routing -- below --min-completion threshold
+              3  routing meets threshold but DRC violations remain
+              4  partial routing AND segment-segment clearance violations
+              5  interrupted by SIGINT with partial results saved
+        """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
@@ -3613,9 +3625,9 @@ def main(argv: list[str] | None = None) -> int:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
-    #     (also used for SIGINT partial save, handled earlier in the function)
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations)
     # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
+    # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.

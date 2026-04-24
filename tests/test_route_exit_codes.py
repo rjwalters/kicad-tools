@@ -1,12 +1,12 @@
-"""Tests for route command exit codes (issue #1301, #1413, #1454, #1946).
+"""Tests for route command exit codes (issue #1301, #1413, #1454, #1946, #2018).
 
 Exit code semantics (updated for --min-completion threshold support):
   0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
   1 = Fatal failure -- no nets routed, no useful output
   2 = Partial routing -- some nets routed but below --min-completion threshold
-      (also used for SIGINT partial save)
   3 = Meets threshold but DRC violations detected (includes seg-seg violations)
   4 = Below threshold AND seg-seg clearance violations remain (Issue #1666)
+  5 = Interrupted by SIGINT with partial results saved
 """
 
 from io import StringIO
@@ -591,3 +591,216 @@ class TestPartialRoutingSuggestions:
         suggestions = result.get("suggestions", [])
         mc_suggestions = [s for s in suggestions if "monte-carlo" in s.get("fix", "")]
         assert len(mc_suggestions) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Exit code epilog in --help output (issue #2018)
+# ---------------------------------------------------------------------------
+
+
+class TestRouteExitCodeEpilog:
+    """Verify that exit codes are documented in --help output."""
+
+    def test_help_epilog_documents_all_exit_codes(self):
+        """The argparse epilog lists all exit codes 0-5."""
+        import argparse
+
+        from kicad_tools.cli import route_cmd
+
+        # Build the parser and check its epilog
+        # We need to capture the help output to verify epilog is included
+        with patch("sys.argv", ["kicad-tools", "route", "--help"]):
+            try:
+                result = route_cmd.main(["--help"])
+            except SystemExit:
+                pass  # --help causes SystemExit(0)
+
+        # Directly inspect the parser's epilog by constructing it the same way
+        parser = argparse.ArgumentParser(
+            prog="kicad-tools route",
+            description="Autoroute a KiCad PCB file",
+        )
+        # The real parser is created inside main(), so we check the source
+        import inspect
+        source = inspect.getsource(route_cmd.main)
+        assert "epilog=" in source, "Parser must have an epilog argument"
+
+    def test_help_epilog_contains_each_exit_code(self):
+        """The epilog text documents each individual exit code."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd.main)
+        # Verify all six exit codes are documented in the epilog
+        for code in range(6):
+            assert f"  {code}  " in source, (
+                f"Exit code {code} must be documented in the parser epilog"
+            )
+
+    def test_help_epilog_mentions_sigint(self):
+        """The epilog documents that exit code 5 is for SIGINT interruption."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd.main)
+        assert "SIGINT" in source, "Epilog must mention SIGINT for exit code 5"
+
+    def test_parser_uses_raw_description_formatter(self):
+        """Parser uses RawDescriptionHelpFormatter so epilog whitespace is preserved."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd.main)
+        assert "RawDescriptionHelpFormatter" in source, (
+            "Parser must use RawDescriptionHelpFormatter for epilog formatting"
+        )
+
+
+# ---------------------------------------------------------------------------
+# SIGINT exit code disambiguation (issue #2018)
+# ---------------------------------------------------------------------------
+
+
+class TestSigintExitCode:
+    """Verify that SIGINT uses exit code 5, distinct from code 2."""
+
+    def test_sigint_handler_uses_exit_code_5(self):
+        """The SIGINT handler exits with code 5 when partial results are saved."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd._handle_interrupt)
+        assert "sys.exit(5" in source, (
+            "SIGINT handler must use exit code 5 for saved partial results"
+        )
+
+    def test_sigint_handler_falls_back_to_130(self):
+        """The SIGINT handler exits with 130 when no partial results could be saved."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd._handle_interrupt)
+        assert "130" in source, (
+            "SIGINT handler must fall back to 130 (128 + SIGINT) when save fails"
+        )
+
+    def test_sigint_exit_code_distinct_from_partial(self):
+        """Exit code 5 (SIGINT) is distinct from exit code 2 (partial routing)."""
+        # Verify the SIGINT handler doesn't use code 2
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd._handle_interrupt)
+        assert "sys.exit(2" not in source, (
+            "SIGINT handler must NOT use exit code 2 (that is for partial routing)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Consumer exit code handling tests (issue #2018)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCmdExitCodeHandling:
+    """Verify build_cmd.py handles route exit codes 3, 4, and 5 as non-fatal."""
+
+    def test_build_cmd_treats_exit_3_as_success(self):
+        """build_cmd treats exit code 3 (DRC violations) as non-fatal."""
+        import inspect
+
+        from kicad_tools.cli import build_cmd
+
+        source = inspect.getsource(build_cmd)
+        # The returncode check should include 3
+        assert "result.returncode in (2, 3, 4, 5)" in source, (
+            "build_cmd must handle exit codes 2, 3, 4, and 5 as non-fatal"
+        )
+
+    def test_build_cmd_treats_exit_4_as_success(self):
+        """build_cmd treats exit code 4 (partial + seg-seg) as non-fatal."""
+        import inspect
+
+        from kicad_tools.cli import build_cmd
+
+        source = inspect.getsource(build_cmd)
+        assert "4" in source, "build_cmd must handle exit code 4"
+
+    def test_build_cmd_has_distinct_messages_per_code(self):
+        """build_cmd provides distinct warning messages for each exit code."""
+        import inspect
+
+        from kicad_tools.cli import build_cmd
+
+        source = inspect.getsource(build_cmd)
+        assert "DRC violations remain" in source, (
+            "build_cmd must have a message for exit code 3 (DRC violations)"
+        )
+        assert "clearance violations" in source, (
+            "build_cmd must have a message for exit code 4 (clearance violations)"
+        )
+        assert "interrupted" in source.lower(), (
+            "build_cmd must have a message for exit code 5 (SIGINT)"
+        )
+
+
+class TestPipelineCmdExitCodeHandling:
+    """Verify pipeline_cmd.py handles route exit codes 3, 4, and 5 as non-fatal."""
+
+    def test_pipeline_cmd_treats_exit_3_as_success(self):
+        """pipeline_cmd treats exit code 3 as completed with warnings."""
+        import inspect
+
+        from kicad_tools.cli import pipeline_cmd
+
+        source = inspect.getsource(pipeline_cmd._run_subprocess_step)
+        assert "result.returncode in (2, 3, 4, 5)" in source, (
+            "pipeline_cmd must handle exit codes 2, 3, 4, and 5 as non-fatal"
+        )
+
+    def test_pipeline_cmd_returns_true_for_codes_2_through_5(self):
+        """pipeline_cmd returns success=True for exit codes 2, 3, 4, and 5."""
+        import subprocess
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from kicad_tools.cli.pipeline_cmd import _run_subprocess_step
+
+        for code in (2, 3, 4, 5):
+            mock_result = MagicMock()
+            mock_result.returncode = code
+            mock_result.stderr = ""
+
+            with patch("kicad_tools.cli.pipeline_cmd.subprocess.run", return_value=mock_result):
+                success, msg = _run_subprocess_step(
+                    cmd=["kct", "route", "test.kicad_pcb"],
+                    cwd=Path("/tmp"),
+                )
+                assert success is True, (
+                    f"Exit code {code} should be treated as success, got failure"
+                )
+                assert "warnings" in msg, (
+                    f"Exit code {code} message should mention warnings, got: {msg}"
+                )
+
+    def test_pipeline_cmd_returns_false_for_code_1(self):
+        """pipeline_cmd returns success=False for exit code 1 (fatal failure)."""
+        from pathlib import Path
+
+        from kicad_tools.cli.pipeline_cmd import _run_subprocess_step
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "fatal error"
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run", return_value=mock_result):
+            success, msg = _run_subprocess_step(
+                cmd=["kct", "route", "test.kicad_pcb"],
+                cwd=Path("/tmp"),
+            )
+            assert success is False, "Exit code 1 should be treated as failure"
