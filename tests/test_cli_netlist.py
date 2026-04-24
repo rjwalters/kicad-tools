@@ -925,3 +925,253 @@ class TestBuildNetlistFromSchematic:
         pin_refs = {(node.reference, node.pin) for node in node_a_net.nodes}
         assert ("R1", "1") in pin_refs
         assert ("R2", "2") in pin_refs
+
+
+class TestExportNetlistIncompleteHierarchy:
+    """Tests for incomplete kicad-cli output detection (issue #2004).
+
+    When kicad-cli produces a netlist that covers fewer sheets than the
+    schematic hierarchy declares, export_netlist() should fall back to the
+    Python extractor automatically.
+    """
+
+    def test_fallback_triggered_when_sheets_missing(self, tmp_path):
+        """export_netlist falls back when kicad-cli output has fewer sheets than hierarchy."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a hierarchical schematic: root + sub_a
+        sub_file = tmp_path / "sub_a.kicad_sch"
+        sub_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "sub-a-uuid-0001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R"
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "sub-a-r2-uuid")
+                (property "Reference" "R2" (at 101.6 48.26 0))
+                (property "Value" "4.7k" (at 101.6 50.8 0))
+                (pin "1" (uuid "sub-a-r2-pin1"))
+                (pin "2" (uuid "sub-a-r2-pin2")))
+            )"""
+        )
+
+        sch_file = tmp_path / "root.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "root-uuid-0001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R"
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "root-r1-uuid")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (pin "1" (uuid "root-r1-pin1"))
+                (pin "2" (uuid "root-r1-pin2")))
+              (sheet (at 150 50) (size 30 20)
+                (uuid "sheet-sub-a-uuid")
+                (property "Sheetname" "SubA" (at 150 49 0))
+                (property "Sheetfile" "sub_a.kicad_sch" (at 150 71 0)))
+            )"""
+        )
+
+        # kicad-cli "succeeds" but produces a netlist with only 1 sheet
+        # (root) when the hierarchy has 2 (root + sub_a).
+        incomplete_netlist = """(export
+          (version "E")
+          (design
+            (source "root.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components
+            (comp (ref "R1")
+              (value "10k")
+              (footprint "")
+              (libsource (lib "Device") (part "R"))))
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "root-netlist.kicad_net"
+
+        def create_incomplete(*args, **kwargs):
+            netlist_file.write_text(incomplete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_incomplete):
+                result = export_netlist(sch_file, fallback=True)
+
+        # Should have fallen back to Python extraction and found both components
+        assert "Python fallback" in result.tool
+        refs = {c.reference for c in result.components}
+        assert "R1" in refs
+        assert "R2" in refs
+
+    def test_no_fallback_when_sheets_complete(self, tmp_path):
+        """export_netlist uses kicad-cli output when sheet count matches."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Flat schematic -- 1 sheet expected
+        sch_file = tmp_path / "flat.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "flat-uuid-0001")
+              (paper "A4")
+            )"""
+        )
+
+        complete_netlist = """(export
+          (version "E")
+          (design
+            (source "flat.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components)
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "flat-netlist.kicad_net"
+
+        def create_complete(*args, **kwargs):
+            netlist_file.write_text(complete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_complete):
+                result = export_netlist(sch_file, fallback=True)
+
+        # Should use kicad-cli output, not fallback
+        assert "Python fallback" not in (result.tool or "")
+        assert result.tool == "Eeschema"
+
+    def test_no_validation_when_fallback_disabled(self, tmp_path):
+        """Completeness validation is skipped when fallback=False."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create hierarchical schematic
+        sub_file = tmp_path / "sub.kicad_sch"
+        sub_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "sub-uuid-0001")
+              (paper "A4")
+            )"""
+        )
+
+        sch_file = tmp_path / "root.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "root-uuid-0001")
+              (paper "A4")
+              (sheet (at 150 50) (size 30 20)
+                (uuid "sheet-sub-uuid")
+                (property "Sheetname" "Sub" (at 150 49 0))
+                (property "Sheetfile" "sub.kicad_sch" (at 150 71 0)))
+            )"""
+        )
+
+        # Incomplete output -- only 1 of 2 sheets
+        incomplete_netlist = """(export
+          (version "E")
+          (design
+            (source "root.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components)
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "root-netlist.kicad_net"
+
+        def create_incomplete(*args, **kwargs):
+            netlist_file.write_text(incomplete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_incomplete):
+                # With fallback=False, incomplete output is returned as-is
+                result = export_netlist(sch_file, fallback=False)
+
+        assert result.tool == "Eeschema"
+
+
+class TestCmdExportFallbackHandling:
+    """Tests for cmd_export handling of Python fallback output (issue #2004)."""
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_kicad_format_writes_json_on_fallback(self, mock_export, tmp_path, capsys):
+        """When Python fallback was used, kicad format export writes JSON."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.tool = "kicad-tools (Python fallback)"
+        mock_netlist.to_json.return_value = '{"components": []}'
+        mock_export.return_value = mock_netlist
+
+        output_file = tmp_path / "output.kicad_net"
+        result = netlist_cmd.cmd_export(
+            Path("test.kicad_sch"), output_file, "kicad"
+        )
+
+        assert result == 0
+        assert output_file.exists()
+        assert output_file.read_text() == '{"components": []}'
+        captured = capsys.readouterr()
+        assert "incomplete" in captured.out
+        assert "Python fallback" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_kicad_format_normal_path_unchanged(self, mock_export, tmp_path, capsys):
+        """When kicad-cli succeeded, kicad format export works as before."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.tool = "Eeschema"
+        mock_export.return_value = mock_netlist
+
+        # Create the default output file that kicad-cli would have written
+        default_output = tmp_path / "test-netlist.kicad_net"
+        default_output.write_text("(export)")
+
+        output_file = tmp_path / "custom_output.kicad_net"
+        result = netlist_cmd.cmd_export(
+            tmp_path / "test.kicad_sch", output_file, "kicad"
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Exported KiCad netlist to:" in captured.out

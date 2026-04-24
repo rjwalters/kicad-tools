@@ -394,6 +394,39 @@ class Netlist:
 
 
 
+def _count_hierarchy_sheets(sch_path: Path, visited: set[Path] | None = None) -> int:
+    """Count the total number of sheets in a schematic hierarchy.
+
+    Recursively traverses all sub-sheet references and returns the total
+    count including the root sheet itself.  Circular references are
+    detected and skipped.
+
+    Args:
+        sch_path: Path to the root .kicad_sch file.
+        visited: Set of already-visited resolved paths (internal).
+
+    Returns:
+        Total number of sheets (1 for a flat schematic).
+    """
+    if visited is None:
+        visited = set()
+
+    resolved = sch_path.resolve()
+    if resolved in visited:
+        return 0
+    visited.add(resolved)
+
+    if not sch_path.exists():
+        return 0
+
+    count = 1  # This sheet
+    sub_filenames = _get_sheet_filenames(sch_path)
+    for filename in sub_filenames:
+        sub_path = sch_path.parent / filename
+        count += _count_hierarchy_sheets(sub_path, visited)
+    return count
+
+
 def _get_sheet_filenames(sch_path: Path) -> list[str]:
     """Extract sub-sheet filenames from a schematic file.
 
@@ -657,7 +690,26 @@ def export_netlist(
                 return build_netlist_from_schematic(sch_path)
             raise RuntimeError(result.stderr or "Netlist export produced no output")
 
-        return Netlist.load(output_path)
+        netlist = Netlist.load(output_path)
+
+        # Validate completeness: kicad-cli sometimes omits sub-sheets
+        # from hierarchical schematics.  Compare the sheet count in the
+        # exported netlist against the hierarchy declared in the .kicad_sch
+        # files.  When the output is incomplete, fall back to the Python
+        # extractor which traverses the full hierarchy.
+        if fallback:
+            expected_sheets = _count_hierarchy_sheets(sch_path)
+            exported_sheets = len(netlist.sheets) if netlist.sheets else 1
+            if exported_sheets < expected_sheets:
+                logger.warning(
+                    "kicad-cli netlist is incomplete: exported %d of %d sheets, "
+                    "using pure Python netlist extraction",
+                    exported_sheets,
+                    expected_sheets,
+                )
+                return build_netlist_from_schematic(sch_path)
+
+        return netlist
 
     except subprocess.CalledProcessError as e:
         if fallback:

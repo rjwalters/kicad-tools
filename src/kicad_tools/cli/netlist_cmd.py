@@ -487,11 +487,26 @@ def cmd_export(schematic_path: Path, output_path: Path | None, format: str) -> i
         else:
             print(output)
     else:
-        # KiCad format - the netlist is already exported by export_netlist()
-        # We just need to tell the user where it is
+        # KiCad format -- export_netlist() may have used the Python fallback
+        # (e.g. incomplete kicad-cli output for hierarchical schematics).
+        # When the fallback was used, the .kicad_net file on disk is either
+        # absent or incomplete, so we write the JSON representation instead
+        # and inform the user.
         default_output = schematic_path.parent / f"{schematic_path.stem}-netlist.kicad_net"
-        if output_path and output_path != default_output:
-            # Copy to requested location
+        used_fallback = "Python fallback" in (netlist.tool or "")
+
+        if used_fallback:
+            # Python fallback produced the netlist in-memory; no valid
+            # kicad-format file exists on disk.  Write JSON output as the
+            # best available representation.
+            dest = output_path or default_output.with_suffix(".json")
+            dest.write_text(netlist.to_json())
+            print(
+                f"Note: kicad-cli output was incomplete; wrote JSON netlist "
+                f"from Python fallback to: {dest}"
+            )
+        elif output_path and output_path != default_output:
+            # Copy kicad-cli output to the requested location
             import shutil
 
             shutil.copy(default_output, output_path)
