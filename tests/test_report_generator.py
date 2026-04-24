@@ -1084,6 +1084,86 @@ class TestLoadDataDir:
         result = _load_data_dir(str(tmp_path))
         assert result == {}
 
+    def test_narrative_json_unpacks_to_fields(self, tmp_path: Path) -> None:
+        """narrative.json unpacks its sub-keys into individual ReportData fields."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps({
+                "design_narrative": "A USB audio interface board.",
+                "functional_blocks": [
+                    {"name": "Power Supply", "filename": "power.kicad_sch"},
+                ],
+                "interfaces": [
+                    {"protocol": "I2C", "signals": ["SCL", "SDA"]},
+                ],
+                "power_architecture": [
+                    {"rail": "+3V3", "type": "power_symbol"},
+                ],
+                "assembly_notes": {
+                    "fine_pitch_count": 1,
+                    "fine_pitch_parts": ["U1"],
+                    "thermal_pad_count": 0,
+                    "polarized_count": 0,
+                    "summary": "1 fine-pitch component",
+                },
+            })
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert result["design_narrative"] == "A USB audio interface board."
+        assert len(result["functional_blocks"]) == 1
+        assert result["functional_blocks"][0]["name"] == "Power Supply"
+        assert len(result["interfaces"]) == 1
+        assert result["interfaces"][0]["protocol"] == "I2C"
+        assert len(result["power_architecture"]) == 1
+        assert result["power_architecture"][0]["rail"] == "+3V3"
+        assert result["assembly_notes"]["fine_pitch_count"] == 1
+        # The intermediate _narrative key must not leak
+        assert "_narrative" not in result
+
+    def test_narrative_json_with_envelope(self, tmp_path: Path) -> None:
+        """Envelope-wrapped narrative.json is unwrapped correctly."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "generated_at": "2026-04-24T00:00:00+00:00",
+                "pcb_path": "board.kicad_pcb",
+                "data": {
+                    "design_narrative": "Test narrative.",
+                    "functional_blocks": None,
+                    "interfaces": None,
+                    "power_architecture": None,
+                    "assembly_notes": None,
+                },
+            })
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert result["design_narrative"] == "Test narrative."
+        # None sub-keys should not be in result
+        assert "functional_blocks" not in result
+        assert "interfaces" not in result
+        assert "_narrative" not in result
+
+    def test_narrative_null_envelope_skips(self, tmp_path: Path) -> None:
+        """Envelope with data=null narrative skips all narrative fields."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "generated_at": "2026-04-24T00:00:00+00:00",
+                "data": None,
+            })
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert "design_narrative" not in result
+        assert "_narrative" not in result
+
     def test_null_envelope_skips_section(self, tmp_path: Path) -> None:
         """An envelope with data=null is skipped (section omitted)."""
         from kicad_tools.cli.report_cmd import _load_data_dir
@@ -1855,3 +1935,182 @@ class TestNetClassification:
         # Old incomplete nets list should still render
         assert "### Incomplete Nets" in content
         assert "- GND" in content
+
+
+# ---------------------------------------------------------------------------
+# TestDesignNarrative - template rendering of narrative sections
+# ---------------------------------------------------------------------------
+
+
+class TestDesignNarrative:
+    """Tests for design narrative, interfaces, power architecture, and assembly notes."""
+
+    def test_design_overview_renders_with_narrative(self, tmp_path: Path) -> None:
+        """Design Overview section renders when design_narrative is provided."""
+        data = _full_data(
+            design_narrative="This board implements a USB audio interface.",
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" in content
+        assert "### Theory of Operation" in content
+        assert "This board implements a USB audio interface." in content
+
+    def test_design_overview_omitted_when_no_data(self, tmp_path: Path) -> None:
+        """Design Overview section is absent when all narrative fields are None."""
+        data = _full_data(
+            design_narrative=None,
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" not in content
+
+    def test_functional_blocks_render(self, tmp_path: Path) -> None:
+        """Functional blocks section renders sheet names."""
+        data = _full_data(
+            functional_blocks=[
+                {"name": "Power Supply", "filename": "power.kicad_sch"},
+                {"name": "Audio DAC", "filename": "audio_dac.kicad_sch"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Functional Blocks" in content
+        assert "**Power Supply**" in content
+        assert "(power.kicad_sch)" in content
+        assert "**Audio DAC**" in content
+
+    def test_interfaces_render(self, tmp_path: Path) -> None:
+        """Communication interfaces table renders detected protocols."""
+        data = _full_data(
+            interfaces=[
+                {"protocol": "I2C", "signals": ["SCL", "SDA"]},
+                {"protocol": "SPI", "signals": ["MISO", "MOSI", "SCK"]},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Communication Interfaces" in content
+        assert "| I2C | SCL, SDA |" in content
+        assert "| SPI | MISO, MOSI, SCK |" in content
+
+    def test_power_architecture_renders_rails_and_regulators(
+        self, tmp_path: Path
+    ) -> None:
+        """Power architecture shows rails and regulator table."""
+        data = _full_data(
+            power_architecture=[
+                {"rail": "+3V3", "type": "power_symbol"},
+                {"rail": "+5V", "type": "power_symbol"},
+                {"rail": "GND", "type": "power_symbol"},
+                {"rail": "U3", "type": "regulator", "value": "AMS1117-3.3"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Power Architecture" in content
+        assert "+3V3" in content
+        assert "+5V" in content
+        assert "GND" in content
+        assert "| U3 | AMS1117-3.3 |" in content
+
+    def test_power_architecture_rails_only(self, tmp_path: Path) -> None:
+        """Power architecture renders only power rails when no regulators."""
+        data = _full_data(
+            power_architecture=[
+                {"rail": "+3V3", "type": "power_symbol"},
+                {"rail": "GND", "type": "power_symbol"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "**Power Rails**" in content
+        assert "+3V3, GND" in content
+        assert "| Regulator |" not in content
+
+    def test_assembly_notes_render(self, tmp_path: Path) -> None:
+        """Assembly notes section renders component warnings."""
+        data = _full_data(
+            assembly_notes={
+                "fine_pitch_count": 2,
+                "fine_pitch_parts": ["U1", "U3"],
+                "thermal_pad_count": 1,
+                "polarized_count": 5,
+                "summary": "2 fine-pitch components; 1 thermal pad; 5 polarized components",
+            },
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Assembly Notes" in content
+        assert "2 fine-pitch components" in content
+        assert "U1, U3" in content
+        assert "1 thermal pad" in content
+        assert "verify solder paste" in content
+        assert "5 polarized components" in content
+        assert "check orientation" in content
+
+    def test_assembly_notes_omitted_when_none(self, tmp_path: Path) -> None:
+        """Assembly notes section absent when data is None."""
+        data = _full_data(assembly_notes=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Assembly Notes" not in content
+
+    def test_graceful_degradation_sparse_metadata(self, tmp_path: Path) -> None:
+        """When narrative fields have no data, sections gracefully degrade."""
+        data = ReportData(
+            project_name="Sparse",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+            design_narrative=None,
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+            assembly_notes=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" not in content
+        assert "## Assembly Notes" not in content
+        assert "None" not in content
+
+    def test_narrative_only_design_overview(self, tmp_path: Path) -> None:
+        """Design Overview shows just narrative when no blocks/interfaces/power."""
+        data = _full_data(
+            design_narrative="A simple test board.",
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" in content
+        assert "### Theory of Operation" in content
+        assert "A simple test board." in content
+        assert "### Functional Blocks" not in content
+        assert "### Communication Interfaces" not in content
+        assert "### Power Architecture" not in content

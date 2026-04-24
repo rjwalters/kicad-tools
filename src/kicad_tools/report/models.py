@@ -61,6 +61,22 @@ class ReportData:
     analog_components: list[dict] | None = None
     """Analog-sensitive components: [{reference, value, footprint, reason}]."""
 
+    design_narrative: str | None = None
+    """Free-text narrative assembled from title-block comments and sheet names."""
+
+    functional_blocks: list[dict] | None = None
+    """Hierarchical sheet summary: [{name, filename}]."""
+
+    interfaces: list[dict] | None = None
+    """Detected communication interfaces: [{protocol, signals}]."""
+
+    power_architecture: list[dict] | None = None
+    """Power rail summary: [{rail, voltage, regulator}]."""
+
+    assembly_notes: dict | None = None
+    """Assembly guidance: {fine_pitch_count, thermal_pad_count,
+    polarized_count, summary}."""
+
     notes: str = ""
     """Free-form notes section content."""
 

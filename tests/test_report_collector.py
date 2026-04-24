@@ -1081,3 +1081,324 @@ class TestCollectNetStatusClassification:
         assert status["single_pad_nets"] == []
         assert status["signal_net_count"] == 3
         assert status["signal_complete_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Narrative collector tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollectNarrative:
+    """Tests for collect_narrative and its sub-extractors."""
+
+    def test_returns_all_expected_keys(self, tmp_path):
+        """collect_narrative returns all five sub-section keys."""
+        pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
+        sch_path = PROJECT_FIXTURES / "test_project.kicad_sch"
+        if not pcb_path.exists() or not sch_path.exists():
+            pytest.skip("test_project fixture not found")
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_path)
+        collector = ReportDataCollector(pcb_path)
+        result = collector.collect_narrative(sch_path, pcb)
+
+        expected_keys = {
+            "design_narrative",
+            "functional_blocks",
+            "interfaces",
+            "power_architecture",
+            "assembly_notes",
+        }
+        assert expected_keys == set(result.keys())
+
+    def test_narrative_from_title_block(self, tmp_path):
+        """Design narrative is extracted from title-block comments."""
+        from kicad_tools.schema.schematic import TitleBlock
+        from unittest.mock import MagicMock
+
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        # Create a mock schematic with title block comments
+        mock_sch = MagicMock()
+        mock_sch.title_block = TitleBlock(
+            title="Audio Interface Board",
+            comments={1: "I2S audio codec with USB input", 2: "Rev A prototype"},
+        )
+        mock_sch.sheets = []
+
+        narrative = collector._extract_design_narrative(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert narrative is not None
+        assert "Audio Interface Board" in narrative
+        assert "I2S audio codec with USB input" in narrative
+        assert "Rev A prototype" in narrative
+
+    def test_narrative_returns_none_when_empty(self, tmp_path):
+        """Design narrative is None when title block has no text."""
+        from kicad_tools.schema.schematic import TitleBlock
+        from unittest.mock import MagicMock
+
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = MagicMock()
+        mock_sch.title_block = TitleBlock()
+        mock_sch.sheets = []
+
+        narrative = collector._extract_design_narrative(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert narrative is None
+
+    def test_functional_blocks_from_sheets(self, tmp_path):
+        """Functional blocks are extracted from hierarchical sheets."""
+        from kicad_tools.schema.schematic import SheetInstance
+        from unittest.mock import MagicMock
+
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = MagicMock()
+        mock_sch.sheets = [
+            SheetInstance(name="Power Supply", filename="power.kicad_sch", uuid="1"),
+            SheetInstance(name="Audio DAC", filename="audio_dac.kicad_sch", uuid="2"),
+        ]
+
+        blocks = collector._extract_functional_blocks(mock_sch)
+
+        assert blocks is not None
+        assert len(blocks) == 2
+        assert blocks[0]["name"] == "Power Supply"
+        assert blocks[0]["filename"] == "power.kicad_sch"
+        assert blocks[1]["name"] == "Audio DAC"
+
+    def test_functional_blocks_none_when_no_sheets(self, tmp_path):
+        """Functional blocks returns None when no hierarchical sheets."""
+        from unittest.mock import MagicMock
+
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = MagicMock()
+        mock_sch.sheets = []
+
+        blocks = collector._extract_functional_blocks(mock_sch)
+
+        assert blocks is None
+
+    def test_interface_detection_i2c(self, tmp_path):
+        """I2C interface detected when SDA and SCL labels present."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(["SDA", "SCL", "VBUS"])
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert interfaces is not None
+        protocols = [i["protocol"] for i in interfaces]
+        assert "I2C" in protocols
+        # USB should NOT be detected (needs D+ or D- as well as VBUS)
+        assert "USB" not in protocols
+
+    def test_interface_detection_spi(self, tmp_path):
+        """SPI interface detected with MOSI/MISO/SCK labels."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(["MOSI", "MISO", "SCK", "CS"])
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert interfaces is not None
+        protocols = [i["protocol"] for i in interfaces]
+        assert "SPI" in protocols
+
+    def test_interface_detection_case_insensitive(self, tmp_path):
+        """Interface detection works with mixed case labels."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(["I2C1_SDA", "I2C1_SCL"])
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert interfaces is not None
+        protocols = [i["protocol"] for i in interfaces]
+        assert "I2C" in protocols
+
+    def test_interface_detection_none_when_no_matches(self, tmp_path):
+        """Returns None when no interface patterns match."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(["LED1", "BUTTON"])
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert interfaces is None
+
+    def test_power_architecture_finds_rails(self, tmp_path):
+        """Power architecture detects power symbols."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_power_symbols(
+            ["+3V3", "+5V", "GND"],
+            regulators=[],
+        )
+        result = collector._extract_power_architecture(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert result is not None
+        rails = [r["rail"] for r in result if r["type"] == "power_symbol"]
+        assert "+3V3" in rails
+        assert "+5V" in rails
+        assert "GND" in rails
+
+    def test_power_architecture_finds_regulators(self, tmp_path):
+        """Power architecture detects voltage regulators."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_power_symbols(
+            ["+3V3"],
+            regulators=[("U3", "AMS1117-3.3", "Regulator_Linear:AMS1117-3.3")],
+        )
+        result = collector._extract_power_architecture(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert result is not None
+        regs = [r for r in result if r["type"] == "regulator"]
+        assert len(regs) == 1
+        assert regs[0]["rail"] == "U3"
+        assert regs[0]["value"] == "AMS1117-3.3"
+
+    def test_power_architecture_none_when_empty(self, tmp_path):
+        """Returns None when no power symbols or regulators found."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_power_symbols([], regulators=[])
+        result = collector._extract_power_architecture(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert result is None
+
+    def test_assembly_notes_fine_pitch(self, tmp_path):
+        """Assembly notes detect fine-pitch packages."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_pcb = _make_mock_pcb_with_footprints([
+            ("U1", "Package_QFP:LQFP-48"),
+            ("U2", "Package_BGA:BGA-256"),
+            ("R1", "Resistor_SMD:R_0402"),
+        ])
+        result = collector._extract_assembly_notes(mock_pcb)
+
+        assert result is not None
+        assert result["fine_pitch_count"] == 2
+        assert "U1" in result["fine_pitch_parts"]
+        assert "U2" in result["fine_pitch_parts"]
+
+    def test_assembly_notes_none_when_simple_board(self, tmp_path):
+        """Assembly notes returns None for simple boards with no special components."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_pcb = _make_mock_pcb_with_footprints([
+            ("R1", "Resistor_SMD:R_0402"),
+            ("C1", "Capacitor_SMD:C_0402"),
+        ])
+        result = collector._extract_assembly_notes(mock_pcb)
+
+        assert result is None
+
+    def test_narrative_sub_extractor_fault_tolerance(self, tmp_path):
+        """Individual sub-extractors survive errors without crashing the whole narrative."""
+        from unittest.mock import MagicMock
+
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        # Create a mock schematic where title_block raises
+        mock_sch = MagicMock()
+        mock_sch.title_block = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        type(mock_sch).title_block = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        mock_sch.sheets = []
+        mock_sch.global_labels = []
+        mock_sch.labels = []
+        mock_sch.symbols = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = []
+
+        # Patch Schematic.load to return our controlled mock
+        with patch(
+            "kicad_tools.schema.schematic.Schematic.load",
+            return_value=mock_sch,
+        ):
+            result = collector.collect_narrative(tmp_path / "test.kicad_sch", mock_pcb)
+
+        # The design_narrative sub-extractor should have failed but others should work
+        assert result["design_narrative"] is None
+        # functional_blocks should be None (no sheets)
+        assert result["functional_blocks"] is None
+        # interfaces should be None (no matching labels)
+        assert result["interfaces"] is None
+        # power_architecture should be None (no power symbols)
+        assert result["power_architecture"] is None
+        # assembly_notes should be None (no special footprints)
+        assert result["assembly_notes"] is None
+
+
+# ---------------------------------------------------------------------------
+# Narrative test helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_schematic_with_labels(label_names):
+    """Build a mock Schematic with specified global labels."""
+    from unittest.mock import MagicMock
+
+    mock_sch = MagicMock()
+    mock_labels = []
+    for name in label_names:
+        lbl = MagicMock()
+        lbl.text = name
+        mock_labels.append(lbl)
+    mock_sch.global_labels = mock_labels
+    mock_sch.labels = []
+    mock_sch.sheets = []
+    return mock_sch
+
+
+def _make_mock_schematic_with_power_symbols(rail_names, regulators):
+    """Build a mock Schematic with power symbols and optional regulators.
+
+    Args:
+        rail_names: List of power rail names (e.g., ["+3V3", "GND"]).
+        regulators: List of (reference, value, lib_id) tuples.
+    """
+    from unittest.mock import MagicMock
+
+    mock_sch = MagicMock()
+    symbols = []
+    for name in rail_names:
+        sym = MagicMock()
+        sym.lib_id = f"power:{name}"
+        sym.reference = f"#{name}"
+        sym.properties = {"Value": MagicMock(value=name)}
+        symbols.append(sym)
+    for ref, value, lib_id in regulators:
+        sym = MagicMock()
+        sym.lib_id = lib_id
+        sym.reference = ref
+        sym.properties = {"Value": MagicMock(value=value)}
+        symbols.append(sym)
+    mock_sch.symbols = symbols
+    mock_sch.sheets = []
+    return mock_sch
+
+
+def _make_mock_pcb_with_footprints(footprint_specs):
+    """Build a mock PCB with specified footprints.
+
+    Args:
+        footprint_specs: List of (reference, footprint_name) tuples.
+    """
+    from unittest.mock import MagicMock
+
+    mock_pcb = MagicMock()
+    fps = []
+    for ref, name in footprint_specs:
+        fp = MagicMock()
+        fp.name = name
+        fp.reference = ref
+        fps.append(fp)
+    mock_pcb.footprints = fps
+    return mock_pcb
