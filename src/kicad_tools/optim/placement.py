@@ -1921,6 +1921,7 @@ class PlacementOptimizer:
         iterations: int = 1000,
         dt: float = 0.01,
         callback: callable | None = None,
+        cancel_flag: callable | None = None,
     ) -> int:
         """
         Run the optimization simulation.
@@ -1929,11 +1930,20 @@ class PlacementOptimizer:
             iterations: Maximum number of iterations
             dt: Time step size
             callback: Optional function called each iteration with (iteration, energy)
+            cancel_flag: Optional callable returning True when cancellation is
+                requested. Checked each iteration; when True the loop exits
+                early and returns the current iteration count. This enables
+                cooperative cancellation from CLI signal handlers without
+                installing signal handlers in library code.
 
         Returns:
             Number of iterations run
         """
         for i in range(iterations):
+            # Cooperative cancellation check
+            if cancel_flag is not None and cancel_flag():
+                return i
+
             self.step(dt)
 
             energy = self.compute_energy()

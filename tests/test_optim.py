@@ -1788,3 +1788,41 @@ class TestArcLinearization:
         # Last segment should end near (0, 10)
         assert abs(segments[-1][1][0] - 0.0) < 0.1
         assert abs(segments[-1][1][1] - 10.0) < 0.1
+
+
+class TestPlacementOptimizerCancelFlag:
+    """Tests for cooperative cancellation via cancel_flag in run()."""
+
+    def test_cancel_flag_stops_simulation_early(self):
+        """When cancel_flag returns True, run() exits before all iterations."""
+        board = Polygon.rectangle(50, 40, 100, 80)
+        optimizer = PlacementOptimizer(board)
+        comp = Component(
+            ref="R1", x=50, y=40, width=3, height=1.5,
+            pins=[Pin(number="1", x=49, y=40, net=1)],
+        )
+        optimizer.add_component(comp)
+
+        call_count = 0
+
+        def cancel_after_5():
+            nonlocal call_count
+            call_count += 1
+            return call_count > 5
+
+        iterations_run = optimizer.run(iterations=1000, cancel_flag=cancel_after_5)
+        assert iterations_run <= 5
+
+    def test_cancel_flag_none_runs_normally(self):
+        """When cancel_flag is None, run() completes all iterations."""
+        board = Polygon.rectangle(50, 40, 100, 80)
+        config = PlacementConfig(energy_threshold=1e-20, velocity_threshold=1e-20)
+        optimizer = PlacementOptimizer(board, config=config)
+        comp = Component(
+            ref="R1", x=50, y=40, width=3, height=1.5,
+            pins=[Pin(number="1", x=49, y=40, net=1)],
+        )
+        optimizer.add_component(comp)
+
+        iterations_run = optimizer.run(iterations=10, cancel_flag=None)
+        assert iterations_run == 10

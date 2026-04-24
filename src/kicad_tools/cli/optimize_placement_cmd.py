@@ -14,7 +14,10 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Sequence
@@ -36,6 +39,95 @@ from kicad_tools.placement.vector import (
     bounds,
     decode,
 )
+
+
+# ---------------------------------------------------------------------------
+# Interrupt handling (SIGINT / SIGTERM)
+# ---------------------------------------------------------------------------
+
+# Global state for interrupt handling -- mirrors the pattern in route_cmd.py
+_interrupt_state: dict = {
+    "interrupted": False,
+    "best_vector": None,
+    "components": None,
+    "pcb_path": None,
+    "output_path": None,
+    "quiet": False,
+}
+
+
+def _handle_placement_interrupt(signum, frame):
+    """Handle SIGINT/SIGTERM by saving the best-so-far placement and exiting."""
+    _interrupt_state["interrupted"] = True
+    quiet = _interrupt_state["quiet"]
+
+    if not quiet:
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        print(f"\n  {sig_name} received -- saving best placement so far...")
+
+    saved = _save_best_placement_on_interrupt()
+
+    # Exit code 2 signals "interrupted with partial results saved",
+    # distinguishing from normal success (0) and failure (1).
+    sys.exit(2 if saved else 130)
+
+
+def _save_best_placement_on_interrupt() -> bool:
+    """Write the best-so-far placement to the output PCB file.
+
+    Uses atomic write (write-to-temp then rename) to prevent corruption if
+    the process is killed during the write itself.
+
+    Returns True if the placement was saved successfully.
+    """
+    best_vector = _interrupt_state["best_vector"]
+    components = _interrupt_state["components"]
+    pcb_path = _interrupt_state["pcb_path"]
+    output_path = _interrupt_state["output_path"]
+    quiet = _interrupt_state["quiet"]
+
+    if best_vector is None or components is None or pcb_path is None or output_path is None:
+        return False
+
+    try:
+        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components)
+        if not quiet:
+            print(f"  Best placement saved to: {output_path}")
+        return True
+    except Exception as e:
+        if not quiet:
+            print(f"  Error saving placement on interrupt: {e}", file=sys.stderr)
+        return False
+
+
+def _write_placements_to_pcb_atomic(
+    pcb_path: str,
+    output_path: str,
+    vector,
+    components: Sequence,
+) -> None:
+    """Write placements via atomic write (temp file + rename).
+
+    This prevents corruption if the process is killed mid-write.
+    """
+    out = Path(output_path)
+    # Write to a temp file in the same directory, then rename.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(out.parent),
+        prefix=".placement_",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    try:
+        _write_placements_to_pcb(pcb_path, tmp_path, vector, components)
+        Path(tmp_path).replace(out)
+    except BaseException:
+        # Clean up the temp file on failure
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _vector_to_placements(
@@ -383,6 +475,17 @@ def run_optimize_placement(
     if output_path is None:
         output_path = pcb_path
 
+    # Install signal handlers for graceful interrupt
+    _interrupt_state["pcb_path"] = pcb_path
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["interrupted"] = False
+    _interrupt_state["best_vector"] = None
+    _interrupt_state["components"] = None
+
+    prev_sigint = signal.signal(signal.SIGINT, _handle_placement_interrupt)
+    prev_sigterm = signal.signal(signal.SIGTERM, _handle_placement_interrupt)
+
     # Parse cost weights
     cost_config = _parse_weights(weights_json)
 
@@ -403,6 +506,9 @@ def run_optimize_placement(
     if not components:
         print("Error: no components found in PCB", file=sys.stderr)
         return 1
+
+    # Update interrupt state so handler can save intermediate results
+    _interrupt_state["components"] = components
 
     if not quiet:
         print(f"  Components: {len(components)}")
@@ -537,6 +643,9 @@ def run_optimize_placement(
             footprint_sizes,
         )
 
+    # Keep interrupt state up-to-date with best vector for graceful save
+    _interrupt_state["best_vector"] = initial_best_vec
+
     if not quiet:
         print(f"  Population size: {strategy._population_size}")
         print(f"  Initial best score: {initial_best_score:.4f}")
@@ -576,6 +685,10 @@ def run_optimize_placement(
             # Feed results back
             strategy.observe(candidates, scores)
 
+            # Update interrupt state with latest best vector
+            best_vec_now, _ = strategy.best()
+            _interrupt_state["best_vector"] = best_vec_now
+
             # Progress reporting
             if progress_interval > 0 and iteration % progress_interval == 0:
                 best_vec, best_score = strategy.best()
@@ -591,6 +704,10 @@ def run_optimize_placement(
     except KeyboardInterrupt:
         if not quiet:
             print("\n  Optimization interrupted by user")
+        # The signal handler may not have fired if Python caught
+        # KeyboardInterrupt before the C-level handler.  Write the
+        # best placement inline as a fallback.
+        _interrupt_state["interrupted"] = True
 
     elapsed = time.monotonic() - start_time
 
@@ -632,12 +749,16 @@ def run_optimize_placement(
         print(f"  Wall time: {elapsed:.2f}s")
         print(f"  Feasible: {final_score.is_feasible}")
 
-    # Write output
+    # Restore original signal handlers
+    signal.signal(signal.SIGINT, prev_sigint)
+    signal.signal(signal.SIGTERM, prev_sigterm)
+
+    # Write output (atomic to prevent corruption on hard kill)
     if not quiet:
         print(f"\nWriting result to: {output_path}")
 
     try:
-        _write_placements_to_pcb(pcb_path, output_path, best_vector, components)
+        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components)
     except Exception as e:
         print(f"Error writing output: {e}", file=sys.stderr)
         if verbose:
@@ -649,4 +770,7 @@ def run_optimize_placement(
     if not quiet:
         print("Done.")
 
+    # Exit code 2 when interrupted (partial result saved), 0 otherwise.
+    if _interrupt_state["interrupted"]:
+        return 2
     return 0
