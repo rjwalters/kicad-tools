@@ -1474,6 +1474,36 @@ class PCB:
         return self._board_origin
 
     @property
+    def board_size(self) -> tuple[float, float]:
+        """Board dimensions (width, height) in mm.
+
+        Computes the board size from the Edge.Cuts outline.  For a gr_rect
+        outline (as created by ``PCB.create()``), the size is derived from
+        the rectangle's start and end coordinates.  For outlines composed
+        of gr_line segments, the bounding box of all Edge.Cuts geometry is
+        used.
+
+        Returns:
+            Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
+            Edge.Cuts geometry is found.
+        """
+        # Try gr_rect first (standard board outline from PCB.create)
+        for graphic in self._graphics:
+            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
+                width = abs(graphic.end[0] - graphic.start[0])
+                height = abs(graphic.end[1] - graphic.start[1])
+                return (width, height)
+
+        # Fallback: bounding box of all Edge.Cuts line segments
+        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
+        if edge_lines:
+            xs = [coord for line in edge_lines for coord in (line.start[0], line.end[0])]
+            ys = [coord for line in edge_lines for coord in (line.start[1], line.end[1])]
+            return (max(xs) - min(xs), max(ys) - min(ys))
+
+        return (0.0, 0.0)
+
+    @property
     def layers(self) -> dict[int, Layer]:
         """Layer definitions."""
         return self._layers
