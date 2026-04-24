@@ -55,6 +55,7 @@ from kicad_tools.mcp.tools.registry import (
     list_tools,
     register_tool,
 )
+from kicad_tools.mcp.tools.placement import placement_place_unplaced
 from kicad_tools.mcp.tools.routing import (
     get_unrouted_nets,
     route_net,
@@ -97,6 +98,7 @@ __all__ = [
     "list_available_subsystem_types",
     "list_mistake_categories",
     "measure_clearance",
+    "placement_place_unplaced",
     "plan_subsystem",
     "record_decision",
     "restore_checkpoint",
