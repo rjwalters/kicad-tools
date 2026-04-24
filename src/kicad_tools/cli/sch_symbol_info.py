@@ -28,7 +28,7 @@ import sys
 from kicad_tools.schema import Schematic
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Show symbol details in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--show-pins", action="store_true", help="Show pin details")
     parser.add_argument("--show-properties", action="store_true", help="Show all properties")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         sch = Schematic.load(args.schematic)

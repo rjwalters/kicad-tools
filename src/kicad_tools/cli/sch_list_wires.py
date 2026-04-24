@@ -28,7 +28,7 @@ import sys
 from kicad_tools.schema import Schematic
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="List wires in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--stats", action="store_true", help="Show statistics only")
     parser.add_argument("--junctions", action="store_true", help="Include junction points")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         sch = Schematic.load(args.schematic)
