@@ -651,6 +651,142 @@ class TestUpdateFootprintPosition:
         assert result is False
 
 
+class TestFootprintDirectSetPersistence:
+    """Regression tests for direct fp.position/rotation/layer assignment.
+
+    Setting ``fp.position`` directly must persist through ``PCB.save()``
+    without requiring ``update_footprint_position()``.  This was broken
+    before the ``_sexp_node`` back-reference was added to ``Footprint``.
+
+    See https://github.com/rjwalters/kicad-tools/issues/1990
+    """
+
+    def test_position_setter_persists(self, routing_test_pcb, tmp_path):
+        """Direct position assignment must round-trip through save/load."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        original_pos = fp.position
+
+        # Assign a new position directly (no update_footprint_position).
+        new_pos = (original_pos[0] + 5.0, original_pos[1] + 3.0)
+        fp.position = new_pos
+        assert fp.position == pytest.approx(new_pos)
+
+        # Save and reload.
+        out = tmp_path / "pos_direct.kicad_pcb"
+        pcb.save(out)
+
+        doc2 = load_pcb(str(out))
+        pcb2 = PCB(doc2)
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.position == pytest.approx(new_pos)
+
+    def test_rotation_setter_persists(self, routing_test_pcb, tmp_path):
+        """Direct rotation assignment must round-trip through save/load."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        assert fp.rotation == pytest.approx(0.0, abs=0.1)
+
+        fp.rotation = 90.0
+        assert fp.rotation == pytest.approx(90.0)
+
+        out = tmp_path / "rot_direct.kicad_pcb"
+        pcb.save(out)
+
+        doc2 = load_pcb(str(out))
+        pcb2 = PCB(doc2)
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.rotation == pytest.approx(90.0)
+
+    def test_layer_setter_persists(self, routing_test_pcb, tmp_path):
+        """Direct layer assignment must round-trip through save/load."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        assert fp.layer == "F.Cu"
+
+        fp.layer = "B.Cu"
+        assert fp.layer == "B.Cu"
+
+        out = tmp_path / "layer_direct.kicad_pcb"
+        pcb.save(out)
+
+        doc2 = load_pcb(str(out))
+        pcb2 = PCB(doc2)
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.layer == "B.Cu"
+
+    def test_position_and_rotation_together(self, routing_test_pcb, tmp_path):
+        """Setting both position and rotation directly must persist."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.get_footprint("U1")
+        assert fp is not None
+
+        fp.position = (120.0, 120.0)
+        fp.rotation = 45.0
+
+        out = tmp_path / "pos_rot_direct.kicad_pcb"
+        pcb.save(out)
+
+        doc2 = load_pcb(str(out))
+        pcb2 = PCB(doc2)
+        fp2 = pcb2.get_footprint("U1")
+        assert fp2 is not None
+        assert fp2.position == pytest.approx((120.0, 120.0))
+        assert fp2.rotation == pytest.approx(45.0)
+
+    def test_footprint_without_sexp_node(self):
+        """Footprint constructed without from_sexp must still work normally."""
+        from kicad_tools.schema.pcb import Footprint
+
+        fp = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="R1",
+            value="10k",
+        )
+        # No _sexp_node -- setters should not raise.
+        fp.position = (30.0, 40.0)
+        fp.rotation = 90.0
+        fp.layer = "B.Cu"
+        assert fp.position == (30.0, 40.0)
+        assert fp.rotation == 90.0
+        assert fp.layer == "B.Cu"
+
+    def test_update_footprint_position_still_works(self, routing_test_pcb, tmp_path):
+        """Existing update_footprint_position must still persist correctly."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        result = pcb.update_footprint_position("R1", 140.0, 120.0, rotation=45.0)
+        assert result is True
+
+        out = tmp_path / "update_method.kicad_pcb"
+        pcb.save(out)
+
+        doc2 = load_pcb(str(out))
+        pcb2 = PCB(doc2)
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.position == pytest.approx((140.0, 120.0))
+        assert fp2.rotation == pytest.approx(45.0)
+
+
 class TestUpdateFootprintReference:
     """Tests for PCB.update_footprint_reference method."""
 
