@@ -1003,3 +1003,436 @@ class TestStitchingViaConnectivity:
         assert gnd is not None
         assert gnd.has_vias is True
         assert gnd.has_routing is True
+
+
+# ---- PCB fixtures for multi-zone and large zone fill tests (Issue #2035) ----
+
+# PCB with zones on multiple layers for the same net.
+# GND has zones on both In1.Cu and B.Cu, connected via through-vias.
+MULTI_ZONE_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 15 15.25) (end 15 17) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
+
+  (via (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-000000000011")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "B.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+)
+"""
+
+
+def _generate_large_zone_pcb(num_filled_polygons: int = 500) -> str:
+    """Generate a PCB with many filled zone polygons to test performance.
+
+    Creates a GND zone with many small filled polygon islands to verify
+    that the zone_points sampling limit removal does not cause false positives
+    and that bounding-box spatial indexing keeps analysis fast.
+    """
+    header = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 50 50)
+    (property "Reference" "C1")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 150 50)
+    (property "Reference" "C2")
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 50 50.25) (end 50 52) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 150 50.25) (end 150 52) (width 0.25) (layer "F.Cu") (net 1))
+
+  (via (at 50 52) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 150 52) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 0 0)
+        (xy 200 0)
+        (xy 200 100)
+        (xy 0 100)
+      )
+    )
+"""
+    # Generate many filled polygons (small tiles across the zone)
+    filled_parts = []
+    cols = int(num_filled_polygons**0.5) + 1
+    for i in range(num_filled_polygons):
+        row = i // cols
+        col = i % cols
+        x = col * 2
+        y = row * 2
+        filled_parts.append(
+            f"""    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy {x} {y})
+        (xy {x + 1.5} {y})
+        (xy {x + 1.5} {y + 1.5})
+        (xy {x} {y + 1.5})
+      )
+    )"""
+        )
+
+    footer = """  )
+)
+"""
+    return header + "\n".join(filled_parts) + "\n" + footer
+
+
+# PCB with zone that has filled_polygon data but no boundary polygon.
+# This tests the fallback boundary detection using bounding box.
+ZONE_NO_BOUNDARY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "R_0805"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "R1")
+    (pad "1" thru_hole rect (at 0 0) (size 1.2 1.2) (drill 0.6) (layers "*.Cu") (net 1 "GND"))
+  )
+
+  (footprint "R_0805"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "R2")
+    (pad "1" thru_hole rect (at 0 0) (size 1.2 1.2) (drill 0.6) (layers "*.Cu") (net 1 "GND"))
+  )
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def multi_zone_layer_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with zones on multiple layers for the same net."""
+    pcb_file = tmp_path / "multi_zone.kicad_pcb"
+    pcb_file.write_text(MULTI_ZONE_LAYER_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def large_zone_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with many filled zone polygons."""
+    pcb_file = tmp_path / "large_zone.kicad_pcb"
+    pcb_file.write_text(_generate_large_zone_pcb(500))
+    return pcb_file
+
+
+@pytest.fixture
+def zone_no_boundary_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with zone that has no boundary polygon."""
+    pcb_file = tmp_path / "no_boundary.kicad_pcb"
+    pcb_file.write_text(ZONE_NO_BOUNDARY_PCB)
+    return pcb_file
+
+
+class TestMultiZoneConnectivity:
+    """Tests for zone fill connectivity improvements (Issue #2035).
+
+    These tests cover:
+    - Multiple zone layers per net reporting all layers
+    - Large zone fills (>1000 polygon vertices) without false positives
+    - Zones with missing boundary polygons (filled_polygon only)
+    - Performance with many filled polygons
+    """
+
+    def test_multi_zone_layers_reported(self, multi_zone_layer_pcb: Path):
+        """Net with zones on multiple layers reports all zone layers."""
+        analyzer = NetStatusAnalyzer(multi_zone_layer_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.is_plane_net is True
+        assert len(gnd.plane_layers) == 2
+        assert "In1.Cu" in gnd.plane_layers
+        assert "B.Cu" in gnd.plane_layers
+        # Backward compat: plane_layer returns first layer
+        assert gnd.plane_layer in ("In1.Cu", "B.Cu")
+
+    def test_multi_zone_complete(self, multi_zone_layer_pcb: Path):
+        """Net with zones on multiple layers is complete when vias connect."""
+        analyzer = NetStatusAnalyzer(multi_zone_layer_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_multi_zone_to_dict_includes_plane_layers(self, multi_zone_layer_pcb: Path):
+        """to_dict includes both plane_layer and plane_layers."""
+        analyzer = NetStatusAnalyzer(multi_zone_layer_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        d = gnd.to_dict()
+        assert "plane_layer" in d
+        assert "plane_layers" in d
+        assert len(d["plane_layers"]) == 2
+        assert d["plane_layer"] in d["plane_layers"]
+
+    def test_multi_zone_suggested_fix_shows_all_layers(self):
+        """Suggested fix for plane net shows all zone layers."""
+        status = NetStatus(
+            net_number=1,
+            net_name="GND",
+            is_plane_net=True,
+            plane_layer="In1.Cu",
+            plane_layers=["In1.Cu", "B.Cu"],
+            total_pads=2,
+            unconnected_pads=[PadInfo("C1", "2", (15, 15), False)],
+        )
+        assert "In1.Cu" in status.suggested_fix
+        assert "B.Cu" in status.suggested_fix
+
+    def test_large_zone_no_false_positives(self, large_zone_pcb: Path):
+        """Board with 500+ filled polygons does not produce false positives.
+
+        Previously, the zone_points[:1000] sampling cap could miss zone
+        connectivity when zone polygon vertices exceeded the limit.
+        """
+        analyzer = NetStatusAnalyzer(large_zone_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.is_plane_net is True
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_large_zone_performance(self, large_zone_pcb: Path):
+        """Analysis of board with 500+ filled polygons completes in <5s."""
+        import time
+
+        analyzer = NetStatusAnalyzer(large_zone_pcb)
+        start = time.monotonic()
+        result = analyzer.analyze()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 5.0, f"Analysis took {elapsed:.2f}s (limit: 5s)"
+        assert result.total_nets >= 1
+
+    def test_zone_no_boundary_polygon(self, zone_no_boundary_pcb: Path):
+        """Zone with no boundary polygon (only filled_polygon) detects pads.
+
+        When kicad-cli omits the zone outline for filled zones, the
+        bounding-box fallback boundary should still detect pad connectivity.
+        """
+        analyzer = NetStatusAnalyzer(zone_no_boundary_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.is_plane_net is True
+        assert gnd.status == "complete", (
+            f"GND should be complete but is {gnd.status}; "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_bounding_box_polygon_helper(self):
+        """Test _bounding_box_polygon helper method."""
+        polys = [
+            [(0.0, 0.0), (5.0, 0.0), (5.0, 3.0)],
+            [(10.0, 10.0), (15.0, 10.0), (15.0, 15.0)],
+        ]
+        result = NetStatusAnalyzer._bounding_box_polygon(polys)
+        assert len(result) == 4
+        # Should be bounding box of all points
+        xs = [p[0] for p in result]
+        ys = [p[1] for p in result]
+        assert min(xs) == 0.0
+        assert max(xs) == 15.0
+        assert min(ys) == 0.0
+        assert max(ys) == 15.0
+
+    def test_bounding_box_polygon_empty(self):
+        """Test _bounding_box_polygon with empty input."""
+        result = NetStatusAnalyzer._bounding_box_polygon([])
+        assert result == []
+
+    def test_polygon_bbox_helper(self):
+        """Test _polygon_bbox static method."""
+        poly = [(1.0, 2.0), (5.0, 3.0), (3.0, 8.0)]
+        bbox = NetStatusAnalyzer._polygon_bbox(poly)
+        assert bbox == (1.0, 2.0, 5.0, 8.0)
+
+    def test_point_in_bbox_helper(self):
+        """Test _point_in_bbox static method."""
+        bbox = (0.0, 0.0, 10.0, 10.0)
+        assert NetStatusAnalyzer._point_in_bbox((5.0, 5.0), bbox) is True
+        assert NetStatusAnalyzer._point_in_bbox((0.0, 0.0), bbox) is True
+        assert NetStatusAnalyzer._point_in_bbox((10.0, 10.0), bbox) is True
+        assert NetStatusAnalyzer._point_in_bbox((-1.0, 5.0), bbox) is False
+        assert NetStatusAnalyzer._point_in_bbox((5.0, 11.0), bbox) is False
+
+    def test_plane_layer_backward_compat_setter(self):
+        """Setting plane_layer via constructor still works."""
+        status = NetStatus(
+            net_number=1,
+            net_name="GND",
+            is_plane_net=True,
+            plane_layer="F.Cu",
+        )
+        assert status.plane_layer == "F.Cu"
+        # plane_layers should remain empty when set via constructor
+        # (backward compat: old code sets plane_layer directly)
+        assert status.plane_layers == []
+
+    def test_plane_layers_with_three_layers(self):
+        """Net with zones on 3+ layers reports all layers in metadata."""
+        status = NetStatus(
+            net_number=1,
+            net_name="GND",
+            is_plane_net=True,
+            plane_layers=["F.Cu", "In1.Cu", "B.Cu"],
+            plane_layer="F.Cu",
+        )
+        assert len(status.plane_layers) == 3
+        d = status.to_dict()
+        assert len(d["plane_layers"]) == 3
+        assert d["plane_layer"] == "F.Cu"

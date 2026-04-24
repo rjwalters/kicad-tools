@@ -55,7 +55,8 @@ class NetStatus:
         connected_pads: List of connected pads
         unconnected_pads: List of unconnected pads
         is_plane_net: Whether this net is connected to a copper zone
-        plane_layer: Layer of the copper zone if is_plane_net
+        plane_layer: Primary layer of the copper zone if is_plane_net
+        plane_layers: All layers with copper zones for this net
         has_routing: Whether this net has any trace segments
         has_vias: Whether this net has any vias
     """
@@ -68,6 +69,7 @@ class NetStatus:
     unconnected_pads: list[PadInfo] = field(default_factory=list)
     is_plane_net: bool = False
     plane_layer: str = ""
+    plane_layers: list[str] = field(default_factory=list)
     has_routing: bool = False
     has_vias: bool = False
 
@@ -132,7 +134,9 @@ class NetStatus:
     def suggested_fix(self) -> str:
         """Suggest fix based on net type."""
         if self.is_plane_net:
-            return f"kct stitch board.kicad_pcb --net {self.net_name}"
+            layers = self.plane_layers or ([self.plane_layer] if self.plane_layer else [])
+            layers_info = ", ".join(layers) if layers else "unknown"
+            return f"kct stitch board.kicad_pcb --net {self.net_name} (zones on {layers_info})"
         return f"Route traces to connect {self.unconnected_count} pads"
 
     def to_dict(self) -> dict:
@@ -149,6 +153,7 @@ class NetStatus:
             "connection_percentage": round(self.connection_percentage, 1),
             "is_plane_net": self.is_plane_net,
             "plane_layer": self.plane_layer,
+            "plane_layers": list(self.plane_layers),
             "has_routing": self.has_routing,
             "has_vias": self.has_vias,
             "suggested_fix": self.suggested_fix if self.status != "complete" else "",
@@ -311,30 +316,30 @@ class NetStatusAnalyzer:
 
         return result
 
-    def _build_zone_net_map(self) -> dict[int, str]:
+    def _build_zone_net_map(self) -> dict[int, list[str]]:
         """Build mapping of net numbers to zone layers.
 
         Returns:
-            Dict mapping net_number to zone layer name
+            Dict mapping net_number to list of zone layer names
         """
-        zone_nets: dict[int, str] = {}
+        zone_nets: dict[int, list[str]] = defaultdict(list)
         for zone in self.pcb.zones:
-            if zone.net_number > 0:
-                zone_nets[zone.net_number] = zone.layer
-        return zone_nets
+            if zone.net_number > 0 and zone.layer not in zone_nets[zone.net_number]:
+                zone_nets[zone.net_number].append(zone.layer)
+        return dict(zone_nets)
 
     def _analyze_net(
         self,
         net_number: int,
         net_name: str,
-        zone_nets: dict[int, str],
+        zone_nets: dict[int, list[str]],
     ) -> NetStatus:
         """Analyze a single net.
 
         Args:
             net_number: Net number
             net_name: Net name
-            zone_nets: Mapping of net numbers to zone layers
+            zone_nets: Mapping of net numbers to zone layer lists
 
         Returns:
             NetStatus for this net
@@ -347,7 +352,8 @@ class NetStatusAnalyzer:
         # Check if this is a plane net
         if net_number in zone_nets:
             status.is_plane_net = True
-            status.plane_layer = zone_nets[net_number]
+            status.plane_layers = zone_nets[net_number]
+            status.plane_layer = zone_nets[net_number][0]
 
         # Check for routing
         segments = list(self.pcb.segments_in_net(net_number))
@@ -480,17 +486,23 @@ class NetStatusAnalyzer:
         # polygons but still within the zone boundary (and thus connected to the zone).
         net_zones: list[tuple[str, list[list[tuple[float, float]]]]] = []
         zone_boundaries: list[tuple[str, list[tuple[float, float]]]] = []
-        zone_points: list[tuple[float, float]] = []
         for zone in self.pcb.zones:
             if zone.net_number == net_number:
-                # Collect boundary polygon (zone outline) for via-in-zone checking
+                # Collect boundary polygon (zone outline) for via-in-zone checking.
+                # If no boundary polygon exists, use the convex hull of filled
+                # polygons as a fallback boundary so that pad-in-zone checks
+                # still work when kicad-cli omits the outline for filled zones.
                 if zone.polygon:
                     zone_boundaries.append((zone.layer, zone.polygon))
-                # Collect filled polygons for sampling and backward compatibility
+                elif zone.filled_polygons:
+                    # Use the bounding box of all filled polygon vertices as a
+                    # conservative fallback boundary.
+                    fallback = self._bounding_box_polygon(zone.filled_polygons)
+                    if fallback:
+                        zone_boundaries.append((zone.layer, fallback))
+                # Collect filled polygons for copper overlap checks
                 if zone.filled_polygons:
                     net_zones.append((zone.layer, zone.filled_polygons))
-                    for poly in zone.filled_polygons:
-                        zone_points.extend(poly)
 
         # Build segment components for reuse
         segment_components = self._build_segment_components(segments)
@@ -558,6 +570,17 @@ class NetStatusAnalyzer:
                             graph[pad].add(other)
                             graph[other].add(pad)
 
+        # Build bounding-box indices for zone polygons to avoid O(n*v) point-in-polygon
+        # checks for zones whose bounding box doesn't contain the query point.
+        boundary_bboxes = [
+            (layer, boundary, self._polygon_bbox(boundary))
+            for layer, boundary in zone_boundaries
+        ]
+        filled_bboxes = [
+            (layer, polys, [self._polygon_bbox(p) for p in polys])
+            for layer, polys in net_zones
+        ]
+
         # Find zone connection points (via positions that touch zones)
         # Check BOTH filled polygons AND zone boundaries because:
         # - Filled polygons have thermal clearance cutouts around pads
@@ -569,19 +592,23 @@ class NetStatusAnalyzer:
         # This catches vias in thermal clearance cutouts that are still in the zone.
         # Use _via_spans_layer to handle through-vias whose layer list is
         # ["F.Cu", "B.Cu"] but which electrically connect all intermediate layers.
-        for zone_layer, boundary in zone_boundaries:
+        for zone_layer, boundary, bbox in boundary_bboxes:
             for via in vias:
                 if not self._via_spans_layer(via.layers, zone_layer):
+                    continue
+                if not self._point_in_bbox(via.position, bbox):
                     continue
                 if self._point_in_polygon(via.position, boundary):
                     zone_connection_points.add(via.position)
 
         # Also check vias against filled polygons (original behavior)
-        for zone_layer, filled_polys in net_zones:
+        for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
             for via in vias:
                 if not self._via_spans_layer(via.layers, zone_layer):
                     continue
-                for poly in filled_polys:
+                for poly, bbox in zip(filled_polys, poly_bboxes):
+                    if not self._point_in_bbox(via.position, bbox):
+                        continue
                     if self._point_in_polygon(via.position, poly):
                         zone_connection_points.add(via.position)
                         break
@@ -602,17 +629,21 @@ class NetStatusAnalyzer:
         for pad_id, pad_pos in pad_positions.items():
             layers = pad_layers.get(pad_id, [])
             # Check zone boundaries (Issue #479 fix)
-            for zone_layer, boundary in zone_boundaries:
+            for zone_layer, boundary, bbox in boundary_bboxes:
                 if not self._pad_layer_matches_zone(layers, zone_layer):
+                    continue
+                if not self._point_in_bbox(pad_pos, bbox):
                     continue
                 if self._point_in_polygon(pad_pos, boundary):
                     zone_connected_pads.add(pad_id)
                     break
             # Also check filled polygons (original behavior)
-            for zone_layer, filled_polys in net_zones:
+            for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
                 if not self._pad_layer_matches_zone(layers, zone_layer):
                     continue
-                for poly in filled_polys:
+                for poly, bbox in zip(filled_polys, poly_bboxes):
+                    if not self._point_in_bbox(pad_pos, bbox):
+                        continue
                     if self._point_in_polygon(pad_pos, poly):
                         zone_connected_pads.add(pad_id)
                         break
@@ -643,10 +674,14 @@ class NetStatusAnalyzer:
                 graph[pad].add(other)
                 graph[other].add(pad)
 
-        # Connect pads at same copper positions (including zones)
+        # Connect pads at same copper positions (segments and vias only).
+        # Zone polygon vertices are NOT sampled here because the pad-to-zone
+        # and via-to-zone polygon containment checks above already handle zone
+        # connectivity properly.  The previous zone_points[:1000] sampling cap
+        # caused false-positive incomplete reports on boards with many filled
+        # polygons (Issue #2035).
         all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
         all_copper.extend([via.position for via in vias])
-        all_copper.extend(zone_points[:1000])  # Limit zone sampling
 
         for pad_id, pad_pos in pad_positions.items():
             for copper_pos in all_copper:
@@ -839,6 +874,63 @@ class NetStatusAnalyzer:
             if pad_layer.startswith("*.") and zone_layer.endswith(pad_layer[1:]):
                 return True
         return False
+
+    @staticmethod
+    def _polygon_bbox(
+        polygon: list[tuple[float, float]],
+    ) -> tuple[float, float, float, float]:
+        """Compute axis-aligned bounding box of a polygon.
+
+        Returns:
+            (min_x, min_y, max_x, max_y) tuple
+        """
+        xs = [p[0] for p in polygon]
+        ys = [p[1] for p in polygon]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    @staticmethod
+    def _point_in_bbox(
+        point: tuple[float, float],
+        bbox: tuple[float, float, float, float],
+    ) -> bool:
+        """Fast check whether a point is inside a bounding box.
+
+        Args:
+            point: (x, y) coordinates
+            bbox: (min_x, min_y, max_x, max_y) bounding box
+
+        Returns:
+            True if the point is within the bounding box (inclusive).
+        """
+        return bbox[0] <= point[0] <= bbox[2] and bbox[1] <= point[1] <= bbox[3]
+
+    @staticmethod
+    def _bounding_box_polygon(
+        filled_polygons: list[list[tuple[float, float]]],
+    ) -> list[tuple[float, float]]:
+        """Build a bounding-box rectangle from multiple filled polygons.
+
+        Used as a fallback zone boundary when the zone outline polygon is
+        absent (some KiCad versions omit it for zones that were filled by
+        kicad-cli).
+
+        Args:
+            filled_polygons: List of filled polygon vertex lists.
+
+        Returns:
+            Four-vertex polygon representing the bounding box, or empty list.
+        """
+        all_x: list[float] = []
+        all_y: list[float] = []
+        for poly in filled_polygons:
+            for px, py in poly:
+                all_x.append(px)
+                all_y.append(py)
+        if not all_x:
+            return []
+        min_x, max_x = min(all_x), max(all_x)
+        min_y, max_y = min(all_y), max(all_y)
+        return [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
 
     def _point_in_polygon(
         self,
