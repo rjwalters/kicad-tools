@@ -450,9 +450,7 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
     even when kicad-cli is not installed.
     """
     try:
-        from kicad_tools.core.types import Severity
-        from kicad_tools.drc.violation import DRCViolation as ReportViolation
-        from kicad_tools.drc.violation import Location, ViolationType
+        from kicad_tools.drc.compat import drc_results_to_report
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.checker import DRCChecker
 
@@ -460,34 +458,7 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
         checker = DRCChecker(pcb)
         results = checker.check_clearances()
 
-        violations: list[ReportViolation] = []
-        for v in results.violations:
-            vtype = ViolationType.from_string(v.rule_id)
-            loc_list: list[Location] = []
-            if v.location:
-                loc_list.append(
-                    Location(x_mm=v.location[0], y_mm=v.location[1], layer=v.layer or "")
-                )
-
-            violations.append(
-                ReportViolation(
-                    type=vtype,
-                    type_str=v.rule_id,
-                    severity=Severity.from_string(v.severity),
-                    message=v.message,
-                    locations=loc_list,
-                    items=list(v.items),
-                    required_value_mm=v.required_value,
-                    actual_value_mm=v.actual_value,
-                )
-            )
-
-        return DRCReport(
-            source_file=str(pcb_path),
-            created_at=None,
-            pcb_name=pcb_path.name,
-            violations=violations,
-        )
+        return drc_results_to_report(results, pcb_path)
 
     except Exception as e:
         print(f"Error running pure-Python DRC: {e}", file=sys.stderr)
