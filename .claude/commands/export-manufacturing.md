@@ -69,13 +69,10 @@ The default output directory is `manufacturing/` alongside the PCB file. This ge
 - **bom_<mfr>.csv** — Bill of materials with LCSC part numbers (for JLCPCB)
 - **cpl_<mfr>.csv** — Component placement list for SMT assembly
 - **kicad_project.zip** — Source project files (only the exported PCB, schematics, and project file; excludes backups)
-- **report/** — Design report directory containing:
-  - **report.pdf** — Full report with schematic figures, PCB layout renders, BOM, DRC status, routing status, and manufacturing readiness assessment (rendered via weasyprint or pandoc+TeX)
-  - **report.md** — Source Markdown (always generated)
-  - **figures/** — PCB renders (front, back, copper, assembly) and per-sheet schematic screenshots
-  - **data/** — JSON snapshots of all collected design data
-  - **metadata.json** — Generation timestamp and checksums
+- **report.pdf** — Full report with schematic figures, PCB layout renders, BOM, DRC status, routing status, and manufacturing readiness assessment (rendered via weasyprint or pandoc+TeX; falls back to report.md if no PDF renderer is available)
 - **manifest.json** — SHA256 checksums of all top-level files
+
+With `--keep-build-artifacts`, intermediate report files are preserved in `.build/report/` (markdown source, figures/, data/, metadata.json).
 
 ### 3.2 Verify the package
 
@@ -83,17 +80,18 @@ Check that all expected files were generated:
 
 ```bash
 ls -la <output-dir>/
-ls -la <output-dir>/report/
-ls -la <output-dir>/report/figures/
+# If --keep-build-artifacts was used:
+ls -la <output-dir>/.build/report/
+ls -la <output-dir>/.build/report/figures/
 ```
 
 Verify:
 - Gerber ZIP exists and is non-empty
 - BOM CSV has the expected component count
 - CPL CSV has placement data for SMT parts
-- Report PDF was generated with figures embedded
-- Schematic and PCB figures exist in report/figures/
+- Report PDF (or report.md) exists at the package root
 - Manifest includes checksums for all files
+- No `report/` subdirectory exists (artifacts are in `.build/report/` only with `--keep-build-artifacts`)
 
 ### 3.3 Review the report PDF
 
