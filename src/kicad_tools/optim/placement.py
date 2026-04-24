@@ -9,8 +9,11 @@ connected pins together.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from kicad_tools.optim.components import Component, FunctionalCluster, Keepout, Pin, Spring
 from kicad_tools.optim.config import PlacementConfig
@@ -111,6 +114,21 @@ class PlacementOptimizer:
 
             self._decision_store = DecisionStore()
 
+    def _effective_boundary_charge(self) -> float:
+        """Compute effective boundary charge, auto-scaled by component density.
+
+        When ``config.auto_scale_boundary`` is True the boundary charge is
+        multiplied by ``max(1, n_components / 20)`` so that the cumulative
+        inter-component repulsion on a dense board cannot overwhelm the
+        boundary forces.  For a 71-component board this gives roughly a 3.5x
+        boost, keeping all components inside the Edge.Cuts outline.
+        """
+        charge = self.config.boundary_charge
+        if self.config.auto_scale_boundary:
+            n = len([c for c in self.components if not c.fixed])
+            charge *= max(1.0, n / 20.0)
+        return charge
+
     @property
     def gpu_enabled(self) -> bool:
         """Return True if GPU acceleration is enabled for this optimizer."""
@@ -187,7 +205,14 @@ class PlacementOptimizer:
         board = cls._extract_board_outline(pcb)
 
         if board is None:
-            # Fall back to estimating from component positions
+            # Fall back to estimating from component positions.
+            # This typically means Edge.Cuts uses geometry we cannot parse
+            # (e.g. gr_poly, fp_line) -- boundary enforcement will be weaker.
+            logger.warning(
+                "Could not extract board outline from Edge.Cuts; "
+                "falling back to estimated outline from component positions. "
+                "Boundary enforcement may be degraded."
+            )
             min_x = min_y = float("inf")
             max_x = max_y = float("-inf")
 
@@ -288,7 +313,10 @@ class PlacementOptimizer:
         """
         Extract board outline from Edge.Cuts layer.
 
-        Attempts to find rectangular outline from gr_rect or gr_line elements.
+        Handles ``gr_rect``, ``gr_line``, and ``gr_arc`` elements.  Arcs are
+        linearised into short line segments so that the resulting polygon
+        closely approximates curved board edges.
+
         Returns None if no outline found.
         """
         # Access the raw SExp to find Edge.Cuts graphics
@@ -315,7 +343,7 @@ class PlacementOptimizer:
                             ]
                         )
 
-        # Look for gr_line elements on Edge.Cuts to build outline
+        # Collect gr_line and gr_arc elements on Edge.Cuts
         edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
         for child in sexp.iter_children():
             if child.tag == "gr_line":
@@ -330,13 +358,97 @@ class PlacementOptimizer:
                         y2 = end.get_float(1) or 0.0
                         edge_lines.append(((x1, y1), (x2, y2)))
 
-        if len(edge_lines) >= 4:
+            elif child.tag == "gr_arc":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    arc_lines = PlacementOptimizer._linearize_arc(child)
+                    edge_lines.extend(arc_lines)
+
+        if len(edge_lines) >= 3:
             # Try to chain the lines into a closed polygon
             vertices = PlacementOptimizer._chain_lines_to_polygon(edge_lines)
             if vertices:
                 return Polygon(vertices=[Vector2D(x, y) for x, y in vertices])
 
         return None
+
+    @staticmethod
+    def _linearize_arc(
+        arc_sexp,
+        num_segments: int = 16,
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Approximate a ``gr_arc`` as a sequence of short line segments.
+
+        KiCad gr_arc is defined by *start* (arc start point), *mid*
+        (midpoint on the arc), and *end* (arc end point).  We recover the
+        centre and radius via the circumscribed-circle of these three points,
+        then emit *num_segments* chords.
+        """
+        start_node = arc_sexp.find("start")
+        mid_node = arc_sexp.find("mid")
+        end_node = arc_sexp.find("end")
+        if not (start_node and mid_node and end_node):
+            return []
+
+        sx = start_node.get_float(0) or 0.0
+        sy = start_node.get_float(1) or 0.0
+        mx = mid_node.get_float(0) or 0.0
+        my = mid_node.get_float(1) or 0.0
+        ex = end_node.get_float(0) or 0.0
+        ey = end_node.get_float(1) or 0.0
+
+        # Find circumscribed circle through (sx,sy), (mx,my), (ex,ey)
+        ax, ay = sx, sy
+        bx, by = mx, my
+        cx, cy = ex, ey
+
+        D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if abs(D) < 1e-12:
+            # Degenerate (collinear) -- fall back to a straight line
+            return [((sx, sy), (ex, ey))]
+
+        ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / D
+        uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / D
+
+        radius = math.sqrt((sx - ux) ** 2 + (sy - uy) ** 2)
+
+        # Compute angles
+        angle_start = math.atan2(sy - uy, sx - ux)
+        angle_mid = math.atan2(my - uy, mx - ux)
+        angle_end = math.atan2(ey - uy, ex - ux)
+
+        # Determine arc direction by checking whether mid lies on the
+        # short arc from start to end going CCW or CW.
+        def _norm_angle(a: float) -> float:
+            while a < 0:
+                a += 2 * math.pi
+            while a >= 2 * math.pi:
+                a -= 2 * math.pi
+            return a
+
+        a_s = _norm_angle(angle_start)
+        a_m = _norm_angle(angle_mid)
+        a_e = _norm_angle(angle_end)
+
+        # CCW sweep from start to end
+        sweep_ccw = _norm_angle(a_e - a_s)
+        mid_in_ccw = _norm_angle(a_m - a_s)
+        if mid_in_ccw <= sweep_ccw:
+            sweep = sweep_ccw
+        else:
+            sweep = -(2 * math.pi - sweep_ccw)
+
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for i in range(num_segments):
+            t0 = i / num_segments
+            t1 = (i + 1) / num_segments
+            a0 = angle_start + sweep * t0
+            a1 = angle_start + sweep * t1
+            p0 = (ux + radius * math.cos(a0), uy + radius * math.sin(a0))
+            p1 = (ux + radius * math.cos(a1), uy + radius * math.sin(a1))
+            segments.append((p0, p1))
+
+        return segments
 
     @staticmethod
     def _chain_lines_to_polygon(
@@ -1332,8 +1444,8 @@ class PlacementOptimizer:
             # Compute repulsion from edge (points away from edge)
             force = self.compute_charge_force(point, edge_start, edge_end)
 
-            # Scale by boundary charge strength
-            scale = self.config.boundary_charge / self.config.charge_density
+            # Scale by boundary charge strength (auto-scaled for dense boards)
+            scale = self._effective_boundary_charge() / self.config.charge_density
 
             if inside:
                 # Inside board: edge charges repel component away from edges
@@ -1467,7 +1579,8 @@ class PlacementOptimizer:
         from kicad_tools.optim.cpp_backend import compute_boundary_forces_cpp
 
         return compute_boundary_forces_cpp(
-            self.components, self.board_outline, self.config
+            self.components, self.board_outline, self.config,
+            effective_boundary_charge=self._effective_boundary_charge(),
         )
 
     def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
@@ -1518,7 +1631,7 @@ class PlacementOptimizer:
                 outline = comp.outline()
                 center = comp.position()
                 inside = self.board_outline.contains_point(center)
-                scale = self.config.boundary_charge / self.config.charge_density
+                scale = self._effective_boundary_charge() / self.config.charge_density
 
                 for e_start, e_end in outline.edges():
                     for b_start, b_end in self.board_outline.edges():

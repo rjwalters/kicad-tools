@@ -1646,3 +1646,145 @@ class TestCourtyardAwareClamping:
         # The component should be clamped and its velocity killed
         assert comp.x >= min_x + half_w - 0.01
         assert comp.vx == 0.0, f"Outward velocity should be zeroed, got {comp.vx}"
+
+
+class TestBoundaryDensityScaling:
+    """Tests for auto-scaled boundary forces on dense boards (issue #2017)."""
+
+    def test_dense_board_components_stay_inside(self):
+        """All components must remain inside board after optimization on a dense board.
+
+        Simulates the scenario described in issue #2017: 50+ components on a
+        small board.  Without density-scaled boundary forces, many components
+        escape the board outline.
+        """
+        # Small board (50x50 mm centred at 50,50) with 50 components
+        board = Polygon.rectangle(50, 50, 50, 50)
+        config = PlacementConfig(boundary_margin=1.0, auto_scale_boundary=True)
+        optimizer = PlacementOptimizer(board, config)
+
+        # Place 50 components in a tight 5x10 grid near the centre
+        for i in range(50):
+            x = 40.0 + (i % 10) * 2.0
+            y = 40.0 + (i // 10) * 2.0
+            comp = Component(ref=f"R{i}", x=x, y=y, width=2.0, height=1.0)
+            optimizer.add_component(comp)
+
+        optimizer.run(iterations=500, dt=0.01)
+
+        min_x = min(v.x for v in board.vertices)
+        max_x = max(v.x for v in board.vertices)
+        min_y = min(v.y for v in board.vertices)
+        max_y = max(v.y for v in board.vertices)
+
+        for comp in optimizer.components:
+            assert comp.x >= min_x and comp.x <= max_x, (
+                f"{comp.ref} escaped horizontally: x={comp.x:.2f}, "
+                f"board=[{min_x:.1f}, {max_x:.1f}]"
+            )
+            assert comp.y >= min_y and comp.y <= max_y, (
+                f"{comp.ref} escaped vertically: y={comp.y:.2f}, "
+                f"board=[{min_y:.1f}, {max_y:.1f}]"
+            )
+
+    def test_auto_scale_disabled_uses_raw_charge(self):
+        """When auto_scale_boundary is False, the raw boundary_charge is used."""
+        board = Polygon.rectangle(50, 50, 50, 50)
+        config = PlacementConfig(
+            boundary_charge=200.0,
+            auto_scale_boundary=False,
+        )
+        optimizer = PlacementOptimizer(board, config)
+
+        for i in range(40):
+            comp = Component(ref=f"R{i}", x=50.0, y=50.0, width=2.0, height=1.0)
+            optimizer.add_component(comp)
+
+        # With auto_scale_boundary=False the effective charge equals the raw value
+        assert optimizer._effective_boundary_charge() == 200.0
+
+    def test_auto_scale_increases_with_component_count(self):
+        """Effective boundary charge should grow with component count."""
+        board = Polygon.rectangle(50, 50, 50, 50)
+        config = PlacementConfig(boundary_charge=200.0, auto_scale_boundary=True)
+        optimizer = PlacementOptimizer(board, config)
+
+        # 10 components -- below threshold, no scaling
+        for i in range(10):
+            comp = Component(ref=f"R{i}", x=50.0, y=50.0, width=2.0, height=1.0)
+            optimizer.add_component(comp)
+        assert optimizer._effective_boundary_charge() == 200.0  # max(1, 10/20) = 1.0
+
+        # Add 30 more for 40 total
+        for i in range(10, 40):
+            comp = Component(ref=f"R{i}", x=50.0, y=50.0, width=2.0, height=1.0)
+            optimizer.add_component(comp)
+        assert optimizer._effective_boundary_charge() == 200.0 * (40 / 20)  # 400.0
+
+    def test_fixed_components_excluded_from_density_count(self):
+        """Fixed components should not inflate the boundary scaling factor."""
+        board = Polygon.rectangle(50, 50, 50, 50)
+        config = PlacementConfig(boundary_charge=200.0, auto_scale_boundary=True)
+        optimizer = PlacementOptimizer(board, config)
+
+        # 5 movable + 25 fixed = 30 total, but only 5 movable
+        for i in range(5):
+            comp = Component(ref=f"R{i}", x=50.0, y=50.0, width=2.0, height=1.0)
+            optimizer.add_component(comp)
+        for i in range(25):
+            comp = Component(
+                ref=f"J{i}", x=50.0, y=50.0, width=2.0, height=1.0, fixed=True
+            )
+            optimizer.add_component(comp)
+
+        # Only 5 movable -> max(1, 5/20) = 1.0 -> no scaling
+        assert optimizer._effective_boundary_charge() == 200.0
+
+
+class TestArcLinearization:
+    """Tests for gr_arc linearization in board outline extraction."""
+
+    def test_linearize_arc_produces_segments(self):
+        """_linearize_arc should produce connected line segments."""
+        # Create a mock SExp-like object for a 90-degree arc
+        class MockNode:
+            def __init__(self, tag, values):
+                self.tag = tag
+                self._values = values
+            def find(self, name):
+                return self._children.get(name)
+            def get_float(self, idx):
+                return self._values[idx] if idx < len(self._values) else None
+            def get_string(self, idx):
+                return self._values[idx] if idx < len(self._values) else None
+
+        class MockArc:
+            def __init__(self, sx, sy, mx, my, ex, ey):
+                self.tag = "gr_arc"
+                self._start = type("N", (), {"get_float": lambda _, i: [sx, sy][i]})()
+                self._mid = type("N", (), {"get_float": lambda _, i: [mx, my][i]})()
+                self._end = type("N", (), {"get_float": lambda _, i: [ex, ey][i]})()
+            def find(self, name):
+                if name == "start":
+                    return self._start
+                if name == "mid":
+                    return self._mid
+                if name == "end":
+                    return self._end
+                return None
+
+        # Quarter circle: centre (0,0), radius 10
+        # start (10, 0), mid ~(7.07, 7.07), end (0, 10)
+        import math as _m
+        mid_x = 10 * _m.cos(_m.pi / 4)
+        mid_y = 10 * _m.sin(_m.pi / 4)
+        arc = MockArc(10.0, 0.0, mid_x, mid_y, 0.0, 10.0)
+        segments = PlacementOptimizer._linearize_arc(arc, num_segments=8)
+
+        assert len(segments) == 8
+        # First segment should start near (10, 0)
+        assert abs(segments[0][0][0] - 10.0) < 0.01
+        assert abs(segments[0][0][1] - 0.0) < 0.01
+        # Last segment should end near (0, 10)
+        assert abs(segments[-1][1][0] - 0.0) < 0.1
+        assert abs(segments[-1][1][1] - 10.0) < 0.1
