@@ -331,6 +331,83 @@ def cmd_snap(args) -> int:
     return 0
 
 
+def cmd_place_unplaced(args) -> int:
+    """Place unplaced components (at origin or outside board bounds) in a grid."""
+    import json as _json
+
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.placement.place_unplaced import place_unplaced
+
+    quiet = getattr(args, "quiet", False)
+    output_format = getattr(args, "format", "text")
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    try:
+        with spinner("Detecting and placing unplaced components...", quiet=quiet):
+            result = place_unplaced(
+                pcb_path=pcb_path,
+                margin=args.margin,
+                spacing=args.spacing,
+                cluster=args.cluster,
+                dry_run=args.dry_run,
+                output_path=args.output,
+                quiet=quiet,
+            )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error placing components: {e}", file=sys.stderr)
+        return 1
+
+    if output_format == "json":
+        print(_json.dumps(result.to_dict(), indent=2))
+        return 0
+
+    # Text output
+    if not quiet:
+        if result.total_unplaced == 0:
+            print("No unplaced components detected.")
+            return 0
+
+        action = "Would place" if result.dry_run else "Placed"
+        print(f"\nDetected {result.total_unplaced} unplaced component(s).")
+        print(f"{action} {result.placed_count} component(s) into grid.")
+
+        if result.placed_refs:
+            if args.verbose:
+                print("\nPlaced components:")
+                for ref in result.placed_refs:
+                    print(f"  {ref}")
+            else:
+                refs_str = ", ".join(result.placed_refs[:10])
+                if len(result.placed_refs) > 10:
+                    refs_str += f" ... and {len(result.placed_refs) - 10} more"
+                print(f"  Components: {refs_str}")
+
+        if result.overflow_count > 0:
+            print(
+                f"\nWarning: {result.overflow_count} component(s) could not be placed "
+                f"(insufficient grid space)."
+            )
+            if args.verbose and result.overflow_refs:
+                print("Overflow components:")
+                for ref in result.overflow_refs:
+                    print(f"  {ref}")
+
+        if result.dry_run:
+            print("\n(Dry run - no changes made)")
+        elif result.placed_count > 0:
+            output = args.output or pcb_path
+            print(f"\nSaved to: {output}")
+
+    return 0
+
+
 def cmd_refine(args) -> int:
     """Interactive placement refinement session."""
     from kicad_tools.cli.progress import spinner
@@ -1855,6 +1932,54 @@ def main(argv: list[str] | None = None) -> int:
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
+    # Place-unplaced subcommand
+    place_unplaced_parser = subparsers.add_parser(
+        "place-unplaced",
+        help="Place unplaced components (at origin or out of bounds) in a grid within the board",
+    )
+    place_unplaced_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    place_unplaced_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    place_unplaced_parser.add_argument(
+        "--margin",
+        type=float,
+        default=2.0,
+        help="Edge margin in mm (default: 2.0)",
+    )
+    place_unplaced_parser.add_argument(
+        "--spacing",
+        type=float,
+        default=2.0,
+        help="Component spacing in mm (default: 2.0)",
+    )
+    place_unplaced_parser.add_argument(
+        "--schematic",
+        help="Schematic for cross-reference (reserved for future use)",
+    )
+    place_unplaced_parser.add_argument(
+        "--cluster",
+        action="store_true",
+        help="Group by net connectivity before placing",
+    )
+    place_unplaced_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be placed without modifying PCB",
+    )
+    place_unplaced_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    place_unplaced_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    place_unplaced_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     # Refine subcommand (interactive placement refinement)
     refine_parser = subparsers.add_parser("refine", help="Interactive placement refinement session")
     refine_parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -1899,6 +2024,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_optimize(args)
     elif args.command == "suggest":
         return cmd_suggest(args)
+    elif args.command == "place-unplaced":
+        return cmd_place_unplaced(args)
     elif args.command == "refine":
         return cmd_refine(args)
 

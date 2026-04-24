@@ -7,7 +7,10 @@ def run_placement_command(args) -> int:
     """Handle placement command."""
     if not args.placement_command:
         print("Usage: kicad-tools placement <command> [options] <file>")
-        print("Commands: check, fix, nudge, optimize, snap, align, distribute, suggest, refine")
+        print(
+            "Commands: check, fix, nudge, optimize, snap, align, distribute, "
+            "suggest, place-unplaced, refine"
+        )
         return 1
 
     from ..placement_cmd import main as placement_main
@@ -170,6 +173,26 @@ def run_placement_command(args) -> int:
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
         if args.verbose:
+            sub_argv.append("--verbose")
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "place-unplaced":
+        sub_argv = ["place-unplaced", args.pcb]
+        if getattr(args, "output", None):
+            sub_argv.extend(["-o", args.output])
+        if getattr(args, "margin", 2.0) != 2.0:
+            sub_argv.extend(["--margin", str(args.margin)])
+        if getattr(args, "spacing", 2.0) != 2.0:
+            sub_argv.extend(["--spacing", str(args.spacing)])
+        if getattr(args, "cluster", False):
+            sub_argv.append("--cluster")
+        if getattr(args, "dry_run", False):
+            sub_argv.append("--dry-run")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
+        if getattr(args, "verbose", False):
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")

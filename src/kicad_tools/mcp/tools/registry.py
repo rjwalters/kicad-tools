@@ -387,6 +387,67 @@ register_tool(
 )
 
 
+def _handler_placement_place_unplaced(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle placement_place_unplaced tool call."""
+    from kicad_tools.mcp.tools.placement import placement_place_unplaced
+
+    return placement_place_unplaced(
+        pcb_path=params["pcb_path"],
+        margin=params.get("margin", 2.0),
+        spacing=params.get("spacing", 2.0),
+        cluster=params.get("cluster", False),
+        dry_run=params.get("dry_run", False),
+        output_path=params.get("output_path"),
+    )
+
+
+register_tool(
+    name="placement_place_unplaced",
+    description=(
+        "Detect and place unplaced components on a PCB. Finds components at the "
+        "sheet origin or outside the board outline (typically added by sync-netlist) "
+        "and arranges them in a grid within the board bounds. Supports dry-run mode "
+        "to preview changes, adjustable margin/spacing, and optional net-based "
+        "clustering to place related components adjacently."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "margin": {
+                "type": "number",
+                "description": "Inward margin from board edge in mm (default: 2.0)",
+                "default": 2.0,
+            },
+            "spacing": {
+                "type": "number",
+                "description": "Spacing between grid cells in mm (default: 2.0)",
+                "default": 2.0,
+            },
+            "cluster": {
+                "type": "boolean",
+                "description": "Group components by shared net connectivity before placing (default: false)",
+                "default": False,
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Report what would change without modifying the PCB (default: false)",
+                "default": False,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional, overwrites original if not specified)",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_placement_place_unplaced,
+    category="placement",
+)
+
+
 def _handler_placement_suggestions(params: dict[str, Any]) -> dict[str, Any]:
     """Handle placement_suggestions tool call."""
     from kicad_tools.mcp.tools.placement import placement_suggestions

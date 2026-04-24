@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.analysis.congestion import CongestionAnalyzer, Severity
 from kicad_tools.analysis.signal_integrity import RiskLevel, TraceIntegrityAnalyzer
@@ -129,6 +130,61 @@ def placement_analyze(
         clusters=clusters,
         routing_estimate=routing_estimate,
     )
+
+
+def placement_place_unplaced(
+    pcb_path: str,
+    margin: float = 2.0,
+    spacing: float = 2.0,
+    cluster: bool = False,
+    dry_run: bool = False,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    """Place unplaced components into a grid within the board outline.
+
+    Detects components sitting at the sheet origin or outside the board
+    bounds and arranges them in a grid inside the board.  Typically used
+    after ``sync-netlist`` to move newly-added footprints into a
+    reasonable initial layout.
+
+    Args:
+        pcb_path: Absolute path to ``.kicad_pcb`` file.
+        margin: Inward margin from board edge in mm.
+        spacing: Spacing between grid cells in mm.
+        cluster: Group components by shared nets before placing.
+        dry_run: When True, report what would change without modifying.
+        output_path: Where to save the modified PCB (defaults to *pcb_path*).
+
+    Returns:
+        Dictionary with placement results (placed_count, overflow_count, etc.)
+
+    Raises:
+        FileNotFoundError: If the PCB file does not exist.
+        ParseError: If the PCB file cannot be parsed.
+        ValueError: If the PCB has no ``Edge.Cuts`` board outline.
+    """
+    from kicad_tools.placement.place_unplaced import (
+        PlaceUnplacedResult,
+        place_unplaced,
+    )
+
+    path = Path(pcb_path)
+    if not path.exists():
+        raise KiCadFileNotFoundError(f"PCB file not found: {pcb_path}")
+
+    if path.suffix != ".kicad_pcb":
+        raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
+
+    result = place_unplaced(
+        pcb_path=pcb_path,
+        margin=margin,
+        spacing=spacing,
+        cluster=cluster,
+        dry_run=dry_run,
+        output_path=output_path,
+        quiet=True,
+    )
+    return result.to_dict()
 
 
 def _compute_wire_length_score(pcb: PCB) -> float:
