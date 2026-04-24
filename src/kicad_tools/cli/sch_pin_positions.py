@@ -24,7 +24,7 @@ import sys
 from kicad_tools.schema import Schematic, SymbolLibrary
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Show pin positions for a symbol instance",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -37,7 +37,7 @@ def main():
         "--format", choices=["table", "json"], default="table", help="Output format"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Load schematic
     try:
