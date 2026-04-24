@@ -218,6 +218,9 @@ def main(argv=None):
             except Exception as e:
                 print(f"Error loading library {lib_path}: {e}", file=sys.stderr)
 
+    # Load embedded symbol definitions from the schematic itself
+    lib_manager.load_embedded(sch)
+
     if not lib_manager.libraries:
         print(
             "Warning: No symbol libraries loaded. Use --lib-path or --lib to specify libraries.",

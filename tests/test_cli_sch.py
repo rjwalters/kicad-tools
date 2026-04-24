@@ -1764,6 +1764,71 @@ class TestSchCheckConnections:
         captured = capsys.readouterr()
         assert "No symbol libraries loaded" in captured.err
 
+    def test_embedded_symbols_no_lib_path(self, capsys, tmp_path):
+        """Test that connections work with embedded lib_symbols and no --lib-path."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        # Create a schematic with embedded symbol definitions in lib_symbols
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (wire
+    (pts (xy 100 96.19) (xy 100 90))
+    (stroke (width 0) (type default))
+    (uuid "00000000-0000-0000-0000-000000000005")
+  )
+)
+"""
+        sch_file = tmp_path / "embedded.kicad_sch"
+        sch_file.write_text(sch_content)
+
+        # Should succeed without --lib-path because embedded symbols are loaded
+        try:
+            main([str(sch_file), "--format", "json"])
+        except SystemExit as e:
+            assert e.code in (0, 1)
+
+        captured = capsys.readouterr()
+        # Must NOT contain the "No symbol libraries loaded" error
+        assert "No symbol libraries loaded" not in captured.err
+        # Should produce JSON output with pin data
+        if captured.out.strip():
+            data = json.loads(captured.out)
+            assert "pins" in data
+            assert "summary" in data
+
 
 class TestSchFindUnconnected:
     """Tests for sch_find_unconnected.py CLI."""
