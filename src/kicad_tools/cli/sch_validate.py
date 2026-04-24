@@ -21,6 +21,7 @@ Examples:
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -935,6 +936,418 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Pin-net semantic mismatch detection
+# ---------------------------------------------------------------------------
+
+# Power-positive keywords (case-insensitive matching)
+_POWER_POSITIVE_KEYWORDS: frozenset[str] = frozenset({
+    "VCC", "VDD", "VBUS", "3V3", "5V", "AVCC", "DVCC", "AVDD", "DVDD",
+    "PVDD", "IOVDD",
+})
+
+# Power-negative keywords
+_POWER_NEGATIVE_KEYWORDS: frozenset[str] = frozenset({
+    "GND", "VSS", "AGND", "DGND", "PGND", "GNDA", "GNDD",
+})
+
+# Bus protocol keyword groups: protocol -> set of signal keywords
+_BUS_PROTOCOLS: dict[str, set[str]] = {
+    "I2C": {"SDA", "SCL"},
+    "SPI": {"MOSI", "MISO", "SCK", "SCLK", "CS", "SS", "NSS"},
+    "I2S": {"BCLK", "LRCLK", "DIN", "DOUT", "SDIN", "SDOUT", "WS", "MCK"},
+    "UART": {"TX", "RX", "TXD", "RXD"},
+}
+
+# All bus signal keywords (flattened)
+_ALL_BUS_KEYWORDS: set[str] = set()
+for _proto_signals in _BUS_PROTOCOLS.values():
+    _ALL_BUS_KEYWORDS.update(_proto_signals)
+
+# Map each keyword back to its protocol
+_KEYWORD_TO_PROTOCOL: dict[str, str] = {}
+for _proto, _signals in _BUS_PROTOCOLS.items():
+    for _sig in _signals:
+        _KEYWORD_TO_PROTOCOL[_sig] = _proto
+
+
+def _tokenize_name(name: str) -> set[str]:
+    """Tokenize a pin or net name into uppercase keyword tokens.
+
+    Splits on ``_``, ``/``, ``-`` separators and camelCase boundaries
+    (lowercase-to-uppercase).  Does NOT split within uppercase+digit
+    sequences like ``I2S``, ``SPI0``, ``I2C1`` -- these are kept as
+    single tokens since they represent common protocol abbreviations.
+
+    Returns the set of uppercase tokens.
+    """
+    if not name or name == "~":
+        return set()
+    # Replace common separators with space
+    s = name.replace("/", " ").replace("_", " ").replace("-", " ")
+    # Insert spaces at camelCase boundaries (lowercase followed by uppercase)
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    return {t.upper() for t in s.split() if t}
+
+
+def _find_protocol(tokens: set[str]) -> str | None:
+    """Return the bus protocol name if any token matches a bus keyword."""
+    for token in tokens:
+        if token in _KEYWORD_TO_PROTOCOL:
+            return _KEYWORD_TO_PROTOCOL[token]
+    return None
+
+
+def _is_generic_pin_name(name: str) -> bool:
+    """Return True if a pin name is generic (numeric only, tilde, empty)."""
+    if not name or name == "~":
+        return True
+    # Purely numeric pin names like "1", "2"
+    stripped = name.strip()
+    if stripped.isdigit():
+        return True
+    # Names like "P1", "P2" on generic connectors
+    if re.match(r"^[Pp]\d+$", stripped):
+        return True
+    return False
+
+
+def _is_passive_component(lib_id: str) -> bool:
+    """Return True for passive component lib_ids (R, C, L, etc.)."""
+    # Common passive library prefixes
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    passive_prefixes = ("R", "C", "L", "D", "FB", "Ferrite")
+    # Match R, R_Small, C, C_Polarized, L, etc.
+    for prefix in passive_prefixes:
+        if part == prefix or part.startswith(prefix + "_"):
+            return True
+    return False
+
+
+def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue]:
+    """Flag pins where the connected net name has no semantic overlap with the pin name.
+
+    For each non-power, non-passive symbol, resolves pin-to-net assignments
+    and compares signal-type keywords between pin names and net names.
+    Also detects systematic N-pin offset patterns within a single symbol.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Skip power symbols
+                    if lib_id.startswith("power:"):
+                        continue
+
+                    # Skip passive components
+                    if _is_passive_component(lib_id):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Collect mismatches for offset detection
+                    # List of (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                    mismatches: list[tuple[int, str, str, str | None, str | None]] = []
+
+                    for pin_num, pin_info in pins_data.items():
+                        pin_name = pin_info.get("name", "")
+                        net_name = pin_info.get("net")
+                        pin_type = pin_info.get("type", "")
+
+                        # Skip unconnected pins
+                        if net_name is None:
+                            continue
+
+                        # Skip generic pin names
+                        if _is_generic_pin_name(pin_name):
+                            continue
+
+                        # Skip power pins (they are checked by power_short)
+                        if pin_type in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        net_tokens = _tokenize_name(net_name)
+
+                        if not pin_tokens or not net_tokens:
+                            continue
+
+                        pin_protocol = _find_protocol(pin_tokens)
+                        net_protocol = _find_protocol(net_tokens)
+
+                        # Check for protocol mismatch
+                        if pin_protocol and net_protocol and pin_protocol != net_protocol:
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                            continue
+
+                        # Check for bus keyword mismatch
+                        pin_bus = pin_tokens & _ALL_BUS_KEYWORDS
+                        net_bus = net_tokens & _ALL_BUS_KEYWORDS
+
+                        if pin_bus and net_bus and not (pin_bus & net_bus):
+                            # Both have bus keywords but no overlap
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                        elif net_bus and not pin_bus and net_protocol:
+                            # Net has bus keywords but pin does not -- the net
+                            # is likely on the wrong pin (e.g., I2S_DIN on a
+                            # MODE pin)
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                        elif pin_bus and not net_bus and pin_protocol:
+                            # Pin has bus keywords but net does not -- a bus
+                            # pin connected to a non-bus net
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+
+                    if not mismatches:
+                        continue
+
+                    # Check for systematic offset pattern
+                    offset_detected = _detect_systematic_offset(
+                        mismatches, pins_data, ref, node.get_path_string(), issues
+                    )
+
+                    if not offset_detected:
+                        # Emit individual warnings for each mismatch
+                        for _, pin_name, net_name, pin_proto, net_proto in mismatches:
+                            proto_info = ""
+                            if pin_proto and net_proto and pin_proto != net_proto:
+                                proto_info = (
+                                    f" (pin expects {pin_proto}, "
+                                    f"net is {net_proto})"
+                                )
+                            issues.append(
+                                ValidationIssue(
+                                    severity="warning",
+                                    category="pin_assignment",
+                                    message=(
+                                        f"{ref}: pin '{pin_name}' connected to "
+                                        f"net '{net_name}'{proto_info}"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="pin_assignment",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="pin_assignment",
+                message=f"Pin assignment check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def _detect_systematic_offset(
+    mismatches: list[tuple[int, str, str, str | None, str | None]],
+    pins_data: dict[str, dict],
+    ref: str,
+    location: str,
+    issues: list[ValidationIssue],
+) -> bool:
+    """Detect if mismatches form a systematic offset pattern.
+
+    If 3 or more mismatches all share the same offset between the pin
+    they are on and the pin whose name matches the net, emit a single
+    high-severity diagnostic.
+
+    Returns True if a systematic offset was detected and reported.
+    """
+    if len(mismatches) < 3:
+        return False
+
+    # Build pin_name -> pin_number map for the symbol
+    name_to_num: dict[str, int] = {}
+    for pnum, pinfo in pins_data.items():
+        pname = pinfo.get("name", "")
+        if pname and pname != "~" and pnum.isdigit():
+            name_to_num[pname.upper()] = int(pnum)
+
+    # For each mismatch, figure out the offset: which pin number has a name
+    # matching the net's bus keywords?
+    offsets: list[int] = []
+    for pin_num_int, pin_name, net_name, _, _ in mismatches:
+        if pin_num_int < 0:
+            continue
+
+        net_tokens = _tokenize_name(net_name)
+        net_bus = net_tokens & _ALL_BUS_KEYWORDS
+
+        if not net_bus:
+            continue
+
+        # Find which pin on this symbol has a name matching the net's keyword
+        for keyword in net_bus:
+            if keyword in name_to_num:
+                expected_pin = name_to_num[keyword]
+                offset = pin_num_int - expected_pin
+                if offset != 0:
+                    offsets.append(offset)
+                break
+
+    if len(offsets) < 3:
+        return False
+
+    # Check if most offsets are the same
+    from collections import Counter
+    offset_counts = Counter(offsets)
+    most_common_offset, count = offset_counts.most_common(1)[0]
+
+    if count >= 3:
+        issues.append(
+            ValidationIssue(
+                severity="error",
+                category="pin_assignment",
+                message=(
+                    f"{ref}: systematic wiring offset detected -- "
+                    f"{count} pins are shifted by {most_common_offset:+d} positions"
+                ),
+                location=location,
+            )
+        )
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Power net short detection (VCC-to-GND)
+# ---------------------------------------------------------------------------
+
+
+def check_power_net_shorts(schematic_path: str) -> list[ValidationIssue]:
+    """Detect nets that connect both VCC-type and GND-type power pins.
+
+    Builds a net-to-pin-types map from ``resolve_pin_map()`` across all
+    sheets.  For each net, flags an error if it contains both power-positive
+    and power-negative pins.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # net_name -> {"positive_pins": [...], "negative_pins": [...], "sheets": set}
+        net_power_map: dict[str, dict] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+
+                        pin_name = pin_info.get("name", "")
+                        pin_type = pin_info.get("type", "")
+
+                        # Only consider power pins
+                        if pin_type not in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        is_positive = bool(pin_tokens & _POWER_POSITIVE_KEYWORDS)
+                        is_negative = bool(pin_tokens & _POWER_NEGATIVE_KEYWORDS)
+
+                        if not is_positive and not is_negative:
+                            continue
+
+                        if net_name not in net_power_map:
+                            net_power_map[net_name] = {
+                                "positive_pins": [],
+                                "negative_pins": [],
+                                "sheets": set(),
+                            }
+
+                        entry_data = net_power_map[net_name]
+                        pin_desc = f"{ref}.{pin_name} (pin {pin_num})"
+                        if is_positive:
+                            entry_data["positive_pins"].append(pin_desc)
+                        if is_negative:
+                            entry_data["negative_pins"].append(pin_desc)
+                        entry_data["sheets"].add(sheet_path)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="power_short",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check for nets with both positive and negative power pins
+        for net_name, data in sorted(net_power_map.items()):
+            if data["positive_pins"] and data["negative_pins"]:
+                pos_str = ", ".join(data["positive_pins"][:3])
+                neg_str = ", ".join(data["negative_pins"][:3])
+                sheets = ", ".join(sorted(data["sheets"]))
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="power_short",
+                        message=(
+                            f"Net '{net_name}' connects power and ground: "
+                            f"positive [{pos_str}], negative [{neg_str}]"
+                        ),
+                        location=sheets,
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="power_short",
+                message=f"Power short check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -974,6 +1387,14 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Duplicate references across sheets
     result.checks_run.append("duplicate_references")
     result.issues.extend(check_duplicate_references(schematic_path))
+
+    # Pin-net semantic mismatch (pin assignment audit)
+    result.checks_run.append("pin_assignment")
+    result.issues.extend(check_pin_net_semantic_mismatch(schematic_path))
+
+    # Power net short detection (VCC-to-GND)
+    result.checks_run.append("power_short")
+    result.issues.extend(check_power_net_shorts(schematic_path))
 
     return result
 
