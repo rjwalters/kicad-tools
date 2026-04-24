@@ -53,6 +53,11 @@ class ManufacturingConfig(AssemblyConfig):
     # When False, versioned directories are preserved as-is.
     latest_report_only: bool = True
 
+    # When True, preserve intermediate report build files (markdown, figures,
+    # JSON data snapshots) in a .build/report/ subdirectory.  Default False
+    # means only report.pdf (or report.md) is kept at the package root.
+    keep_build_artifacts: bool = False
+
     # When True (default), generate a README.txt explaining the output files.
     include_readme: bool = True
 
@@ -593,11 +598,16 @@ class ManufacturingPackage:
         return result
 
     def _flatten_latest_report(self, out_dir: Path, result: ManufacturingResult) -> None:
-        """Copy the latest ``vN/`` contents into ``report/`` and remove version dirs.
+        """Promote the latest report to the package root and clean up.
 
         When ``config.latest_report_only`` is ``True``, this post-processing
-        step replaces versioned directories with a single flat ``report/``
-        subdirectory containing only the latest version's contents.
+        step copies the latest ``vN/`` contents into a temporary staging area,
+        promotes ``report.pdf`` (or ``report.md`` if PDF is unavailable) to
+        the package root, and removes all ``vN/`` directories.
+
+        If ``config.keep_build_artifacts`` is ``True``, intermediate files
+        (markdown source, figures, data, metadata) are preserved in a
+        ``.build/report/`` subdirectory.  Otherwise they are discarded.
         """
         try:
             from ..report.generator import ReportGenerator
@@ -609,26 +619,42 @@ class ManufacturingPackage:
             # No versioned directories (e.g. --no-report was also set)
             return
 
-        report_dest = out_dir / "report"
-        if report_dest.exists():
-            shutil.rmtree(report_dest)
-        shutil.copytree(latest, report_dest)
+        # Stage the latest version contents in a temporary directory
+        report_staging = out_dir / "report"
+        if report_staging.exists():
+            shutil.rmtree(report_staging)
+        shutil.copytree(latest, report_staging)
 
         # Remove all vN/ directories from the output
         for child in list(out_dir.iterdir()):
             if child.is_dir() and re.fullmatch(r"v\d+", child.name):
                 shutil.rmtree(child)
 
-        # Update result.report_path to point to the flattened location,
-        # preferring PDF over MD when both exist.
-        flat_pdf = report_dest / "report.pdf"
-        flat_report = report_dest / "report.md"
-        if flat_pdf.exists():
-            result.report_path = flat_pdf
-        elif flat_report.exists():
-            result.report_path = flat_report
+        # Promote the report file (PDF preferred, MD fallback) to package root
+        staged_pdf = report_staging / "report.pdf"
+        staged_md = report_staging / "report.md"
 
-        logger.info(f"Flattened latest report into {report_dest}")
+        if staged_pdf.exists():
+            promoted = out_dir / "report.pdf"
+            shutil.copy2(staged_pdf, promoted)
+            result.report_path = promoted
+        elif staged_md.exists():
+            promoted = out_dir / "report.md"
+            shutil.copy2(staged_md, promoted)
+            result.report_path = promoted
+
+        # Handle build artifacts
+        if self.config.keep_build_artifacts:
+            build_dir = out_dir / ".build" / "report"
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+            build_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(report_staging), str(build_dir))
+            logger.info(f"Preserved build artifacts in {build_dir}")
+        else:
+            shutil.rmtree(report_staging)
+
+        logger.info(f"Promoted report to {result.report_path}")
 
     def _generate_readme(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a README.txt describing the manufacturing package contents."""

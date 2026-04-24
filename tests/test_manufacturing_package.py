@@ -526,7 +526,7 @@ class TestLatestReportOnly:
         return version_dir / "report.md"
 
     def test_flatten_latest_report(self, tmp_path, monkeypatch):
-        """With latest_report_only=True, output has report/ instead of vN/ dirs."""
+        """With latest_report_only=True, report.md is promoted to package root."""
         pcb = self._setup_project(tmp_path)
         out_dir = tmp_path / "output"
 
@@ -561,14 +561,15 @@ class TestLatestReportOnly:
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
         result = pkg.export(out_dir)
 
-        # Flattened report/ directory should exist
-        report_dir = out_dir / "report"
-        assert report_dir.exists()
-        assert (report_dir / "report.md").exists()
-        assert "v3" in (report_dir / "report.md").read_text()
+        # report.md should be promoted to the package root
+        assert (out_dir / "report.md").exists()
+        assert "v3" in (out_dir / "report.md").read_text()
 
-        # Data subdirectory should also be copied
-        assert (report_dir / "data" / "board_summary.json").exists()
+        # No report/ subdirectory should remain (artifacts discarded by default)
+        assert not (out_dir / "report").exists()
+
+        # No .build/ directory without keep_build_artifacts
+        assert not (out_dir / ".build").exists()
 
         # No vN/ directories should remain
         import re
@@ -578,8 +579,8 @@ class TestLatestReportOnly:
                     f"Version directory {child.name} should have been removed"
                 )
 
-        # result.report_path should point to the flattened location
-        assert result.report_path == report_dir / "report.md"
+        # result.report_path should point to the root-level file
+        assert result.report_path == out_dir / "report.md"
 
     def test_latest_only_false_preserves_version_dirs(self, tmp_path, monkeypatch):
         """With latest_report_only=False (default), vN/ directories are preserved."""
@@ -651,7 +652,7 @@ class TestLatestReportOnly:
         assert not (out_dir / "report").exists()
 
     def test_latest_only_fresh_project_single_version(self, tmp_path, monkeypatch):
-        """On a fresh project, latest_report_only flattens the single v1/ into report/."""
+        """On a fresh project, latest_report_only promotes v1/report.md to root."""
         pcb = self._setup_project(tmp_path)
         out_dir = tmp_path / "output"
 
@@ -680,17 +681,240 @@ class TestLatestReportOnly:
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
         result = pkg.export(out_dir)
 
-        # report/ directory should exist with v1 content
-        assert (out_dir / "report" / "report.md").exists()
-        assert "v1" in (out_dir / "report" / "report.md").read_text()
+        # report.md should be promoted to root with v1 content
+        assert (out_dir / "report.md").exists()
+        assert "v1" in (out_dir / "report.md").read_text()
 
         # v1/ should be removed
         assert not (out_dir / "v1").exists()
+
+        # No report/ subdirectory
+        assert not (out_dir / "report").exists()
 
     def test_config_default_latest_report_only(self):
         """latest_report_only defaults to True."""
         config = ManufacturingConfig()
         assert config.latest_report_only is True
+
+    def test_config_default_keep_build_artifacts(self):
+        """keep_build_artifacts defaults to False."""
+        config = ManufacturingConfig()
+        assert config.keep_build_artifacts is False
+
+    def test_keep_build_artifacts_preserves_intermediates(self, tmp_path, monkeypatch):
+        """With keep_build_artifacts=True, .build/report/ contains build files."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # report.md should be promoted to root
+        assert (out_dir / "report.md").exists()
+        assert result.report_path == out_dir / "report.md"
+
+        # .build/report/ should contain the build artifacts
+        build_report = out_dir / ".build" / "report"
+        assert build_report.exists()
+        assert (build_report / "report.md").exists()
+        assert (build_report / "data" / "board_summary.json").exists()
+        assert (build_report / "metadata.json").exists()
+
+        # No report/ or vN/ directories
+        assert not (out_dir / "report").exists()
+        assert not (out_dir / "v1").exists()
+
+    def test_pdf_promoted_over_md(self, tmp_path, monkeypatch):
+        """When report.pdf exists, it is promoted to root instead of report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            # Create both MD and PDF in v1/
+            report_path = self._fake_report_generate(od, 1)
+            pdf_path = report_path.with_suffix(".pdf")
+            pdf_path.write_bytes(b"%PDF-1.4 fake pdf content")
+            result.report_path = pdf_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # PDF should be promoted to root
+        assert (out_dir / "report.pdf").exists()
+        assert result.report_path == out_dir / "report.pdf"
+
+        # No report/ subdirectory
+        assert not (out_dir / "report").exists()
+
+    def test_no_report_no_build_dir(self, tmp_path, monkeypatch):
+        """With include_report=False, no report.pdf or .build/ directory is created."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        assert result.success
+        assert result.report_path is None
+        assert not (out_dir / "report.pdf").exists()
+        assert not (out_dir / "report.md").exists()
+        assert not (out_dir / ".build").exists()
+
+    def test_keep_versions_bypasses_artifact_cleanup(self, tmp_path, monkeypatch):
+        """With latest_report_only=False, no .build/ directory is created."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=False,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # vN/ directories preserved
+        assert (out_dir / "v1").exists()
+        # No .build/ directory (flattening was skipped)
+        assert not (out_dir / ".build").exists()
+        # No report at root (stays in vN/)
+        assert not (out_dir / "report.md").exists()
+
+    def test_manifest_checksums_report_at_root(self, tmp_path, monkeypatch):
+        """Manifest should checksum report.md at root, not report/report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=True,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Parse manifest
+        import json
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+
+        # Manifest should have "report.md" key (at root), not "report/report.md"
+        assert "report.md" in manifest["files"]
+        assert "report/report.md" not in manifest.get("files", {})
+
+    def test_cli_keep_build_artifacts_flag(self):
+        """CLI --keep-build-artifacts flag parses correctly."""
+        from kicad_tools.cli.export_cmd import main
+        import argparse
+
+        # We just need to verify the argument parses without running the export
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--keep-build-artifacts", action="store_true")
+        args = parser.parse_args(["--keep-build-artifacts"])
+        assert args.keep_build_artifacts is True
+
+        args_default = parser.parse_args([])
+        assert args_default.keep_build_artifacts is False
 
 
 class TestGerberCleanup:

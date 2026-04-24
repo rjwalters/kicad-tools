@@ -107,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Preserve versioned vN/ report directories (default: flat report/ directory)",
     )
     parser.add_argument(
+        "--keep-build-artifacts",
+        action="store_true",
+        help="Preserve intermediate report files (markdown, figures, data) in .build/ directory",
+    )
+    parser.add_argument(
         "--keep-gerber-files",
         action="store_true",
         help="Keep individual gerber/drill files alongside the zip archive",
@@ -269,6 +274,7 @@ def run_export(args: argparse.Namespace) -> int:
         pnp_config=pnp_config,
         gerber_config=gerber_config,
         latest_report_only=not getattr(args, "keep_versions", False),
+        keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
     )
 
     pkg = ManufacturingPackage(

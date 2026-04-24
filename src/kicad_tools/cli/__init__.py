@@ -740,6 +740,8 @@ def _run_export_command(args) -> int:
         sub_argv.extend(["--erc-report", args.export_erc_report])
     if getattr(args, "export_keep_versions", False):
         sub_argv.append("--keep-versions")
+    if getattr(args, "export_keep_build_artifacts", False):
+        sub_argv.append("--keep-build-artifacts")
     if getattr(args, "export_keep_gerber_files", False):
         sub_argv.append("--keep-gerber-files")
     if getattr(args, "export_include_tht", False):

@@ -4870,6 +4870,12 @@ def _add_export_parser(subparsers) -> None:
         help="Preserve versioned vN/ report directories (default: flat report/ directory)",
     )
     export_parser.add_argument(
+        "--keep-build-artifacts",
+        dest="export_keep_build_artifacts",
+        action="store_true",
+        help="Preserve intermediate report files (markdown, figures, data) in .build/ directory",
+    )
+    export_parser.add_argument(
         "--keep-gerber-files",
         dest="export_keep_gerber_files",
         action="store_true",
