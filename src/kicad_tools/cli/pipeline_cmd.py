@@ -541,8 +541,12 @@ def _run_subprocess_step(
 
         if result.returncode == 0:
             return True, "completed successfully"
-        elif result.returncode == 2:
-            # Some commands use exit code 2 for partial success (e.g., DRC-only failures)
+        elif result.returncode in (2, 3, 4, 5):
+            # Exit codes 2-5 indicate usable output exists:
+            #   2 = partial routing below threshold
+            #   3 = routing meets threshold but DRC violations remain
+            #   4 = partial routing with segment-segment clearance violations
+            #   5 = interrupted by SIGINT with partial results saved
             return True, "completed with warnings"
         else:
             error_msg = result.stderr.strip() if result.stderr else f"exit code {result.returncode}"

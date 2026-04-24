@@ -1108,16 +1108,23 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 message="Routing completed successfully",
                 output_file=output_file if output_file.exists() else None,
             )
-        elif result.returncode == 2:
-            # Exit code 2 = partial routing (some nets routed, some skipped).
-            # When pour nets (GND, +3.3V, etc.) are auto-skipped for zone fill,
-            # the router reports partial completion even though all signal nets
-            # routed successfully.  Treat this as success so the build pipeline
-            # continues to verification.
+        elif result.returncode in (2, 3, 4, 5):
+            # Exit codes 2-5 all produce usable output files:
+            #   2 = partial routing below --min-completion threshold
+            #   3 = routing meets threshold but DRC violations remain
+            #   4 = partial routing with segment-segment clearance violations
+            #   5 = interrupted by SIGINT with partial results saved
+            # Treat as non-fatal so the build pipeline continues to verification.
+            _route_warning_messages = {
+                2: "Routing completed (some nets skipped for zone fill)",
+                3: "Routing complete but DRC violations remain",
+                4: "Partial routing with clearance violations",
+                5: "Routing interrupted by user, partial results saved",
+            }
             return BuildResult(
                 step="route",
                 success=True,
-                message="Routing completed (some nets skipped for zone fill)",
+                message=_route_warning_messages[result.returncode],
                 output_file=output_file if output_file.exists() else None,
             )
         else:
