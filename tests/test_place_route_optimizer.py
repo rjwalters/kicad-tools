@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kicad_tools.optim import OptimizationResult, PlaceRouteOptimizer
+from kicad_tools.validate.violations import DRCViolation
 
 # =============================================================================
 # Test PCB fixtures
@@ -1059,11 +1060,24 @@ class TestFixDrcViolationsIntegration:
                     results.passed = False
                     results.errors = [MagicMock()]
                     results.warnings = []
+                    results.violations = [
+                        DRCViolation(
+                            rule_id="clearance_trace_trace",
+                            severity="error",
+                            message="Clearance violation between traces",
+                            location=(10.0, 20.0),
+                            layer="F.Cu",
+                            actual_value=0.15,
+                            required_value=0.2,
+                            items=("R1", "R2"),
+                        )
+                    ]
                 else:
                     # Second check: clean
                     results.passed = True
                     results.errors = []
                     results.warnings = []
+                    results.violations = []
                 return results
 
             checker.check_all = check_all
