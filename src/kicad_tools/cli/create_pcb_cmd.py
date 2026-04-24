@@ -84,8 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--columns",
         type=int,
-        default=10,
-        help="Number of columns for auto-placement grid (default: 10)",
+        default=None,
+        help="Number of columns for auto-placement grid (default: auto-calculated from board width)",
+    )
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=3.0,
+        help="Inset from board edges for auto-placement in mm (default: 3.0)",
     )
     parser.add_argument(
         "--dry-run",
@@ -137,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
             result = workflow.place_all_components(
                 spacing=args.spacing,
                 columns=args.columns,
+                margin=args.margin,
             )
             console.print(
                 f"[green]Placed {result.success_count} components[/green]"

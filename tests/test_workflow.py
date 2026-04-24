@@ -365,6 +365,165 @@ class TestCreatePCBFromSchematic:
             mock_workflow.assign_nets.assert_called_once()
 
 
+class TestBoardSize:
+    """Tests for PCB.board_size property."""
+
+    def test_board_size_from_create(self):
+        """Test board_size returns correct dimensions from PCB.create()."""
+        pcb = PCB.create(width=65, height=56.5)
+        w, h = pcb.board_size
+        assert w == pytest.approx(65.0)
+        assert h == pytest.approx(56.5)
+
+    def test_board_size_large_board(self):
+        """Test board_size with a larger board."""
+        pcb = PCB.create(width=200, height=150)
+        w, h = pcb.board_size
+        assert w == pytest.approx(200.0)
+        assert h == pytest.approx(150.0)
+
+    def test_board_size_no_outline(self):
+        """Test board_size returns (0,0) when no Edge.Cuts outline exists."""
+        # Create a PCB and clear its graphics to simulate no outline
+        pcb = PCB.create(width=100, height=100)
+        pcb._graphics = []
+        pcb._graphic_lines = []
+        w, h = pcb.board_size
+        assert w == 0.0
+        assert h == 0.0
+
+
+class TestPlaceAllComponentsBoardAware:
+    """Tests for board-aware placement in place_all_components()."""
+
+    def _make_workflow(self, tmp_path: Path, board_w: float, board_h: float):
+        """Helper to create a workflow with a PCB of given dimensions."""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("(kicad_sch (version 20231120))")
+
+        # Build a mock netlist with several components
+        mock_netlist = MagicMock(spec=Netlist)
+        mock_netlist.components = [
+            NetlistComponent(
+                reference=f"R{i}",
+                value="10k",
+                footprint="Resistor_SMD:R_0805_2012Metric",
+                lib_id="Device:R",
+            )
+            for i in range(1, 16)  # 15 components
+        ]
+        mock_netlist.nets = []
+        mock_netlist.get_component = lambda ref: next(
+            (c for c in mock_netlist.components if c.reference == ref), None
+        )
+
+        workflow = PCBFromSchematic.__new__(PCBFromSchematic)
+        workflow.schematic_path = sch_path
+        workflow._netlist_path = tmp_path / "test.kicad_net"
+        workflow._netlist = mock_netlist
+        workflow._pcb = None
+        workflow._components = None
+
+        workflow.create_pcb(width=board_w, height=board_h)
+        return workflow
+
+    def test_auto_columns_narrow_board(self, tmp_path: Path):
+        """On a narrow board, auto-columns prevents horizontal overflow."""
+        workflow = self._make_workflow(tmp_path, board_w=50, board_h=40)
+
+        calls: list[tuple[str, float, float]] = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                result = workflow.place_all_components(spacing=15.0)
+
+        # Usable width = 50 - 3 (start margin) - 3 (end margin) = 44
+        # columns = int(44 / 15) = 2
+        # So max x = 3 + 1*15 = 18, well within 50
+        assert result.success_count == 15
+
+        # Verify all x positions stay within board width
+        for ref, x, _y in calls:
+            assert x < 50, f"Component {ref} placed at x={x}, exceeds board width 50"
+
+    def test_auto_columns_wide_board(self, tmp_path: Path):
+        """On a wide board, more columns fit."""
+        workflow = self._make_workflow(tmp_path, board_w=200, board_h=100)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            result = workflow.place_all_components(spacing=15.0)
+
+        assert result.success_count == 15
+
+    def test_explicit_columns_override(self, tmp_path: Path):
+        """Explicit columns parameter overrides auto-calculation."""
+        workflow = self._make_workflow(tmp_path, board_w=200, board_h=100)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            result = workflow.place_all_components(spacing=15.0, columns=5)
+
+        assert result.success_count == 15
+
+    def test_explicit_start_position(self, tmp_path: Path):
+        """Explicit start_x/start_y overrides margin-based defaults."""
+        workflow = self._make_workflow(tmp_path, board_w=100, board_h=100)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            result = workflow.place_all_components(
+                start_x=10.0, start_y=10.0, spacing=15.0, columns=5
+            )
+
+        assert result.success_count == 15
+
+    def test_default_margin(self, tmp_path: Path):
+        """Default margin of 3mm is applied when start positions are not given."""
+        workflow = self._make_workflow(tmp_path, board_w=100, board_h=100)
+
+        calls = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                workflow.place_all_components()
+
+        # First component should be at (margin, margin) = (3.0, 3.0)
+        assert calls[0][1] == pytest.approx(3.0)
+        assert calls[0][2] == pytest.approx(3.0)
+
+    def test_custom_margin(self, tmp_path: Path):
+        """Custom margin value is respected."""
+        workflow = self._make_workflow(tmp_path, board_w=100, board_h=100)
+
+        calls = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                workflow.place_all_components(margin=5.0)
+
+        # First component at (5.0, 5.0)
+        assert calls[0][1] == pytest.approx(5.0)
+        assert calls[0][2] == pytest.approx(5.0)
+
+        # columns = int((100 - 5 - 5) / 15) = int(6.0) = 6
+        # So the 7th component (index 6) should wrap to next row
+        assert calls[6][1] == pytest.approx(5.0)  # x wraps back
+        assert calls[6][2] == pytest.approx(5.0 + 15.0)  # y increments
+
+
 class TestWorkflowExports:
     """Tests for workflow module exports."""
 

@@ -309,22 +309,36 @@ class PCBFromSchematic:
 
     def place_all_components(
         self,
-        start_x: float = 10.0,
-        start_y: float = 10.0,
+        start_x: float | None = None,
+        start_y: float | None = None,
         spacing: float = 15.0,
-        columns: int = 10,
+        columns: int | None = None,
+        margin: float = 3.0,
     ) -> PlacementResult:
         """
-        Place all components in a grid pattern.
+        Place all components in a grid pattern inside the board outline.
 
         This provides a simple default placement that can be refined later.
         Components are placed left-to-right, top-to-bottom in a grid.
 
+        When ``start_x``/``start_y`` are not provided, positions are
+        calculated from the board dimensions with a configurable margin
+        inset from each edge.  When ``columns`` is ``None``, the number
+        of columns is auto-calculated so that components stay within the
+        board width.
+
+        All coordinates are board-relative (``add_footprint()`` applies
+        the board origin offset internally).
+
         Args:
-            start_x: Starting X position in mm (default 10.0)
-            start_y: Starting Y position in mm (default 10.0)
+            start_x: Starting X position in mm.  Defaults to ``margin``.
+            start_y: Starting Y position in mm.  Defaults to ``margin``.
             spacing: Spacing between components in mm (default 15.0)
-            columns: Number of columns in the grid (default 10)
+            columns: Number of columns in the grid.  ``None`` (default)
+                auto-calculates from the board width and spacing so that
+                components stay within the board outline.
+            margin: Inset from board edges in mm when auto-calculating
+                start position and column count (default 3.0).
 
         Returns:
             PlacementResult with lists of placed and failed components
@@ -332,14 +346,28 @@ class PCBFromSchematic:
         if self._pcb is None:
             raise ValueError("No PCB created. Call create_pcb() first.")
 
+        board_w, _board_h = self._pcb.board_size
+
+        # Determine starting position
+        sx = start_x if start_x is not None else margin
+        sy = start_y if start_y is not None else margin
+
+        # Auto-calculate column count from board width if not specified
+        if columns is None:
+            if board_w > 0 and spacing > 0:
+                usable_width = board_w - sx - margin
+                columns = max(1, int(usable_width / spacing))
+            else:
+                columns = 10  # fallback when board size is unknown
+
         result = PlacementResult()
         components = self.get_components()
 
         for i, comp in enumerate(components):
             col = i % columns
             row = i // columns
-            x = start_x + col * spacing
-            y = start_y + row * spacing
+            x = sx + col * spacing
+            y = sy + row * spacing
 
             if not comp.footprint:
                 result.failed.append((comp.reference, "No footprint assigned"))
@@ -432,7 +460,8 @@ def create_pcb_from_schematic(
     company: str = "",
     auto_place: bool = True,
     placement_spacing: float = 15.0,
-    placement_columns: int = 10,
+    placement_columns: int | None = None,
+    placement_margin: float = 3.0,
 ) -> PCB:
     """
     Create a PCB from a schematic file in one step.
@@ -452,7 +481,10 @@ def create_pcb_from_schematic(
         company: Company name for title block
         auto_place: Whether to automatically place components (default True)
         placement_spacing: Spacing between auto-placed components in mm
-        placement_columns: Number of columns for auto-placement grid
+        placement_columns: Number of columns for auto-placement grid.
+            ``None`` (default) auto-calculates from board width.
+        placement_margin: Inset from board edges in mm for auto-placement
+            (default 3.0)
 
     Returns:
         The fully populated PCB object ready to save
@@ -487,6 +519,7 @@ def create_pcb_from_schematic(
         workflow.place_all_components(
             spacing=placement_spacing,
             columns=placement_columns,
+            margin=placement_margin,
         )
 
     # Assign nets
