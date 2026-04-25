@@ -727,6 +727,62 @@ class Schematic:
         lib_syms.append(lib_sym.to_sexp_node())
         return replaced
 
+    def find_nearest_connection_point(
+        self,
+        position: tuple[float, float],
+        radius: float = 2.0,
+    ) -> tuple[float, float] | None:
+        """Find the nearest existing connection point within *radius* mm.
+
+        Searches wire endpoints, junction positions, and pin positions of
+        placed symbols for the closest point to *position*.
+
+        Args:
+            position: ``(x, y)`` query point in schematic coordinates.
+            radius: Maximum search distance in mm (default 2.0).
+
+        Returns:
+            The ``(x, y)`` coordinates of the nearest connection point,
+            or ``None`` if nothing is within *radius*.
+        """
+        px, py = position
+        best: tuple[float, float] | None = None
+        best_dist = radius
+
+        # Wire endpoints
+        for wire in self.wires:
+            for pt in (wire.start, wire.end):
+                d = ((pt[0] - px) ** 2 + (pt[1] - py) ** 2) ** 0.5
+                if d < best_dist:
+                    best_dist = d
+                    best = pt
+
+        # Junction positions
+        for junc in self.junctions:
+            d = ((junc.position[0] - px) ** 2 + (junc.position[1] - py) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best = junc.position
+
+        # Pin positions of existing symbol instances
+        for sym in self.symbols:
+            lib_sym_sexp = self.get_lib_symbol(sym.lib_id)
+            if lib_sym_sexp is None:
+                continue
+            lib_sym_obj = LibrarySymbol.from_sexp(lib_sym_sexp)
+            pin_positions = lib_sym_obj.get_all_pin_positions(
+                instance_pos=sym.position,
+                instance_rot=sym.rotation,
+                mirror=sym.mirror,
+            )
+            for pin_pos in pin_positions.values():
+                d = ((pin_pos[0] - px) ** 2 + (pin_pos[1] - py) ** 2) ** 0.5
+                if d < best_dist:
+                    best_dist = d
+                    best = pin_pos
+
+        return best
+
     @staticmethod
     def snap_to_grid(
         value: float,
