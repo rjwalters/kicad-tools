@@ -2101,12 +2101,17 @@ def route_pcb(
     print(f"Autorouting {len(nets_to_route)} nets...")
     router.route_all(nets_to_route, progress_callback=progress_callback)
 
+    # Generate S-expression output first -- to_sexp() runs
+    # cleanup_artifacts() which may remove net-0 orphans and OOB
+    # segments (Issue #2039).  Statistics must be computed AFTER
+    # cleanup so they reflect the data actually written to the file.
+    sexp = router.to_sexp()
     stats = router.get_statistics()
     print(
         f"  Completed: {stats['routes']} routes, {stats['segments']} segments, {stats['vias']} vias"
     )
 
-    return router.to_sexp(), stats
+    return sexp, stats
 
 
 def _extract_pad_blocks(section: str) -> list[str]:
@@ -2551,9 +2556,17 @@ def load_pcb_for_routing(
         # Pads already have absolute positions
         router.add_component(comp["ref"], comp["pads"])
 
+    # Extract edge segments for board bbox and optional edge clearance
+    # (Issue #2039).  The bbox derived from actual edge cuts is more
+    # accurate than grid origin/dimensions for OOB filtering.
+    edge_segments = _extract_edge_segments(pcb_text)
+    if edge_segments:
+        all_xs = [p[0] for seg in edge_segments for p in seg]
+        all_ys = [p[1] for seg in edge_segments for p in seg]
+        router._board_bbox = (min(all_xs), min(all_ys), max(all_xs), max(all_ys))
+
     # Apply edge clearance if specified
     if edge_clearance is not None and edge_clearance > 0:
-        edge_segments = _extract_edge_segments(pcb_text)
         if edge_segments:
             blocked_cells = router.grid.add_edge_keepout(edge_segments, edge_clearance)
             if blocked_cells > 0:

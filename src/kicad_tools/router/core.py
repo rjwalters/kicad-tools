@@ -369,6 +369,11 @@ class Autorouter:
         # copper zone, so they must be routed as signal traces instead of skipped.
         self._pour_nets_without_zones: set[str] = set()
 
+        # Board bounding box for OOB filtering in cleanup_artifacts().
+        # Defaults to grid origin/dimensions but can be overridden with the
+        # actual board edge cuts bbox when available (Issue #2039).
+        self._board_bbox: tuple[float, float, float, float] | None = None
+
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
 
@@ -3626,11 +3631,22 @@ class Autorouter:
             "oob_vias_removed": 0,
         }
 
-        # -- Step 1: Remove entire routes with net == 0 --
+        # -- Step 1: Handle routes with net == 0 --
+        # A Route may have net=0 while its child segments/vias carry
+        # the correct net (Issue #2039).  Propagate the child net to
+        # the Route instead of discarding valid routed traces.
         kept_routes: list[Route] = []
         for route in self.routes:
             if route.net == 0:
-                stats["net0_routes_removed"] += 1
+                child_nets = {s.net for s in route.segments if s.net != 0}
+                child_nets |= {v.net for v in route.vias if v.net != 0}
+                if child_nets:
+                    # Adopt a valid child net -- all children typically
+                    # share the same net so pick any.
+                    route.net = child_nets.pop()
+                    kept_routes.append(route)
+                else:
+                    stats["net0_routes_removed"] += 1
             else:
                 kept_routes.append(route)
         self.routes = kept_routes
@@ -3645,11 +3661,21 @@ class Autorouter:
             stats["net0_vias_removed"] += orig_via_count - len(route.vias)
 
         # -- Step 3: Remove out-of-bounds segments and vias --
-        # Compute board bounding box from the grid's origin and dimensions.
-        min_x = self.grid.origin_x - oob_margin
-        min_y = self.grid.origin_y - oob_margin
-        max_x = self.grid.origin_x + self.grid.width + oob_margin
-        max_y = self.grid.origin_y + self.grid.height + oob_margin
+        # Use the board edge cuts bbox when available (Issue #2039).
+        # Falls back to the grid origin/dimensions which may differ
+        # from the physical board outline on non-rectangular boards or
+        # when adaptive grid resolution is in effect.
+        if self._board_bbox is not None:
+            bb_min_x, bb_min_y, bb_max_x, bb_max_y = self._board_bbox
+        else:
+            bb_min_x = self.grid.origin_x
+            bb_min_y = self.grid.origin_y
+            bb_max_x = self.grid.origin_x + self.grid.width
+            bb_max_y = self.grid.origin_y + self.grid.height
+        min_x = bb_min_x - oob_margin
+        min_y = bb_min_y - oob_margin
+        max_x = bb_max_x + oob_margin
+        max_y = bb_max_y + oob_margin
 
         for route in self.routes:
             orig_seg_count = len(route.segments)

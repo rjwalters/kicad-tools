@@ -1,9 +1,12 @@
-"""Tests for post-route artifact cleanup (Issue #1979).
+"""Tests for post-route artifact cleanup (Issues #1979, #2039).
 
-Tests the ``cleanup_artifacts()`` method on ``Autorouter`` which removes:
-- Routes and segments/vias with net == 0
-- Segments with both endpoints outside the board bounding box
-- Vias with center outside the board bounding box
+Tests the ``cleanup_artifacts()`` method on ``Autorouter`` which:
+- Preserves net-0 routes whose child segments/vias have valid nets
+- Removes net-0 routes only when ALL children are also net-0
+- Strips individual net-0 segments/vias from otherwise valid routes
+- Removes segments with both endpoints outside the board bounding box
+- Removes vias with center outside the board bounding box
+- Uses board edge bbox (when set) instead of grid origin/dimensions
 """
 
 from kicad_tools.router.core import Autorouter
@@ -301,7 +304,7 @@ class TestCleanupCombined:
     def test_net0_and_oob_combined(self):
         router = _make_router()
         router.routes = [
-            # Net-0 route (removed entirely)
+            # Net-0 route with all-net-0 children (removed entirely)
             Route(net=0, net_name="", segments=[_seg(110, 90, 120, 90, net=0)]),
             # Valid route with a net-0 segment and an OOB segment
             Route(
@@ -327,3 +330,195 @@ class TestCleanupCombined:
         assert len(router.routes) == 1
         assert len(router.routes[0].segments) == 1
         assert len(router.routes[0].vias) == 1
+
+
+class TestNet0RouteWithValidChildren:
+    """Issue #2039: Routes with net=0 but valid child segment/via nets
+    should be preserved with the child net propagated to the Route."""
+
+    def test_preserves_net0_route_with_valid_segment_nets(self):
+        """A Route(net=0) whose segments all have net=5 should survive
+        with route.net corrected to 5."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[
+                    _seg(110, 90, 120, 90, net=5),
+                    _seg(120, 90, 130, 100, net=5),
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["net0_routes_removed"] == 0
+        assert len(router.routes) == 1
+        assert router.routes[0].net == 5
+
+    def test_preserves_net0_route_with_valid_via_nets(self):
+        """A Route(net=0) with no segments but vias with valid nets
+        should be preserved."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[],
+                vias=[_via(115, 90, net=7)],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["net0_routes_removed"] == 0
+        assert len(router.routes) == 1
+        assert router.routes[0].net == 7
+
+    def test_removes_net0_route_all_children_net0(self):
+        """A Route(net=0) where ALL children also have net=0 should
+        still be removed -- no valid data to salvage."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[_seg(110, 90, 120, 90, net=0)],
+                vias=[_via(115, 90, net=0)],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["net0_routes_removed"] == 1
+        assert len(router.routes) == 0
+
+    def test_mixed_child_nets_picks_valid(self):
+        """If children have mixed nets (some valid, some 0), the Route
+        adopts a valid net and net-0 children are stripped in step 2."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[
+                    _seg(110, 90, 120, 90, net=3),
+                    _seg(120, 90, 130, 100, net=0),  # orphan child
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["net0_routes_removed"] == 0
+        assert len(router.routes) == 1
+        assert router.routes[0].net == 3
+        # Step 2 should have stripped the net-0 segment
+        assert stats["net0_segments_removed"] == 1
+        assert len(router.routes[0].segments) == 1
+
+
+class TestBoardBboxOverride:
+    """Issue #2039: cleanup_artifacts() should use _board_bbox when set
+    instead of grid origin/dimensions for OOB filtering."""
+
+    def test_oob_uses_board_bbox(self):
+        """When _board_bbox is set, OOB filtering should use its bounds
+        rather than the grid's origin/dimensions."""
+        # Grid covers (100, 80) to (150, 120) but the actual board
+        # edge cuts say (90, 70) to (160, 130) -- wider than the grid.
+        router = _make_router(width=50, height=40, origin_x=100, origin_y=80)
+        router._board_bbox = (90.0, 70.0, 160.0, 130.0)
+
+        # Segment at x=95 is outside grid bounds but inside board bbox
+        router.routes = [
+            Route(
+                net=1,
+                net_name="A",
+                segments=[_seg(95, 90, 110, 90)],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["oob_segments_removed"] == 0
+        assert len(router.routes[0].segments) == 1
+
+    def test_oob_without_board_bbox_uses_grid(self):
+        """When _board_bbox is None, falls back to grid bounds."""
+        router = _make_router(width=50, height=40, origin_x=100, origin_y=80)
+        # _board_bbox is None by default
+
+        # Segment at x=95 is outside grid bounds (min_x = 100 - 0.5 = 99.5)
+        # Both endpoints outside grid bounds
+        router.routes = [
+            Route(
+                net=1,
+                net_name="A",
+                segments=[_seg(50, 50, 60, 50)],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["oob_segments_removed"] == 1
+
+    def test_board_bbox_narrower_than_grid(self):
+        """When board bbox is narrower than the grid, segments outside
+        the board bbox but inside the grid should be removed."""
+        router = _make_router(width=50, height=40, origin_x=100, origin_y=80)
+        router._board_bbox = (110.0, 90.0, 130.0, 110.0)
+
+        # Segment at x=105 is inside grid but outside board bbox
+        # (board bbox min_x = 110 - 0.5 margin = 109.5)
+        router.routes = [
+            Route(
+                net=1,
+                net_name="A",
+                segments=[_seg(105, 95, 108, 95)],  # both endpoints outside bbox
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["oob_segments_removed"] == 1
+
+
+class TestStatisticsAfterCleanup:
+    """Issue #2039: Statistics must reflect post-cleanup data."""
+
+    def test_statistics_reflect_post_cleanup_routes(self):
+        """get_statistics() called after cleanup_artifacts() should
+        report counts matching the surviving routes."""
+        router = _make_router()
+        router.routes = [
+            # Will be removed (net=0, all children net=0)
+            Route(net=0, net_name="", segments=[_seg(110, 90, 120, 90, net=0)]),
+            # Will survive
+            Route(
+                net=1,
+                net_name="A",
+                segments=[
+                    _seg(110, 90, 120, 90, net=1),
+                    _seg(120, 90, 130, 100, net=1),
+                ],
+                vias=[_via(120, 90, net=1)],
+            ),
+        ]
+        # Run cleanup first (simulates what to_sexp does)
+        router.cleanup_artifacts()
+        stats = router.get_statistics()
+        assert stats["routes"] == 1
+        assert stats["segments"] == 2
+        assert stats["vias"] == 1
+
+    def test_to_sexp_then_statistics_consistent(self):
+        """Calling to_sexp() then get_statistics() should yield
+        consistent counts since to_sexp triggers cleanup."""
+        router = _make_router()
+        router.routes = [
+            Route(net=0, net_name="", segments=[_seg(110, 90, 120, 90, net=0)]),
+            Route(
+                net=2,
+                net_name="B",
+                segments=[_seg(115, 95, 125, 95, net=2)],
+            ),
+        ]
+        sexp = router.to_sexp()
+        stats = router.get_statistics()
+
+        # sexp should only contain net 2
+        assert "(net 2)" in sexp
+        assert "(net 0)" not in sexp
+
+        # stats should match the post-cleanup state
+        assert stats["routes"] == 1
+        assert stats["segments"] == 1
+        assert stats["vias"] == 0
