@@ -972,7 +972,7 @@ def route_with_layer_escalation(
             original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
 
         # Get route S-expressions
-        route_sexp = final_result.router.to_sexp()
+        route_sexp = final_result.router.to_sexp(skip_cleanup=True)
 
         # Insert routes before final closing parenthesis
         if route_sexp:
@@ -1376,7 +1376,7 @@ def route_with_rule_relaxation(
         original_content = pcb_path.read_text()
 
         # Get route S-expressions
-        route_sexp = final_result.router.to_sexp()
+        route_sexp = final_result.router.to_sexp(skip_cleanup=True)
 
         # Insert routes before final closing parenthesis
         if route_sexp:
@@ -1806,7 +1806,7 @@ def route_with_combined_escalation(
             original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
 
         # Get route S-expressions
-        route_sexp = final_result.router.to_sexp()
+        route_sexp = final_result.router.to_sexp(skip_cleanup=True)
 
         # Insert routes before final closing parenthesis
         if route_sexp:
@@ -3432,8 +3432,9 @@ def main(argv: list[str] | None = None) -> int:
             # Read original PCB content
             original_content = pcb_path.read_text()
 
-            # Get route S-expressions
-            route_sexp = router.to_sexp()
+            # Get route S-expressions (skip cleanup — it removes valid routes;
+            # statistics have already been computed from the full route set)
+            route_sexp = router.to_sexp(skip_cleanup=True)
 
             # Insert routes and zones before final closing parenthesis
             # Note: KiCad's S-expression format doesn't support ; comments

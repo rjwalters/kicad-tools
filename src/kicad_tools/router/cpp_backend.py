@@ -41,6 +41,25 @@ except ImportError as e:
     _CPP_IMPORT_ERROR = str(e)
     router_cpp = None  # type: ignore
 
+    # Check for common cause: .so built for a different Python version
+    import glob
+    import pathlib
+    import sys
+
+    _so_files = glob.glob(
+        str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-darwin.so")
+    ) + glob.glob(
+        str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so")
+    )
+    if _so_files:
+        _running_tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+        if _running_tag not in " ".join(_so_files):
+            _CPP_IMPORT_ERROR = (
+                f"C++ backend was built for {', '.join(pathlib.Path(f).name for f in _so_files)} "
+                f"but running Python {sys.version_info.major}.{sys.version_info.minor} "
+                f"({_running_tag}). Rebuild with: kicad-tools build-native"
+            )
+
 
 def is_cpp_available() -> bool:
     """Check if the C++ router backend is available."""
@@ -643,9 +662,11 @@ def create_hybrid_router(
 
     # Fall back to Python implementation
     if not force_python:
+        reason = _CPP_IMPORT_ERROR or "unknown reason"
         logger.warning(
             "C++ router backend not available -- using pure Python (10-100x slower). "
-            "Build the native backend for dramatically faster routing: kct build-native"
+            "Reason: %s",
+            reason,
         )
 
     from .pathfinder import Router
