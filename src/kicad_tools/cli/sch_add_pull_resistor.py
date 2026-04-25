@@ -40,6 +40,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
+from kicad_tools.schema.wire import Wire
 
 
 @dataclass
@@ -53,6 +54,173 @@ class PlannedAction:
 def _snap(value: float, grid: float = 1.27) -> float:
     """Snap a coordinate to the nearest grid point."""
     return round(value / grid) * grid
+
+
+def _cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Return cross product of vectors (a - o) and (b - o)."""
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _on_segment(
+    p: tuple[float, float],
+    q: tuple[float, float],
+    r: tuple[float, float],
+) -> bool:
+    """Check if point q lies on segment pr (assuming collinear)."""
+    return (
+        min(p[0], r[0]) <= q[0] + 1e-9
+        and q[0] <= max(p[0], r[0]) + 1e-9
+        and min(p[1], r[1]) <= q[1] + 1e-9
+        and q[1] <= max(p[1], r[1]) + 1e-9
+    )
+
+
+def _segments_intersect(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    p4: tuple[float, float],
+    *,
+    exclude_endpoints: bool = True,
+) -> bool:
+    """Test whether two line segments (p1-p2) and (p3-p4) intersect.
+
+    Uses the standard cross-product orientation test.  When
+    *exclude_endpoints* is True (default), touching only at shared
+    endpoints is **not** considered an intersection -- this avoids
+    false positives when the planned wire starts or ends on an existing
+    wire endpoint (which is a valid KiCad T-junction, not a crossing).
+    """
+    d1 = _cross(p3, p4, p1)
+    d2 = _cross(p3, p4, p2)
+    d3 = _cross(p1, p2, p3)
+    d4 = _cross(p1, p2, p4)
+
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
+        (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)
+    ):
+        return True  # proper crossing -- segments straddle each other
+
+    # Collinear / endpoint-on-segment cases
+    eps = 1e-9
+    if abs(d1) < eps and _on_segment(p3, p1, p4):
+        if exclude_endpoints and (
+            _pt_eq(p1, p3) or _pt_eq(p1, p4)
+        ):
+            return False
+        return True
+    if abs(d2) < eps and _on_segment(p3, p2, p4):
+        if exclude_endpoints and (
+            _pt_eq(p2, p3) or _pt_eq(p2, p4)
+        ):
+            return False
+        return True
+    if abs(d3) < eps and _on_segment(p1, p3, p2):
+        if exclude_endpoints and (
+            _pt_eq(p3, p1) or _pt_eq(p3, p2)
+        ):
+            return False
+        return True
+    if abs(d4) < eps and _on_segment(p1, p4, p2):
+        if exclude_endpoints and (
+            _pt_eq(p4, p1) or _pt_eq(p4, p2)
+        ):
+            return False
+        return True
+
+    return False
+
+
+def _pt_eq(a: tuple[float, float], b: tuple[float, float], tol: float = 0.01) -> bool:
+    """Check approximate point equality."""
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+
+def _check_wire_path_crossings(
+    sch: Schematic,
+    wire_start: tuple[float, float],
+    wire_end: tuple[float, float],
+) -> list[str]:
+    """Check if a planned wire segment crosses existing wires or labels.
+
+    Returns a list of warning strings, one per crossing detected.
+    """
+    warnings: list[str] = []
+    path_wire = Wire(start=wire_start, end=wire_end)
+
+    # Check wire-to-wire crossings
+    for existing in sch.wires:
+        if _segments_intersect(
+            wire_start, wire_end, existing.start, existing.end
+        ):
+            warnings.append(
+                f"Wire path ({wire_start[0]:.2f},{wire_start[1]:.2f})->"
+                f"({wire_end[0]:.2f},{wire_end[1]:.2f}) crosses existing wire "
+                f"({existing.start[0]:.2f},{existing.start[1]:.2f})->"
+                f"({existing.end[0]:.2f},{existing.end[1]:.2f})"
+            )
+
+    # Check labels on the wire path
+    for label in sch.labels:
+        if path_wire.contains_point(label.position, tolerance=0.1):
+            if not (_pt_eq(label.position, wire_start) or _pt_eq(label.position, wire_end)):
+                warnings.append(
+                    f"Wire path crosses label '{label.text}' at "
+                    f"({label.position[0]:.2f},{label.position[1]:.2f})"
+                )
+
+    for glabel in sch.global_labels:
+        if path_wire.contains_point(glabel.position, tolerance=0.1):
+            if not (_pt_eq(glabel.position, wire_start) or _pt_eq(glabel.position, wire_end)):
+                warnings.append(
+                    f"Wire path crosses global label '{glabel.text}' at "
+                    f"({glabel.position[0]:.2f},{glabel.position[1]:.2f})"
+                )
+
+    for hlabel in sch.hierarchical_labels:
+        if path_wire.contains_point(hlabel.position, tolerance=0.1):
+            if not (_pt_eq(hlabel.position, wire_start) or _pt_eq(hlabel.position, wire_end)):
+                warnings.append(
+                    f"Wire path crosses hierarchical label '{hlabel.text}' at "
+                    f"({hlabel.position[0]:.2f},{hlabel.position[1]:.2f})"
+                )
+
+    return warnings
+
+
+def _find_clear_offset(
+    sch: Schematic,
+    pin_pos: tuple[float, float],
+    ic_center_x: float,
+    wire_start_y: float,
+    wire_end_y: float,
+    grid: float = 1.27,
+    max_steps: int = 4,
+) -> float | None:
+    """Find a horizontal X offset that avoids wire crossings.
+
+    Tries offsets away from *ic_center_x* first, then toward it.
+    Returns the snapped X coordinate of a clear column, or ``None``
+    if no clear path is found within *max_steps* grid steps.
+    """
+    pin_x = pin_pos[0]
+    # Prefer moving away from IC center
+    if pin_x >= ic_center_x:
+        primary_dir = 1.0
+    else:
+        primary_dir = -1.0
+
+    for step in range(1, max_steps + 1):
+        for direction in (primary_dir, -primary_dir):
+            candidate_x = _snap(pin_x + direction * step * grid)
+            # Check vertical segment at candidate_x
+            seg_start = (candidate_x, wire_start_y)
+            seg_end = (candidate_x, wire_end_y)
+            crossings = _check_wire_path_crossings(sch, seg_start, seg_end)
+            if not crossings:
+                return candidate_x
+
+    return None
 
 
 def _setup_lib_manager(
@@ -313,6 +481,104 @@ def run_add_pull_resistor(args) -> int:
         for warning in collision_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
 
+    # --- Check for wire path crossings and reroute if needed ---
+    # Compute the planned wire segments (IC pin -> resistor, resistor -> power)
+    ic_pin_snapped = (_snap(pin_x), _snap(pin_y))
+    ic_side_snapped = (_snap(ic_side_pin[0]), _snap(ic_side_pin[1]))
+    power_side_snapped = (_snap(power_side_pin[0]), _snap(power_side_pin[1]))
+    power_pos_snapped = (_snap(power_x), _snap(power_y))
+
+    # Build list of wire segments to place: each is (start, end)
+    wire_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    rerouted = False
+
+    # Check the IC-side wire for crossings
+    ic_wire_crossings = _check_wire_path_crossings(sch, ic_pin_snapped, ic_side_snapped)
+
+    if ic_wire_crossings and not force:
+        # Try L-shaped reroute: find a clear vertical column, then route
+        # horizontally from IC pin to the column, then vertically to resistor
+        ic_symbol = sch.get_symbol(args.ref)
+        ic_center_x = ic_symbol.position[0] if ic_symbol else pin_x
+
+        clear_x = _find_clear_offset(
+            sch,
+            ic_pin_snapped,
+            ic_center_x,
+            wire_start_y=ic_pin_snapped[1],
+            wire_end_y=ic_side_snapped[1],
+        )
+
+        if clear_x is not None:
+            rerouted = True
+            # Shift the resistor and power symbol to the new column
+            x_shift = clear_x - res_x
+            res_x = clear_x
+            res_position = (res_x, res_y)
+
+            # Recompute resistor pin positions at the new X
+            res_pin_positions = resistor_lib_sym.get_all_pin_positions(
+                instance_pos=res_position,
+                instance_rot=res_rotation,
+                mirror="",
+            )
+            res_pin1 = res_pin_positions["1"]
+            res_pin2 = res_pin_positions["2"]
+
+            dist1 = ((res_pin1[0] - pin_x) ** 2 + (res_pin1[1] - pin_y) ** 2) ** 0.5
+            dist2 = ((res_pin2[0] - pin_x) ** 2 + (res_pin2[1] - pin_y) ** 2) ** 0.5
+            if dist1 <= dist2:
+                ic_side_pin = res_pin1
+                power_side_pin = res_pin2
+            else:
+                ic_side_pin = res_pin2
+                power_side_pin = res_pin1
+
+            # Recompute power position
+            power_x = _snap(power_side_pin[0])
+            power_y = _snap(power_side_pin[1])
+            power_position = (power_x, power_y)
+
+            # Recompute snapped coordinates
+            ic_side_snapped = (_snap(ic_side_pin[0]), _snap(ic_side_pin[1]))
+            power_side_snapped = (_snap(power_side_pin[0]), _snap(power_side_pin[1]))
+            power_pos_snapped = (_snap(power_x), _snap(power_y))
+
+            # L-shaped route: horizontal from IC pin, then vertical to resistor
+            corner = (_snap(clear_x), ic_pin_snapped[1])
+            wire_segments.append((ic_pin_snapped, corner))
+            wire_segments.append((corner, ic_side_snapped))
+
+            print(
+                f"Note: Rerouted wire via L-shape at x={clear_x:.2f} "
+                f"to avoid crossing existing wires",
+                file=sys.stderr,
+            )
+        else:
+            # No clear path found
+            for warning in ic_wire_crossings:
+                print(f"Error: {warning}", file=sys.stderr)
+            print(
+                "Error: Cannot find a clear wire path. "
+                "Use --force to place anyway (may create net shorts).",
+                file=sys.stderr,
+            )
+            return 1
+
+    if not rerouted:
+        # Straight wire from IC pin to resistor (no crossing or --force)
+        wire_segments.append((ic_pin_snapped, ic_side_snapped))
+
+    # Check the power-side wire for crossings (always straight -- shorter segment)
+    power_wire_crossings = _check_wire_path_crossings(
+        sch, power_side_snapped, power_pos_snapped
+    )
+    if power_wire_crossings and not force:
+        for warning in power_wire_crossings:
+            print(f"Warning: {warning}", file=sys.stderr)
+
+    wire_segments.append((power_side_snapped, power_pos_snapped))
+
     # --- Plan actions ---
     planned: list[PlannedAction] = []
 
@@ -352,23 +618,15 @@ def run_add_pull_resistor(args) -> int:
         )
     )
 
-    # Wire from IC pin to near resistor pin
-    planned.append(
-        PlannedAction(
-            "wire",
-            f"Wire from IC pin ({pin_x:.2f}, {pin_y:.2f})"
-            f" to resistor at ({ic_side_pin[0]:.2f}, {ic_side_pin[1]:.2f})",
+    # Wire segments
+    for seg_start, seg_end in wire_segments:
+        planned.append(
+            PlannedAction(
+                "wire",
+                f"Wire from ({seg_start[0]:.2f}, {seg_start[1]:.2f})"
+                f" to ({seg_end[0]:.2f}, {seg_end[1]:.2f})",
+            )
         )
-    )
-
-    # Wire from far resistor pin to power symbol
-    planned.append(
-        PlannedAction(
-            "wire",
-            f"Wire from resistor at ({power_side_pin[0]:.2f}, {power_side_pin[1]:.2f})"
-            f" to power symbol at ({power_x:.2f}, {power_y:.2f})",
-        )
-    )
 
     # --- Report planned actions ---
     if args.dry_run:
@@ -415,24 +673,12 @@ def run_add_pull_resistor(args) -> int:
     sch.add_power(power_net, power_position, power_rotation)
 
     # 4. Add wires
-    # Wire from IC pin to near resistor pin
-    ic_pin_snapped = (_snap(pin_x), _snap(pin_y))
-    ic_side_snapped = (_snap(ic_side_pin[0]), _snap(ic_side_pin[1]))
-    power_side_snapped = (_snap(power_side_pin[0]), _snap(power_side_pin[1]))
-    power_pos_snapped = (_snap(power_x), _snap(power_y))
-
-    # Only add wire if start != end
-    if (
-        abs(ic_pin_snapped[0] - ic_side_snapped[0]) > 0.01
-        or abs(ic_pin_snapped[1] - ic_side_snapped[1]) > 0.01
-    ):
-        sch.add_wire(ic_pin_snapped, ic_side_snapped)
-
-    if (
-        abs(power_side_snapped[0] - power_pos_snapped[0]) > 0.01
-        or abs(power_side_snapped[1] - power_pos_snapped[1]) > 0.01
-    ):
-        sch.add_wire(power_side_snapped, power_pos_snapped)
+    for seg_start, seg_end in wire_segments:
+        if (
+            abs(seg_start[0] - seg_end[0]) > 0.01
+            or abs(seg_start[1] - seg_end[1]) > 0.01
+        ):
+            sch.add_wire(seg_start, seg_end)
 
     # 5. Save
     sch.save()
@@ -442,6 +688,8 @@ def run_add_pull_resistor(args) -> int:
     print(f"  Value: {value}")
     print(f"  Position: ({res_x:.2f}, {res_y:.2f})")
     print(f"  Power net: {power_net}")
+    if rerouted:
+        print("  Route: L-shaped (rerouted to avoid wire crossings)")
     return 0
 
 
