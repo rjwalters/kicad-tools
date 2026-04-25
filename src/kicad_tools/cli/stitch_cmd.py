@@ -119,8 +119,10 @@ class StitchResult:
     already_connected: int = 0
     # Per-net detected layers: {net_name: layer} for auto-detected layers
     detected_layers: dict[str, str] = field(default_factory=dict)
-    # Nets that fell back to default B.Cu (no zone found)
+    # Nets that fell back to default B.Cu (no zone found, 2-layer board)
     fallback_nets: list[str] = field(default_factory=list)
+    # Nets whose target layer was inferred from board stackup (no zone on inner layer)
+    stackup_inferred_nets: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -218,6 +220,125 @@ def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
                 layers.append(zone_layer)
 
     return layers
+
+
+# Ordered list of KiCad copper layer names (front to back).
+# KiCad numbers inner layers 1..30 as In1.Cu .. In30.Cu.
+_COPPER_LAYER_ORDER = (
+    ["F.Cu"]
+    + [f"In{i}.Cu" for i in range(1, 31)]
+    + ["B.Cu"]
+)
+
+
+def get_copper_layers(sexp: SExp) -> list[str]:
+    """Return the ordered list of copper layers defined in the PCB.
+
+    Parses the ``(layers ...)`` block and returns only copper layers
+    (signal / power type) sorted in physical stackup order
+    (F.Cu first, B.Cu last).
+
+    Args:
+        sexp: PCB S-expression root
+
+    Returns:
+        Ordered list of copper layer names, e.g. ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    """
+    layers_node = sexp.find_child("layers")
+    if layers_node is None:
+        return ["F.Cu", "B.Cu"]
+
+    copper_names: list[str] = []
+    for child in layers_node.iter_children():
+        if len(child.values) < 1:
+            continue
+        name = child.get_string(0)
+        layer_type = child.get_string(1) or ""
+        if name and layer_type in ("signal", "power"):
+            copper_names.append(name)
+
+    if not copper_names:
+        return ["F.Cu", "B.Cu"]
+
+    # Sort into physical stackup order using the canonical ordering
+    order_map = {name: idx for idx, name in enumerate(_COPPER_LAYER_ORDER)}
+    copper_names.sort(key=lambda n: order_map.get(n, 999))
+
+    return copper_names
+
+
+def _is_ground_net(net_name: str) -> bool:
+    """Return True if the net name matches common ground naming patterns."""
+    name_lower = net_name.lower()
+    return any(
+        g in name_lower
+        for g in ["gnd", "vss", "ground", "agnd", "dgnd", "gndd", "gnda"]
+    )
+
+
+def infer_target_layer_from_stackup(
+    copper_layers: list[str],
+    net_name: str,
+    pad_layer: str,
+) -> str | None:
+    """Infer the target plane layer for a net using standard stackup conventions.
+
+    For multi-layer boards (4+ layers), the conventional stackup assigns:
+    - Ground nets to the first inner layer (In1.Cu for 4-layer)
+    - Power nets to the second inner layer (In2.Cu for 4-layer)
+
+    For 2-layer boards, returns None (no inner layers available, so the
+    caller should use the default F.Cu/B.Cu through-via behavior).
+
+    Args:
+        copper_layers: Ordered list of copper layers from get_copper_layers()
+        net_name: The net name (used to classify as ground vs power)
+        pad_layer: The layer the component pad is on
+
+    Returns:
+        Target inner layer name, or None if no inner layers exist
+    """
+    # Extract inner layers (everything except F.Cu and B.Cu)
+    inner_layers = [l for l in copper_layers if l not in ("F.Cu", "B.Cu")]
+
+    if not inner_layers:
+        # 2-layer board: no inner layers, caller uses default behavior
+        return None
+
+    if _is_ground_net(net_name):
+        # Ground nets -> first inner layer (In1.Cu for 4-layer)
+        return inner_layers[0]
+    else:
+        # Power nets -> last inner layer (In2.Cu for 4-layer, or
+        # furthest inner layer for 6+ layer boards)
+        return inner_layers[-1]
+
+
+def _should_use_stackup_fallback(
+    zone_layers: list[str],
+    copper_layers: list[str],
+) -> bool:
+    """Return True if zone layers indicate we should use stackup inference.
+
+    This detects the case where zones exist but are placed on outer layers
+    (F.Cu/B.Cu) for a multi-layer board -- meaning the zone creation step
+    didn't properly target inner layers.
+
+    Args:
+        zone_layers: Layers where zones were found for the net
+        copper_layers: All copper layers in the board
+
+    Returns:
+        True if we should fall back to stackup inference
+    """
+    inner_layers = [l for l in copper_layers if l not in ("F.Cu", "B.Cu")]
+    if not inner_layers:
+        # 2-layer board: no inner layers, no need for fallback
+        return False
+
+    # If all zone layers are outer layers, we should use stackup inference
+    outer_only = all(zl in ("F.Cu", "B.Cu") for zl in zone_layers)
+    return outer_only
 
 
 def extract_zone_polygons(sexp: SExp, net_name: str) -> list[ZonePolygon]:
@@ -2149,6 +2270,7 @@ def run_blanket_stitch(
         StitchResult with details of what was done
     """
     sexp = load_pcb(pcb_path)
+    copper_layers = get_copper_layers(sexp)
 
     result = StitchResult(
         pcb_name=pcb_path.name,
@@ -2201,12 +2323,20 @@ def run_blanket_stitch(
             net_target_layer = target_layer
         else:
             zone_layers = find_zones_for_net(sexp, net_name)
-            if zone_layers:
+            if zone_layers and not _should_use_stackup_fallback(zone_layers, copper_layers):
                 net_target_layer = zone_layers[0]
                 result.detected_layers[net_name] = zone_layers[0]
             else:
-                net_target_layer = None
-                result.fallback_nets.append(net_name)
+                # No zone or zones only on outer layers -- infer from stackup
+                inferred = infer_target_layer_from_stackup(
+                    copper_layers, net_name, "F.Cu"
+                )
+                if inferred:
+                    net_target_layer = inferred
+                    result.detected_layers[net_name] = inferred
+                else:
+                    net_target_layer = None
+                    result.fallback_nets.append(net_name)
 
         for zone_poly in zone_polygons:
             # Generate grid positions inside this zone polygon
@@ -2320,17 +2450,28 @@ def run_stitch(
 
     # Auto-detect target layers per net if not specified
     net_target_layers: dict[str, str | None] = {}
+    copper_layers = get_copper_layers(sexp)
     if target_layer is None:
         for net_name in net_names:
             zone_layers = find_zones_for_net(sexp, net_name)
-            if zone_layers:
-                # Use first zone layer found (typically there's only one per net)
+            if zone_layers and not _should_use_stackup_fallback(zone_layers, copper_layers):
+                # Zone found on an inner layer -- use it directly
                 net_target_layers[net_name] = zone_layers[0]
                 result.detected_layers[net_name] = zone_layers[0]
             else:
-                # No zone found, will fall back to B.Cu
-                net_target_layers[net_name] = None
-                result.fallback_nets.append(net_name)
+                # No zone or zones only on outer layers for a multi-layer
+                # board.  Infer the correct inner layer from the stackup.
+                inferred = infer_target_layer_from_stackup(
+                    copper_layers, net_name, "F.Cu"
+                )
+                if inferred:
+                    net_target_layers[net_name] = inferred
+                    result.detected_layers[net_name] = inferred
+                    result.stackup_inferred_nets.append(net_name)
+                else:
+                    # 2-layer board: no inner layers, fall back to B.Cu
+                    net_target_layers[net_name] = None
+                    result.fallback_nets.append(net_name)
     else:
         # Use explicit target layer for all nets
         for net_name in net_names:
@@ -2655,9 +2796,14 @@ def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = F
 
     # Show detected layers
     if result.detected_layers:
-        print("\nAuto-detected target layers from zones:")
+        print("\nAuto-detected target layers:")
         for net_name, layer in sorted(result.detected_layers.items()):
-            print(f"  {net_name} -> {layer}")
+            source = (
+                " (inferred from stackup)"
+                if net_name in result.stackup_inferred_nets
+                else " (from zone)"
+            )
+            print(f"  {net_name} -> {layer}{source}")
 
     if not result.vias_added and not result.pads_skipped:
         if result.already_connected > 0:

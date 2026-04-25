@@ -11,6 +11,8 @@ from kicad_tools.cli.stitch_cmd import (
     TraceSegment,
     TrackSegment,
     ZonePolygon,
+    _is_ground_net,
+    _should_use_stackup_fallback,
     calculate_dogleg_via_position,
     calculate_extended_escape_position,
     calculate_via_position,
@@ -26,9 +28,11 @@ from kicad_tools.cli.stitch_cmd import (
     find_pads_on_nets,
     find_same_net_filled_polygons,
     generate_grid_positions,
+    get_copper_layers,
     get_net_map,
     get_net_number,
     get_via_layers,
+    infer_target_layer_from_stackup,
     is_pad_connected,
     main,
     point_in_polygon,
@@ -1235,8 +1239,8 @@ class TestZoneAutoDetection:
         for via in v33_vias:
             assert via.layers[1] == "In2.Cu"
 
-    def test_fallback_to_bcu_when_no_zone(self, stitch_zone_pcb: Path):
-        """Should fall back to B.Cu when no zone found for net."""
+    def test_no_zone_infers_inner_layer_for_power_net(self, stitch_zone_pcb: Path):
+        """Should infer inner layer from stackup when no zone found for net on 4-layer board."""
         result = run_stitch(
             pcb_path=stitch_zone_pcb,
             net_names=["VCC"],  # VCC has no zone
@@ -1244,20 +1248,22 @@ class TestZoneAutoDetection:
             dry_run=True,
         )
 
-        # Should record VCC as fallback
-        assert "VCC" in result.fallback_nets
-        assert "VCC" not in result.detected_layers
+        # VCC is a power net -> should be inferred to In2.Cu (last inner layer)
+        assert "VCC" in result.detected_layers
+        assert result.detected_layers["VCC"] == "In2.Cu"
+        assert "VCC" in result.stackup_inferred_nets
+        assert len(result.fallback_nets) == 0
 
-        # VCC vias should target B.Cu (default)
+        # VCC vias should target In2.Cu
         vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
         for via in vcc_vias:
-            assert via.layers[1] == "B.Cu"
+            assert via.layers[1] == "In2.Cu"
 
     def test_mixed_zone_and_no_zone_nets(self, stitch_zone_pcb: Path):
-        """Should handle mix of nets with and without zones."""
+        """Should handle mix of nets with zones and nets inferred from stackup."""
         result = run_stitch(
             pcb_path=stitch_zone_pcb,
-            net_names=["GND", "VCC"],  # GND has zone, VCC doesn't
+            net_names=["GND", "VCC"],  # GND has zone on In1.Cu, VCC doesn't
             target_layer=None,
             dry_run=True,
         )
@@ -1265,8 +1271,10 @@ class TestZoneAutoDetection:
         # GND detected from zone
         assert result.detected_layers.get("GND") == "In1.Cu"
 
-        # VCC falls back to B.Cu
-        assert "VCC" in result.fallback_nets
+        # VCC inferred from stackup to In2.Cu (power net -> last inner layer)
+        assert result.detected_layers.get("VCC") == "In2.Cu"
+        assert "VCC" in result.stackup_inferred_nets
+        assert len(result.fallback_nets) == 0
 
         # Check layers match
         gnd_vias = [v for v in result.vias_added if v.pad.net_name == "GND"]
@@ -1275,7 +1283,7 @@ class TestZoneAutoDetection:
         for via in gnd_vias:
             assert via.layers[1] == "In1.Cu"
         for via in vcc_vias:
-            assert via.layers[1] == "B.Cu"
+            assert via.layers[1] == "In2.Cu"
 
     def test_explicit_target_overrides_zone(self, stitch_zone_pcb: Path):
         """Explicit target layer should override zone auto-detection."""
@@ -1294,8 +1302,8 @@ class TestZoneAutoDetection:
         for via in result.vias_added:
             assert via.layers[1] == "In2.Cu"
 
-    def test_no_zone_without_explicit_target(self, stitch_test_pcb: Path):
-        """PCB without zones should fall back to B.Cu for all nets."""
+    def test_no_zone_infers_inner_layer_on_4layer_board(self, stitch_test_pcb: Path):
+        """4-layer PCB without zones should infer inner layer from stackup."""
         result = run_stitch(
             pcb_path=stitch_test_pcb,
             net_names=["GND"],
@@ -1303,13 +1311,15 @@ class TestZoneAutoDetection:
             dry_run=True,
         )
 
-        # GND should fall back (no zones in test PCB)
-        assert "GND" in result.fallback_nets
-        assert len(result.detected_layers) == 0
+        # GND should be inferred to In1.Cu (first inner layer) via stackup
+        assert "GND" in result.detected_layers
+        assert result.detected_layers["GND"] == "In1.Cu"
+        assert "GND" in result.stackup_inferred_nets
+        assert len(result.fallback_nets) == 0
 
-        # Vias should target B.Cu
+        # Vias should target In1.Cu
         for via in result.vias_added:
-            assert via.layers[1] == "B.Cu"
+            assert via.layers[1] == "In1.Cu"
 
 
 class TestCLIOutputWithZones:
@@ -1324,15 +1334,230 @@ class TestCLIOutputWithZones:
         assert "Auto-detected target layers" in captured.out
         assert "GND -> In1.Cu" in captured.out
 
-    def test_output_shows_fallback_warning(self, stitch_zone_pcb: Path, capsys):
-        """CLI should show warning when falling back to B.Cu."""
+    def test_output_shows_stackup_inferred(self, stitch_zone_pcb: Path, capsys):
+        """CLI should show stackup-inferred layers in output."""
         exit_code = main([str(stitch_zone_pcb), "--net", "VCC", "--dry-run"])
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "Warning" in captured.err
-        assert "VCC" in captured.err
-        assert "B.Cu" in captured.err
+        assert "Auto-detected target layers" in captured.out
+        assert "VCC -> In2.Cu" in captured.out
+        assert "inferred from stackup" in captured.out
+
+
+# 2-layer PCB for testing true fallback to B.Cu (no inner layers available)
+STITCH_2LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+)
+"""
+
+# 4-layer PCB with zones on OUTER layers only (the bug scenario from #2040)
+STITCH_OUTER_ZONE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone-gnd-outer")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "F.Cu") (uuid "zone-3v3-outer")
+    (name "3V3_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+)
+"""
+
+
+@pytest.fixture
+def stitch_2layer_pcb(tmp_path: Path) -> Path:
+    """Create a 2-layer PCB file for testing true B.Cu fallback."""
+    pcb_file = tmp_path / "stitch_2layer.kicad_pcb"
+    pcb_file.write_text(STITCH_2LAYER_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def stitch_outer_zone_pcb(tmp_path: Path) -> Path:
+    """Create a 4-layer PCB with zones on outer layers only (bug #2040 scenario)."""
+    pcb_file = tmp_path / "stitch_outer_zone.kicad_pcb"
+    pcb_file.write_text(STITCH_OUTER_ZONE_PCB)
+    return pcb_file
+
+
+class TestStackupAwareFallback:
+    """Tests for stackup-aware layer inference (#2040)."""
+
+    def test_get_copper_layers_4layer(self, stitch_zone_pcb: Path):
+        """Should extract ordered copper layers from a 4-layer PCB."""
+        sexp = load_pcb(stitch_zone_pcb)
+        layers = get_copper_layers(sexp)
+        assert layers == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+    def test_get_copper_layers_2layer(self, stitch_2layer_pcb: Path):
+        """Should extract ordered copper layers from a 2-layer PCB."""
+        sexp = load_pcb(stitch_2layer_pcb)
+        layers = get_copper_layers(sexp)
+        assert layers == ["F.Cu", "B.Cu"]
+
+    def test_is_ground_net(self):
+        """Should identify ground net names."""
+        assert _is_ground_net("GND")
+        assert _is_ground_net("GNDD")
+        assert _is_ground_net("GNDA")
+        assert _is_ground_net("AGND")
+        assert _is_ground_net("DGND")
+        assert _is_ground_net("VSS")
+        assert not _is_ground_net("+3.3V")
+        assert not _is_ground_net("VCC")
+        assert not _is_ground_net("+5V")
+
+    def test_infer_ground_to_first_inner_layer(self):
+        """Ground nets should target first inner layer on 4-layer board."""
+        copper = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "GNDD", "F.Cu") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "AGND", "F.Cu") == "In1.Cu"
+
+    def test_infer_power_to_last_inner_layer(self):
+        """Power nets should target last inner layer on 4-layer board."""
+        copper = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") == "In2.Cu"
+        assert infer_target_layer_from_stackup(copper, "+5V", "F.Cu") == "In2.Cu"
+        assert infer_target_layer_from_stackup(copper, "VCC", "F.Cu") == "In2.Cu"
+
+    def test_infer_returns_none_for_2layer(self):
+        """2-layer board should return None (no inner layers)."""
+        copper = ["F.Cu", "B.Cu"]
+        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") is None
+        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") is None
+
+    def test_infer_6layer_board(self):
+        """6-layer board should use first/last inner layer appropriately."""
+        copper = ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"]
+        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") == "In4.Cu"
+
+    def test_should_use_stackup_fallback_outer_zones(self):
+        """Zones on outer layers should trigger stackup fallback on multi-layer board."""
+        copper_4layer = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        assert _should_use_stackup_fallback(["B.Cu"], copper_4layer) is True
+        assert _should_use_stackup_fallback(["F.Cu"], copper_4layer) is True
+        assert _should_use_stackup_fallback(["F.Cu", "B.Cu"], copper_4layer) is True
+
+    def test_should_not_use_stackup_fallback_inner_zones(self):
+        """Zones on inner layers should not trigger stackup fallback."""
+        copper_4layer = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        assert _should_use_stackup_fallback(["In1.Cu"], copper_4layer) is False
+        assert _should_use_stackup_fallback(["In2.Cu"], copper_4layer) is False
+
+    def test_should_not_use_stackup_fallback_2layer(self):
+        """2-layer board should not trigger stackup fallback."""
+        copper_2layer = ["F.Cu", "B.Cu"]
+        assert _should_use_stackup_fallback(["B.Cu"], copper_2layer) is False
+
+    def test_2layer_board_falls_back_to_bcu(self, stitch_2layer_pcb: Path):
+        """2-layer PCB without zones should fall back to B.Cu (no inner layers)."""
+        result = run_stitch(
+            pcb_path=stitch_2layer_pcb,
+            net_names=["GND"],
+            target_layer=None,
+            dry_run=True,
+        )
+
+        assert "GND" in result.fallback_nets
+        assert "GND" not in result.detected_layers
+
+        for via in result.vias_added:
+            assert via.layers[1] == "B.Cu"
+
+    def test_outer_zone_triggers_stackup_inference(self, stitch_outer_zone_pcb: Path):
+        """4-layer board with zones on outer layers should infer inner layers."""
+        result = run_stitch(
+            pcb_path=stitch_outer_zone_pcb,
+            net_names=["GND", "+3.3V"],
+            target_layer=None,
+            dry_run=True,
+        )
+
+        # GND has zone on B.Cu (outer) -> should be inferred to In1.Cu
+        assert result.detected_layers.get("GND") == "In1.Cu"
+        assert "GND" in result.stackup_inferred_nets
+
+        # +3.3V has zone on F.Cu (outer) -> should be inferred to In2.Cu
+        assert result.detected_layers.get("+3.3V") == "In2.Cu"
+        assert "+3.3V" in result.stackup_inferred_nets
+
+        assert len(result.fallback_nets) == 0
+
+        # Verify via layers
+        gnd_vias = [v for v in result.vias_added if v.pad.net_name == "GND"]
+        v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
+
+        for via in gnd_vias:
+            assert via.layers[1] == "In1.Cu"
+        for via in v33_vias:
+            assert via.layers[1] == "In2.Cu"
+
+    def test_inner_zone_not_overridden(self, stitch_zone_pcb: Path):
+        """Zones on inner layers should be used directly, not overridden by stackup."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["GND", "+3.3V"],
+            target_layer=None,
+            dry_run=True,
+        )
+
+        # Zones are on In1.Cu and In2.Cu respectively -> use directly
+        assert result.detected_layers.get("GND") == "In1.Cu"
+        assert result.detected_layers.get("+3.3V") == "In2.Cu"
+        assert len(result.stackup_inferred_nets) == 0
+        assert len(result.fallback_nets) == 0
 
 
 class TestFindAllPlaneNets:
