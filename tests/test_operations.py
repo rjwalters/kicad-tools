@@ -27,6 +27,7 @@ from kicad_tools.operations.pinmap import (
     match_pins,
 )
 from kicad_tools.operations.symbol_ops import (
+    PinTypeChange,
     find_symbol_by_reference,
     get_symbol_lib_id,
     get_symbol_pins,
@@ -389,6 +390,267 @@ class TestSymbolOps:
 
         with pytest.raises(ValueError, match="not found"):
             replace_symbol_lib_id(str(test_file), "U99", "New:Symbol")
+
+
+# Schematic with a voltage regulator symbol and embedded lib_symbols entry
+# that has power_out pin type on the output pin.
+REGULATOR_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Regulator_Linear:AP2204K-3.3"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "AP2204K-3.3" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "AP2204K-3.3_1_1"
+        (pin power_in line (at -5.08 2.54 0) (length 2.54) (name "VIN") (number "1"))
+        (pin power_in line (at 0 -5.08 90) (length 2.54) (name "GND") (number "2"))
+        (pin power_out line (at 5.08 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Regulator_Linear:AP2204K-3.3")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "U1" (at 120 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "AP2204K-3.3" (at 120 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_TO_SOT_SMD:SOT-23-5" (at 120 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (pin "3" (uuid "00000000-0000-0000-0000-000000000013"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+
+# Library file with a replacement symbol that uses "output" instead of
+# "power_out" on pin 3, triggering the ERC regression described in #2048.
+REPLACEMENT_LIB = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "XC6206P332MR"
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "XC6206P332MR" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "XC6206P332MR_1_1"
+      (pin power_in line (at -5.08 2.54 0) (length 2.54) (name "VIN") (number "1"))
+      (pin power_in line (at 0 -5.08 90) (length 2.54) (name "GND") (number "2"))
+      (pin output line (at 5.08 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+    )
+  )
+)
+"""
+
+# Library with a symbol that has different pin count (4 pins vs 3)
+DIFFERENT_PIN_COUNT_LIB = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "AltReg:REG4PIN"
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "REG4PIN" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "REG4PIN_1_1"
+      (pin power_in line (at -5.08 2.54 0) (length 2.54) (name "VIN") (number "1"))
+      (pin power_in line (at 0 -5.08 90) (length 2.54) (name "GND") (number "2"))
+      (pin output line (at 5.08 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+      (pin input line (at -5.08 -2.54 0) (length 2.54) (name "EN") (number "4"))
+    )
+  )
+)
+"""
+
+
+class TestReplaceSymbolWithLibUpdate:
+    """Tests for replace_symbol_lib_id with --lib-path (lib_symbols update)."""
+
+    def _write_schematic(self, tmp_path: Path) -> Path:
+        """Write the regulator schematic fixture."""
+        sch_file = tmp_path / "regulator.kicad_sch"
+        sch_file.write_text(REGULATOR_SCHEMATIC)
+        return sch_file
+
+    def _write_lib(self, tmp_path: Path, content: str, name: str = "replacement.kicad_sym") -> Path:
+        lib_file = tmp_path / name
+        lib_file.write_text(content)
+        return lib_file
+
+    def test_lib_symbols_updated_on_replace(self, tmp_path: Path):
+        """Replacing with lib_path updates the embedded lib_symbols entry."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, REPLACEMENT_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:XC6206P332MR",
+            lib_path=str(lib_file),
+        )
+
+        assert result.lib_symbol_updated is True
+        assert result.old_lib_id == "Regulator_Linear:AP2204K-3.3"
+        assert result.new_lib_id == "Regulator_Linear:XC6206P332MR"
+
+        # Verify the schematic now has the new lib_symbols entry
+        sexp = parse_string(sch_file.read_text())
+        lib_syms = sexp.find("lib_symbols")
+        assert lib_syms is not None
+
+        # Old entry should be gone
+        old_found = False
+        new_found = False
+        for sym in lib_syms.find_all("symbol"):
+            name = sym.get_string(0)
+            if name == "Regulator_Linear:AP2204K-3.3":
+                old_found = True
+            if name == "Regulator_Linear:XC6206P332MR":
+                new_found = True
+        assert not old_found, "Old lib_symbols entry should be removed"
+        assert new_found, "New lib_symbols entry should be present"
+
+    def test_pin_type_changes_reported(self, tmp_path: Path):
+        """Pin type differences between old and new symbols are reported."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, REPLACEMENT_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:XC6206P332MR",
+            lib_path=str(lib_file),
+        )
+
+        # Pin 3 changed from power_out to output
+        assert len(result.pin_type_changes) == 1
+        ptc = result.pin_type_changes[0]
+        assert ptc.pin_number == "3"
+        assert ptc.old_type == "power_out"
+        assert ptc.new_type == "output"
+
+    def test_dry_run_does_not_modify_file(self, tmp_path: Path):
+        """Dry run with lib_path reports changes but does not write."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, REPLACEMENT_LIB)
+        original_text = sch_file.read_text()
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:XC6206P332MR",
+            lib_path=str(lib_file),
+            dry_run=True,
+        )
+
+        assert result.lib_symbol_updated is True
+        assert result.pin_type_changes
+        # File should be untouched
+        assert sch_file.read_text() == original_text
+
+    def test_different_pin_count_adds_new_pins(self, tmp_path: Path):
+        """When new symbol has extra pins, they are added to the instance."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DIFFERENT_PIN_COUNT_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "AltReg:REG4PIN",
+            lib_path=str(lib_file),
+        )
+
+        assert result.old_pin_count == 3
+        assert result.new_pin_count == 4
+        assert result.lib_symbol_updated is True
+
+        # Verify the instance now has 4 pins
+        sexp = parse_string(sch_file.read_text())
+        symbol = find_symbol_by_reference(sexp, "U1")
+        pins = get_symbol_pins(symbol)
+        assert len(pins) == 4
+
+    def test_library_not_found_raises(self, tmp_path: Path):
+        """Providing a non-existent lib_path raises FileNotFoundError."""
+        sch_file = self._write_schematic(tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="Library not found"):
+            replace_symbol_lib_id(
+                str(sch_file),
+                "U1",
+                "Regulator_Linear:XC6206P332MR",
+                lib_path=str(tmp_path / "nonexistent.kicad_sym"),
+            )
+
+    def test_symbol_not_in_library_raises(self, tmp_path: Path):
+        """Providing a lib_path that doesn't contain the symbol raises ValueError."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, REPLACEMENT_LIB)
+
+        with pytest.raises(ValueError, match="not found in library"):
+            replace_symbol_lib_id(
+                str(sch_file),
+                "U1",
+                "Regulator_Linear:NonExistentSymbol",
+                lib_path=str(lib_file),
+            )
+
+    def test_new_lib_symbol_has_correct_pin_types(self, tmp_path: Path):
+        """After replacement, the embedded lib symbol has the new pin types."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, REPLACEMENT_LIB)
+
+        replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:XC6206P332MR",
+            lib_path=str(lib_file),
+        )
+
+        # Parse the updated schematic and check the embedded lib symbol
+        sexp = parse_string(sch_file.read_text())
+        lib_syms = sexp.find("lib_symbols")
+        new_sym = None
+        for sym in lib_syms.find_all("symbol"):
+            if sym.get_string(0) == "Regulator_Linear:XC6206P332MR":
+                new_sym = sym
+                break
+        assert new_sym is not None
+
+        # Find pin 3 in the unit sub-symbol and check its type
+        from kicad_tools.schema.library import LibrarySymbol
+
+        lib_sym = LibrarySymbol.from_sexp(new_sym)
+        pin3 = lib_sym.get_pin("3")
+        assert pin3 is not None
+        assert pin3.type == "output", (
+            f"Pin 3 should be 'output' (from new symbol), got '{pin3.type}'"
+        )
+
+    def test_without_lib_path_soft_replace_unchanged(self, tmp_path: Path):
+        """Without lib_path, replacement is still soft (no lib_symbols update)."""
+        sch_file = self._write_schematic(tmp_path)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:XC6206P332MR",
+        )
+
+        assert result.lib_symbol_updated is False
+        assert len(result.pin_type_changes) == 0
+
+        # lib_symbols should still have the OLD definition
+        from kicad_tools.schema.schematic import Schematic
+
+        sch = Schematic.load(sch_file)
+        old_sym = sch.get_lib_symbol("Regulator_Linear:AP2204K-3.3")
+        assert old_sym is not None, "Old lib_symbols entry should still be present"
 
 
 class TestNetOpsHelpers:

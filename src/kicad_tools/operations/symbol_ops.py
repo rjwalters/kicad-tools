@@ -7,10 +7,20 @@ Provides functions to modify, replace, and update symbol instances.
 from __future__ import annotations
 
 import uuid as uuid_lib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
+
+
+@dataclass
+class PinTypeChange:
+    """Describes a change in pin electrical type between old and new symbol."""
+
+    pin_number: str
+    pin_name: str
+    old_type: str
+    new_type: str
 
 
 @dataclass
@@ -24,6 +34,8 @@ class SymbolReplacement:
     new_pin_count: int
     preserved_properties: list[str]  # Properties that were kept
     changes_made: list[str]  # List of changes made
+    lib_symbol_updated: bool = False  # Whether the lib_symbols entry was updated
+    pin_type_changes: list[PinTypeChange] = field(default_factory=list)
 
 
 def find_symbol_by_reference(sexp: SExp, reference: str) -> SExp | None:
@@ -64,13 +76,16 @@ def replace_symbol_lib_id(
     new_value: str | None = None,
     new_footprint: str | None = None,
     dry_run: bool = False,
+    lib_path: str | None = None,
 ) -> SymbolReplacement:
     """
     Replace a symbol's library ID (and optionally value/footprint).
 
-    This is a "soft" replacement that changes the lib_id but keeps
-    the existing pin connections. Use this when the new symbol has
-    compatible pinout or when you'll rewire manually.
+    When *lib_path* is provided, the embedded ``lib_symbols`` entry is
+    replaced with the definition from the library file and the instance
+    pins are reconciled with the new definition.  Without *lib_path*
+    this is a "soft" replacement that changes only the ``lib_id`` and
+    selected properties while keeping the old pin definitions.
 
     Args:
         schematic_path: Path to the .kicad_sch file
@@ -79,14 +94,20 @@ def replace_symbol_lib_id(
         new_value: Optional new value for the symbol
         new_footprint: Optional new footprint
         dry_run: If True, don't write changes
+        lib_path: Optional path to the .kicad_sym library file
+            containing the new symbol.  When provided the embedded
+            ``lib_symbols`` definition and instance pins are updated.
 
     Returns:
         SymbolReplacement with details of changes
 
     Raises:
-        FileNotFoundError: If schematic doesn't exist
-        ValueError: If symbol not found
+        FileNotFoundError: If schematic or library doesn't exist
+        ValueError: If symbol not found in schematic or library
     """
+    from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
+    from kicad_tools.schema.schematic import Schematic
+
     path = Path(schematic_path)
     if not path.exists():
         raise FileNotFoundError(f"Schematic not found: {schematic_path}")
@@ -106,6 +127,8 @@ def replace_symbol_lib_id(
 
     changes = []
     preserved = []
+    lib_symbol_updated = False
+    pin_type_changes: list[PinTypeChange] = []
 
     # Update lib_id
     lib_id_node = symbol.find("lib_id")
@@ -127,14 +150,92 @@ def replace_symbol_lib_id(
         else:
             preserved.append(name)
 
+    # Update lib_symbols entry and reconcile instance pins
+    new_pin_count = len(old_pins)
+    if lib_path:
+        lib_file = Path(lib_path)
+        if not lib_file.exists():
+            raise FileNotFoundError(f"Library not found: {lib_path}")
+
+        lib = SymbolLibrary.load(str(lib_file))
+
+        # The new_lib_id is typically "LibName:SymbolName".  The symbol
+        # is stored in the library under the full qualified name.  Some
+        # libraries use just the short name as the key.
+        new_lib_sym = lib.get_symbol(new_lib_id)
+        if new_lib_sym is None:
+            # Try the short name (part after colon)
+            short_name = new_lib_id.split(":", 1)[1] if ":" in new_lib_id else new_lib_id
+            new_lib_sym = lib.get_symbol(short_name)
+        if new_lib_sym is None:
+            raise ValueError(
+                f"Symbol '{new_lib_id}' not found in library '{lib_path}'"
+            )
+
+        # Compare old and new pin types for reporting
+        old_lib_sym_sexp = _find_lib_symbol_sexp(sexp, old_lib_id)
+        if old_lib_sym_sexp is not None:
+            old_lib_sym = LibrarySymbol.from_sexp(old_lib_sym_sexp)
+            old_pin_map = {p.number: p for p in old_lib_sym.pins}
+            for new_pin in new_lib_sym.pins:
+                old_pin = old_pin_map.get(new_pin.number)
+                if old_pin and old_pin.type != new_pin.type:
+                    pin_type_changes.append(
+                        PinTypeChange(
+                            pin_number=new_pin.number,
+                            pin_name=new_pin.name,
+                            old_type=old_pin.type,
+                            new_type=new_pin.type,
+                        )
+                    )
+
+        # Replace the lib_symbols entry.  We need to rename the new
+        # library symbol to match the lib_id used in the schematic so
+        # that KiCad can resolve the reference.
+        renamed_sym = LibrarySymbol(
+            name=new_lib_id,
+            properties=new_lib_sym.properties,
+            pins=new_lib_sym.pins,
+            graphics=new_lib_sym.graphics,
+            units=new_lib_sym.units,
+        )
+
+        # Use Schematic helper to swap the lib_symbols entry
+        sch = Schematic.__new__(Schematic)
+        sch._sexp = sexp
+        sch.replace_lib_symbol(old_lib_id, renamed_sym)
+        lib_symbol_updated = True
+        changes.append(f"lib_symbols: replaced embedded definition for {old_lib_id}")
+
+        # Reconcile instance pins with the new library definition
+        new_pin_numbers = {p.number for p in new_lib_sym.pins}
+        old_instance_pins = {p.get_string(0) for p in old_pins}
+
+        # Remove instance pins that don't exist in the new symbol
+        for pin in list(old_pins):
+            pin_num = pin.get_string(0)
+            if pin_num not in new_pin_numbers:
+                symbol.remove(pin)
+                changes.append(f"Removed instance pin {pin_num} (not in new symbol)")
+
+        # Add instance pins that exist in new symbol but not in instance
+        for pin in new_lib_sym.pins:
+            if pin.number not in old_instance_pins:
+                add_symbol_pin(symbol, pin.number)
+                changes.append(f"Added instance pin {pin.number} (new in replacement symbol)")
+
+        new_pin_count = len(get_symbol_pins(symbol))
+
     result = SymbolReplacement(
         reference=reference,
         old_lib_id=old_lib_id,
         new_lib_id=new_lib_id,
         old_pin_count=len(old_pins),
-        new_pin_count=len(old_pins),  # Pins not changed in soft replace
+        new_pin_count=new_pin_count,
         preserved_properties=preserved,
         changes_made=changes,
+        lib_symbol_updated=lib_symbol_updated,
+        pin_type_changes=pin_type_changes,
     )
 
     # Write back if not dry run
@@ -143,6 +244,17 @@ def replace_symbol_lib_id(
         path.write_text(new_text)
 
     return result
+
+
+def _find_lib_symbol_sexp(sexp: SExp, lib_id: str) -> SExp | None:
+    """Find a library symbol definition in the schematic's lib_symbols section."""
+    lib_syms = sexp.find("lib_symbols")
+    if lib_syms is None:
+        return None
+    for sym in lib_syms.find_all("symbol"):
+        if sym.get_string(0) == lib_id:
+            return sym
+    return None
 
 
 def update_symbol_pins(
