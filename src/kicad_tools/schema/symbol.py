@@ -255,6 +255,15 @@ class SymbolInstance:
         for pin in sexp.find_all("pin"):
             pins.append(SymbolPin.from_sexp(pin))
 
+        # Get instances block (project_name + instance_path)
+        project_name = ""
+        instance_path = ""
+        if instances := sexp.find("instances"):
+            if project := instances.find("project"):
+                project_name = project.get_string(0) or ""
+                if path_node := project.find("path"):
+                    instance_path = path_node.get_string(0) or ""
+
         return cls(
             lib_id=lib_id,
             uuid=uuid,
@@ -267,6 +276,8 @@ class SymbolInstance:
             dnp=dnp,
             properties=properties,
             pins=pins,
+            project_name=project_name,
+            instance_path=instance_path,
             _sexp=sexp,
         )
 

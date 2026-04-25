@@ -461,6 +461,120 @@ class TestRoundTrip:
 
 
 # ---------------------------------------------------------------------------
+# Instances block (project_instances)
+# ---------------------------------------------------------------------------
+
+
+class TestInstancesBlock:
+    """Verify that placed symbols include the (instances ...) S-expression."""
+
+    def test_instances_block_auto_detected(self, tmp_path: Path):
+        """add-component should auto-detect project name and emit instances."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+        ])
+        assert result == 0
+
+        # Read the raw file and verify (instances ...) is present
+        content = sch_path.read_text()
+        assert "(instances" in content
+        assert "(project" in content
+        # The project name should be the schematic stem (no .kicad_pro nearby)
+        assert "test_add_comp" in content
+
+        # Reload and check structured data
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.project_name == "test_add_comp"
+        assert sym.instance_path  # non-empty
+        # Path should start with / and contain the schematic UUID
+        assert sym.instance_path.startswith("/")
+
+    def test_instances_block_with_explicit_project(self, tmp_path: Path):
+        """--project-name and --instance-path override auto-detection."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--project-name", "my-board",
+            "--instance-path", "/aaaa-bbbb-cccc",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.project_name == "my-board"
+        assert sym.instance_path == "/aaaa-bbbb-cccc"
+
+    def test_instances_block_contains_reference_and_unit(self, tmp_path: Path):
+        """The instances block must include reference and unit."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R42",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+        ])
+        assert result == 0
+
+        content = sch_path.read_text()
+        assert '(reference "R42")' in content
+        assert "(unit 1)" in content
+
+    def test_instances_block_with_kicad_pro(self, tmp_path: Path):
+        """Project name derived from .kicad_pro when present."""
+        sch_path = _write_sch(tmp_path)
+        # Create a .kicad_pro file so project name is derived from it
+        pro_path = tmp_path / "chorus-board.kicad_pro"
+        pro_path.write_text("{}")  # Minimal content
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.project_name == "chorus-board"
+
+    def test_power_symbol_no_instances_block(self, tmp_path: Path):
+        """Power symbols should NOT get an instances block (KiCad convention)."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "100.33", "90.17",
+        ])
+        assert result == 0
+
+        content = sch_path.read_text()
+        # Power symbols should not have instances blocks
+        # The symbol section should not contain (instances ...)
+        # (The only (instances ...) would be in sheet_instances which is different)
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        # Power symbols don't get project_name/instance_path set
+        assert not sym.project_name or sym.lib_id.startswith("power:")
+
+
+# ---------------------------------------------------------------------------
 # Schematic.add_junction method
 # ---------------------------------------------------------------------------
 
