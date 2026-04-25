@@ -46,6 +46,38 @@ def _mock_kicad_cli():
 
 
 # ---------------------------------------------------------------------------
+# Test: overlap warnings in add and batch subcommands
+# ---------------------------------------------------------------------------
+
+
+class TestAddOverlapWarnings:
+    """Verify overlap warnings are surfaced in zones add."""
+
+    def test_add_no_warning_different_layer(self, tmp_pcb, capsys):
+        """zones add on a unique layer produces no warning."""
+        ret = main(["add", str(tmp_pcb), "--net", "GND", "--layer", "B.Cu", "--priority", "1", "-o", str(tmp_pcb)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "overlap warning" not in captured.err
+
+
+class TestBatchOverlapWarnings:
+    """Verify overlap warnings are surfaced in zones batch."""
+
+    def test_batch_warns_same_layer_overlap(self, tmp_pcb, capsys):
+        """zones batch emits overlap warning for same-layer full-board zones."""
+        ret = main([
+            "batch", str(tmp_pcb),
+            "--power-nets", "GND:F.Cu,+3V3:F.Cu",
+            "-o", str(tmp_pcb),
+        ])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "overlap warning" in captured.err
+        assert "zero copper" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # Test: fill subcommand appears in help
 # ---------------------------------------------------------------------------
 

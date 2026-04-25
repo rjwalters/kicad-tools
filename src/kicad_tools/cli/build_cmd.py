@@ -847,9 +847,9 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
     """Run automatic zone creation for power and ground nets.
 
     Identifies pour nets (POWER and GROUND) via net classification and
-    creates copper zone definitions on the PCB before routing.  GND gets
-    a zone on B.Cu with priority 1; other power nets get zones on F.Cu
-    with priority 0.
+    creates copper zone definitions on the PCB before routing.  Layer
+    assignment is stackup-aware: on 4-layer boards GND goes on In1.Cu
+    and power nets are distributed across In2.Cu / F.Cu.
 
     Zones are *defined* here (unfilled polygons).  Filling happens later
     after routing, typically via kicad-cli.
