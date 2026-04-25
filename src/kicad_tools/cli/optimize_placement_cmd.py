@@ -52,6 +52,7 @@ _interrupt_state: dict = {
     "components": None,
     "pcb_path": None,
     "output_path": None,
+    "board_origin": (0.0, 0.0),
     "quiet": False,
 }
 
@@ -90,7 +91,10 @@ def _save_best_placement_on_interrupt() -> bool:
         return False
 
     try:
-        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components)
+        board_origin = _interrupt_state.get("board_origin", (0.0, 0.0))
+        _write_placements_to_pcb_atomic(
+            pcb_path, output_path, best_vector, components, board_origin,
+        )
         if not quiet:
             print(f"  Best placement saved to: {output_path}")
         return True
@@ -105,6 +109,7 @@ def _write_placements_to_pcb_atomic(
     output_path: str,
     vector,
     components: Sequence,
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """Write placements via atomic write (temp file + rename).
 
@@ -119,7 +124,7 @@ def _write_placements_to_pcb_atomic(
     )
     os.close(fd)
     try:
-        _write_placements_to_pcb(pcb_path, tmp_path, vector, components)
+        _write_placements_to_pcb(pcb_path, tmp_path, vector, components, board_origin)
         Path(tmp_path).replace(out)
     except BaseException:
         # Clean up the temp file on failure
@@ -234,11 +239,15 @@ def _read_board_data(
     list[Net],
     BoardOutline,
     DesignRuleSet,
+    tuple[float, float],
 ]:
     """Read component, net, and board data from a .kicad_pcb file.
 
     Uses kicad_tools.schema.pcb.PCB to parse the file and extract
-    components, nets, board outline, and design rules.
+    components, nets, board outline, design rules, and board origin.
+
+    The returned board origin is needed by the writer to convert
+    board-relative optimizer output back to sheet-absolute coordinates.
     """
     from kicad_tools.placement.vector import PadDef
     from kicad_tools.schema.pcb import PCB as SchemaPCB
@@ -300,11 +309,17 @@ def _read_board_data(
     # --- Design rules (use defaults; PCB setup has limited rule info) ---
     rules = DesignRuleSet()
 
-    return components, nets, board_outline, rules
+    return components, nets, board_outline, rules, pcb.board_origin
 
 
 def _extract_board_outline(pcb) -> BoardOutline:
-    """Extract board outline from Edge.Cuts graphic lines."""
+    """Extract board outline from Edge.Cuts graphic lines.
+
+    Edge.Cuts coordinates are in sheet-absolute space, but footprint
+    positions on ``SchemaPCB`` are board-relative (the origin is already
+    subtracted).  We must convert the outline to the same board-relative
+    coordinate system so the optimizer bounds match component positions.
+    """
     xs: list[float] = []
     ys: list[float] = []
 
@@ -314,6 +329,10 @@ def _extract_board_outline(pcb) -> BoardOutline:
             ys.extend([line.start[1], line.end[1]])
 
     if xs and ys:
+        # Convert from sheet-absolute to board-relative coordinates.
+        ox, oy = pcb.board_origin
+        xs = [x - ox for x in xs]
+        ys = [y - oy for y in ys]
         return BoardOutline(min_x=min(xs), min_y=min(ys), max_x=max(xs), max_y=max(ys))
 
     # Fallback: use footprint bounding box with margin
@@ -360,13 +379,17 @@ def _write_placements_to_pcb(
     output_path: str,
     vector: PlacementVector,
     components: Sequence[ComponentDef],
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """Write optimized placements back to a .kicad_pcb file.
 
     Reads the original file, updates footprint positions, and writes
-    the result.
+    the result.  Positions from the optimizer are in board-relative
+    coordinates; the board origin offset is added back to produce the
+    sheet-absolute values expected in the ``.kicad_pcb`` file.
     """
     placed = decode(vector, components)
+    ox, oy = board_origin
     ref_to_placement = {p.reference: p for p in placed}
 
     # Read the original PCB content
@@ -413,7 +436,10 @@ def _write_placements_to_pcb(
                 if at_match:
                     p = ref_to_placement[current_ref]
                     indent = at_match.group(1)
-                    new_at = f"{indent}(at {p.x:.6f} {p.y:.6f} {p.rotation:.0f})"
+                    # Convert board-relative back to sheet-absolute.
+                    abs_x = p.x + ox
+                    abs_y = p.y + oy
+                    new_at = f"{indent}(at {abs_x:.6f} {abs_y:.6f} {p.rotation:.0f})"
                     output_lines.append(new_at)
                     if paren_depth <= 0:
                         in_footprint = False
@@ -494,7 +520,7 @@ def run_optimize_placement(
 
     # Read board data
     try:
-        components, nets, board_outline, rules = _read_board_data(pcb_path)
+        components, nets, board_outline, rules, board_origin = _read_board_data(pcb_path)
     except Exception as e:
         print(f"Error reading PCB: {e}", file=sys.stderr)
         if verbose:
@@ -509,6 +535,7 @@ def run_optimize_placement(
 
     # Update interrupt state so handler can save intermediate results
     _interrupt_state["components"] = components
+    _interrupt_state["board_origin"] = board_origin
 
     if not quiet:
         print(f"  Components: {len(components)}")
@@ -758,7 +785,7 @@ def run_optimize_placement(
         print(f"\nWriting result to: {output_path}")
 
     try:
-        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components)
+        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components, board_origin)
     except Exception as e:
         print(f"Error writing output: {e}", file=sys.stderr)
         if verbose:

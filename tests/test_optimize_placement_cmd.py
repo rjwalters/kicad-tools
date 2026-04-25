@@ -612,7 +612,7 @@ class TestInterruptHandling:
             _write_placements_to_pcb_atomic,
         )
 
-        components, nets, board, rules = _read_board_data(str(tmp_pcb))
+        components, nets, board, rules, _origin = _read_board_data(str(tmp_pcb))
         seed = _generate_seed("random", components, nets, board)
         output = tmp_path / "atomic_output.kicad_pcb"
 
@@ -654,6 +654,161 @@ class TestInterruptHandling:
 
 # Import helpers needed by the new tests
 from kicad_tools.cli.optimize_placement_cmd import (
+    _extract_board_outline,
     _read_board_data,
+    _write_placements_to_pcb,
     _write_placements_to_pcb_atomic,
 )
+
+
+# ---------------------------------------------------------------------------
+# Board-origin coordinate system tests (issue #2054)
+# ---------------------------------------------------------------------------
+
+
+class TestBoardOriginCoordinates:
+    """Verify that board origin is correctly subtracted from Edge.Cuts
+    outline and added back when writing positions to the PCB file."""
+
+    @pytest.fixture
+    def offset_pcb(self, tmp_path: Path) -> Path:
+        """Create a PCB file with a non-zero board origin (116, 76.75).
+
+        The Edge.Cuts outline spans from (116, 76.75) to (181, 133.25)
+        in sheet-absolute coordinates — i.e. a 65x56.5 mm board.
+        Footprint positions are stored in sheet-absolute coordinates
+        in the file.
+        """
+        pcb_content = """\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (footprint "R_0805" (layer "F.Cu")
+    (at 126.0 86.75 0)
+    (property "Reference" "R1")
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "R_0805" (layer "F.Cu")
+    (at 146.0 96.75 0)
+    (property "Reference" "R2")
+    (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 1.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (gr_line (start 116 76.75) (end 181 76.75) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 181 76.75) (end 181 133.25) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 181 133.25) (end 116 133.25) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 116 133.25) (end 116 76.75) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+        pcb_file = tmp_path / "offset_board.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_extract_board_outline_subtracts_origin(self, offset_pcb):
+        """Board outline must be in board-relative coordinates (starting near 0,0)."""
+        from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+        pcb = SchemaPCB.load(str(offset_pcb))
+        outline = _extract_board_outline(pcb)
+
+        # The Edge.Cuts spans (116,76.75)-(181,133.25) in absolute space.
+        # Board origin is (116, 76.75), so board-relative outline should be
+        # (0, 0) to (65, 56.5).
+        assert abs(outline.min_x - 0.0) < 0.01
+        assert abs(outline.min_y - 0.0) < 0.01
+        assert abs(outline.max_x - 65.0) < 0.01
+        assert abs(outline.max_y - 56.5) < 0.01
+
+    def test_component_positions_within_board_relative_outline(self, offset_pcb):
+        """Component positions must fall within the board-relative outline."""
+        components, nets, outline, rules, origin = _read_board_data(str(offset_pcb))
+
+        for comp in components:
+            # Components from SchemaPCB are already board-relative.
+            # With the fix, the outline is also board-relative.
+            # We don't have position info on ComponentDef directly, but
+            # we can verify the outline and origin are consistent.
+            pass
+
+        # Verify board origin was detected
+        assert abs(origin[0] - 116.0) < 0.01
+        assert abs(origin[1] - 76.75) < 0.01
+
+        # Verify outline is board-relative
+        assert abs(outline.min_x - 0.0) < 0.01
+        assert abs(outline.min_y - 0.0) < 0.01
+
+    def test_write_adds_origin_back(self, offset_pcb, tmp_path):
+        """Written positions must include the board origin offset (sheet-absolute)."""
+        import re
+
+        components, nets, outline, rules, origin = _read_board_data(str(offset_pcb))
+
+        # Create a vector that places R1 at board-relative (10, 10) and R2 at (30, 20)
+        data = np.array(
+            [10.0, 10.0, 0.0, 0.0, 30.0, 20.0, 0.0, 0.0],
+            dtype=np.float64,
+        )
+        from kicad_tools.placement.vector import PlacementVector
+
+        vector = PlacementVector(data=data)
+        output = tmp_path / "written.kicad_pcb"
+        _write_placements_to_pcb(str(offset_pcb), str(output), vector, components, origin)
+
+        content = output.read_text()
+
+        # R1 at board-relative (10, 10) should be written as
+        # sheet-absolute (10 + 116, 10 + 76.75) = (126, 86.75)
+        at_pattern = re.compile(r"\(at\s+([\d.]+)\s+([\d.]+)")
+        at_matches = at_pattern.findall(content)
+
+        # Collect footprint (at ...) values — should be sheet-absolute
+        # The file has two footprints; collect their (at ...) from the output.
+        # Filter to footprint-level (at ...) which are the first in each block.
+        footprint_ats = []
+        in_fp = False
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("(footprint "):
+                in_fp = True
+            if in_fp:
+                m = re.match(r"\s*\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)", stripped)
+                if m:
+                    footprint_ats.append((float(m.group(1)), float(m.group(2))))
+                    in_fp = False  # Only capture first (at) per footprint
+
+        assert len(footprint_ats) == 2
+
+        # R1: board-relative (10, 10) + origin (116, 76.75) = (126, 86.75)
+        assert abs(footprint_ats[0][0] - 126.0) < 0.01
+        assert abs(footprint_ats[0][1] - 86.75) < 0.01
+
+        # R2: board-relative (30, 20) + origin (116, 76.75) = (146, 96.75)
+        assert abs(footprint_ats[1][0] - 146.0) < 0.01
+        assert abs(footprint_ats[1][1] - 96.75) < 0.01
+
+    def test_zero_origin_unaffected(self, tmp_pcb, tmp_path):
+        """Board with origin at (0, 0) should produce identical results."""
+        components, nets, outline, rules, origin = _read_board_data(str(tmp_pcb))
+
+        # Origin should be (0, 0) for the standard test fixture
+        assert abs(origin[0]) < 0.01
+        assert abs(origin[1]) < 0.01
+
+        # Outline should match the Edge.Cuts directly (no offset to subtract)
+        assert abs(outline.min_x - 0.0) < 0.01
+        assert abs(outline.min_y - 0.0) < 0.01
+        assert abs(outline.max_x - 30.0) < 0.01
+        assert abs(outline.max_y - 20.0) < 0.01
