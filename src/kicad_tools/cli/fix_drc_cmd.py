@@ -37,6 +37,7 @@ class PassResult:
     repaired: int
     clearance_result: RepairResult
     drill_result: DrillRepairResult
+    non_targeted_count: int = 0
     connectivity_before: int | None = None
     connectivity_after: int | None = None
     connectivity_rolled_back: bool = False
@@ -206,9 +207,20 @@ Examples:
         )
 
         total_targeted = len(clearance_violations) + len(drill_violations)
+        total_all = len(report.violations)
+        non_targeted_count = total_all - total_targeted
 
         if total_targeted == 0:
             if pass_num == 1:
+                if non_targeted_count > 0:
+                    # No repairable violations, but non-targeted violations exist
+                    if not args.quiet:
+                        print(
+                            f"No repairable violations found, but {non_targeted_count} "
+                            f"non-repairable violation(s) detected "
+                            f"(edge clearance, dimension, silkscreen, etc.)."
+                        )
+                    return 2
                 # No violations at all on first pass
                 if not args.quiet:
                     print("No targeted violations found. Nothing to repair.")
@@ -218,11 +230,16 @@ Examples:
                 break
 
         if not args.quiet and args.format == "text" and pass_num == 1:
-            print(f"Found {total_targeted} targeted violation(s):")
+            print(f"Found {total_targeted} repairable violation(s):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
                 print(f"  Drill clearance: {len(drill_violations)}")
+            if non_targeted_count > 0:
+                print(
+                    f"Also found {non_targeted_count} non-repairable "
+                    f"violation(s) (edge clearance, dimension, silkscreen, etc.)"
+                )
 
         # Snapshot and baseline connectivity before the repair pass
         snapshot: bytes | None = None
@@ -280,6 +297,7 @@ Examples:
                 repaired=repaired_this_pass,
                 clearance_result=clearance_result,
                 drill_result=drill_result,
+                non_targeted_count=non_targeted_count,
                 connectivity_before=baseline_conn,
                 connectivity_after=after_conn,
                 connectivity_rolled_back=rolled_back,
@@ -310,17 +328,20 @@ Examples:
             args.max_passes,
         )
 
-    # Exit code: 0 = all repaired, 1 = no violations found/no progress,
-    #            2 = partial repair, 3 = connectivity rollback
+    # Exit code: 0 = all repaired (no remaining violations of any type),
+    #            1 = no violations found/no progress,
+    #            2 = partial repair or non-repairable violations remain,
+    #            3 = connectivity rollback
     if connectivity_rollback_occurred:
         return 3
     final_pass = pass_results[-1] if pass_results else None
     if final_pass is None:
         return 0
-    remaining = final_pass.violations_before - final_pass.repaired
-    if remaining == 0:
+    remaining_targeted = final_pass.violations_before - final_pass.repaired
+    remaining_total = remaining_targeted + final_pass.non_targeted_count
+    if remaining_total == 0:
         return 0
-    if final_pass.repaired == 0:
+    if final_pass.repaired == 0 and final_pass.non_targeted_count == 0:
         return 1
     return 2
 
@@ -446,8 +467,9 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
 def _run_python_drc(pcb_path: Path) -> DRCReport | None:
     """Run pure-Python DRC and convert results into a DRCReport.
 
-    This allows ``fix-drc`` to detect segment-to-via clearance violations
-    even when kicad-cli is not installed.
+    Runs all check categories (clearance, dimensions, edge clearance,
+    silkscreen, solder mask) so that ``fix-drc`` can report the full
+    scope of violations even when it can only repair a subset.
     """
     try:
         from kicad_tools.drc.compat import drc_results_to_report
@@ -456,7 +478,7 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
 
         pcb = PCB.load(pcb_path)
         checker = DRCChecker(pcb)
-        results = checker.check_clearances()
+        results = checker.check_all()
 
         return drc_results_to_report(results, pcb_path)
 
@@ -510,11 +532,15 @@ def _print_json(
         total_violations = first.violations_before
         total_repaired = total_repaired_all
 
+    # Non-targeted violations (detected but not repairable by fix-drc)
+    non_targeted = last.non_targeted_count if last else 0
+
     data: dict = {
         "dry_run": dry_run,
         "max_displacement_mm": max_displacement,
         "total_violations": total_violations,
         "total_repaired": total_repaired,
+        "non_targeted_violations": non_targeted,
         "clearance": {
             "violations": clearance_result.total_violations,
             "repaired": clearance_result.repaired,
@@ -609,10 +635,11 @@ def _print_summary(
 ) -> None:
     """Print a compact summary."""
     action = "Would repair" if dry_run else "Repaired"
+    last = pass_results[-1] if pass_results else None
+    non_targeted = last.non_targeted_count if last else 0
 
     if len(pass_results) <= 1:
         # Single-pass: backward-compatible output
-        last = pass_results[-1] if pass_results else None
         clearance_result = last.clearance_result if last else RepairResult()
         drill_result = last.drill_result if last else DrillRepairResult()
         total_violations = clearance_result.total_violations + drill_result.total_violations
@@ -638,6 +665,12 @@ def _print_summary(
                     f"  Pass {p.pass_number}: {p.violations_before} -> "
                     f"{p.violations_after} (-{p.repaired})"
                 )
+
+    if non_targeted > 0:
+        print(
+            f"  Non-repairable: {non_targeted} "
+            f"(edge clearance, dimension, silkscreen, etc.)"
+        )
 
 
 def _print_text(
@@ -731,13 +764,30 @@ def _print_text(
 
     print(f"\n{'=' * 60}")
 
+    # Non-targeted (non-repairable) violations
+    non_targeted = last.non_targeted_count if last else 0
     remaining = first_violations - total_repaired_all
-    if remaining <= 0:
-        print("All targeted violations repaired!")
+
+    if remaining <= 0 and non_targeted == 0:
+        print("All violations repaired!")
+    elif remaining <= 0 and non_targeted > 0:
+        print("All repairable violations repaired!")
+        print(
+            f"{non_targeted} non-repairable violation(s) remain "
+            f"(edge clearance, dimension, silkscreen, etc.)"
+        )
     else:
-        print(f"{remaining} violation(s) require manual repair")
-        if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
-            print(f"  Try increasing --max-displacement (currently {max_displacement}mm)")
+        total_remaining = remaining + non_targeted
+        print(f"{total_remaining} violation(s) remain:")
+        if remaining > 0:
+            print(f"  Repairable (not yet fixed): {remaining}")
+            if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
+                print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
+        if non_targeted > 0:
+            print(
+                f"  Non-repairable: {non_targeted} "
+                f"(edge clearance, dimension, silkscreen, etc.)"
+            )
 
 
 if __name__ == "__main__":
