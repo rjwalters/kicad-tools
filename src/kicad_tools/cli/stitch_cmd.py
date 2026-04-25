@@ -279,7 +279,6 @@ def _is_ground_net(net_name: str) -> bool:
 def infer_target_layer_from_stackup(
     copper_layers: list[str],
     net_name: str,
-    pad_layer: str,
 ) -> str | None:
     """Infer the target plane layer for a net using standard stackup conventions.
 
@@ -293,7 +292,6 @@ def infer_target_layer_from_stackup(
     Args:
         copper_layers: Ordered list of copper layers from get_copper_layers()
         net_name: The net name (used to classify as ground vs power)
-        pad_layer: The layer the component pad is on
 
     Returns:
         Target inner layer name, or None if no inner layers exist
@@ -2329,11 +2327,12 @@ def run_blanket_stitch(
             else:
                 # No zone or zones only on outer layers -- infer from stackup
                 inferred = infer_target_layer_from_stackup(
-                    copper_layers, net_name, "F.Cu"
+                    copper_layers, net_name
                 )
                 if inferred:
                     net_target_layer = inferred
                     result.detected_layers[net_name] = inferred
+                    result.stackup_inferred_nets.append(net_name)
                 else:
                     net_target_layer = None
                     result.fallback_nets.append(net_name)
@@ -2462,7 +2461,7 @@ def run_stitch(
                 # No zone or zones only on outer layers for a multi-layer
                 # board.  Infer the correct inner layer from the stackup.
                 inferred = infer_target_layer_from_stackup(
-                    copper_layers, net_name, "F.Cu"
+                    copper_layers, net_name
                 )
                 if inferred:
                     net_target_layers[net_name] = inferred

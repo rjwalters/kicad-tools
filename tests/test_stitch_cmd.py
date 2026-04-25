@@ -1460,28 +1460,28 @@ class TestStackupAwareFallback:
     def test_infer_ground_to_first_inner_layer(self):
         """Ground nets should target first inner layer on 4-layer board."""
         copper = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
-        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") == "In1.Cu"
-        assert infer_target_layer_from_stackup(copper, "GNDD", "F.Cu") == "In1.Cu"
-        assert infer_target_layer_from_stackup(copper, "AGND", "F.Cu") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "GND") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "GNDD") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "AGND") == "In1.Cu"
 
     def test_infer_power_to_last_inner_layer(self):
         """Power nets should target last inner layer on 4-layer board."""
         copper = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
-        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") == "In2.Cu"
-        assert infer_target_layer_from_stackup(copper, "+5V", "F.Cu") == "In2.Cu"
-        assert infer_target_layer_from_stackup(copper, "VCC", "F.Cu") == "In2.Cu"
+        assert infer_target_layer_from_stackup(copper, "+3.3V") == "In2.Cu"
+        assert infer_target_layer_from_stackup(copper, "+5V") == "In2.Cu"
+        assert infer_target_layer_from_stackup(copper, "VCC") == "In2.Cu"
 
     def test_infer_returns_none_for_2layer(self):
         """2-layer board should return None (no inner layers)."""
         copper = ["F.Cu", "B.Cu"]
-        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") is None
-        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") is None
+        assert infer_target_layer_from_stackup(copper, "GND") is None
+        assert infer_target_layer_from_stackup(copper, "+3.3V") is None
 
     def test_infer_6layer_board(self):
         """6-layer board should use first/last inner layer appropriately."""
         copper = ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"]
-        assert infer_target_layer_from_stackup(copper, "GND", "F.Cu") == "In1.Cu"
-        assert infer_target_layer_from_stackup(copper, "+3.3V", "F.Cu") == "In4.Cu"
+        assert infer_target_layer_from_stackup(copper, "GND") == "In1.Cu"
+        assert infer_target_layer_from_stackup(copper, "+3.3V") == "In4.Cu"
 
     def test_should_use_stackup_fallback_outer_zones(self):
         """Zones on outer layers should trigger stackup fallback on multi-layer board."""
