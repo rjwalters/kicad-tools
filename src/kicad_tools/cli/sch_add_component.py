@@ -272,6 +272,70 @@ def _validate_wire_endpoints(
                 )
 
 
+def _find_project_name(schematic_path: Path) -> str:
+    """Derive the project name from the nearest .kicad_pro file.
+
+    Walks up from *schematic_path* looking for a ``.kicad_pro`` file.
+    Falls back to the schematic stem if none is found.
+    """
+    directory = schematic_path.resolve().parent
+    for parent in [directory, *directory.parents]:
+        pro_files = list(parent.glob("*.kicad_pro"))
+        if pro_files:
+            return pro_files[0].stem
+    return schematic_path.stem
+
+
+def _build_instance_path(schematic_path: Path, sch_uuid: str) -> str:
+    """Build the hierarchical instance path for a symbol.
+
+    For a root schematic, returns ``/<sch_uuid>``.
+    For a sub-sheet, walks up the hierarchy from the project root to build
+    ``/<root_uuid>/<sheet_uuid>/...``.
+    """
+    from kicad_tools.schema.hierarchy import build_hierarchy
+
+    resolved = schematic_path.resolve()
+    directory = resolved.parent
+
+    # Find the project root schematic (same stem as .kicad_pro, or look
+    # for the .kicad_pro file and derive the root schematic from it).
+    root_sch_path: Path | None = None
+    for parent in [directory, *directory.parents]:
+        pro_files = list(parent.glob("*.kicad_pro"))
+        if pro_files:
+            candidate = pro_files[0].with_suffix(".kicad_sch")
+            if candidate.exists():
+                root_sch_path = candidate
+            break
+
+    # If no .kicad_pro found, assume the schematic *is* the root
+    if root_sch_path is None or root_sch_path.resolve() == resolved:
+        return f"/{sch_uuid}"
+
+    # Build hierarchy from root and find the node matching our schematic
+    try:
+        root_node = build_hierarchy(str(root_sch_path))
+    except Exception:
+        # If hierarchy building fails, fall back to simple root path
+        return f"/{sch_uuid}"
+
+    # Walk the hierarchy to find the node whose path matches our file
+    for node in root_node.all_nodes():
+        if Path(node.path).resolve() == resolved:
+            # Build the UUID path from root to this node
+            parts: list[str] = []
+            current: object = node
+            while current is not None:
+                parts.append(current.uuid)  # type: ignore[union-attr]
+                current = current.parent  # type: ignore[union-attr]
+            parts.reverse()
+            return "/" + "/".join(parts)
+
+    # Fallback: treat as root
+    return f"/{sch_uuid}"
+
+
 def run_add_component(args) -> int:
     """Execute the add-component command."""
     schematic_path = Path(args.schematic)
@@ -487,7 +551,25 @@ def run_add_component(args) -> int:
             lib_sym.name = args.lib_id
         sch.embed_lib_symbol(lib_sym)
 
-    # 2. Place the symbol
+    # 2. Derive project_name and instance_path for the instances block
+    explicit_project = getattr(args, "project_name", "") or ""
+    explicit_path = getattr(args, "instance_path", "") or ""
+
+    if explicit_project:
+        project_name = explicit_project
+    else:
+        project_name = _find_project_name(schematic_path)
+
+    if explicit_path:
+        instance_path = explicit_path
+    else:
+        sch_uuid = sch.uuid or ""
+        if sch_uuid:
+            instance_path = _build_instance_path(schematic_path, sch_uuid)
+        else:
+            instance_path = ""
+
+    # 3. Place the symbol
     if is_power:
         power_name = args.lib_id.split(":", 1)[1]
         sym_instance = sch.add_power(power_name, position, rotation)
@@ -500,9 +582,11 @@ def run_add_component(args) -> int:
             position=position,
             rotation=rotation,
             mirror=mirror,
+            project_name=project_name,
+            instance_path=instance_path,
         )
 
-    # 3. Add wire connections (reuse pin_positions computed during planning)
+    # 4. Add wire connections (reuse pin_positions computed during planning)
     if connect_specs:
         # Record wires that existed before we start adding, so we can
         # correctly detect pre-existing wires for junction insertion.
@@ -530,11 +614,11 @@ def run_add_component(args) -> int:
                     sch.add_junction(cs.target)
                     break
 
-    # 4. Post-placement validation: check for dangling wire endpoints
+    # 5. Post-placement validation: check for dangling wire endpoints
     if connect_specs:
         _validate_wire_endpoints(sch, pre_existing_wire_count)
 
-    # 5. Save
+    # 6. Save
     sch.save()
 
     print(f"\nComponent placed successfully: {sym_instance.lib_id}")
@@ -586,6 +670,18 @@ def main(argv=None):
     )
     parser.add_argument(
         "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    parser.add_argument(
+        "--project-name",
+        dest="project_name",
+        default="",
+        help="Project name for the instances block (auto-detected from .kicad_pro)",
+    )
+    parser.add_argument(
+        "--instance-path",
+        dest="instance_path",
+        default="",
+        help="Hierarchy path for instances block (auto-detected from schematic UUID)",
     )
     parser.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
