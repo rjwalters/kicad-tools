@@ -31,11 +31,18 @@ Example::
     gen.save("board_with_zones.kicad_pcb")
 """
 
-from .generator import ZoneConfig, ZoneGenerator, auto_create_zones_for_pour_nets, parse_power_nets
+from .generator import (
+    ZoneConfig,
+    ZoneGenerator,
+    ZoneOverlapWarning,
+    auto_create_zones_for_pour_nets,
+    parse_power_nets,
+)
 
 __all__ = [
-    "ZoneGenerator",
     "ZoneConfig",
+    "ZoneGenerator",
+    "ZoneOverlapWarning",
     "auto_create_zones_for_pour_nets",
     "parse_power_nets",
 ]

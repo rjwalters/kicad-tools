@@ -7,6 +7,7 @@ with automatic board outline detection and sensible defaults for power nets.
 
 from __future__ import annotations
 
+import sys
 import uuid as uuid_module
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,23 @@ from kicad_tools.sexp.builders import zone_node
 
 if TYPE_CHECKING:
     from kicad_tools.router.net_class import NetClass
+
+
+@dataclass
+class ZoneOverlapWarning:
+    """Warning about overlapping zones on the same layer.
+
+    Attributes:
+        new_net: Net name of the zone being added
+        existing_net: Net name of the existing zone that overlaps
+        layer: The shared copper layer
+        message: Human-readable warning message
+    """
+
+    new_net: str
+    existing_net: str
+    layer: str
+    message: str
 
 
 @dataclass
@@ -110,6 +128,7 @@ class ZoneGenerator:
         self._pcb = pcb
         self._doc = doc
         self._zones: list[GeneratedZone] = []
+        self._warnings: list[ZoneOverlapWarning] = []
         self._board_outline: list[tuple[float, float]] | None = None
         self._applied = False
 
@@ -194,6 +213,120 @@ class ZoneGenerator:
             raise ValueError(f"Net '{net_name}' not found in PCB")
         return net.number
 
+    @property
+    def warnings(self) -> list[ZoneOverlapWarning]:
+        """Overlap warnings generated during zone addition."""
+        return self._warnings
+
+    @staticmethod
+    def _boundaries_overlap(
+        boundary_a: list[tuple[float, float]],
+        boundary_b: list[tuple[float, float]],
+    ) -> bool:
+        """Check whether two boundary polygons overlap.
+
+        Uses bounding-box intersection as a conservative approximation.
+        Two polygons whose bounding boxes overlap are considered overlapping.
+        This is intentionally conservative -- it may report overlaps for
+        polygons that only share a bounding-box region but not actual area.
+        For the zone-overlap-warning use case, false positives are acceptable
+        while false negatives would hide real problems.
+
+        Returns:
+            True if the boundaries' bounding boxes overlap.
+        """
+        if not boundary_a or not boundary_b:
+            return False
+
+        a_xs = [p[0] for p in boundary_a]
+        a_ys = [p[1] for p in boundary_a]
+        b_xs = [p[0] for p in boundary_b]
+        b_ys = [p[1] for p in boundary_b]
+
+        # Axis-aligned bounding-box overlap test
+        return not (
+            max(a_xs) <= min(b_xs)
+            or max(b_xs) <= min(a_xs)
+            or max(a_ys) <= min(b_ys)
+            or max(b_ys) <= min(a_ys)
+        )
+
+    def _check_overlap(
+        self,
+        net: str,
+        layer: str,
+        priority: int,
+        boundary: list[tuple[float, float]],
+    ) -> list[ZoneOverlapWarning]:
+        """Check for overlapping zones on the same layer.
+
+        Checks both existing PCB zones and zones already queued in
+        this generator.
+
+        Returns:
+            List of overlap warnings (empty if no overlaps detected).
+        """
+        warnings: list[ZoneOverlapWarning] = []
+
+        # Check against existing zones in the PCB
+        for existing in self._pcb.zones:
+            if existing.layer != layer:
+                continue
+            if existing.net_name == net:
+                continue  # Same net on same layer is fine (e.g. re-run)
+
+            existing_boundary = existing.polygon
+            if self._boundaries_overlap(boundary, existing_boundary):
+                if priority <= existing.priority:
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The new zone will get zero copper because the existing zone "
+                        f"has equal or higher priority."
+                    )
+                else:
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The existing zone will get zero copper."
+                    )
+                warnings.append(ZoneOverlapWarning(
+                    new_net=net,
+                    existing_net=existing.net_name,
+                    layer=layer,
+                    message=msg,
+                ))
+
+        # Check against queued zones in this generator
+        for queued in self._zones:
+            if queued.config.layer != layer:
+                continue
+            if queued.config.net == net:
+                continue
+
+            if self._boundaries_overlap(boundary, queued.boundary):
+                if priority <= queued.config.priority:
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The new zone will get zero copper because the other zone "
+                        f"has equal or higher priority."
+                    )
+                else:
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The other zone will get zero copper."
+                    )
+                warnings.append(ZoneOverlapWarning(
+                    new_net=net,
+                    existing_net=queued.config.net,
+                    layer=layer,
+                    message=msg,
+                ))
+
+        return warnings
+
     def add_zone(
         self,
         net: str,
@@ -206,6 +339,9 @@ class ZoneGenerator:
         boundary: list[tuple[float, float]] | None = None,
     ) -> GeneratedZone:
         """Add a copper pour zone.
+
+        Checks for overlapping zones on the same layer and emits warnings
+        to stderr if conflicts are detected.
 
         Args:
             net: Net name (e.g., "GND", "+3.3V")
@@ -239,6 +375,12 @@ class ZoneGenerator:
 
         # Use board outline if no boundary specified
         actual_boundary = boundary if boundary is not None else self.board_outline
+
+        # Check for overlapping zones on the same layer
+        overlap_warnings = self._check_overlap(net, layer, priority, actual_boundary)
+        for warning in overlap_warnings:
+            self._warnings.append(warning)
+            print(f"WARNING: {warning.message}", file=sys.stderr)
 
         zone = GeneratedZone(
             config=config,
@@ -423,18 +565,83 @@ def parse_power_nets(spec: str) -> list[tuple[str, str]]:
     return result
 
 
+def _assign_layers_for_pour_nets(
+    copper_layer_count: int,
+    pour_nets: list[tuple[str, "NetClass"]],
+) -> list[tuple[str, str, int]]:
+    """Assign layers and priorities for pour nets based on board stackup.
+
+    For 2-layer boards:
+    - GROUND nets -> B.Cu, priority 1
+    - POWER nets  -> F.Cu, priority 0
+
+    For 4-layer boards:
+    - GROUND nets -> In1.Cu (dedicated ground plane), priority 1
+    - First POWER net  -> In2.Cu, priority 0
+    - Additional POWER nets -> F.Cu with descending priorities
+      so each successive power net gets a lower priority
+
+    Args:
+        copper_layer_count: Number of copper layers (2, 4, 6, etc.)
+        pour_nets: List of (net_name, NetClass) tuples
+
+    Returns:
+        List of (net_name, layer, priority) tuples
+    """
+    from kicad_tools.router.net_class import NetClass
+
+    ground_nets = [(n, c) for n, c in pour_nets if c == NetClass.GROUND]
+    power_nets = [(n, c) for n, c in pour_nets if c != NetClass.GROUND]
+
+    assignments: list[tuple[str, str, int]] = []
+
+    if copper_layer_count >= 4:
+        # 4+ layer board: use inner layers for power/ground planes
+        for net_name, _ in ground_nets:
+            assignments.append((net_name, "In1.Cu", 1))
+
+        if len(power_nets) == 1:
+            # Single power net gets its own inner layer
+            assignments.append((power_nets[0][0], "In2.Cu", 0))
+        else:
+            # Multiple power nets: first gets In2.Cu, rest go on F.Cu
+            # with decreasing priorities so they don't fully override each other.
+            # NOTE: Full-board overlapping zones on the same layer still produce
+            # zero-copper for lower-priority zones.  The overlap warning will
+            # fire, prompting the user to use smaller boundaries or `zones split`.
+            for i, (net_name, _) in enumerate(power_nets):
+                if i == 0:
+                    assignments.append((net_name, "In2.Cu", 0))
+                else:
+                    assignments.append((net_name, "F.Cu", i - 1))
+    else:
+        # 2-layer board
+        for net_name, _ in ground_nets:
+            assignments.append((net_name, "B.Cu", 1))
+
+        for net_name, _ in power_nets:
+            assignments.append((net_name, "F.Cu", 0))
+
+    return assignments
+
+
 def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
-    pour_nets: list[tuple[str, NetClass]],
+    pour_nets: list[tuple[str, "NetClass"]],
 ) -> int:
     """Create zones for power and ground nets on a PCB.
 
     Loads the PCB, creates zone definitions for each pour net, and saves
-    the modified PCB in place.
+    the modified PCB in place.  Layer assignment is stackup-aware:
 
     For 2-layer boards:
     - GROUND nets get a zone on B.Cu with priority 1
     - POWER nets get a zone on F.Cu with priority 0
+
+    For 4-layer boards:
+    - GROUND nets get a zone on In1.Cu with priority 1
+    - First POWER net gets a zone on In2.Cu with priority 0
+    - Additional POWER nets get zones on F.Cu
 
     Args:
         pcb_path: Path to .kicad_pcb file (modified in place)
@@ -444,18 +651,15 @@ def auto_create_zones_for_pour_nets(
     Returns:
         Number of zones created
     """
-    from kicad_tools.router.net_class import NetClass
-
     pcb_path = Path(pcb_path)
     gen = ZoneGenerator.from_pcb(pcb_path)
 
+    copper_layer_count = len(gen.pcb.copper_layers)
+    assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets)
+
     count = 0
-    for net_name, net_class in pour_nets:
-        if net_class == NetClass.GROUND:
-            gen.add_zone(net=net_name, layer="B.Cu", priority=1)
-        else:
-            # POWER nets go on F.Cu
-            gen.add_power_plane(net=net_name, layer="F.Cu", priority=0)
+    for net_name, layer, priority in assignments:
+        gen.add_zone(net=net_name, layer=layer, priority=priority)
         count += 1
 
     if count > 0:

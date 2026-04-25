@@ -2,8 +2,8 @@
 
 import pytest
 
-from kicad_tools.zones import ZoneConfig, ZoneGenerator, parse_power_nets
-from kicad_tools.zones.generator import GeneratedZone
+from kicad_tools.zones import ZoneConfig, ZoneGenerator, ZoneOverlapWarning, parse_power_nets
+from kicad_tools.zones.generator import GeneratedZone, _assign_layers_for_pour_nets
 
 
 class TestParsePowerNets:
@@ -329,3 +329,339 @@ class TestZoneGeneratorIntegration:
         )
 
         assert zone.boundary == custom_boundary
+
+
+class TestZoneOverlapDetection:
+    """Tests for overlap detection in ZoneGenerator.add_zone()."""
+
+    @pytest.fixture
+    def sample_pcb_path(self, tmp_path):
+        """Create a minimal valid PCB file for overlap testing."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "+5V")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_no_warning_different_layers(self, sample_pcb_path):
+        """No warning when zones are on different layers."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+
+        assert len(gen.warnings) == 0
+
+    def test_warning_same_layer_same_boundary(self, sample_pcb_path):
+        """Warning when two zones share the same layer and boundary."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+        gen.add_zone(net="+5V", layer="F.Cu", priority=0)
+
+        assert len(gen.warnings) == 1
+        w = gen.warnings[0]
+        assert w.new_net == "+5V"
+        assert w.existing_net == "+3.3V"
+        assert w.layer == "F.Cu"
+        assert "zero copper" in w.message
+
+    def test_warning_lower_priority_gets_zero_copper(self, sample_pcb_path):
+        """Warning identifies that lower-priority zone gets zero copper."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="GND", layer="F.Cu", priority=1)
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+
+        assert len(gen.warnings) == 1
+        w = gen.warnings[0]
+        assert "new zone will get zero copper" in w.message
+
+    def test_warning_higher_priority_overrides(self, sample_pcb_path):
+        """Warning identifies that higher-priority zone overrides existing."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+        gen.add_zone(net="GND", layer="F.Cu", priority=1)
+
+        assert len(gen.warnings) == 1
+        w = gen.warnings[0]
+        assert "other zone will get zero copper" in w.message
+
+    def test_no_warning_same_net_same_layer(self, sample_pcb_path):
+        """No warning for the same net on the same layer (idempotent re-add)."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+
+        assert len(gen.warnings) == 0
+
+    def test_no_warning_non_overlapping_boundaries(self, sample_pcb_path):
+        """No warning when custom boundaries don't overlap."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(
+            net="+3.3V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(0, 0), (20, 0), (20, 50), (0, 50)],
+        )
+        gen.add_zone(
+            net="+5V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(25, 0), (50, 0), (50, 50), (25, 50)],
+        )
+
+        assert len(gen.warnings) == 0
+
+    def test_warning_overlapping_custom_boundaries(self, sample_pcb_path):
+        """Warning when custom boundaries overlap on the same layer."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(
+            net="+3.3V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(0, 0), (30, 0), (30, 50), (0, 50)],
+        )
+        gen.add_zone(
+            net="+5V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(20, 0), (50, 0), (50, 50), (20, 50)],
+        )
+
+        assert len(gen.warnings) == 1
+
+    def test_warning_emitted_to_stderr(self, sample_pcb_path, capsys):
+        """Overlap warnings are printed to stderr."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+        gen.add_zone(net="+5V", layer="F.Cu", priority=0)
+
+        captured = capsys.readouterr()
+        assert "WARNING:" in captured.err
+        assert "zero copper" in captured.err
+
+
+class TestBoundariesOverlap:
+    """Tests for the static _boundaries_overlap method."""
+
+    def test_identical_boundaries(self):
+        """Identical boundaries overlap."""
+        b = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        assert ZoneGenerator._boundaries_overlap(b, b) is True
+
+    def test_disjoint_boundaries(self):
+        """Non-overlapping boundaries do not overlap."""
+        a = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        b = [(20, 0), (30, 0), (30, 10), (20, 10)]
+        assert ZoneGenerator._boundaries_overlap(a, b) is False
+
+    def test_adjacent_boundaries_no_overlap(self):
+        """Boundaries sharing an edge do not overlap (exclusive comparison)."""
+        a = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        b = [(10, 0), (20, 0), (20, 10), (10, 10)]
+        assert ZoneGenerator._boundaries_overlap(a, b) is False
+
+    def test_nested_boundaries(self):
+        """Smaller boundary inside larger one overlaps."""
+        outer = [(0, 0), (100, 0), (100, 100), (0, 100)]
+        inner = [(10, 10), (20, 10), (20, 20), (10, 20)]
+        assert ZoneGenerator._boundaries_overlap(outer, inner) is True
+
+    def test_empty_boundary(self):
+        """Empty boundary does not overlap."""
+        b = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        assert ZoneGenerator._boundaries_overlap([], b) is False
+        assert ZoneGenerator._boundaries_overlap(b, []) is False
+
+
+class TestAssignLayersForPourNets:
+    """Tests for _assign_layers_for_pour_nets layer assignment logic."""
+
+    def test_2_layer_ground_on_bcu(self):
+        """2-layer board: GND goes on B.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            2,
+            [("GND", NetClass.GROUND)],
+        )
+        assert result == [("GND", "B.Cu", 1)]
+
+    def test_2_layer_power_on_fcu(self):
+        """2-layer board: power nets go on F.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            2,
+            [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)],
+        )
+        assert ("GND", "B.Cu", 1) in result
+        assert ("+3.3V", "F.Cu", 0) in result
+
+    def test_4_layer_ground_on_in1cu(self):
+        """4-layer board: GND goes on In1.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GND", NetClass.GROUND)],
+        )
+        assert result == [("GND", "In1.Cu", 1)]
+
+    def test_4_layer_single_power_on_in2cu(self):
+        """4-layer board: single power net goes on In2.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("+3.3V", "In2.Cu", 0) in result
+
+    def test_4_layer_multiple_power_nets(self):
+        """4-layer board: multiple power nets distributed across layers."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+            ],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("+3.3V", "In2.Cu", 0) in result
+        assert ("+5V", "F.Cu", 0) in result
+
+    def test_4_layer_three_power_nets(self):
+        """4-layer board: three power nets -- first on In2.Cu, rest on F.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+                ("+1.8V", NetClass.POWER),
+            ],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("+3.3V", "In2.Cu", 0) in result
+        # Additional power nets go on F.Cu with increasing priority index
+        assert ("+5V", "F.Cu", 0) in result
+        assert ("+1.8V", "F.Cu", 1) in result
+
+
+class TestAutoCreateZones4Layer:
+    """Tests for auto_create_zones_for_pour_nets with 4-layer boards."""
+
+    @pytest.fixture
+    def four_layer_pcb_path(self, tmp_path):
+        """Create a 4-layer PCB file for testing."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "+5V")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "four_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_4_layer_assigns_inner_layers(self, four_layer_pcb_path):
+        """auto_create_zones assigns inner layers for 4-layer boards."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        count = auto_create_zones_for_pour_nets(
+            four_layer_pcb_path,
+            [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)],
+        )
+
+        assert count == 2
+
+        # Verify zones were saved correctly
+        pcb = PCB.load(str(four_layer_pcb_path))
+        zone_layers = {z.net_name: z.layer for z in pcb.zones}
+
+        assert zone_layers["GND"] == "In1.Cu"
+        assert zone_layers["+3.3V"] == "In2.Cu"
+
+    def test_4_layer_multiple_power_nets_warns(self, four_layer_pcb_path, capsys):
+        """auto_create_zones emits overlap warnings for multiple power on F.Cu."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        count = auto_create_zones_for_pour_nets(
+            four_layer_pcb_path,
+            [
+                ("GND", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+            ],
+        )
+
+        assert count == 3
+
+        # The two power nets should NOT overlap since first goes to In2.Cu
+        # and second goes to F.Cu -- no warning expected
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err

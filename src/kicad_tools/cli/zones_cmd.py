@@ -232,6 +232,12 @@ def _run_add(args) -> int:
         print(f"  Clearance:   {zone.config.clearance}mm")
         print(f"  Boundary:    {len(zone.boundary)} points")
 
+    # Surface overlap warnings
+    if gen.warnings:
+        print(f"\n{len(gen.warnings)} overlap warning(s):", file=sys.stderr)
+        for w in gen.warnings:
+            print(f"  WARNING: {w.message}", file=sys.stderr)
+
     if args.dry_run:
         if not quiet:
             print("\n--- Dry run - not saving ---")
@@ -372,6 +378,12 @@ def _run_batch(args) -> int:
         print("\nErrors:", file=sys.stderr)
         for err in errors:
             print(err, file=sys.stderr)
+
+    # Surface overlap warnings
+    if gen.warnings:
+        print(f"\n{len(gen.warnings)} overlap warning(s):", file=sys.stderr)
+        for w in gen.warnings:
+            print(f"  WARNING: {w.message}", file=sys.stderr)
 
     if args.dry_run:
         if not quiet:
