@@ -1398,7 +1398,8 @@ class TestSchValidateGlobalLabelDirections:
         assert "no receiver" in gl_issues[0].message
 
     def test_valid_output_input_mix(self, tmp_path: Path):
-        """One output and one input on the same net -- no issues."""
+        """One output and one input on the same net -- no driver/receiver issues,
+        but a shape-consistency warning is expected."""
         from kicad_tools.cli.sch_validate import check_global_label_directions
 
         parent_sch = self._make_schematic("""
@@ -1418,8 +1419,20 @@ class TestSchValidateGlobalLabelDirections:
         (tmp_path / "sub.kicad_sch").write_text(child_sch)
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
-        gl_issues = [i for i in issues if i.category == "global_label"]
-        assert len(gl_issues) == 0
+        driver_receiver_issues = [
+            i
+            for i in issues
+            if i.category == "global_label"
+            and ("no driver" in i.message or "no receiver" in i.message)
+        ]
+        assert len(driver_receiver_issues) == 0
+        # Shape-consistency warning IS expected since output != input
+        consistency_issues = [
+            i
+            for i in issues
+            if i.category == "global_label" and "inconsistent" in i.message
+        ]
+        assert len(consistency_issues) == 1
 
     def test_bidirectional_counts_as_both(self, tmp_path: Path):
         """All bidirectional -- counts as both driver and receiver."""
@@ -1516,6 +1529,130 @@ class TestSchValidateGlobalLabelDirections:
 
         result = validate_schematic(str(sch_file))
         assert "global_label_directions" in result.checks_run
+
+
+    def test_inconsistent_shapes_detected(self, tmp_path: Path):
+        """Same label with different shapes across sheets emits a warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SWCLK" (shape input) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "h1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SWCLK" (shape bidirectional) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "h2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [
+            i
+            for i in issues
+            if i.category == "global_label" and "inconsistent" in i.message
+        ]
+
+        assert len(gl_issues) == 1
+        assert gl_issues[0].severity == "warning"
+        assert "SWCLK" in gl_issues[0].message
+        assert "input" in gl_issues[0].message
+        assert "bidirectional" in gl_issues[0].message
+
+    def test_consistent_shapes_no_warning(self, tmp_path: Path):
+        """Same shape on all sheets should not emit a shape-consistency warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_D" (shape input) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "i1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_D" (shape input) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "i2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        consistency_issues = [
+            i
+            for i in issues
+            if i.category == "global_label" and "inconsistent" in i.message
+        ]
+        assert len(consistency_issues) == 0
+
+    def test_single_sheet_label_no_shape_warning(self, tmp_path: Path):
+        """A label on only one sheet should not emit a shape-consistency warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        sch = self._make_schematic("""
+          (global_label "LONELY" (shape output) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "j1"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        consistency_issues = [
+            i
+            for i in issues
+            if i.category == "global_label" and "inconsistent" in i.message
+        ]
+        assert len(consistency_issues) == 0
+
+    def test_multiple_shapes_across_three_sheets(self, tmp_path: Path):
+        """Inconsistent shapes across 3+ sheets lists all shapes and locations."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "MULTI" (shape input) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "k1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub1" (at 100 99 0))
+            (property "Sheetfile" "sub1.kicad_sch" (at 100 111 0)))
+          (sheet (at 200 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000003")
+            (property "Sheetname" "Sub2" (at 200 99 0))
+            (property "Sheetfile" "sub2.kicad_sch" (at 200 111 0)))
+        """)
+        sub1_sch = self._make_schematic("""
+          (global_label "MULTI" (shape bidirectional) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "k2"))
+        """)
+        sub2_sch = self._make_schematic("""
+          (global_label "MULTI" (shape passive) (at 50 60 0)
+            (effects (font (size 1.27 1.27))) (uuid "k3"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub1.kicad_sch").write_text(sub1_sch)
+        (tmp_path / "sub2.kicad_sch").write_text(sub2_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        consistency_issues = [
+            i
+            for i in issues
+            if i.category == "global_label" and "inconsistent" in i.message
+        ]
+
+        assert len(consistency_issues) == 1
+        msg = consistency_issues[0].message
+        assert "MULTI" in msg
+        assert "input" in msg
+        assert "bidirectional" in msg
+        assert "passive" in msg
 
 
 class TestSchValidateSheetParseFailure:
