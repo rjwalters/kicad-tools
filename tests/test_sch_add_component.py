@@ -870,7 +870,8 @@ class TestNoDanglingStubs:
 
 class TestRoundPos:
     def test_round_pos_basic(self):
-        assert _round_pos((1.005, 2.995)) == (1.0, 3.0)
+        # Default is 4 decimal places (0.1 um precision)
+        assert _round_pos((1.00506, 2.99996)) == (1.0051, 3.0)
 
     def test_round_pos_no_change_on_clean(self):
         assert _round_pos((100.33, 80.01)) == (100.33, 80.01)
@@ -881,8 +882,205 @@ class TestRoundPos:
         drifted_x = 100.33 + 3.81 * math.cos(math.radians(90))
         drifted_y = 80.01 + 3.81 * math.sin(math.radians(90))
         result = _round_pos((drifted_x, drifted_y))
-        assert result[0] == pytest.approx(100.33, abs=0.01)
-        assert result[1] == pytest.approx(83.82, abs=0.01)
+        assert result[0] == pytest.approx(100.33, abs=0.001)
+        assert result[1] == pytest.approx(83.82, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# Grid-aware snap: pin positions after rotation land on 1.27mm grid
+# ---------------------------------------------------------------------------
+
+
+class TestGridAwareSnap:
+    """Verify that get_pin_position grid-snaps rotated pin offsets."""
+
+    def test_90_degree_rotation_snaps_to_grid(self, tmp_path: Path):
+        """Pin at (0, -3.81) rotated 90 degrees should snap exactly."""
+        lib_sym = LibrarySymbol.from_sexp(
+            Schematic.load(_write_sch(tmp_path)).get_lib_symbol("Device:R")
+        )
+        pos = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=90
+        )
+        assert pos is not None
+        # Pin 1 is at (0, 3.81) in lib coords -> (0, -3.81) after Y-negate
+        # Rotated 90: x' = 0*cos90 - (-3.81)*sin90 = 3.81
+        #              y' = 0*sin90 + (-3.81)*cos90 = 0
+        # With grid snap: x = 100.33 + 3.81 = 104.14, y = 80.01 + 0 = 80.01
+        assert pos[0] == pytest.approx(104.14, abs=0.001)
+        assert pos[1] == pytest.approx(80.01, abs=0.001)
+
+    def test_non_standard_pin_offset_snaps(self, tmp_path: Path):
+        """A 3.81mm pin offset (3 x 1.27) should snap after 90 deg rotation."""
+        lib_sym = LibrarySymbol.from_sexp(
+            Schematic.load(_write_sch(tmp_path)).get_lib_symbol("Device:R")
+        )
+        # Verify pin 1 offset is 3.81 (non-standard = 3 x 1.27, not 2 x 2.54)
+        pin = lib_sym.get_pin("1")
+        assert pin is not None
+        assert abs(pin.position[1]) == pytest.approx(3.81, abs=0.01)
+
+        # After 90-degree rotation, the offset should still land on grid
+        pos = lib_sym.get_pin_position(
+            "1", instance_pos=(0.0, 0.0), instance_rot=90
+        )
+        assert pos is not None
+        # Check that each coordinate is a multiple of 1.27
+        assert pos[0] % 1.27 == pytest.approx(0.0, abs=0.001)
+        assert pos[1] % 1.27 == pytest.approx(0.0, abs=0.001)
+
+    def test_snap_opt_out(self, tmp_path: Path):
+        """snap_to_grid=False should return raw trig result."""
+        lib_sym = LibrarySymbol.from_sexp(
+            Schematic.load(_write_sch(tmp_path)).get_lib_symbol("Device:R")
+        )
+        pos_snapped = lib_sym.get_pin_position(
+            "1", instance_pos=(0.0, 0.0), instance_rot=90, snap_to_grid=True
+        )
+        pos_raw = lib_sym.get_pin_position(
+            "1", instance_pos=(0.0, 0.0), instance_rot=90, snap_to_grid=False
+        )
+        assert pos_snapped is not None
+        assert pos_raw is not None
+        # Snapped should be clean; raw may have tiny trig drift
+        assert pos_snapped[1] == 0.0
+        # Raw y should be very close to 0 but may not be exactly 0
+        assert abs(pos_raw[1]) < 1e-10
+
+
+class TestGridSnapWithWires:
+    """Wire endpoints must land on grid after rotation -- integration tests."""
+
+    def test_45_degree_rotation_no_dangling(self, tmp_path: Path):
+        """Non-axis rotation (45 deg) should not produce dangling stubs.
+
+        At 45 degrees, pin positions won't be on the 1.27mm grid, but
+        the wire start should exactly match the computed pin position
+        (no rounding error gap).
+        """
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "45",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym_sexp = sch.get_lib_symbol("Device:R")
+        lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        expected = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=45
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+    def test_30_degree_rotation_wire_matches_pin(self, tmp_path: Path):
+        """30-degree rotation: wire start must match computed pin position."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "30",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym = LibrarySymbol.from_sexp(sch.get_lib_symbol("Device:R"))
+        expected = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=30
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+    def test_60_degree_rotation_wire_matches_pin(self, tmp_path: Path):
+        """60-degree rotation: wire start must match computed pin position."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "60",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym = LibrarySymbol.from_sexp(sch.get_lib_symbol("Device:R"))
+        expected = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=60
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+
+class TestValidateAutoCorrection:
+    """_validate_wire_endpoints should auto-correct near-miss endpoints."""
+
+    def test_autocorrect_within_radius(self, tmp_path: Path):
+        """A wire endpoint with small drift should be auto-corrected."""
+        from kicad_tools.cli.sch_add_component import _validate_wire_endpoints
+        from kicad_tools.schema.wire import Wire
+
+        sch_path = _write_sch(tmp_path)
+        sch = Schematic.load(sch_path)
+
+        # Add a wire with a slightly drifted start point
+        # Existing wire goes (100, 50) -> (150, 50)
+        # We place a wire from (100.1, 50.0) to (100.1, 70.0)
+        # The start is 0.1mm from wire endpoint (100, 50) -- should be corrected
+        drift_wire = Wire(start=(100.1, 50.0), end=(100.1, 70.0))
+        sch.wires.append(drift_wire)
+        first_new = len(sch.wires) - 1
+
+        _validate_wire_endpoints(sch, first_new, correction_radius=0.5)
+
+        # After correction, wire start should be snapped to (100, 50)
+        assert sch.wires[first_new].start[0] == pytest.approx(100.0, abs=0.01)
+        assert sch.wires[first_new].start[1] == pytest.approx(50.0, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
