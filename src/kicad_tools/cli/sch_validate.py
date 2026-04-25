@@ -521,6 +521,29 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
                     )
                 )
 
+            # Check for shape consistency across sheets
+            if len(shapes) > 1:
+                shape_locations: dict[str, list[str]] = {}
+                for shape, sheet in entries:
+                    if shape not in shape_locations:
+                        shape_locations[shape] = []
+                    shape_locations[shape].append(sheet)
+                detail = "; ".join(
+                    f"{s} on {', '.join(sorted(set(locs)))}"
+                    for s, locs in sorted(shape_locations.items())
+                )
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="global_label",
+                        message=(
+                            f"Global label '{net_name}' has inconsistent "
+                            f"shapes: {detail}"
+                        ),
+                        location=", ".join(sheets),
+                    )
+                )
+
     except Exception as e:
         issues.append(
             ValidationIssue(
