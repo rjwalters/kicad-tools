@@ -3705,13 +3705,15 @@ class Autorouter:
         self._cleanup_stats = stats
         return stats
 
-    def to_sexp(self) -> str:
+    def to_sexp(self, *, skip_cleanup: bool = False) -> str:
         """Generate KiCad S-expressions for all routes.
 
         Automatically runs ``cleanup_artifacts()`` before emitting to
-        remove net-0 orphans and out-of-bounds segments.
+        remove net-0 orphans and out-of-bounds segments, unless
+        *skip_cleanup* is True.
         """
-        self.cleanup_artifacts()
+        if not skip_cleanup:
+            self.cleanup_artifacts()
         return "\n\t".join(route.to_sexp() for route in self.routes)
 
     def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:
