@@ -113,16 +113,14 @@ def _snap(value: float, grid: float = 1.27) -> float:
     return round(value / grid) * grid
 
 
-def _round_pos(pos: tuple[float, float], decimals: int = 2) -> tuple[float, float]:
+def _round_pos(pos: tuple[float, float], decimals: int = 4) -> tuple[float, float]:
     """Round a position to *decimals* decimal places.
 
-    This is used instead of ``_snap()`` for pin positions that are already
-    computed from a grid-snapped symbol origin.  The pin offsets in library
-    coordinates are exact multiples of 1.27 mm, so the only source of error
-    is floating-point drift from trig-based rotation.  Rounding to two
-    decimal places eliminates that drift without risk of jumping to a
-    different grid point (which ``_snap()`` can do for values near the
-    midpoint between two grid lines).
+    This is a lightweight cleanup for residual floating-point noise
+    after the grid-aware snap in ``get_pin_position()`` has done the
+    heavy lifting.  Four decimal places (0.1 um) is well below KiCad's
+    ERC tolerance while still eliminating IEEE-754 artefacts like
+    ``1.2699999999999998``.
     """
     return (round(pos[0], decimals), round(pos[1], decimals))
 
@@ -191,16 +189,17 @@ def _validate_wire_endpoints(
     sch: Schematic,
     first_new_wire_index: int,
     tolerance: float = 0.01,
+    correction_radius: float = 0.5,
 ) -> None:
-    """Warn about dangling endpoints on newly added wires.
+    """Check and auto-correct dangling endpoints on newly added wires.
 
     Iterates every endpoint of wires added after *first_new_wire_index*
     and checks that it coincides (within *tolerance* mm) with a pin,
     another wire endpoint/midpoint, or a junction.
 
-    This is a best-effort guard -- it emits warnings on stderr but does
-    not prevent saving, because the caller may intentionally create a
-    stub that will be connected later.
+    If an endpoint is dangling but a valid connection point exists within
+    *correction_radius* mm, the endpoint is snapped to that point.
+    Otherwise a warning is emitted on stderr.
     """
     all_wires = sch.wires
     new_wires = all_wires[first_new_wire_index:]
@@ -230,7 +229,8 @@ def _validate_wire_endpoints(
         connection_points.extend(pin_positions.values())
 
     for wire in new_wires:
-        for endpoint in (wire.start, wire.end):
+        for attr in ("start", "end"):
+            endpoint = getattr(wire, attr)
             # An endpoint is valid if it coincides with at least TWO
             # connection points (itself counted once as a wire endpoint,
             # plus at least one other element).
@@ -240,7 +240,31 @@ def _validate_wire_endpoints(
                 if abs(cp[0] - endpoint[0]) < tolerance
                 and abs(cp[1] - endpoint[1]) < tolerance
             )
-            if matches < 2:
+            if matches >= 2:
+                continue
+
+            # Try to auto-correct: find the nearest connection point
+            # within correction_radius (excluding the endpoint itself).
+            best_cp = None
+            best_dist = correction_radius
+            for cp in connection_points:
+                dist = ((cp[0] - endpoint[0]) ** 2 + (cp[1] - endpoint[1]) ** 2) ** 0.5
+                if dist < tolerance:
+                    continue  # Skip the endpoint itself
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cp = cp
+
+            if best_cp is not None:
+                print(
+                    f"Auto-corrected wire endpoint "
+                    f"({endpoint[0]:.4f}, {endpoint[1]:.4f}) -> "
+                    f"({best_cp[0]:.4f}, {best_cp[1]:.4f}) "
+                    f"(drift: {best_dist:.4f} mm)",
+                    file=sys.stderr,
+                )
+                setattr(wire, attr, best_cp)
+            else:
                 print(
                     f"Warning: wire endpoint ({endpoint[0]:.2f}, {endpoint[1]:.2f}) "
                     "may be dangling (not connected to any pin, wire, or junction)",

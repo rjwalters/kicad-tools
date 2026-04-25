@@ -419,6 +419,28 @@ class LibraryPin:
         return SExp(name="pin", children=children)
 
 
+KICAD_GRID = 1.27  # mm -- standard KiCad schematic grid
+
+
+def _snap_to_kicad_grid(
+    value: float,
+    grid: float = KICAD_GRID,
+    tolerance: float = 0.2,
+) -> float:
+    """Snap *value* to the nearest multiple of *grid* if within *tolerance*.
+
+    KiCad library pin offsets are exact multiples of 1.27 mm.  After
+    rotation by ``sin``/``cos`` the result drifts by a tiny amount (e.g.
+    ``3.81 * cos(90deg) = 4.66e-16`` instead of ``0``).  This helper
+    snaps to the grid when the residual is small, leaving values that
+    are genuinely off-grid untouched.
+    """
+    nearest = round(value / grid) * grid
+    if abs(value - nearest) <= tolerance:
+        return nearest
+    return value
+
+
 @dataclass
 class LibrarySymbol:
     """
@@ -456,6 +478,7 @@ class LibrarySymbol:
         instance_pos: tuple[float, float],
         instance_rot: float = 0,
         mirror: str = "",
+        snap_to_grid: bool = True,
     ) -> tuple[float, float] | None:
         """
         Calculate the actual schematic position of a pin.
@@ -465,6 +488,9 @@ class LibrarySymbol:
             instance_pos: The symbol instance position in schematic
             instance_rot: The symbol instance rotation in degrees
             mirror: Mirror mode ("", "x", "y")
+            snap_to_grid: If True, snap rotated pin offsets to the nearest
+                1.27mm grid point when within tolerance.  This eliminates
+                floating-point drift from trig-based rotation.
 
         Returns:
             (x, y) position in schematic coordinates, or None if pin not found
@@ -492,6 +518,17 @@ class LibrarySymbol:
             sin_a = math.sin(angle_rad)
             x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
 
+        # Snap rotated offset to nearest 1.27mm grid point when close.
+        # Pin offsets in library coordinates are exact multiples of 1.27mm.
+        # Axis-aligned rotations (0/90/180/270) should preserve this, but
+        # floating-point trig introduces drift (e.g. cos(90deg) ~ 6e-17
+        # instead of 0).  Snap each offset coordinate to the nearest
+        # multiple of 1.27mm if within 0.2mm -- this eliminates trig drift
+        # without affecting genuinely non-grid positions.
+        if snap_to_grid:
+            x = _snap_to_kicad_grid(x)
+            y = _snap_to_kicad_grid(y)
+
         # Apply translation
         return (instance_pos[0] + x, instance_pos[1] + y)
 
@@ -500,6 +537,7 @@ class LibrarySymbol:
         instance_pos: tuple[float, float],
         instance_rot: float = 0,
         mirror: str = "",
+        snap_to_grid: bool = True,
     ) -> dict[str, tuple[float, float]]:
         """
         Get all pin positions for a symbol instance.
@@ -509,7 +547,10 @@ class LibrarySymbol:
         """
         positions = {}
         for pin in self.pins:
-            pos = self.get_pin_position(pin.number, instance_pos, instance_rot, mirror)
+            pos = self.get_pin_position(
+                pin.number, instance_pos, instance_rot, mirror,
+                snap_to_grid=snap_to_grid,
+            )
             if pos:
                 positions[pin.number] = pos
         return positions
