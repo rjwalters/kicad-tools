@@ -16,11 +16,13 @@ from kicad_tools.cli.sch_add_component import (
     _is_power_symbol,
     _point_on_wire_midpoint,
     _point_on_wire_segment,
+    _round_pos,
     _snap,
     main as add_component_main,
     parse_connect,
     run_add_component,
 )
+from kicad_tools.schema.library import LibrarySymbol
 from kicad_tools.cli.sch_add_junction import main as add_junction_main
 from kicad_tools.cli.sch_add_wire import main as add_wire_main
 from kicad_tools.schema import Schematic
@@ -574,6 +576,378 @@ class TestJunctionAtEndpoint:
             for j in sch.junctions
         )
         assert found, f"Expected junction near (100.33, 49.53), got {sch.junctions}"
+
+
+# ---------------------------------------------------------------------------
+# Wire endpoint alignment -- pin positions must not be double-snapped
+# ---------------------------------------------------------------------------
+
+
+class TestWireEndpointAlignment:
+    """Verify that wire start points exactly match computed pin positions.
+
+    This is the core regression test for issue #2047: _snap() applied to pin
+    positions that were already derived from a grid-snapped symbol origin can
+    shift coordinates to the wrong grid point, producing dangling micro-stubs.
+    """
+
+    def test_pin_position_no_double_snap(self, tmp_path: Path):
+        """Wire start at pin 1 must equal the computed pin position (no _snap)."""
+        sch_path = _write_sch(tmp_path)
+        # Place at a grid-aligned position and connect pin 1
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Get library symbol to compute expected pin position
+        lib_sym_sexp = sch.get_lib_symbol("Device:R")
+        assert lib_sym_sexp is not None
+        lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        expected_pin1 = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=0
+        )
+        assert expected_pin1 is not None
+        expected_pin1 = _round_pos(expected_pin1)
+
+        # Find the newly added wire (not the pre-existing one from 100,50 to 150,50)
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        wire = new_wires[0]
+
+        # The wire start must exactly match the pin position
+        assert wire.start[0] == pytest.approx(expected_pin1[0], abs=0.01)
+        assert wire.start[1] == pytest.approx(expected_pin1[1], abs=0.01)
+
+    def test_rotated_symbol_pin_alignment(self, tmp_path: Path):
+        """Wire endpoints for a 90-degree rotated symbol should still align."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "90",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym_sexp = sch.get_lib_symbol("Device:R")
+        lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        expected = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=90
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+    def test_180_rotation_pin_alignment(self, tmp_path: Path):
+        """Wire endpoints for a 180-degree rotation should align."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "180",
+            "--connect", "2:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym_sexp = sch.get_lib_symbol("Device:R")
+        lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        expected = lib_sym.get_pin_position(
+            "2", instance_pos=(100.33, 80.01), instance_rot=180
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+    def test_270_rotation_pin_alignment(self, tmp_path: Path):
+        """Wire endpoints for a 270-degree rotation should align."""
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+            "--rotation", "270",
+            "--connect", "1:120.65,80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        lib_sym_sexp = sch.get_lib_symbol("Device:R")
+        lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        expected = lib_sym.get_pin_position(
+            "1", instance_pos=(100.33, 80.01), instance_rot=270
+        )
+        expected = _round_pos(expected)
+
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+            )
+        ]
+        assert len(new_wires) == 1
+        assert new_wires[0].start[0] == pytest.approx(expected[0], abs=0.01)
+        assert new_wires[0].start[1] == pytest.approx(expected[1], abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Wire target snaps to existing connection points
+# ---------------------------------------------------------------------------
+
+
+class TestTargetSnapsToExistingConnections:
+    """Verify that --connect targets prefer existing connection points."""
+
+    def test_target_snaps_to_existing_wire_endpoint(self, tmp_path: Path):
+        """Target near an existing wire endpoint should use exact endpoint coords."""
+        sch_path = _write_sch(tmp_path)
+        # Existing wire: (100, 50) -> (150, 50)
+        # Target slightly off the endpoint: (100.05, 50.05) should snap to (100, 50)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "40.64",
+            "--connect", "2:100.05,50.05",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        new_wires = [
+            w for w in sch.wires
+            if not (
+                abs(w.start[0] - 100) < 0.5 and abs(w.start[1] - 50) < 0.5
+                and abs(w.end[0] - 150) < 0.5 and abs(w.end[1] - 50) < 0.5
+            )
+        ]
+        assert len(new_wires) >= 1
+        # The wire target (end) should be at exactly (100, 50), not
+        # whatever _snap(100.05) would produce
+        target_wire = new_wires[0]
+        assert target_wire.end[0] == pytest.approx(100.0, abs=0.01)
+        assert target_wire.end[1] == pytest.approx(50.0, abs=0.01)
+
+    def test_target_far_from_connections_falls_back_to_grid(self, tmp_path: Path):
+        """Target far from any existing connection should grid-snap as before."""
+        sch_path = _write_sch(tmp_path)
+        # Target (200, 200) is far from the existing wire (100,50)-(150,50)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "200.66", "190.50",
+            "--connect", "1:200,200",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        new_wires = [
+            w for w in sch.wires
+            if abs(w.end[0] - _snap(200)) < 0.5
+            and abs(w.end[1] - _snap(200)) < 0.5
+        ]
+        assert len(new_wires) >= 1
+
+
+# ---------------------------------------------------------------------------
+# No dangling stubs after add-component --connect
+# ---------------------------------------------------------------------------
+
+
+class TestNoDanglingStubs:
+    """Every wire endpoint should connect to a pin, wire, junction, or label."""
+
+    def test_no_dangling_after_connect(self, tmp_path: Path):
+        """After add-component --connect, every *newly added* wire endpoint
+        must be connected to a pin, another wire, junction, or label."""
+        sch_path = _write_sch(tmp_path)
+        sch_before = Schematic.load(sch_path)
+        original_wire_count = len(sch_before.wires)
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "40.64",
+            "--connect", "2:100.33,49.53",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Collect all connection points
+        conn_points: list[tuple[float, float]] = []
+        for w in sch.wires:
+            conn_points.append(w.start)
+            conn_points.append(w.end)
+        for j in sch.junctions:
+            conn_points.append(j.position)
+        for sym in sch.symbols:
+            lib_sym_sexp = sch.get_lib_symbol(sym.lib_id)
+            if lib_sym_sexp:
+                lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+                for pos in lib_sym.get_all_pin_positions(
+                    instance_pos=sym.position,
+                    instance_rot=sym.rotation,
+                    mirror=sym.mirror,
+                ).values():
+                    conn_points.append(pos)
+
+        # Only check the newly added wires (skip pre-existing ones that
+        # may legitimately have open endpoints in the test fixture).
+        new_wires = sch.wires[original_wire_count:]
+        assert len(new_wires) >= 1, "Expected at least one new wire"
+
+        tolerance = 0.05
+        for w in new_wires:
+            for ep in (w.start, w.end):
+                matches = sum(
+                    1
+                    for cp in conn_points
+                    if abs(cp[0] - ep[0]) < tolerance
+                    and abs(cp[1] - ep[1]) < tolerance
+                )
+                assert matches >= 2, (
+                    f"Dangling endpoint at ({ep[0]:.2f}, {ep[1]:.2f}) "
+                    f"-- only {matches} coincident connection point(s)"
+                )
+
+
+# ---------------------------------------------------------------------------
+# _round_pos utility
+# ---------------------------------------------------------------------------
+
+
+class TestRoundPos:
+    def test_round_pos_basic(self):
+        assert _round_pos((1.005, 2.995)) == (1.0, 3.0)
+
+    def test_round_pos_no_change_on_clean(self):
+        assert _round_pos((100.33, 80.01)) == (100.33, 80.01)
+
+    def test_round_pos_eliminates_float_drift(self):
+        # Simulate trig drift: cos(90 deg) should be 0 but may be ~6e-17
+        import math
+        drifted_x = 100.33 + 3.81 * math.cos(math.radians(90))
+        drifted_y = 80.01 + 3.81 * math.sin(math.radians(90))
+        result = _round_pos((drifted_x, drifted_y))
+        assert result[0] == pytest.approx(100.33, abs=0.01)
+        assert result[1] == pytest.approx(83.82, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# find_nearest_connection_point
+# ---------------------------------------------------------------------------
+
+
+class TestFindNearestConnectionPoint:
+    def test_finds_wire_endpoint(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        sch = Schematic.load(sch_path)
+        # Query near wire start (100, 50)
+        result = sch.find_nearest_connection_point((100.1, 50.1))
+        assert result is not None
+        assert result[0] == pytest.approx(100.0, abs=0.01)
+        assert result[1] == pytest.approx(50.0, abs=0.01)
+
+    def test_finds_wire_end(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        sch = Schematic.load(sch_path)
+        result = sch.find_nearest_connection_point((149.9, 49.9))
+        assert result is not None
+        assert result[0] == pytest.approx(150.0, abs=0.01)
+        assert result[1] == pytest.approx(50.0, abs=0.01)
+
+    def test_returns_none_when_nothing_nearby(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        sch = Schematic.load(sch_path)
+        result = sch.find_nearest_connection_point((500.0, 500.0))
+        assert result is None
+
+    def test_prefers_closest(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        sch = Schematic.load(sch_path)
+        # Query equidistant from start (100,50) and end (150,50)
+        # but slightly closer to end
+        result = sch.find_nearest_connection_point((149.0, 50.0))
+        assert result is not None
+        assert result[0] == pytest.approx(150.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Regression: placement without --connect unchanged
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementOnlyUnchanged:
+    def test_placement_only_adds_no_wires(self, tmp_path: Path):
+        """add-component without --connect must not create extra wires."""
+        sch_path = _write_sch(tmp_path)
+        sch_before = Schematic.load(sch_path)
+        original_wire_count = len(sch_before.wires)
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        assert len(sch.wires) == original_wire_count
 
 
 # ---------------------------------------------------------------------------

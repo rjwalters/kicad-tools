@@ -113,6 +113,20 @@ def _snap(value: float, grid: float = 1.27) -> float:
     return round(value / grid) * grid
 
 
+def _round_pos(pos: tuple[float, float], decimals: int = 2) -> tuple[float, float]:
+    """Round a position to *decimals* decimal places.
+
+    This is used instead of ``_snap()`` for pin positions that are already
+    computed from a grid-snapped symbol origin.  The pin offsets in library
+    coordinates are exact multiples of 1.27 mm, so the only source of error
+    is floating-point drift from trig-based rotation.  Rounding to two
+    decimal places eliminates that drift without risk of jumping to a
+    different grid point (which ``_snap()`` can do for values near the
+    midpoint between two grid lines).
+    """
+    return (round(pos[0], decimals), round(pos[1], decimals))
+
+
 def _point_on_wire_midpoint(
     point: tuple[float, float],
     wire_start: tuple[float, float],
@@ -171,6 +185,67 @@ def _point_on_wire_segment(
 
     dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
     return dist < tolerance
+
+
+def _validate_wire_endpoints(
+    sch: Schematic,
+    first_new_wire_index: int,
+    tolerance: float = 0.01,
+) -> None:
+    """Warn about dangling endpoints on newly added wires.
+
+    Iterates every endpoint of wires added after *first_new_wire_index*
+    and checks that it coincides (within *tolerance* mm) with a pin,
+    another wire endpoint/midpoint, or a junction.
+
+    This is a best-effort guard -- it emits warnings on stderr but does
+    not prevent saving, because the caller may intentionally create a
+    stub that will be connected later.
+    """
+    all_wires = sch.wires
+    new_wires = all_wires[first_new_wire_index:]
+    if not new_wires:
+        return
+
+    # Collect all known connection points: wire endpoints, junction
+    # positions, pin positions of placed symbols.
+    connection_points: list[tuple[float, float]] = []
+    for wire in all_wires:
+        connection_points.append(wire.start)
+        connection_points.append(wire.end)
+    for junc in sch.junctions:
+        connection_points.append(junc.position)
+
+    # Pin positions of all symbols
+    for sym in sch.symbols:
+        lib_sym_sexp = sch.get_lib_symbol(sym.lib_id)
+        if lib_sym_sexp is None:
+            continue
+        lib_sym_obj = LibrarySymbol.from_sexp(lib_sym_sexp)
+        pin_positions = lib_sym_obj.get_all_pin_positions(
+            instance_pos=sym.position,
+            instance_rot=sym.rotation,
+            mirror=sym.mirror,
+        )
+        connection_points.extend(pin_positions.values())
+
+    for wire in new_wires:
+        for endpoint in (wire.start, wire.end):
+            # An endpoint is valid if it coincides with at least TWO
+            # connection points (itself counted once as a wire endpoint,
+            # plus at least one other element).
+            matches = sum(
+                1
+                for cp in connection_points
+                if abs(cp[0] - endpoint[0]) < tolerance
+                and abs(cp[1] - endpoint[1]) < tolerance
+            )
+            if matches < 2:
+                print(
+                    f"Warning: wire endpoint ({endpoint[0]:.2f}, {endpoint[1]:.2f}) "
+                    "may be dangling (not connected to any pin, wire, or junction)",
+                    file=sys.stderr,
+                )
 
 
 def run_add_component(args) -> int:
@@ -282,10 +357,17 @@ def run_add_component(args) -> int:
             except ValueError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
-            # Snap connect target to grid
+            # Try to snap the target to an existing connection point
+            # (wire endpoint, junction, pin) within a 2 mm radius.
+            # If nothing is nearby, fall back to grid snap.
+            nearby = sch.find_nearest_connection_point(cs.target, radius=2.0)
+            if nearby is not None:
+                target = nearby
+            else:
+                target = (_snap(cs.target[0]), _snap(cs.target[1]))
             cs = ConnectSpec(
                 pin_number=cs.pin_number,
-                target=(_snap(cs.target[0]), _snap(cs.target[1])),
+                target=target,
             )
             connect_specs.append(cs)
 
@@ -322,8 +404,11 @@ def run_add_component(args) -> int:
                 return 1
 
             pin_pos = pin_positions[cs.pin_number]
-            # Snap pin position too
-            pin_pos = (_snap(pin_pos[0]), _snap(pin_pos[1]))
+            # Round to eliminate floating-point drift from rotation
+            # transforms.  Do NOT use _snap() here -- the position is
+            # already derived from a grid-snapped origin and applying
+            # _snap() again can shift to the wrong grid point.
+            pin_pos = _round_pos(pin_pos)
 
             planned.append(
                 PlannedAction(
@@ -404,7 +489,7 @@ def run_add_component(args) -> int:
             if pin_pos is None:
                 continue
 
-            pin_pos = (_snap(pin_pos[0]), _snap(pin_pos[1]))
+            pin_pos = _round_pos(pin_pos)
 
             # Skip duplicate: don't add a wire if start == end
             if (
@@ -421,7 +506,11 @@ def run_add_component(args) -> int:
                     sch.add_junction(cs.target)
                     break
 
-    # 4. Save
+    # 4. Post-placement validation: check for dangling wire endpoints
+    if connect_specs:
+        _validate_wire_endpoints(sch, pre_existing_wire_count)
+
+    # 5. Save
     sch.save()
 
     print(f"\nComponent placed successfully: {sym_instance.lib_id}")
