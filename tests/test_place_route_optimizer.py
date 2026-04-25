@@ -1116,3 +1116,132 @@ class TestFixDrcViolationsIntegration:
         assert drc_call_count == 2
         # The repairer was called once
         mock_repairer.repair_from_report.assert_called_once()
+
+
+# =============================================================================
+# Cooperative cancellation tests
+# =============================================================================
+
+
+class TestCooperativeCancellation:
+    """Tests for cancel_flag in PlaceRouteOptimizer.optimize()."""
+
+    def test_cancel_flag_stops_loop(self, tmp_path):
+        """Setting cancel_flag causes optimize() to return partial results."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Cancel immediately on first check
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+        )
+
+        result = optimizer.optimize(
+            max_iterations=100,
+            cancel_flag=lambda: True,
+        )
+
+        assert result.success is False
+        assert "Cancelled" in result.message
+        assert result.iterations == 0
+
+    def test_cancel_flag_not_set_runs_normally(self, tmp_path):
+        """When cancel_flag always returns False, optimization runs normally."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(
+            max_iterations=5,
+            cancel_flag=lambda: False,
+        )
+
+        assert result.success is True
+
+
+# =============================================================================
+# Periodic checkpoint tests
+# =============================================================================
+
+
+class TestPeriodicCheckpoint:
+    """Tests for checkpoint_interval in PlaceRouteOptimizer.optimize()."""
+
+    def test_checkpoint_file_created(self, tmp_path):
+        """Checkpoint file is created during optimization."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+        checkpoint_path = pcb_path.with_suffix(".checkpoint.kicad_pcb")
+
+        # DRC checker that always fails, forcing retry iterations.
+        # The router succeeds (all nets routed) so we reach the DRC/checkpoint code.
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        drc_results = MagicMock()
+        drc_results.passed = False
+        drc_results.errors = [MagicMock()]
+        drc_results.warnings = []
+        drc_results.violations = []
+
+        mock_checker = MagicMock()
+        mock_checker.check_all.return_value = drc_results
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        optimizer.optimize(
+            max_iterations=3,
+            checkpoint_interval=1,
+        )
+
+        assert checkpoint_path.exists()
+        content = checkpoint_path.read_text()
+        assert "kicad_pcb" in content
+
+    def test_no_checkpoint_when_interval_zero(self, tmp_path):
+        """No checkpoint file is created when checkpoint_interval is 0."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+        checkpoint_path = pcb_path.with_suffix(".checkpoint.kicad_pcb")
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        optimizer.optimize(max_iterations=3, checkpoint_interval=0)
+
+        assert not checkpoint_path.exists()

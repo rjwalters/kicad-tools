@@ -244,12 +244,16 @@ class OptimizationWorkflow:
     def run(
         self,
         callback: Callable[[int, float], None] | None = None,
+        cancel_flag: Callable[[], bool] | None = None,
     ) -> OptimizationResult:
         """
         Run the placement optimization.
 
         Args:
             callback: Optional progress callback(iteration, energy/fitness).
+            cancel_flag: Optional callable returning True when cancellation
+                is requested. Threaded through to the underlying optimizer
+                so that the loop exits early on interrupt.
 
         Returns:
             OptimizationResult with metrics and status.
@@ -260,7 +264,7 @@ class OptimizationWorkflow:
         strategy = self.config.strategy
 
         if strategy == "force-directed":
-            return self._run_force_directed(callback)
+            return self._run_force_directed(callback, cancel_flag=cancel_flag)
         elif strategy == "evolutionary":
             return self._run_evolutionary(callback)
         elif strategy == "hybrid":
@@ -275,6 +279,7 @@ class OptimizationWorkflow:
     def _run_force_directed(
         self,
         callback: Callable[[int, float], None] | None = None,
+        cancel_flag: Callable[[], bool] | None = None,
     ) -> OptimizationResult:
         """Run force-directed (physics-based) optimization."""
         from kicad_tools.optim import PlacementConfig, PlacementOptimizer, add_keepout_zones
@@ -308,6 +313,7 @@ class OptimizationWorkflow:
         iterations_run = optimizer.run(
             iterations=self.config.iterations,
             callback=callback,
+            cancel_flag=cancel_flag,
         )
 
         # Snap to grid

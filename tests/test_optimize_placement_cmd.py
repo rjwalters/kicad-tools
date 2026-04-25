@@ -540,3 +540,120 @@ class TestOptimizationConvergence:
         best_vec, best_score = strategy.best()
         # The optimizer should find a score no worse than the initial worst population member
         assert best_score <= max(scores) + 1e-6  # Allow tiny floating point slack
+
+
+# ---------------------------------------------------------------------------
+# Interrupt handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptHandling:
+    """Tests for SIGINT/SIGTERM handler and atomic write."""
+
+    def test_signal_handler_is_installed(self, tmp_pcb, tmp_path, monkeypatch):
+        """Verify that SIGINT/SIGTERM handlers are installed during optimization."""
+        import signal as sig
+
+        installed_signals: list[int] = []
+        original_signal = sig.signal
+
+        def spy_signal(signum, handler):
+            installed_signals.append(signum)
+            return original_signal(signum, handler)
+
+        monkeypatch.setattr(sig, "signal", spy_signal)
+
+        output = tmp_path / "out.kicad_pcb"
+        run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=1,
+            output_path=str(output),
+            quiet=True,
+        )
+        assert sig.SIGINT in installed_signals
+        assert sig.SIGTERM in installed_signals
+
+    def test_keyboard_interrupt_writes_output_and_returns_2(self, tmp_pcb, tmp_path, monkeypatch):
+        """When KeyboardInterrupt fires, best placement is saved and exit code is 2."""
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        call_count = 0
+        original_suggest = None
+
+        # Monkeypatch CMAESStrategy.suggest to raise KeyboardInterrupt after 1 call
+        from kicad_tools.placement.cmaes_strategy import CMAESStrategy
+
+        original_suggest = CMAESStrategy.suggest
+
+        def interrupt_on_second_suggest(self, n):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise KeyboardInterrupt()
+            return original_suggest(self, n)
+
+        monkeypatch.setattr(CMAESStrategy, "suggest", interrupt_on_second_suggest)
+
+        output = tmp_path / "interrupted_output.kicad_pcb"
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=100,
+            output_path=str(output),
+            quiet=True,
+        )
+        assert result == 2
+        assert output.exists()
+        content = output.read_text()
+        assert "kicad_pcb" in content
+
+    def test_atomic_write_prevents_corruption(self, tmp_pcb, tmp_path):
+        """Atomic write creates output even if process is killed between steps."""
+        from kicad_tools.cli.optimize_placement_cmd import (
+            _write_placements_to_pcb_atomic,
+        )
+
+        components, nets, board, rules = _read_board_data(str(tmp_pcb))
+        seed = _generate_seed("random", components, nets, board)
+        output = tmp_path / "atomic_output.kicad_pcb"
+
+        _write_placements_to_pcb_atomic(str(tmp_pcb), str(output), seed, components)
+
+        assert output.exists()
+        content = output.read_text()
+        assert "kicad_pcb" in content
+
+    def test_interrupt_state_tracks_best_vector(self, tmp_pcb, tmp_path, monkeypatch):
+        """Verify _interrupt_state['best_vector'] is updated during optimization."""
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        observed_vectors: list = []
+
+        from kicad_tools.placement.cmaes_strategy import CMAESStrategy
+
+        original_observe = CMAESStrategy.observe
+
+        def capture_observe(self, candidates, scores):
+            result = original_observe(self, candidates, scores)
+            best_vec = mod._interrupt_state.get("best_vector")
+            if best_vec is not None:
+                observed_vectors.append(True)
+            return result
+
+        monkeypatch.setattr(CMAESStrategy, "observe", capture_observe)
+
+        output = tmp_path / "out.kicad_pcb"
+        run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=3,
+            output_path=str(output),
+            quiet=True,
+        )
+        # After 3 iterations, best_vector should have been set multiple times
+        assert len(observed_vectors) >= 3
+
+
+# Import helpers needed by the new tests
+from kicad_tools.cli.optimize_placement_cmd import (
+    _read_board_data,
+    _write_placements_to_pcb_atomic,
+)

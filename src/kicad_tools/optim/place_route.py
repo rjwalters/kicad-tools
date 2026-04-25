@@ -19,6 +19,10 @@ Example:
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -304,6 +308,8 @@ class PlaceRouteOptimizer:
         max_iterations: int = 10,
         allow_placement_changes: bool = True,
         skip_drc: bool = False,
+        cancel_flag: Callable[[], bool] | None = None,
+        checkpoint_interval: int = 0,
     ) -> OptimizationResult:
         """Run the optimization loop.
 
@@ -313,6 +319,12 @@ class PlaceRouteOptimizer:
             max_iterations: Maximum iterations before giving up
             allow_placement_changes: Whether to modify component placements
             skip_drc: Skip DRC checking (useful for faster iteration)
+            cancel_flag: Optional callable returning True when cancellation
+                is requested. Checked at the start of each iteration.
+            checkpoint_interval: Save a checkpoint copy of the PCB every N
+                iterations. 0 (default) disables periodic checkpoints.
+                Checkpoint files are written atomically (temp + rename) to
+                prevent corruption on hard kill.
 
         Returns:
             OptimizationResult with final state and metrics
@@ -335,6 +347,15 @@ class PlaceRouteOptimizer:
             print(f"  DRC enabled: {not skip_drc and self.drc_checker_factory is not None}")
 
         for iteration in range(max_iterations):
+            # Cooperative cancellation check
+            if cancel_flag is not None and cancel_flag():
+                return OptimizationResult(
+                    success=False,
+                    pcb_path=self.pcb_path,
+                    routes=self._current_routes,
+                    iterations=iteration,
+                    message="Cancelled via cancel_flag",
+                )
             if self.verbose:
                 print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
 
@@ -389,6 +410,10 @@ class PlaceRouteOptimizer:
                         message=f"Could not route {len(failed_nets)} nets (placement locked)",
                     )
 
+            # Periodic checkpoint save (atomic write)
+            if checkpoint_interval > 0 and (iteration + 1) % checkpoint_interval == 0:
+                self._save_checkpoint()
+
             # Phase 3: DRC check
             if not skip_drc and self.drc_checker_factory is not None:
                 drc_results = self._run_drc_phase()
@@ -434,6 +459,33 @@ class PlaceRouteOptimizer:
             iterations=max_iterations,
             message=f"Max iterations ({max_iterations}) exceeded",
         )
+
+    def _save_checkpoint(self) -> None:
+        """Save a checkpoint copy of the PCB using atomic write.
+
+        Writes to a temp file in the same directory and renames, so a
+        hard kill during the write cannot corrupt the checkpoint.
+        """
+        checkpoint_path = self.pcb_path.with_suffix(".checkpoint.kicad_pcb")
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.pcb_path.parent),
+                prefix=".checkpoint_",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            shutil.copy2(str(self.pcb_path), tmp_path)
+            Path(tmp_path).replace(checkpoint_path)
+            if self.verbose:
+                print(f"  Checkpoint saved: {checkpoint_path}")
+        except Exception as e:
+            if self.verbose:
+                print(f"  Warning: checkpoint save failed: {e}")
+            # Clean up temp file if it exists
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except (OSError, UnboundLocalError):
+                pass
 
     def _run_placement_phase(self) -> list[Conflict]:
         """Run placement conflict detection.
