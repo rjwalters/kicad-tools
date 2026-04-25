@@ -674,6 +674,59 @@ class Schematic:
 
         lib_syms.append(lib_sym.to_sexp_node())
 
+    def replace_lib_symbol(self, old_name: str, lib_sym: LibrarySymbol) -> bool:
+        """Replace an existing library symbol definition in ``lib_symbols``.
+
+        Removes the entry named *old_name* and inserts the definition from
+        *lib_sym*.  If *old_name* is not found the new definition is simply
+        appended (equivalent to :meth:`embed_lib_symbol`).
+
+        Args:
+            old_name: The ``lib_id`` of the symbol to remove.
+            lib_sym: The :class:`LibrarySymbol` to insert in its place.
+
+        Returns:
+            ``True`` if an existing entry was replaced, ``False`` if a new
+            entry was appended.
+        """
+        lib_syms = self.lib_symbols
+        if lib_syms is None:
+            # Create the lib_symbols section
+            lib_syms = SExp.list("lib_symbols")
+            insert_idx = 0
+            for i, child in enumerate(self._sexp.children):
+                if child.name in (
+                    "uuid",
+                    "paper",
+                    "title_block",
+                    "generator",
+                    "generator_version",
+                    "version",
+                ):
+                    insert_idx = i + 1
+            self._sexp.insert(insert_idx, lib_syms)
+
+        # Find and remove the old entry
+        replaced = False
+        for sym in lib_syms.find_all("symbol"):
+            sym_name = sym.get_string(0)
+            if sym_name == old_name:
+                lib_syms.remove(sym)
+                replaced = True
+                break
+
+        # Also remove any pre-existing entry with the new name to avoid
+        # duplicates when old_name != lib_sym.name
+        if old_name != lib_sym.name:
+            for sym in lib_syms.find_all("symbol"):
+                sym_name = sym.get_string(0)
+                if sym_name == lib_sym.name:
+                    lib_syms.remove(sym)
+                    break
+
+        lib_syms.append(lib_sym.to_sexp_node())
+        return replaced
+
     @staticmethod
     def snap_to_grid(
         value: float,

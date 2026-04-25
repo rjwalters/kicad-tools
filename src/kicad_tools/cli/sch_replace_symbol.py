@@ -8,12 +8,19 @@ Usage:
 Options:
     --value <value>        Set new value for the symbol
     --footprint <fp>       Set new footprint
+    --lib-path <path>      Path to .kicad_sym library containing the new symbol.
+                           When provided, the embedded lib_symbols definition
+                           and instance pins are updated to match the new symbol.
     --dry-run              Show what would change without modifying
     --backup               Create backup before modifying
 
 Examples:
     # Replace U1 with a different library symbol
     python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2"
+
+    # Replace with full library update (recommended)
+    python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2" \\
+        --lib-path path/to/chorus-revA.kicad_sym
 
     # Replace with new value and footprint
     python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2" \\
@@ -43,6 +50,11 @@ def main(argv=None):
     parser.add_argument("new_lib_id", help="New library ID (e.g., 'chorus-revA:TPA3116D2')")
     parser.add_argument("--value", help="New value for the symbol")
     parser.add_argument("--footprint", help="New footprint")
+    parser.add_argument(
+        "--lib-path",
+        help="Path to .kicad_sym library file containing the new symbol. "
+        "Updates embedded pin definitions to prevent ERC regressions.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Show changes without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
@@ -67,6 +79,7 @@ def main(argv=None):
             new_value=args.value,
             new_footprint=args.footprint,
             dry_run=args.dry_run,
+            lib_path=args.lib_path,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -81,16 +94,22 @@ def main(argv=None):
         print("=" * 50)
 
     print(f"Symbol: {result.reference}")
-    print(f"Library ID: {result.old_lib_id} → {result.new_lib_id}")
-    print(f"Pin count: {result.old_pin_count}")
+    print(f"Library ID: {result.old_lib_id} -> {result.new_lib_id}")
+    print(f"Pin count: {result.old_pin_count} -> {result.new_pin_count}")
     print()
 
     if result.changes_made:
         print("Changes:")
         for change in result.changes_made:
-            print(f"  • {change}")
+            print(f"  - {change}")
     else:
         print("No changes made")
+
+    if result.pin_type_changes:
+        print()
+        print("Pin type changes:")
+        for ptc in result.pin_type_changes:
+            print(f"  Pin {ptc.pin_number} ({ptc.pin_name}): {ptc.old_type} -> {ptc.new_type}")
 
     if result.preserved_properties:
         print()
@@ -98,14 +117,15 @@ def main(argv=None):
 
     if not args.dry_run:
         print()
-        print("✓ Schematic updated successfully")
-        print()
-        print("⚠️  Important: This replacement only updated the lib_id and properties.")
-        print("   The pin connections remain from the old symbol.")
-        print("   If the new symbol has a different pinout, you must:")
-        print("   1. Open the schematic in KiCad")
-        print("   2. Delete and re-place the symbol from the library")
-        print("   3. Reconnect all wires to the correct pins")
+        if result.lib_symbol_updated:
+            print("Schematic updated successfully (lib_symbols definition replaced)")
+        else:
+            print("Schematic updated successfully")
+            print()
+            print("Warning: This replacement only updated the lib_id and properties.")
+            print("   The embedded pin definitions were NOT updated.")
+            print("   Use --lib-path to provide the new symbol's library file")
+            print("   so that pin types are updated and ERC regressions are avoided.")
 
 
 if __name__ == "__main__":
