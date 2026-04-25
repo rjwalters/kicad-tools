@@ -6,7 +6,10 @@ from kicad_tools.router.io import (
     GridAutoSelection,
     PadPosition,
     _compute_gcd_grid_candidates,
+    _count_off_grid_with_offset,
+    _find_optimal_origin_offset,
     _is_on_grid,
+    _is_on_grid_with_offset,
     auto_select_grid_resolution,
     extract_board_dimensions,
     extract_pad_positions,
@@ -766,3 +769,232 @@ class TestExtractBoardDimensions:
 )"""
         dims = extract_board_dimensions(pcb_text)
         assert dims is None
+
+
+class TestIsOnGridWithOffset:
+    """Tests for _is_on_grid_with_offset helper."""
+
+    def test_on_grid_with_zero_offset(self):
+        """Zero offset behaves the same as _is_on_grid."""
+        assert _is_on_grid_with_offset(0.5, 0.25, 0.0)
+        assert _is_on_grid_with_offset(1.0, 0.25, 0.0)
+
+    def test_on_grid_with_nonzero_offset(self):
+        """Value on shifted grid is detected correctly."""
+        # Grid at offset 0.04, resolution 0.1 -> grid points at 0.04, 0.14, 0.24, ...
+        assert _is_on_grid_with_offset(0.04, 0.1, 0.04)
+        assert _is_on_grid_with_offset(0.14, 0.1, 0.04)
+        assert _is_on_grid_with_offset(0.24, 0.1, 0.04)
+
+    def test_off_grid_with_offset(self):
+        """Value not on shifted grid is detected correctly."""
+        # Grid at offset 0.04, resolution 0.1 -> 0.0 is off-grid
+        assert not _is_on_grid_with_offset(0.0, 0.1, 0.04)
+
+
+class TestCountOffGridWithOffset:
+    """Tests for _count_off_grid_with_offset helper."""
+
+    def test_all_on_grid_no_offset(self):
+        """All pads on-grid with zero offset."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=0.5, y=0.5)]
+        assert _count_off_grid_with_offset(pads, 0.25) == 0
+
+    def test_offset_brings_pads_on_grid(self):
+        """Offset shifts grid to align with pads."""
+        pads = [PadPosition(x=0.04, y=0.0), PadPosition(x=0.14, y=0.0)]
+        # Without offset, pads are off-grid at 0.1mm resolution
+        assert _count_off_grid_with_offset(pads, 0.1, 0.0, 0.0) == 2
+        # With offset 0.04, pads are on-grid
+        assert _count_off_grid_with_offset(pads, 0.1, 0.04, 0.0) == 0
+
+
+class TestFindOptimalOriginOffset:
+    """Tests for _find_optimal_origin_offset helper."""
+
+    def test_zero_offset_when_already_aligned(self):
+        """Returns (0,0) when pads are already on-grid."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=0.5, y=0.5)]
+        offset = _find_optimal_origin_offset(pads, 0.25)
+        assert offset == (0.0, 0.0)
+
+    def test_finds_offset_for_shifted_pads(self):
+        """Finds offset that aligns shifted pads."""
+        pads = [
+            PadPosition(x=0.04, y=0.0),
+            PadPosition(x=0.14, y=0.0),
+            PadPosition(x=0.24, y=0.0),
+        ]
+        offset = _find_optimal_origin_offset(pads, 0.1)
+        # With offset, all pads should be on-grid
+        off_grid = _count_off_grid_with_offset(pads, 0.1, offset[0], offset[1])
+        assert off_grid == 0
+
+    def test_empty_pad_list(self):
+        """Returns (0,0) for empty list."""
+        assert _find_optimal_origin_offset([], 0.1) == (0.0, 0.0)
+
+
+class TestMixedPitchOriginOffset:
+    """Tests for the mixed metric/imperial pad alignment fix (issue #2033).
+
+    The core bug: auto_select_grid_resolution with a mix of 2.54mm-pitch
+    (imperial THT) and 0.65mm-pitch (TSSOP) pads would produce 97% off-grid
+    because no single zero-origin grid aligns with both pitches.
+    """
+
+    def test_mixed_254_065_under_20_pct_off_grid(self):
+        """Mixed 2.54mm + 0.65mm pads produce < 20% off-grid.
+
+        This is the primary acceptance criterion from issue #2033.
+        """
+        pads = [
+            # Imperial THT headers at 2.54mm pitch
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+            PadPosition(x=7.62, y=0.0),
+            # TSSOP at 0.65mm pitch
+            PadPosition(x=20.0, y=0.0),
+            PadPosition(x=20.65, y=0.0),
+            PadPosition(x=21.30, y=0.0),
+            PadPosition(x=21.95, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert result.off_grid_percentage < 20.0, (
+            f"Mixed 2.54mm + 0.65mm pads should have < 20% off-grid, "
+            f"got {result.off_grid_percentage:.1f}% with grid {result.resolution}mm "
+            f"and offset {result.origin_offset}"
+        )
+
+    def test_origin_offset_reported(self):
+        """GridAutoSelection reports the chosen grid origin offset."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert isinstance(result.origin_offset, tuple)
+        assert len(result.origin_offset) == 2
+
+    def test_pure_imperial_zero_off_grid(self):
+        """Pure 2.54mm pads still produce 0% off-grid (regression check)."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+            PadPosition(x=7.62, y=0.0),
+            PadPosition(x=0.0, y=2.54),
+            PadPosition(x=2.54, y=2.54),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert result.off_grid_pads == 0, (
+            f"Pure imperial pads should have zero off-grid, got {result.off_grid_pads} "
+            f"with grid {result.resolution}mm"
+        )
+
+    def test_pure_metric_065_zero_off_grid(self):
+        """Pure 0.65mm pads still produce 0% off-grid (regression check)."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=1.95, y=0.0),
+            PadPosition(x=2.60, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert result.off_grid_pads == 0, (
+            f"Pure 0.65mm pads should have zero off-grid, got {result.off_grid_pads} "
+            f"with grid {result.resolution}mm"
+        )
+
+    def test_summary_shows_offset(self):
+        """Summary includes offset when it's non-zero."""
+        result = GridAutoSelection(
+            resolution=0.065,
+            off_grid_pads=1,
+            total_pads=8,
+            off_grid_percentage=12.5,
+            candidates_tried=[(0.065, 1)],
+            origin_offset=(0.04, 0.0),
+        )
+        summary = result.summary()
+        assert "origin offset" in summary.lower()
+        assert "0.0400" in summary
+
+    def test_summary_hides_offset_when_zero(self):
+        """Summary omits offset when it's (0,0)."""
+        result = GridAutoSelection(
+            resolution=0.065,
+            off_grid_pads=0,
+            total_pads=4,
+            off_grid_percentage=0.0,
+            candidates_tried=[(0.065, 0)],
+            origin_offset=(0.0, 0.0),
+        )
+        summary = result.summary()
+        assert "origin offset" not in summary.lower()
+
+
+class TestRoutingGridOriginOffset:
+    """Tests for RoutingGrid with non-zero origin offset."""
+
+    def test_world_to_grid_with_offset(self):
+        """RoutingGrid with offset correctly maps world coords to grid indices."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(grid_resolution=0.1)
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            origin_x=0.0,
+            origin_y=0.0,
+            grid_origin_offset=(0.04, 0.0),
+        )
+        # With offset 0.04, grid point 0 is at x=0.04
+        # So x=0.04 should map to grid index 0
+        gx, gy = grid.world_to_grid(0.04, 0.0)
+        assert gx == 0
+        # x=0.14 should map to grid index 1
+        gx, gy = grid.world_to_grid(0.14, 0.0)
+        assert gx == 1
+
+    def test_grid_to_world_with_offset(self):
+        """RoutingGrid with offset correctly maps grid indices to world coords."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(grid_resolution=0.1)
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            origin_x=0.0,
+            origin_y=0.0,
+            grid_origin_offset=(0.04, 0.0),
+        )
+        # Grid index 0 should map to x=0.04
+        wx, wy = grid.grid_to_world(0, 0)
+        assert abs(wx - 0.04) < 0.001
+        # Grid index 1 should map to x=0.14
+        wx, wy = grid.grid_to_world(1, 0)
+        assert abs(wx - 0.14) < 0.001
+
+    def test_offset_from_rules(self):
+        """RoutingGrid reads offset from DesignRules when not explicitly given."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(
+            grid_resolution=0.1,
+            grid_origin_offset=(0.04, 0.02),
+        )
+        grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+        assert grid.grid_origin_offset == (0.04, 0.02)
+        # origin_x should be shifted
+        assert abs(grid.origin_x - 0.04) < 0.001
+        assert abs(grid.origin_y - 0.02) < 0.001

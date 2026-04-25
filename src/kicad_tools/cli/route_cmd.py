@@ -2571,6 +2571,9 @@ def main(argv: list[str] | None = None) -> int:
             if not args.quiet:
                 print(grid_auto_result.summary())
                 print()
+
+        # Store grid origin offset from auto-selection for DesignRules
+        args._grid_origin_offset = grid_auto_result.origin_offset
     else:
         try:
             args.grid = float(args.grid)
@@ -2716,8 +2719,10 @@ def main(argv: list[str] | None = None) -> int:
         layer_stack = layer_stack_map[args.layers]
 
     # Configure design rules
+    grid_origin_offset = getattr(args, "_grid_origin_offset", (0.0, 0.0))
     rules = DesignRules(
         grid_resolution=args.grid,
+        grid_origin_offset=grid_origin_offset,
         trace_width=args.trace_width,
         trace_clearance=args.clearance,
         via_drill=args.via_drill,

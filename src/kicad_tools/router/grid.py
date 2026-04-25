@@ -244,6 +244,7 @@ class RoutingGrid:
         resolution_override: float | None = None,
         thread_safe: bool = False,
         config: PerformanceConfig | None = None,
+        grid_origin_offset: tuple[float, float] | None = None,
     ):
         """Initialize routing grid.
 
@@ -259,12 +260,26 @@ class RoutingGrid:
                         concurrent access. Disabled by default for performance.
             config: Performance configuration for GPU acceleration settings.
                    If None, GPU is disabled and CPU (NumPy) is always used.
+            grid_origin_offset: Optional (x, y) offset in mm for grid origin.
+                   When provided, grid points are shifted so that
+                   ``origin + offset + k * resolution`` covers pad positions
+                   more accurately.  Computed by
+                   ``auto_select_grid_resolution()`` for mixed-pitch boards.
         """
         self.width = width
         self.height = height
         self.rules = rules
-        self.origin_x = origin_x
-        self.origin_y = origin_y
+        # Apply grid origin offset to the board origin so that grid points
+        # are shifted to align with pad positions on mixed-pitch boards.
+        # Priority: explicit parameter > rules > default (0,0)
+        if grid_origin_offset is not None:
+            self.grid_origin_offset = grid_origin_offset
+        elif hasattr(rules, "grid_origin_offset"):
+            self.grid_origin_offset = rules.grid_origin_offset
+        else:
+            self.grid_origin_offset = (0.0, 0.0)
+        self.origin_x = origin_x + self.grid_origin_offset[0]
+        self.origin_y = origin_y + self.grid_origin_offset[1]
         self.expanded_obstacles = expanded_obstacles
         self._config = config
 

@@ -559,6 +559,8 @@ class GridAutoSelection:
         memory_capped: True if the resolution was constrained by memory budget
         uncapped_resolution: The resolution that would have been selected without
             memory constraints (None if no capping occurred)
+        origin_offset: Optimal grid origin offset (x_mm, y_mm) that maximizes
+            on-grid pad count. Default (0.0, 0.0) means no offset.
     """
 
     resolution: float
@@ -568,12 +570,18 @@ class GridAutoSelection:
     candidates_tried: list[tuple[float, int]]
     memory_capped: bool = False
     uncapped_resolution: float | None = None
+    origin_offset: tuple[float, float] = (0.0, 0.0)
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
         lines = [
             f"Selected grid: {self.resolution}mm",
         ]
+        if self.origin_offset != (0.0, 0.0):
+            lines.append(
+                f"  Grid origin offset: ({self.origin_offset[0]:.4f}, "
+                f"{self.origin_offset[1]:.4f})mm"
+            )
         if self.memory_capped and self.uncapped_resolution is not None:
             lines.append(
                 f"  (capped from {self.uncapped_resolution}mm due to memory budget)"
@@ -610,6 +618,121 @@ def _is_on_grid(value: float, resolution: float, threshold: float | None = None)
     distance_to_grid = min(remainder, resolution - remainder)
 
     return distance_to_grid <= threshold
+
+
+def _is_on_grid_with_offset(
+    value: float, resolution: float, offset: float, threshold: float | None = None
+) -> bool:
+    """Check if a value aligns to a grid with a given origin offset.
+
+    The grid is shifted by *offset*, so grid points are at
+    ``offset + k * resolution`` for integer k.
+
+    Args:
+        value: The coordinate value to check
+        resolution: The grid resolution
+        offset: Grid origin offset along this axis
+        threshold: Maximum allowed deviation (default: resolution / 10)
+
+    Returns:
+        True if the value is on the shifted grid within the threshold.
+    """
+    return _is_on_grid(value - offset, resolution, threshold)
+
+
+def _count_off_grid_with_offset(
+    pad_list: list,
+    resolution: float,
+    x_offset: float = 0.0,
+    y_offset: float = 0.0,
+) -> int:
+    """Count pads that are off-grid at the given resolution and offset.
+
+    Args:
+        pad_list: List of pad objects with x, y attributes
+        resolution: Grid resolution in mm
+        x_offset: Grid origin X offset in mm
+        y_offset: Grid origin Y offset in mm
+
+    Returns:
+        Number of off-grid pads.
+    """
+    off_grid = 0
+    for pad in pad_list:
+        x_on = _is_on_grid_with_offset(pad.x, resolution, x_offset)
+        y_on = _is_on_grid_with_offset(pad.y, resolution, y_offset)
+        if not (x_on and y_on):
+            off_grid += 1
+    return off_grid
+
+
+def _find_optimal_origin_offset(
+    pad_list: list,
+    resolution: float,
+) -> tuple[float, float]:
+    """Find the grid origin offset that maximizes on-grid pad count.
+
+    For a given resolution ``r``, each pad coordinate has a residue
+    ``coord % r``.  Clustering these residues reveals the offset that
+    places the most pads on-grid.
+
+    The algorithm:
+    1. For each axis, compute residues ``coord % resolution`` for every pad.
+    2. For each unique residue, count how many pads would be on-grid if
+       the grid origin were shifted to that residue.
+    3. Pick the residue with the highest on-grid count.
+
+    This is O(P^2) in the worst case (P = number of pads) but P is
+    typically < 500 for real boards, so it runs in microseconds.
+
+    Args:
+        pad_list: List of pad objects with x, y attributes.
+        resolution: Grid resolution in mm.
+
+    Returns:
+        (x_offset, y_offset) in mm that maximizes on-grid pad count.
+    """
+    if not pad_list or resolution <= 0:
+        return (0.0, 0.0)
+
+    threshold = resolution / 10
+
+    def best_offset_for_axis(coords: list[float]) -> float:
+        """Find the offset that places the most coordinates on-grid."""
+        if not coords:
+            return 0.0
+
+        # Compute residues
+        residues = [c % resolution for c in coords]
+
+        # Try each residue as a candidate offset and count on-grid
+        best_offset = 0.0
+        best_count = 0
+
+        # Also try offset 0.0 (no shift)
+        candidates = [0.0] + residues
+
+        for candidate in candidates:
+            count = 0
+            for r in residues:
+                # Distance between residue and candidate, wrapped
+                diff = abs(r - candidate)
+                diff = min(diff, resolution - diff)
+                if diff <= threshold:
+                    count += 1
+            if count > best_count:
+                best_count = count
+                best_offset = candidate
+
+        return best_offset
+
+    x_coords = [p.x for p in pad_list]
+    y_coords = [p.y for p in pad_list]
+
+    x_off = best_offset_for_axis(x_coords)
+    y_off = best_offset_for_axis(y_coords)
+
+    return (round(x_off, 6), round(y_off, 6))
 
 
 def _compute_gcd_grid_candidates(
@@ -783,18 +906,35 @@ def auto_select_grid_resolution(
             memory_capped = True
             valid_candidates = [valid_candidates[0]]
 
-    # Analyze off-grid pads for each candidate
+    # Analyze off-grid pads for each candidate, using optimal origin offset.
+    # For each candidate resolution, we find the grid origin offset that
+    # maximizes on-grid pad count.  This handles mixed metric/imperial boards
+    # where no single zero-origin grid aligns with all pad pitches.
     candidates_tried: list[tuple[float, int]] = []
     best_resolution = valid_candidates[0]
     best_off_grid = total_pads  # Worst case
+    best_offset: tuple[float, float] = (0.0, 0.0)
 
     for resolution in valid_candidates:
-        off_grid_count = 0
-        for pad in pad_list:
-            x_on_grid = _is_on_grid(pad.x, resolution)
-            y_on_grid = _is_on_grid(pad.y, resolution)
-            if not (x_on_grid and y_on_grid):
-                off_grid_count += 1
+        # First, quick check with no offset
+        off_grid_no_offset = _count_off_grid_with_offset(
+            pad_list, resolution, 0.0, 0.0
+        )
+
+        if off_grid_no_offset == 0:
+            # Perfect alignment at zero offset -- no need to search
+            off_grid_count = 0
+            offset = (0.0, 0.0)
+        else:
+            # Search for the optimal origin offset for this resolution
+            offset = _find_optimal_origin_offset(pad_list, resolution)
+            off_grid_count = _count_off_grid_with_offset(
+                pad_list, resolution, offset[0], offset[1]
+            )
+            # Keep zero offset if it's equal or better (simpler)
+            if off_grid_no_offset <= off_grid_count:
+                off_grid_count = off_grid_no_offset
+                offset = (0.0, 0.0)
 
         candidates_tried.append((resolution, off_grid_count))
 
@@ -802,9 +942,11 @@ def auto_select_grid_resolution(
         if off_grid_count < best_off_grid:
             best_off_grid = off_grid_count
             best_resolution = resolution
+            best_offset = offset
         elif off_grid_count == best_off_grid and resolution > best_resolution:
             # Prefer coarser resolution when off-grid counts are equal
             best_resolution = resolution
+            best_offset = offset
 
     off_grid_pct = (best_off_grid / total_pads * 100) if total_pads > 0 else 0.0
 
@@ -823,6 +965,7 @@ def auto_select_grid_resolution(
         candidates_tried=candidates_tried,
         memory_capped=memory_capped,
         uncapped_resolution=uncapped_resolution,
+        origin_offset=best_offset,
     )
 
 
@@ -835,14 +978,17 @@ def compute_multi_resolution_plan(
     zone_padding: float = 2.0,
     min_fine_resolution: float = 0.05,
     fine_pitch_threshold: float = 0.8,
+    off_grid_escalation_threshold: float = 50.0,
 ) -> MultiResolutionGridPlan | None:
     """Compute a multi-resolution grid plan for adaptive routing.
 
     Analyzes pad positions to determine if a multi-resolution approach is
     beneficial. Returns a plan with coarse global grid and per-component
-    fine zones when fine-pitch components are detected.
+    fine zones when fine-pitch components are detected OR when the uniform
+    grid leaves a high percentage of pads off-grid.
 
-    Returns None if all components are coarse-pitch (uniform grid is optimal).
+    Returns None if all components are coarse-pitch and off-grid percentage
+    is acceptable (uniform grid is optimal).
 
     Args:
         pads: Pad objects or positions
@@ -853,9 +999,14 @@ def compute_multi_resolution_plan(
         zone_padding: Padding around component bbox for fine zones (mm)
         min_fine_resolution: Minimum fine grid resolution floor (mm)
         fine_pitch_threshold: Pitch below this triggers fine-grid zone
+        off_grid_escalation_threshold: When off-grid percentage exceeds this
+            value after origin-offset optimization, automatically create
+            escape zones for off-grid pad clusters even if they are not
+            fine-pitch.  Default 50.0%.
 
     Returns:
-        MultiResolutionGridPlan if fine-pitch components detected, else None.
+        MultiResolutionGridPlan if fine-pitch components detected or
+        off-grid escalation triggered, else None.
     """
     from .adaptive_grid import identify_fine_pitch_components
 
@@ -893,8 +1044,57 @@ def compute_multi_resolution_plan(
         fine_pitch_threshold=fine_pitch_threshold,
     )
 
+    # Escalation: when off-grid percentage is still high after origin-offset
+    # optimization, identify off-grid pad clusters and create escape zones
+    # for them even if they are not fine-pitch.  This handles mixed
+    # metric/imperial boards where no single uniform grid works.
+    if (
+        uniform_result.off_grid_percentage >= off_grid_escalation_threshold
+        and has_ref
+    ):
+        # Find components with off-grid pads at the chosen resolution+offset
+        off_grid_refs: dict[str, list] = {}
+        offset = uniform_result.origin_offset
+        for pad in pad_list:
+            ref = getattr(pad, "ref", None)
+            if not ref:
+                continue
+            x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
+            y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
+            if not (x_on and y_on):
+                if ref not in off_grid_refs:
+                    off_grid_refs[ref] = []
+                off_grid_refs[ref].append(pad)
+
+        # Add these components as needing fine-grid zones (if not already)
+        for ref, ref_pads in off_grid_refs.items():
+            if ref not in fine_components:
+                # Use a resolution that divides into the component's pad pitch
+                xs = sorted({p.x for p in ref_pads})
+                ys = sorted({p.y for p in ref_pads})
+                deltas = []
+                for coords in (xs, ys):
+                    for i in range(1, len(coords)):
+                        d = coords[i] - coords[i - 1]
+                        if d > 0.001:
+                            deltas.append(d)
+                if deltas:
+                    # Pick a resolution that divides the smallest delta
+                    min_delta = min(deltas)
+                    # Use pitch/10 or min_fine_resolution, whichever is larger
+                    fine_res = max(min_delta / 10.0, min_fine_resolution)
+                    fine_components[ref] = fine_res
+
+        logger.info(
+            "Off-grid escalation: %.1f%% pads off-grid at %.3fmm, "
+            "creating escape zones for %d components",
+            uniform_result.off_grid_percentage,
+            coarse_resolution,
+            len(off_grid_refs),
+        )
+
     if not fine_components:
-        # No fine-pitch components - uniform grid is optimal
+        # No fine-pitch components and off-grid is acceptable
         return None
 
     # Build fine zones from component bboxes
