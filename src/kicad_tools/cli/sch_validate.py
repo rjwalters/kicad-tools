@@ -1024,6 +1024,163 @@ def _is_passive_component(lib_id: str) -> bool:
     return False
 
 
+def _is_resistor(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a resistor symbol (R, R_Small, etc.)."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    return part == "R" or part.startswith("R_")
+
+
+def _is_i2c_net(net_name: str) -> bool:
+    """Return True if *net_name* represents an I2C signal (SDA or SCL).
+
+    Uses ``_tokenize_name`` to split the name into tokens and checks for
+    I2C bus keywords.  This avoids false positives on names like ``PRESCALER``
+    because the tokenizer splits on separators and camelCase boundaries, so
+    ``PRESCALER`` tokenizes to ``{PRESCALER}`` which does not match ``SCL``.
+
+    Trailing digits are stripped from tokens to handle common variants like
+    ``SCL0``, ``SDA1`` where a bus instance number is appended directly.
+    """
+    tokens = _tokenize_name(net_name)
+    i2c_keywords = _BUS_PROTOCOLS["I2C"]  # {"SDA", "SCL"}
+    if tokens & i2c_keywords:
+        return True
+    # Also check tokens with trailing digits stripped (SCL0 -> SCL)
+    stripped_tokens = {re.sub(r"\d+$", "", t) for t in tokens}
+    return bool(stripped_tokens & i2c_keywords)
+
+
+def check_i2c_pullups(schematic_path: str) -> list[ValidationIssue]:
+    """Warn when I2C nets (SCL / SDA) lack pull-up resistors.
+
+    I2C is an open-drain bus -- without pull-up resistors the bus cannot
+    transition to logic high.  This check walks every sheet, identifies I2C
+    nets, and verifies that at least one resistor connects each I2C net to a
+    power-positive rail.
+
+    A pull-up is considered present when a component whose ``lib_id``
+    indicates a resistor (via ``_is_resistor``) has one pin on the I2C net
+    and another pin on a net whose name tokenizes to a power-positive keyword
+    (using ``_POWER_POSITIVE_KEYWORDS``).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Global maps accumulated across all sheets:
+        #   i2c_nets: set of net names identified as I2C
+        #   net_to_sheets: net_name -> set of sheet paths where the net appears
+        #   resistor_nets: ref -> list of net names the resistor's pins connect to
+        i2c_nets: set[str] = set()
+        net_to_sheets: dict[str, set[str]] = {}
+        # ref -> [net_name, ...]  (one entry per pin)
+        resistor_pin_nets: dict[str, list[str]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+
+                        # Track which sheets each net appears on
+                        net_to_sheets.setdefault(net_name, set()).add(sheet_path)
+
+                        # Identify I2C nets
+                        if _is_i2c_net(net_name):
+                            i2c_nets.add(net_name)
+
+                    # Track resistor pin-to-net connections
+                    if _is_resistor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num, pin_info in pins_data.items():
+                            n = pin_info.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        # Accumulate across sheets (same ref may appear on
+                        # different sheets in hierarchical designs, but
+                        # typically a resistor only appears once).
+                        if ref not in resistor_pin_nets:
+                            resistor_pin_nets[ref] = nets_for_ref
+                        else:
+                            resistor_pin_nets[ref].extend(nets_for_ref)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="i2c_pullups",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Determine which I2C nets have a valid pull-up resistor.
+        # A valid pull-up: resistor has one pin on the I2C net AND another
+        # pin on a power-positive net.
+        def _is_power_positive_net(net_name: str) -> bool:
+            # Tokenize as-is first
+            tokens = _tokenize_name(net_name)
+            if tokens & _POWER_POSITIVE_KEYWORDS:
+                return True
+            # Strip leading +/- (common in power net names like +3V3, +5V)
+            stripped = net_name.lstrip("+-")
+            if stripped != net_name:
+                tokens2 = _tokenize_name(stripped)
+                if tokens2 & _POWER_POSITIVE_KEYWORDS:
+                    return True
+            # Match common voltage patterns: +3.3V, +5V, +1.8V, etc.
+            if re.match(r"^\+?\d+(\.\d+)?V$", net_name):
+                return True
+            return False
+
+        i2c_nets_with_pullup: set[str] = set()
+        for _ref, pin_net_list in resistor_pin_nets.items():
+            net_set = set(pin_net_list)
+            i2c_on_resistor = net_set & i2c_nets
+            power_on_resistor = {n for n in net_set if _is_power_positive_net(n)}
+            if i2c_on_resistor and power_on_resistor:
+                i2c_nets_with_pullup.update(i2c_on_resistor)
+
+        # Emit warnings for I2C nets missing pull-ups
+        for net_name in sorted(i2c_nets - i2c_nets_with_pullup):
+            sheets = sorted(net_to_sheets.get(net_name, set()))
+            sheet_str = ", ".join(sheets) if sheets else "unknown"
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="i2c_pullups",
+                    message=(
+                        f"I2C net '{net_name}' has no pull-up resistor to a "
+                        f"power rail"
+                    ),
+                    location=sheet_str,
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="i2c_pullups",
+                message=f"I2C pull-up check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue]:
     """Flag pins where the connected net name has no semantic overlap with the pin name.
 
@@ -1395,6 +1552,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Power net short detection (VCC-to-GND)
     result.checks_run.append("power_short")
     result.issues.extend(check_power_net_shorts(schematic_path))
+
+    # I2C pull-up resistor detection
+    result.checks_run.append("i2c_pullups")
+    result.issues.extend(check_i2c_pullups(schematic_path))
 
     return result
 
