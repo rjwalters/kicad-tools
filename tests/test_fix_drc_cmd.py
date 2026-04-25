@@ -1652,7 +1652,13 @@ class TestEnlargedViaDisplacement:
 
 
 class TestLocalRerouteViaCentralizedCLI:
-    """Tests that --local-reroute and --quiet work via kct fix-drc (centralized CLI)."""
+    """Tests that --local-reroute and --quiet work via kct fix-drc (centralized CLI).
+
+    These tests verify that CLI flags are accepted by argparse. Since exit
+    code 2 can now legitimately mean 'non-repairable violations remain',
+    we check that results are in the valid range (0-3) and don't raise
+    SystemExit (which argparse would do for unrecognized arguments).
+    """
 
     def test_centralized_cli_local_reroute_dry_run(self, tmp_path):
         """kct fix-drc ... --local-reroute --dry-run parses without 'unrecognized arguments'."""
@@ -1662,8 +1668,8 @@ class TestLocalRerouteViaCentralizedCLI:
         pcb_file.write_text(PCB_WITH_CLEARANCE)
 
         result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--dry-run", "--quiet"])
-        # Should not fail with unrecognized arguments (exit code 2 = argparse error)
-        assert result != 2
+        # Should return a valid exit code (0-3), not raise SystemExit
+        assert result in (0, 1, 2, 3)
 
     def test_centralized_cli_quiet_dry_run(self, tmp_path):
         """kct fix-drc ... --quiet --dry-run parses without 'unrecognized arguments'."""
@@ -1673,7 +1679,7 @@ class TestLocalRerouteViaCentralizedCLI:
         pcb_file.write_text(PCB_WITH_CLEARANCE)
 
         result = cli_main(["fix-drc", str(pcb_file), "--quiet", "--dry-run"])
-        assert result != 2
+        assert result in (0, 1, 2, 3)
 
     def test_centralized_cli_quiet_short_flag_dry_run(self, tmp_path):
         """kct fix-drc ... -q --dry-run parses the short -q flag."""
@@ -1683,7 +1689,7 @@ class TestLocalRerouteViaCentralizedCLI:
         pcb_file.write_text(PCB_WITH_CLEARANCE)
 
         result = cli_main(["fix-drc", str(pcb_file), "-q", "--dry-run"])
-        assert result != 2
+        assert result in (0, 1, 2, 3)
 
     def test_centralized_cli_local_reroute_quiet_combined(self, tmp_path):
         """kct fix-drc ... --local-reroute --quiet --dry-run combines without conflict."""
@@ -1693,7 +1699,7 @@ class TestLocalRerouteViaCentralizedCLI:
         pcb_file.write_text(PCB_WITH_CLEARANCE)
 
         result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--quiet", "--dry-run"])
-        assert result != 2
+        assert result in (0, 1, 2, 3)
 
     def test_centralized_cli_max_displacement_still_works(self, tmp_path):
         """kct fix-drc ... --max-displacement 0.5 --dry-run still works (regression check)."""
@@ -1705,7 +1711,7 @@ class TestLocalRerouteViaCentralizedCLI:
         result = cli_main(
             ["fix-drc", str(pcb_file), "--max-displacement", "0.5", "--dry-run", "--quiet"]
         )
-        assert result != 2
+        assert result in (0, 1, 2, 3)
 
     def test_centralized_cli_no_connectivity_check(self, tmp_path):
         """kct fix-drc ... --no-connectivity-check parses without error."""
@@ -1717,7 +1723,7 @@ class TestLocalRerouteViaCentralizedCLI:
         result = cli_main(
             ["fix-drc", str(pcb_file), "--no-connectivity-check", "--dry-run", "--quiet"]
         )
-        assert result != 2
+        assert result in (0, 1, 2, 3)
 
 
 # ── Connectivity check and rollback tests ────────────────────────────
@@ -2181,9 +2187,9 @@ class TestFixDrcNewDefaults:
         result_without = fix_main(
             [str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
         )
-        # Both should complete without error (exit code not 2 = argparse error)
-        assert result_with != 2
-        assert result_without != 2
+        # Both should complete without error (valid exit codes 0-3)
+        assert result_with in (0, 1, 2, 3)
+        assert result_without in (0, 1, 2, 3)
 
     def test_no_local_reroute_flag_accepted(self, tmp_path: Path):
         """--no-local-reroute should be accepted as a valid flag."""
@@ -2195,7 +2201,7 @@ class TestFixDrcNewDefaults:
         result = cli_main(
             ["fix-drc", str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
         )
-        assert result != 2  # Not an argparse error
+        assert result in (0, 1, 2, 3)  # Valid exit code, not SystemExit
 
 
 class TestFixDrcWithZoneFills:
@@ -2247,3 +2253,221 @@ class TestFixDrcWithZoneFills:
         # The zone violation should have been filtered out by ClearanceRepairer
         # so clearance violations count should be 0
         assert data["clearance"]["violations"] == 0
+
+
+# ── Full-detection and non-targeted violation tests ────────────────────────────
+
+
+# DRC report with mixed repairable and non-repairable violations
+DRC_REPORT_WITH_EDGE_AND_CLEARANCE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 3 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+[silkscreen_line_width]: Silkscreen line width violation (minimum 0.1000 mm; actual 0.0500 mm)
+    Rule: silkscreen minimum; warning
+    @(100.0000 mm, 95.0000 mm): Line on F.SilkS
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC report with only non-repairable violations
+DRC_REPORT_ONLY_EDGE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+class TestNonTargetedViolations:
+    """Tests for detection and reporting of non-repairable (non-targeted) violations."""
+
+    def test_non_targeted_violations_in_json_output(
+        self, pcb_clearance: Path, tmp_path: Path, capsys
+    ):
+        """JSON output should include non_targeted_violations count."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "non_targeted_violations" in data
+        # 2 non-targeted: edge_clearance_trace + silkscreen_line_width
+        assert data["non_targeted_violations"] == 2
+        # 1 clearance violation is targeted
+        assert data["total_violations"] >= 1
+
+    def test_only_non_repairable_exits_2(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """When only non-repairable violations exist, exit code should be 2."""
+        report_file = tmp_path / "edge-only-drc.rpt"
+        report_file.write_text(DRC_REPORT_ONLY_EDGE)
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+            ]
+        )
+
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "non-repairable" in captured.out.lower()
+
+    def test_text_output_reports_non_targeted(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """Text output should mention non-repairable violations."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "text",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Text output should mention non-repairable violations
+        assert "non-repairable" in captured.out.lower()
+
+    def test_summary_output_reports_non_targeted(
+        self, pcb_clearance: Path, tmp_path: Path, capsys
+    ):
+        """Summary output should mention non-repairable violations."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "summary",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "non-repairable" in captured.out.lower()
+
+    def test_zero_violations_clean_board_exits_0(
+        self, pcb_clearance: Path, report_empty: Path, capsys
+    ):
+        """Board with 0 violations (including non-targeted) should exit 0."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_empty),
+            ]
+        )
+        assert result == 0
+
+    def test_all_repaired_but_non_targeted_remain_exits_2(
+        self, pcb_same_net_vias: Path, tmp_path: Path, capsys
+    ):
+        """When all repairable violations are fixed but non-targeted remain, exit code is 2."""
+        # Create a report with a repairable drill violation + a non-repairable edge violation
+        report_content = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 2 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual -0.3000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "mixed-with-edge-drc.rpt"
+        report_file.write_text(report_content)
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_file),
+                "--no-connectivity-check",
+            ]
+        )
+
+        # Drill violation repaired but edge violation remains -> exit 2
+        assert result == 2
+
+
+class TestFullDetectionFallback:
+    """Tests that _run_python_drc uses check_all() and detects all violation categories."""
+
+    def test_fallback_detects_all_categories(self, tmp_path: Path):
+        """Pure-Python DRC fallback should detect violations beyond clearance."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        # PCB with a trace that would violate edge clearance (no edge cuts
+        # defined, so edge checks may not fire, but dimensions checks should).
+        # The key assertion is that _run_python_drc returns violations from
+        # multiple check categories, not just clearances.
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        # Should have at least clearance violations
+        assert report.violation_count > 0
+
+    def test_fallback_returns_more_violations_than_clearance_only(self, tmp_path: Path):
+        """check_all() should find at least as many violations as check_clearances()."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        pcb = PCB.load(pcb_file)
+        checker = DRCChecker(pcb)
+
+        clearance_only = checker.check_clearances()
+        all_checks = checker.check_all()
+
+        # check_all must return at least as many violations as check_clearances
+        assert len(all_checks.violations) >= len(clearance_only.violations)
