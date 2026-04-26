@@ -427,6 +427,15 @@ def _count_hierarchy_sheets(sch_path: Path, visited: set[Path] | None = None) ->
     return count
 
 
+@dataclass
+class _SheetEntry:
+    """Parsed sheet entry with filename and pin information."""
+
+    filename: str
+    pin_names: list[str] = field(default_factory=list)
+    pin_positions: list[tuple[float, float]] = field(default_factory=list)
+
+
 def _get_sheet_filenames(sch_path: Path) -> list[str]:
     """Extract sub-sheet filenames from a schematic file.
 
@@ -439,18 +448,79 @@ def _get_sheet_filenames(sch_path: Path) -> list[str]:
     Returns:
         List of sub-sheet filenames (relative to the schematic directory).
     """
+    return [entry.filename for entry in _get_sheet_entries(sch_path)]
+
+
+def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
+    """Extract sub-sheet entries including pin information.
+
+    Parses the raw S-expression tree to find ``(sheet ...)`` entries and
+    extracts both the ``Sheetfile`` property and any ``(pin ...)`` children
+    (sheet pins) from each.
+
+    Sheet pins represent the interface between a parent sheet and its child
+    sheet.  Each pin has a name that corresponds to a ``hierarchical_label``
+    in the child schematic.  The pin's position in the parent sheet is used
+    to determine which parent net it connects to.
+
+    Args:
+        sch_path: Path to the .kicad_sch file.
+
+    Returns:
+        List of :class:`_SheetEntry` objects with filename and pin data.
+    """
     doc = parse_string(sch_path.read_text(encoding="utf-8"))
-    filenames: list[str] = []
+    entries: list[_SheetEntry] = []
     for child in doc.children:
         if getattr(child, "name", None) == "sheet" or getattr(child, "tag", None) == "sheet":
+            filename = ""
+            pin_names: list[str] = []
+            pin_positions: list[tuple[float, float]] = []
+
+            # Extract sheet position for computing absolute pin positions
+            sheet_x, sheet_y = 0.0, 0.0
+            at_node = child.find("at")
+            if at_node:
+                atoms = at_node.get_atoms()
+                if len(atoms) >= 2:
+                    sheet_x = round(float(atoms[0]), 2)
+                    sheet_y = round(float(atoms[1]), 2)
+
             # Look for (property "Sheetfile" "filename.kicad_sch")
             for prop in child.find_all("property"):
                 prop_name = prop.get_string(0)
                 if prop_name == "Sheetfile":
-                    filename = prop.get_string(1)
-                    if filename:
-                        filenames.append(filename)
-    return filenames
+                    fname = prop.get_string(1)
+                    if fname:
+                        filename = fname
+
+            # Extract (pin "name" direction (at x y angle) ...) children.
+            # Pin positions in sheet entries are relative to the sheet origin.
+            for pin_node in child.find_all("pin"):
+                pin_name = pin_node.get_string(0)
+                if pin_name:
+                    pin_names.append(pin_name)
+                    pin_at = pin_node.find("at")
+                    if pin_at:
+                        pin_atoms = pin_at.get_atoms()
+                        if len(pin_atoms) >= 2:
+                            px = round(float(pin_atoms[0]), 2)
+                            py = round(float(pin_atoms[1]), 2)
+                            pin_positions.append((px, py))
+                        else:
+                            pin_positions.append((sheet_x, sheet_y))
+                    else:
+                        pin_positions.append((sheet_x, sheet_y))
+
+            if filename:
+                entries.append(
+                    _SheetEntry(
+                        filename=filename,
+                        pin_names=pin_names,
+                        pin_positions=pin_positions,
+                    )
+                )
+    return entries
 
 
 def _collect_hierarchy_components(
@@ -463,8 +533,10 @@ def _collect_hierarchy_components(
     Loads the schematic at *sch_path*, collects its components and
     per-sheet netlist, then recurses into any ``(sheet ...)`` sub-sheets.
     Global labels with matching names across sheets are merged into the
-    same net.  Circular references (the same file appearing again in the
-    traversal) are detected and skipped with a warning.
+    same net.  Hierarchical labels in child sheets are merged with the
+    corresponding parent sheet pin's net using the parent's wiring context.
+    Circular references (the same file appearing again in the traversal)
+    are detected and skipped with a warning.
 
     Args:
         sch_path: Absolute path to a ``.kicad_sch`` file.
@@ -530,20 +602,58 @@ def _collect_hierarchy_components(
     except Exception:
         logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
 
-    # Recurse into sub-sheets
-    sub_filenames = _get_sheet_filenames(sch_path)
+    # Build a map from sheet pin position -> net name in the parent sheet.
+    # This is used to resolve hierarchical label connections: the parent's
+    # connectivity graph tells us what net each sheet pin is on.
+    parent_connectivity, parent_net_names, _ = sch._build_connectivity_graph()
+
+    def _find_parent(p: tuple) -> tuple:
+        if p not in parent_connectivity:
+            parent_connectivity[p] = p
+        if parent_connectivity[p] != p:
+            parent_connectivity[p] = _find_parent(parent_connectivity[p])
+        return parent_connectivity[p]
+
+    def _net_name_at(pos: tuple) -> str | None:
+        """Find the net name for a position in the parent connectivity graph."""
+        root = _find_parent(pos)
+        # Check all points in the same connected component for net names
+        for point, names in parent_net_names.items():
+            if _find_parent(point) == root and names:
+                return names[0]
+        return None
+
+    # Recurse into sub-sheets with hierarchical label net merging
+    sheet_entries = _get_sheet_entries(sch_path)
     parent_dir = sch_path.parent
-    for filename in sub_filenames:
-        sub_path = parent_dir / filename
-        sub_sheet_path = f"{sheet_path}{filename}/"
+    for entry in sheet_entries:
+        sub_path = parent_dir / entry.filename
+        sub_sheet_path = f"{sheet_path}{entry.filename}/"
         sub_components, sub_nets = _collect_hierarchy_components(
             sub_path, sub_sheet_path, visited
         )
         components.extend(sub_components)
-        # Merge nets -- global labels with the same name across sheets
-        # produce entries in the same net bucket.
+
+        # Build a mapping from hierarchical label name -> parent net name
+        # using the sheet pin positions in the parent's connectivity graph.
+        hlabel_to_parent_net: dict[str, str] = {}
+        for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions):
+            parent_net = _net_name_at(pin_pos)
+            if parent_net:
+                hlabel_to_parent_net[pin_name] = parent_net
+
+        # Merge child nets into parent net_dict.  When a child net name
+        # matches a hierarchical label that has a different net name in
+        # the parent context, unify them under the parent's net name.
         for net_name, pins in sub_nets.items():
-            net_dict.setdefault(net_name, []).extend(pins)
+            target_name = hlabel_to_parent_net.get(net_name, net_name)
+            net_dict.setdefault(target_name, []).extend(pins)
+
+        # Also ensure any parent-side pins already in net_dict under the
+        # hierarchical label name are merged if we renamed the net.
+        for hlabel_name, parent_net in hlabel_to_parent_net.items():
+            if hlabel_name != parent_net and hlabel_name in net_dict:
+                net_dict.setdefault(parent_net, []).extend(net_dict.pop(hlabel_name))
 
     return components, net_dict
 
@@ -706,6 +816,25 @@ def export_netlist(
                     "using pure Python netlist extraction",
                     exported_sheets,
                     expected_sheets,
+                )
+                return build_netlist_from_schematic(sch_path)
+
+            # Also validate component count: kicad-cli may report all sheets
+            # but still omit components from some of them.  Use the Python
+            # hierarchy traversal to get the expected count.
+            py_components, _ = _collect_hierarchy_components(sch_path, "/")
+            # Filter out power symbols (references starting with #) which
+            # are not included in the kicad-cli netlist component list.
+            expected_count = sum(
+                1 for c in py_components if not c.reference.startswith("#")
+            )
+            exported_count = len(netlist.components)
+            if exported_count < expected_count:
+                logger.warning(
+                    "kicad-cli netlist is missing components: exported %d of %d, "
+                    "using pure Python netlist extraction",
+                    exported_count,
+                    expected_count,
                 )
                 return build_netlist_from_schematic(sch_path)
 

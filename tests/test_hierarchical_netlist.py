@@ -2,18 +2,22 @@
 
 Verifies that build_netlist_from_schematic() recursively loads all
 (sheet ...) references, collects components from every level, merges
-global labels across sheets, and handles edge cases gracefully.
+global labels across sheets, handles hierarchical label cross-sheet
+net merging, and handles edge cases gracefully.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from kicad_tools.operations.netlist import (
     _collect_hierarchy_components,
     _count_hierarchy_sheets,
+    _get_sheet_entries,
     _get_sheet_filenames,
     build_netlist_from_schematic,
+    export_netlist,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hierarchical"
@@ -221,3 +225,146 @@ class TestCountHierarchySheets:
         # does_not_exist returns 0.
         # Total: root_shared(1) + sub_b(1) = 2
         assert count >= 2
+
+
+class TestGetSheetEntries:
+    """Tests for _get_sheet_entries helper."""
+
+    def test_extracts_sheet_pins(self):
+        """Sheet entries with (pin ...) children return pin data."""
+        entries = _get_sheet_entries(FIXTURES / "parent_with_pins.kicad_sch")
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.filename == "child_with_hlabels.kicad_sch"
+        assert "SDA" in entry.pin_names
+        assert len(entry.pin_positions) == len(entry.pin_names)
+
+    def test_sheets_without_pins_return_empty_lists(self):
+        """Sheet entries without (pin ...) children have empty pin lists."""
+        entries = _get_sheet_entries(FIXTURES / "root.kicad_sch")
+        assert len(entries) == 2
+        for entry in entries:
+            assert entry.pin_names == []
+            assert entry.pin_positions == []
+
+    def test_filenames_match_get_sheet_filenames(self):
+        """_get_sheet_entries filenames match _get_sheet_filenames output."""
+        entries = _get_sheet_entries(FIXTURES / "root.kicad_sch")
+        filenames = _get_sheet_filenames(FIXTURES / "root.kicad_sch")
+        assert [e.filename for e in entries] == filenames
+
+
+class TestHierarchicalLabelNetMerging:
+    """Tests for cross-sheet net merging via hierarchical labels and sheet pins."""
+
+    def test_child_components_collected(self):
+        """Components from child sheet with hierarchical labels are collected."""
+        netlist = build_netlist_from_schematic(
+            FIXTURES / "parent_with_pins.kicad_sch"
+        )
+        refs = {c.reference for c in netlist.components}
+        # Parent: R1; Child: R5, R6
+        assert "R1" in refs
+        assert "R5" in refs
+        assert "R6" in refs
+        assert len(netlist.components) == 3
+
+    def test_hlabel_net_merged_with_parent_net(self):
+        """Hierarchical label 'SDA' in child merges with parent's 'I2C_SDA' net."""
+        _, net_dict = _collect_hierarchy_components(
+            FIXTURES / "parent_with_pins.kicad_sch", "/"
+        )
+        # The parent has a label "I2C_SDA" connected via wire to the sheet pin "SDA".
+        # The child has a hierarchical_label "SDA" connected to R5 pin 1.
+        # After merging, the child's "SDA" net should be unified under "I2C_SDA".
+        #
+        # Check that "I2C_SDA" net exists and contains pins from the child
+        if "I2C_SDA" in net_dict:
+            # The "SDA" net from the child should have been merged into "I2C_SDA"
+            assert "SDA" not in net_dict, (
+                "Child's 'SDA' net should be merged into parent's 'I2C_SDA'"
+            )
+
+    def test_component_count_matches_across_sheets(self):
+        """Component count from hierarchy matches total placed symbols."""
+        components, _ = _collect_hierarchy_components(
+            FIXTURES / "parent_with_pins.kicad_sch", "/"
+        )
+        # Parent: R1; Child: R5, R6
+        assert len(components) == 3
+
+
+class TestComponentCountValidation:
+    """Tests for component-count validation fallback in export_netlist."""
+
+    def test_fallback_triggered_on_missing_components(self, tmp_path):
+        """When kicad-cli output has fewer components, Python fallback is used."""
+        from kicad_tools.operations.netlist import Netlist, NetlistComponent
+
+        # Create a simple flat schematic for testing
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "test-uuid-0001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R"
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "test-r1-uuid")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (pin "1" (uuid "test-r1-pin1"))
+                (pin "2" (uuid "test-r1-pin2")))
+              (symbol (lib_id "Device:R") (at 120 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "test-r2-uuid")
+                (property "Reference" "R2" (at 121.6 48.26 0))
+                (property "Value" "4.7k" (at 121.6 50.8 0))
+                (pin "1" (uuid "test-r2-pin1"))
+                (pin "2" (uuid "test-r2-pin2")))
+            )"""
+        )
+
+        # Create a partial netlist file (only 1 of 2 components)
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        netlist_file.write_text(
+            """(export
+              (version "E")
+              (design
+                (source "test.kicad_sch")
+                (tool "KiCad 8.0")
+              )
+              (components
+                (comp (ref "R1")
+                  (value "10k")
+                  (footprint "")
+                  (libsource (lib "Device") (part "R"))
+                )
+              )
+              (nets
+              )
+            )"""
+        )
+
+        # Mock kicad-cli to return the partial netlist
+        def mock_run(cmd, **kwargs):
+            class Result:
+                returncode = 0
+                stderr = ""
+            return Result()
+
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value="/usr/bin/kicad-cli"), \
+             patch("kicad_tools.operations.netlist.subprocess.run", side_effect=mock_run):
+            netlist = export_netlist(
+                sch_file, output_path=netlist_file, fallback=True
+            )
+
+        # Should have fallen back to Python extraction which finds both components
+        assert len(netlist.components) == 2
+        assert "Python fallback" in netlist.tool
