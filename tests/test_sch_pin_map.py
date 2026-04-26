@@ -416,6 +416,108 @@ DIODE_RESISTOR_SCHEMATIC = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# Schematic modelling the false-positive from issue #2116.
+#
+# A pull-up resistor (R1) has pin 2 connected via a short vertical wire to a
+# horizontal wire that also passes through an IC pin (U1 pin 1).  The net
+# label "SCL" is at the far end of the horizontal wire -- on the opposite
+# side of U1's pin.
+#
+# Topology:
+#   Global label "SCL" at (80, 50)
+#   Horizontal wire (80, 50) -> (110, 50)
+#   U1 (generic IC) at (110, 54.81):
+#     Pin 1 at (110, 51.0)  -- sits on the horizontal wire (split point)
+#   R1 (Device:R) at (110, 40) rotation 0:
+#     Pin 1 at (110, 36.19) -> wire up to power symbol +3.3V at (110, 30)
+#     Pin 2 at (110, 43.81) -> wire down to (110, 50) on horizontal wire
+#
+# Before fix: BFS from R1 pin 2 reaches (110, 50), then hits U1 pin 1 at
+# (110, 51.0).  But wait, (110, 50) is NOT U1's pin -- the pin is at
+# (110, 51.0).  Actually the wire endpoint (110, 50) and U1 pin (110, 51.0)
+# are different points.  Let me recalculate to make the bug reproduce.
+#
+# Revised topology (matches issue #2116 pattern exactly):
+#   Global label "SCL" at (80, 50)
+#   Horizontal wire (80, 50) -> (110, 50)
+#   U1 pin 1 is at exactly (110, 50) -- the wire endpoint.
+#   R1 pin 2 at (110, 46.19) connects via vertical wire to (110, 50).
+#
+# Before fix: BFS from R1 pin 2 (110, 46.19) goes to (110, 50), which is
+# a barrier pin (U1 pin 1).  BFS checks net_names at (110, 50) -- no label
+# there (label is at (80, 50)).  BFS stops.  R1 pin 2 -> net=None.
+#
+# After fix: _propagate_net_names pre-fills (110, 50) with "SCL" because
+# it's wire-connected to the label at (80, 50).  BFS finds "SCL" at the
+# barrier pin and returns it.
+# ---------------------------------------------------------------------------
+PULLUP_BARRIER_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002116")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+    (symbol "MyLib:IC"
+      (symbol "IC_1_1"
+        (pin input line
+          (at -3.81 0 0) (length 1.27) (name "SCL") (number "1"))
+        (pin input line
+          (at -3.81 -2.54 0) (length 1.27) (name "SDA") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 110 40 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "r1-pullup")
+    (property "Reference" "R1" (at 112 38 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "4.7k" (at 112 40 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "r1p1")) (pin "2" (uuid "r1p2"))
+  )
+  (symbol
+    (lib_id "MyLib:IC") (at 113.81 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "u1-ic")
+    (property "Reference" "U1" (at 116 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "PCM5122" (at 116 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "u1p1")) (pin "2" (uuid "u1p2"))
+  )
+  (wire (pts (xy 80 50) (xy 110 50))
+    (stroke (width 0) (type default)) (uuid "w-scl-bus"))
+  (wire (pts (xy 110 43.81) (xy 110 50))
+    (stroke (width 0) (type default)) (uuid "w-r1p2-bus"))
+  (wire (pts (xy 110 36.19) (xy 110 30))
+    (stroke (width 0) (type default)) (uuid "w-r1p1-vcc"))
+  (symbol
+    (lib_id "power:+3.3V")
+    (at 110 30 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "pwr-33v")
+    (property "Reference" "#PWR01" (at 110 26 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "+3.3V" (at 110 26 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pwr1"))
+  )
+  (global_label "SCL" (at 80 50 180)
+    (effects (font (size 1.27 1.27)) (justify right))
+    (uuid "gl-scl"))
+)
+"""
+
+
 def _write_sch(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "test.kicad_sch"
     p.write_text(content)
@@ -730,6 +832,57 @@ class TestBFSBarrier:
         assert pin_map["C1"]["pins"]["1"]["net"] == "VIN"
         assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
         assert pin_map["C1"]["pins"]["2"]["net"] == "GND"
+
+
+# ---------------------------------------------------------------------------
+# Regression: pull-up resistor wire meets IC pin (barrier) before label
+# ---------------------------------------------------------------------------
+
+
+class TestPullupBarrierNetPropagation:
+    """Regression test for issue #2116: pull-up resolves to net=None when its
+    wire connects at the same coordinate as another component's pin (barrier),
+    and the net label is on the far side of that shared node."""
+
+    def test_pullup_resolves_through_barrier_pin(self, tmp_path):
+        """R1 pin 2 connects via wire to (110,50) which is also U1 pin 1.
+        The SCL label is at (80,50) on the other side of U1's pin.
+
+        Before the fix, R1 pin 2 resolved to None because BFS stopped at
+        the barrier (U1 pin 1) and no net name was recorded there.
+        After the fix, net name propagation ensures (110,50) has 'SCL'."""
+        sch = Schematic.load(_write_sch(tmp_path, PULLUP_BARRIER_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "R1" in pin_map
+        assert "U1" in pin_map
+
+        # R1 pin 2 must resolve to SCL (was None before fix)
+        r1_pin2_net = pin_map["R1"]["pins"]["2"]["net"]
+        assert r1_pin2_net == "SCL", (
+            f"R1 pin 2 should resolve to 'SCL', got {r1_pin2_net!r}"
+        )
+
+        # R1 pin 1 should resolve to +3.3V (power symbol)
+        assert pin_map["R1"]["pins"]["1"]["net"] == "+3.3V"
+
+        # U1 pin 1 should also resolve to SCL
+        assert pin_map["U1"]["pins"]["1"]["net"] == "SCL"
+
+    def test_barrier_still_prevents_cross_component_traversal(self, tmp_path):
+        """Even with net propagation, BFS must not cross through a component.
+
+        The diode-resistor test (DIODE_RESISTOR_SCHEMATIC) must still pass:
+        D1 cathode must NOT resolve to GND through R1's body."""
+        sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
+        assert d1_pin1_net is None, (
+            f"D1 cathode should still be None, got {d1_pin1_net!r}"
+        )
+        assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
+        assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
 
 
 # ---------------------------------------------------------------------------
