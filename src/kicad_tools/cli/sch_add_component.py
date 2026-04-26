@@ -39,6 +39,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
+from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.library import LibrarySymbol
 
 
@@ -272,68 +273,10 @@ def _validate_wire_endpoints(
                 )
 
 
-def _find_project_name(schematic_path: Path) -> str:
-    """Derive the project name from the nearest .kicad_pro file.
-
-    Walks up from *schematic_path* looking for a ``.kicad_pro`` file.
-    Falls back to the schematic stem if none is found.
-    """
-    directory = schematic_path.resolve().parent
-    for parent in [directory, *directory.parents]:
-        pro_files = list(parent.glob("*.kicad_pro"))
-        if pro_files:
-            return pro_files[0].stem
-    return schematic_path.stem
-
-
-def _build_instance_path(schematic_path: Path, sch_uuid: str) -> str:
-    """Build the hierarchical instance path for a symbol.
-
-    For a root schematic, returns ``/<sch_uuid>``.
-    For a sub-sheet, walks up the hierarchy from the project root to build
-    ``/<root_uuid>/<sheet_uuid>/...``.
-    """
-    from kicad_tools.schema.hierarchy import build_hierarchy
-
-    resolved = schematic_path.resolve()
-    directory = resolved.parent
-
-    # Find the project root schematic (same stem as .kicad_pro, or look
-    # for the .kicad_pro file and derive the root schematic from it).
-    root_sch_path: Path | None = None
-    for parent in [directory, *directory.parents]:
-        pro_files = list(parent.glob("*.kicad_pro"))
-        if pro_files:
-            candidate = pro_files[0].with_suffix(".kicad_sch")
-            if candidate.exists():
-                root_sch_path = candidate
-            break
-
-    # If no .kicad_pro found, assume the schematic *is* the root
-    if root_sch_path is None or root_sch_path.resolve() == resolved:
-        return f"/{sch_uuid}"
-
-    # Build hierarchy from root and find the node matching our schematic
-    try:
-        root_node = build_hierarchy(str(root_sch_path))
-    except Exception:
-        # If hierarchy building fails, fall back to simple root path
-        return f"/{sch_uuid}"
-
-    # Walk the hierarchy to find the node whose path matches our file
-    for node in root_node.all_nodes():
-        if Path(node.path).resolve() == resolved:
-            # Build the UUID path from root to this node
-            parts: list[str] = []
-            current: object = node
-            while current is not None:
-                parts.append(current.uuid)  # type: ignore[union-attr]
-                current = current.parent  # type: ignore[union-attr]
-            parts.reverse()
-            return "/" + "/".join(parts)
-
-    # Fallback: treat as root
-    return f"/{sch_uuid}"
+# Backward-compatible aliases -- the canonical implementations now live in
+# kicad_tools.schema.instances and are imported at the top of this module.
+_find_project_name = find_project_name
+_build_instance_path = build_instance_path
 
 
 def run_add_component(args) -> int:
@@ -572,7 +515,13 @@ def run_add_component(args) -> int:
     # 3. Place the symbol
     if is_power:
         power_name = args.lib_id.split(":", 1)[1]
-        sym_instance = sch.add_power(power_name, position, rotation)
+        sym_instance = sch.add_power(
+            power_name,
+            position,
+            rotation,
+            project_name=project_name,
+            instance_path=instance_path,
+        )
     else:
         sym_instance = sch.add_symbol(
             lib_id=args.lib_id,

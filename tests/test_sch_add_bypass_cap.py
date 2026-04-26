@@ -645,3 +645,103 @@ class TestErrors:
             "--pin", "4",
         ])
         assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# Instances block verification
+# ---------------------------------------------------------------------------
+
+
+class TestInstancesBlock:
+    """Verify that placed symbols include the (instances ...) S-expression."""
+
+    def test_capacitor_has_instances_block(self, tmp_path: Path):
+        """The capacitor placed by add-bypass-cap must have an instances block."""
+        sch_path = _write_sch(tmp_path)
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U1",
+            "--pin", "4",
+            "--value", "100nF",
+            "--ground-net", "GND",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Find the newly placed capacitor (C6, auto-assigned after C5)
+        cap_sym = None
+        for s in sch.symbols:
+            if s.reference == "C6":
+                cap_sym = s
+                break
+        assert cap_sym is not None, "Expected C6 to be placed"
+        assert cap_sym.project_name, "Capacitor must have project_name set"
+        assert cap_sym.instance_path, "Capacitor must have instance_path set"
+        assert cap_sym.instance_path.startswith("/")
+
+        # Verify the raw file contains the instances block for the cap
+        content = sch_path.read_text()
+        assert "(instances" in content
+        assert "(project" in content
+
+    def test_ground_symbol_has_instances_block(self, tmp_path: Path):
+        """The ground power symbol placed by add-bypass-cap must have an instances block."""
+        sch_path = _write_sch(tmp_path)
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U1",
+            "--pin", "4",
+            "--value", "100nF",
+            "--ground-net", "GND",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # Find the newly placed GND power symbol
+        gnd_syms = [s for s in sch.symbols if s.lib_id == "power:GND"]
+        assert len(gnd_syms) >= 1
+        gnd_sym = gnd_syms[0]
+        assert gnd_sym.project_name, "Ground symbol must have project_name set"
+        assert gnd_sym.instance_path, "Ground symbol must have instance_path set"
+        assert gnd_sym.instance_path.startswith("/")
+
+    def test_instances_use_schematic_stem_as_project(self, tmp_path: Path):
+        """Without .kicad_pro, project name should be the schematic stem."""
+        sch_path = _write_sch(tmp_path)
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U1",
+            "--pin", "4",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        cap_sym = None
+        for s in sch.symbols:
+            if s.reference == "C6":
+                cap_sym = s
+                break
+        assert cap_sym is not None
+        assert cap_sym.project_name == "test_bypass"
+
+    def test_instances_use_kicad_pro_name(self, tmp_path: Path):
+        """With a .kicad_pro file, project name comes from it."""
+        sch_path = _write_sch(tmp_path)
+        pro_path = tmp_path / "my-board.kicad_pro"
+        pro_path.write_text("{}")
+
+        result = add_bypass_main([
+            str(sch_path),
+            "--ref", "U1",
+            "--pin", "4",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        cap_sym = None
+        for s in sch.symbols:
+            if s.reference == "C6":
+                cap_sym = s
+                break
+        assert cap_sym is not None
+        assert cap_sym.project_name == "my-board"
