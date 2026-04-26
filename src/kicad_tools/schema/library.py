@@ -500,23 +500,25 @@ class LibrarySymbol:
             return None
 
         # Start with pin's local position in library coordinates (Y-up).
-        # Negate Y to convert to schematic coordinates (Y-down) before
-        # applying mirror/rotation transforms.
+        # Mirror and rotation are applied in library coordinate space,
+        # then Y is negated to convert to schematic coordinates (Y-down).
         x, y = pin.position
-        y = -y
 
-        # Apply mirror
+        # Apply mirror (in library coords, Y-up)
         if mirror == "x":
             x = -x
         elif mirror == "y":
             y = -y
 
-        # Apply rotation
+        # Apply rotation (in library coords, Y-up)
         if instance_rot != 0:
             angle_rad = math.radians(instance_rot)
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
             x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
+
+        # Convert from library coords (Y-up) to schematic coords (Y-down)
+        y = -y
 
         # Snap rotated offset to nearest 1.27mm grid point when close.
         # Pin offsets in library coordinates are exact multiples of 1.27mm.

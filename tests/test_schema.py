@@ -920,12 +920,14 @@ class TestLibrarySymbol:
             name="Test",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                    number="1", name="A", type="input", position=(2.54, 0), rotation=0, length=2.54
                 ),
             ],
         )
+        # Pin at library (2.54, 0), no rotation.  Y negation has no effect
+        # on y=0.  Schematic position = (100+2.54, 100+0) = (102.54, 100).
         pos = sym.get_pin_position("1", instance_pos=(100, 100))
-        assert pos == (105.0, 100.0)
+        assert pos == (102.54, 100.0)
 
     def test_library_symbol_get_pin_position_with_rotation(self):
         """Test pin position with symbol rotation."""
@@ -933,15 +935,58 @@ class TestLibrarySymbol:
             name="Test",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                    number="1", name="A", type="input", position=(2.54, 0), rotation=0, length=2.54
                 ),
             ],
         )
-        # 90 degree rotation
+        # Pin at library (2.54, 0), rotated 90 degrees CCW in library coords
+        # (Y-up): (0, 2.54).  Then Y negated for schematic: (0, -2.54).
+        # Schematic position = (100+0, 100-2.54) = (100, 97.46).
         pos = sym.get_pin_position("1", instance_pos=(100, 100), instance_rot=90)
         assert pos is not None
         assert pos[0] == pytest.approx(100.0, abs=0.01)
-        assert pos[1] == pytest.approx(105.0, abs=0.01)
+        assert pos[1] == pytest.approx(97.46, abs=0.01)
+
+    def test_library_symbol_get_pin_position_with_rotation_nonzero_y(self):
+        """Test pin position with rotation and non-zero Y offset.
+
+        This is the core bug scenario from issue #2118: when the pin has a
+        non-zero Y coordinate in library space, negating Y before rotation
+        produces mirror-image positions.
+        """
+        sym = LibrarySymbol(
+            name="C_Small",
+            pins=[
+                LibraryPin(
+                    number="1", name="~", type="passive",
+                    position=(0, 2.54), rotation=0, length=0,
+                ),
+                LibraryPin(
+                    number="2", name="~", type="passive",
+                    position=(0, -2.54), rotation=0, length=0,
+                ),
+            ],
+        )
+        # C_Small at (182.88, 97.79) rotated 90 degrees.
+        # Pin 1 library (0, 2.54) -> rotate 90 CCW -> (-2.54, 0)
+        #   -> negate Y -> (-2.54, 0)
+        #   -> translate -> (180.34, 97.79)
+        pos1 = sym.get_pin_position(
+            "1", instance_pos=(182.88, 97.79), instance_rot=90
+        )
+        assert pos1 is not None
+        assert pos1[0] == pytest.approx(180.34, abs=0.01)
+        assert pos1[1] == pytest.approx(97.79, abs=0.01)
+
+        # Pin 2 library (0, -2.54) -> rotate 90 CCW -> (2.54, 0)
+        #   -> negate Y -> (2.54, 0)
+        #   -> translate -> (185.42, 97.79)
+        pos2 = sym.get_pin_position(
+            "2", instance_pos=(182.88, 97.79), instance_rot=90
+        )
+        assert pos2 is not None
+        assert pos2[0] == pytest.approx(185.42, abs=0.01)
+        assert pos2[1] == pytest.approx(97.79, abs=0.01)
 
     def test_library_symbol_get_pin_position_with_mirror_x(self):
         """Test pin position with X mirror."""
@@ -949,12 +994,14 @@ class TestLibrarySymbol:
             name="Test",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                    number="1", name="A", type="input", position=(2.54, 0), rotation=0, length=2.54
                 ),
             ],
         )
+        # Mirror X negates library x: (-2.54, 0). Y negated: (−2.54, 0).
+        # Schematic position = (100-2.54, 100) = (97.46, 100).
         pos = sym.get_pin_position("1", instance_pos=(100, 100), mirror="x")
-        assert pos == (95.0, 100.0)
+        assert pos == (97.46, 100.0)
 
     def test_library_symbol_get_pin_position_with_mirror_y(self):
         """Test pin position with Y mirror."""
@@ -962,12 +1009,46 @@ class TestLibrarySymbol:
             name="Test",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="input", position=(0, 5), rotation=0, length=2.54
+                    number="1", name="A", type="input", position=(0, 2.54), rotation=0, length=2.54
                 ),
             ],
         )
+        # Mirror Y negates library y: (0, -2.54). Y negated for schematic:
+        # (0, 2.54).  Schematic position = (100, 100+2.54) = (100, 102.54).
         pos = sym.get_pin_position("1", instance_pos=(100, 100), mirror="y")
-        assert pos == (100.0, 105.0)
+        assert pos == (100.0, 102.54)
+
+    def test_library_symbol_get_pin_position_all_rotations(self):
+        """Test pin positions at 0, 90, 180, 270 degrees for a vertical pin."""
+        sym = LibrarySymbol(
+            name="C_Small",
+            pins=[
+                LibraryPin(
+                    number="1", name="~", type="passive",
+                    position=(0, 2.54), rotation=0, length=0,
+                ),
+            ],
+        )
+        center = (100.0, 100.0)
+
+        # 0 deg: (0, 2.54) -> negate Y -> (0, -2.54). Pos: (100, 97.46)
+        pos = sym.get_pin_position("1", instance_pos=center, instance_rot=0)
+        assert pos == pytest.approx((100.0, 97.46), abs=0.01)
+
+        # 90 deg: rotate (0,2.54) -> (-2.54, 0), negate Y -> (-2.54, 0).
+        # Pos: (97.46, 100)
+        pos = sym.get_pin_position("1", instance_pos=center, instance_rot=90)
+        assert pos == pytest.approx((97.46, 100.0), abs=0.01)
+
+        # 180 deg: rotate (0,2.54) -> (0, -2.54), negate Y -> (0, 2.54).
+        # Pos: (100, 102.54)
+        pos = sym.get_pin_position("1", instance_pos=center, instance_rot=180)
+        assert pos == pytest.approx((100.0, 102.54), abs=0.01)
+
+        # 270 deg: rotate (0,2.54) -> (2.54, 0), negate Y -> (2.54, 0).
+        # Pos: (102.54, 100)
+        pos = sym.get_pin_position("1", instance_pos=center, instance_rot=270)
+        assert pos == pytest.approx((102.54, 100.0), abs=0.01)
 
     def test_library_symbol_get_all_pin_positions(self):
         """Test getting all pin positions."""
@@ -975,17 +1056,17 @@ class TestLibrarySymbol:
             name="Test",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                    number="1", name="A", type="input", position=(2.54, 0), rotation=0, length=2.54
                 ),
                 LibraryPin(
-                    number="2", name="B", type="output", position=(-5, 0), rotation=0, length=2.54
+                    number="2", name="B", type="output", position=(-2.54, 0), rotation=0, length=2.54
                 ),
             ],
         )
         positions = sym.get_all_pin_positions(instance_pos=(100, 100))
         assert len(positions) == 2
-        assert positions["1"] == (105.0, 100.0)
-        assert positions["2"] == (95.0, 100.0)
+        assert positions["1"] == (102.54, 100.0)
+        assert positions["2"] == (97.46, 100.0)
 
 
 class TestLibraryManager:
