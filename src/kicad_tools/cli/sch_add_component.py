@@ -441,16 +441,23 @@ def run_add_component(args) -> int:
             # _snap() again can shift to the wrong grid point.
             pin_pos = _round_pos(pin_pos)
 
-            planned.append(
-                PlannedAction(
-                    "wire",
-                    f"Wire from pin {cs.pin_number} at"
-                    f" ({pin_pos[0]:.2f}, {pin_pos[1]:.2f})"
-                    f" to ({cs.target[0]:.2f}, {cs.target[1]:.2f})",
+            # Only plan a wire when start != end (mirrors execution phase).
+            if not (
+                abs(pin_pos[0] - cs.target[0]) < 0.01
+                and abs(pin_pos[1] - cs.target[1]) < 0.01
+            ):
+                planned.append(
+                    PlannedAction(
+                        "wire",
+                        f"Wire from pin {cs.pin_number} at"
+                        f" ({pin_pos[0]:.2f}, {pin_pos[1]:.2f})"
+                        f" to ({cs.target[0]:.2f}, {cs.target[1]:.2f})",
+                    )
                 )
-            )
 
-            # Check if target intersects existing wires (endpoint or midpoint)
+            # Check if target intersects existing wires (endpoint or midpoint).
+            # This must run even when no wire is planned -- a symbol pin
+            # landing on a wire midpoint still needs a junction.
             for wire in sch.wires:
                 if _point_on_wire_segment(cs.target, wire.start, wire.end):
                     planned.append(
@@ -548,16 +555,18 @@ def run_add_component(args) -> int:
 
             pin_pos = _round_pos(pin_pos)
 
-            # Skip duplicate: don't add a wire if start == end
-            if (
+            # Add wire unless start == end (e.g. power symbol pin
+            # already sits on the connect target).
+            if not (
                 abs(pin_pos[0] - cs.target[0]) < 0.01
                 and abs(pin_pos[1] - cs.target[1]) < 0.01
             ):
-                continue
+                sch.add_wire(pin_pos, cs.target)
 
-            sch.add_wire(pin_pos, cs.target)
-
-            # Add junction if target intersects a pre-existing wire segment
+            # Add junction if target intersects a pre-existing wire
+            # segment.  This must run even when no wire was added --
+            # the symbol pin still meets the existing wire and KiCad
+            # requires a junction at wire midpoints.
             for wire in sch.wires[:pre_existing_wire_count]:
                 if _point_on_wire_segment(cs.target, wire.start, wire.end):
                     sch.add_junction(cs.target)
