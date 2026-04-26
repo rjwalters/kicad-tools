@@ -159,6 +159,41 @@ def _build_wire_graph(
     return dict(adjacency), net_names
 
 
+def _propagate_net_names(
+    adjacency: dict[Coord, set[Coord]],
+    net_names: dict[Coord, str],
+) -> None:
+    """Propagate net names from labelled nodes to all wire-connected nodes.
+
+    For each coordinate that already has a net name (from a label or power
+    symbol), run an unrestricted BFS across the wire graph and assign the
+    same net name to every reachable node that does not yet have one.
+
+    This is safe because KiCad wires form disjoint nets -- two different
+    net labels connected by a wire would be an ERC error in the schematic.
+    The function mutates *net_names* in place.
+    """
+    # Snapshot the set of seed coordinates; we will add entries to net_names
+    # during iteration, so iterate over a copy.
+    seeds = list(net_names.items())
+
+    for seed_coord, name in seeds:
+        # BFS from seed_coord through the full wire graph (no barriers).
+        visited: set[Coord] = set()
+        queue = [seed_coord]
+        visited.add(seed_coord)
+
+        while queue:
+            current = queue.pop(0)
+            # Assign net name if this node doesn't have one yet.
+            if current not in net_names:
+                net_names[current] = name
+            for neighbor in adjacency.get(current, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+
 def _flood_fill_net(
     start: Coord,
     adjacency: dict[Coord, set[Coord]],
@@ -269,6 +304,22 @@ def resolve_pin_map(
 
     # --- Build wire graph with pin coordinates as split points ---
     adjacency, net_names = _build_wire_graph(schematic, extra_points=all_pin_coords)
+
+    # ------------------------------------------------------------------
+    # Pre-pass: propagate net names to all wire-connected nodes.
+    #
+    # Labels/power symbols define net names at specific coordinates, but
+    # barrier pins may sit between a component's pin and the label.  When
+    # the per-component BFS reaches a barrier pin it checks for a net name
+    # at that coordinate but does NOT continue traversal.  If the label is
+    # on the far side of the barrier, the net name is never found.
+    #
+    # Fix: run an unrestricted BFS from every labelled node and assign the
+    # net name to every reachable node in the wire graph.  This ensures
+    # barrier pins that are electrically on the same wire as a label will
+    # already have the net name recorded before per-component BFS runs.
+    # ------------------------------------------------------------------
+    _propagate_net_names(adjacency, net_names)
 
     # ------------------------------------------------------------------
     # Second pass: resolve nets for each symbol using per-component barrier sets.
