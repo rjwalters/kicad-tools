@@ -2159,7 +2159,7 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
     issues: list[ValidationIssue] = []
 
     try:
-        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+        from kicad_tools.cli.sch_pin_map import _to_coord, resolve_pin_map
 
         hierarchy = build_hierarchy(schematic_path)
 
@@ -2168,6 +2168,12 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                 sch = Schematic.load(node.path)
                 pin_map = resolve_pin_map(sch)
                 sheet_path = node.get_path_string()
+
+                # Collect wire endpoints for near-miss distance reporting.
+                wire_endpoints: set[tuple[int, int]] = set()
+                for wire in sch.wires:
+                    wire_endpoints.add(_to_coord(*wire.start))
+                    wire_endpoints.add(_to_coord(*wire.end))
 
                 # Collect no-connect marker positions from the raw S-expression.
                 nc_points: set[tuple[float, float]] = set()
@@ -2230,16 +2236,44 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                     if has_any_nc_marker:
                         continue
 
-                    # All pins are floating with no no-connect markers
+                    # All pins are floating with no no-connect markers.
+                    # Compute near-miss distances for diagnostics.
                     value = ref_values.get(ref, entry.get("lib_id", "?"))
+                    near_miss_parts: list[str] = []
+                    if wire_endpoints:
+                        for pin_num, pin_info in pins_data.items():
+                            pos = pin_info.get("position")
+                            if not pos:
+                                continue
+                            pc = _to_coord(pos[0], pos[1])
+                            min_dist = min(
+                                abs(pc[0] - wp[0]) + abs(pc[1] - wp[1])
+                                for wp in wire_endpoints
+                            )
+                            # Convert integer units (0.1mm) to mm
+                            dist_mm = min_dist * 0.1
+                            if dist_mm <= 5.0:
+                                near_miss_parts.append(
+                                    f"pin {pin_num}: {dist_mm:.1f}mm"
+                                )
+                            else:
+                                near_miss_parts.append(
+                                    f"pin {pin_num}: no wire within 5mm"
+                                )
+
+                    msg = (
+                        f"Fully unconnected component: {ref} ({value}) "
+                        f"-- all pins are floating"
+                    )
+                    if near_miss_parts:
+                        msg += (
+                            f" (nearest wire: {', '.join(near_miss_parts)})"
+                        )
                     issues.append(
                         ValidationIssue(
                             severity="error",
                             category="unconnected_component",
-                            message=(
-                                f"Fully unconnected component: {ref} ({value}) "
-                                f"-- all pins are floating"
-                            ),
+                            message=msg,
                             location=sheet_path,
                         )
                     )

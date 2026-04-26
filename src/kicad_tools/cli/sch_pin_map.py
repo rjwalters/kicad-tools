@@ -31,6 +31,33 @@ def _to_coord(x: float, y: float) -> Coord:
     return (int(round(x * 10)), int(round(y * 10)))
 
 
+def _snap_coord(coord: Coord, known: set[Coord], tolerance: int = 1) -> Coord:
+    """Return the nearest node in *known* if within *tolerance*, else *coord* unchanged.
+
+    Sub-grid component placement can cause pin positions computed from
+    ``instance_pos + lib_pin_offset`` to round to a different integer than
+    the wire endpoint parsed directly from the schematic.  This function
+    bridges a gap of up to *tolerance* units (default 1 = 0.1 mm) so that
+    the pin still matches the wire graph.
+    """
+    if coord in known:
+        return coord
+    cx, cy = coord
+    best = coord
+    best_dist = tolerance + 1  # sentinel > tolerance
+    for dx in range(-tolerance, tolerance + 1):
+        for dy in range(-tolerance, tolerance + 1):
+            if dx == 0 and dy == 0:
+                continue
+            candidate = (cx + dx, cy + dy)
+            if candidate in known:
+                dist = abs(dx) + abs(dy)  # Manhattan distance
+                if dist < best_dist:
+                    best = candidate
+                    best_dist = dist
+    return best
+
+
 def _point_on_segment(
     point: Coord, seg_start: Coord, seg_end: Coord
 ) -> bool:
@@ -217,6 +244,11 @@ def _flood_fill_net(
     """
     if barrier_pins is None:
         barrier_pins = set()
+
+    # Snap start to the nearest graph node if sub-grid rounding caused a
+    # 1-unit mismatch between pin position and wire endpoint.
+    graph_nodes = set(adjacency.keys())
+    start = _snap_coord(start, graph_nodes)
 
     visited: set[Coord] = set()
     queue = [start]
