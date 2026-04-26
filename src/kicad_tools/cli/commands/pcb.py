@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone, snap-rotation")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone, snap-rotation, edit-outline")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -42,6 +42,10 @@ def run_pcb_command(args) -> int:
     # Handle snap-rotation command
     if args.pcb_command == "snap-rotation":
         return _run_snap_rotation_command(args, pcb_path)
+
+    # Handle edit-outline command
+    if args.pcb_command == "edit-outline":
+        return _run_edit_outline_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -787,3 +791,171 @@ def _run_snap_rotation_command(args, pcb_path: Path) -> int:
             return 1
 
     return 0
+
+
+def _run_edit_outline_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb edit-outline' command."""
+    from kicad_tools.schema.pcb import PCB
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # --list: display contours
+    if getattr(args, "list_contours", False):
+        contours = pcb.list_edge_contours()
+        if not contours:
+            if output_format == "json":
+                print(json.dumps({"contours": []}))
+            else:
+                print("No Edge.Cuts contours found.")
+            return 0
+
+        if output_format == "json":
+            data = []
+            for c in contours:
+                data.append({
+                    "index": c.index,
+                    "elements": c.element_count,
+                    "bbox": {
+                        "min_x": round(c.bbox[0], 2),
+                        "min_y": round(c.bbox[1], 2),
+                        "max_x": round(c.bbox[2], 2),
+                        "max_y": round(c.bbox[3], 2),
+                    },
+                    "width_mm": round(c.bbox_width, 2),
+                    "height_mm": round(c.bbox_height, 2),
+                    "area_mm2": round(c.bbox_area, 2),
+                    "is_mounting_hole": c.is_mounting_hole,
+                })
+            print(json.dumps({"contours": data}, indent=2))
+        else:
+            print(f"Found {len(contours)} Edge.Cuts contour(s):\n")
+            for c in contours:
+                label = " [mounting hole]" if c.is_mounting_hole else ""
+                print(
+                    f"  [{c.index}] {c.element_count} element(s), "
+                    f"bbox ({c.bbox[0]:.2f}, {c.bbox[1]:.2f}) - "
+                    f"({c.bbox[2]:.2f}, {c.bbox[3]:.2f}), "
+                    f"{c.bbox_width:.2f} x {c.bbox_height:.2f} mm"
+                    f"{label}"
+                )
+        return 0
+
+    # --remove-outline INDEX
+    remove_idx = getattr(args, "remove_outline", None)
+    if remove_idx is not None:
+        contours = pcb.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == remove_idx:
+                target = c
+                break
+        if target is None:
+            print(f"Error: No contour with index {remove_idx}", file=sys.stderr)
+            return 1
+
+        if dry_run:
+            print(
+                f"Would remove contour [{remove_idx}]: "
+                f"{target.element_count} element(s), "
+                f"bbox ({target.bbox[0]:.2f}, {target.bbox[1]:.2f}) - "
+                f"({target.bbox[2]:.2f}, {target.bbox[3]:.2f})"
+            )
+            return 0
+
+        ok = pcb.remove_edge_contour(remove_idx)
+        if not ok:
+            print(f"Error: Failed to remove contour {remove_idx}", file=sys.stderr)
+            return 1
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(f"Removed contour [{remove_idx}] ({target.element_count} element(s)). Saved to {save_path}")
+        return 0
+
+    # --keep-only INDEX
+    keep_idx = getattr(args, "keep_only", None)
+    if keep_idx is not None:
+        contours = pcb.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == keep_idx:
+                target = c
+                break
+        if target is None:
+            print(f"Error: No contour with index {keep_idx}", file=sys.stderr)
+            return 1
+
+        to_remove = [
+            c for c in contours
+            if c.index != keep_idx and not c.is_mounting_hole
+        ]
+
+        if dry_run:
+            print(f"Would keep contour [{keep_idx}] and remove {len(to_remove)} other outline(s).")
+            for c in to_remove:
+                print(
+                    f"  Remove [{c.index}]: {c.element_count} element(s), "
+                    f"bbox ({c.bbox[0]:.2f}, {c.bbox[1]:.2f}) - "
+                    f"({c.bbox[2]:.2f}, {c.bbox[3]:.2f})"
+                )
+            return 0
+
+        # Remove in reverse index order to keep indices stable
+        for c in sorted(to_remove, key=lambda c: c.index, reverse=True):
+            pcb.remove_edge_contour(c.index)
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(
+            f"Kept contour [{keep_idx}], removed {len(to_remove)} outline(s). "
+            f"Saved to {save_path}"
+        )
+        return 0
+
+    # --set-outline rect
+    set_outline = getattr(args, "set_outline", None)
+    if set_outline == "rect":
+        origin = getattr(args, "origin", None)
+        size = getattr(args, "size", None)
+        if not origin or not size:
+            print(
+                "Error: --set-outline rect requires --origin X Y and --size W H",
+                file=sys.stderr,
+            )
+            return 1
+
+        origin_x, origin_y = origin
+        width, height = size
+
+        if dry_run:
+            contours = pcb.list_edge_contours()
+            outline_count = sum(1 for c in contours if not c.is_mounting_hole)
+            print(
+                f"Would replace {outline_count} outline contour(s) with "
+                f"rect at ({origin_x}, {origin_y}), size {width} x {height} mm"
+            )
+            return 0
+
+        removed = pcb.replace_outline(origin_x, origin_y, width, height)
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(
+            f"Replaced {removed} outline(s) with rect at "
+            f"({origin_x}, {origin_y}), size {width} x {height} mm. "
+            f"Saved to {save_path}"
+        )
+        return 0
+
+    print("Error: No action specified. Use --list, --remove-outline, --keep-only, or --set-outline.", file=sys.stderr)
+    return 1

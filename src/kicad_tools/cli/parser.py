@@ -1349,6 +1349,75 @@ def _add_pcb_parser(subparsers) -> None:
     )
 
 
+    # pcb edit-outline
+    pcb_edit_outline = pcb_subparsers.add_parser(
+        "edit-outline",
+        help="List, remove, or replace Edge.Cuts board outlines",
+        description="Manage Edge.Cuts contours in a PCB file. "
+        "Supports listing contours, removing specific contours by index, "
+        "keeping only a specific contour, and replacing all outlines with "
+        "a new rectangle. Mounting hole circles are preserved by default.",
+    )
+    pcb_edit_outline.add_argument("pcb", help="Path to .kicad_pcb file")
+
+    outline_action = pcb_edit_outline.add_mutually_exclusive_group(required=True)
+    outline_action.add_argument(
+        "--list",
+        dest="list_contours",
+        action="store_true",
+        help="List all Edge.Cuts contours with bounding boxes",
+    )
+    outline_action.add_argument(
+        "--remove-outline",
+        type=int,
+        metavar="INDEX",
+        help="Remove a contour by its index",
+    )
+    outline_action.add_argument(
+        "--keep-only",
+        type=int,
+        metavar="INDEX",
+        help="Remove all contours except the one at INDEX (preserves mounting holes)",
+    )
+    outline_action.add_argument(
+        "--set-outline",
+        choices=["rect"],
+        help="Replace all outlines with a new shape (preserves mounting holes)",
+    )
+
+    pcb_edit_outline.add_argument(
+        "--origin",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Origin (top-left) for --set-outline in mm",
+    )
+    pcb_edit_outline.add_argument(
+        "--size",
+        nargs=2,
+        type=float,
+        metavar=("W", "H"),
+        help="Width and height for --set-outline in mm",
+    )
+    pcb_edit_outline.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_edit_outline.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_edit_outline.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying the PCB file",
+    )
+
+
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
     lib_parser = subparsers.add_parser("lib", help="Symbol and footprint library tools")

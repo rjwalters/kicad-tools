@@ -934,6 +934,35 @@ class GraphicArc:
 
 
 @dataclass
+class EdgeContour:
+    """A group of connected Edge.Cuts graphic elements forming a contour.
+
+    Each contour is either a closed polygon (board outline) or a small
+    shape such as a mounting hole.  The ``sexp_nodes`` list stores the
+    raw S-expression nodes so the contour can be removed from the PCB.
+    """
+
+    index: int
+    element_count: int
+    bbox: tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
+    is_mounting_hole: bool = False
+    sexp_nodes: list = field(default_factory=list)  # list[SExp]
+
+    @property
+    def bbox_area(self) -> float:
+        """Bounding box area in mm^2."""
+        return (self.bbox[2] - self.bbox[0]) * (self.bbox[3] - self.bbox[1])
+
+    @property
+    def bbox_width(self) -> float:
+        return self.bbox[2] - self.bbox[0]
+
+    @property
+    def bbox_height(self) -> float:
+        return self.bbox[3] - self.bbox[1]
+
+
+@dataclass
 class StackupLayer:
     """Stackup layer definition."""
 
@@ -2081,6 +2110,264 @@ class PCB:
                 segments.extend(self._rect_to_segments(graphic.start, graphic.end))
 
         return segments
+
+    # ------------------------------------------------------------------
+    # Edge.Cuts contour analysis and manipulation
+    # ------------------------------------------------------------------
+
+    _MOUNTING_HOLE_AREA_THRESHOLD = 25.0  # mm^2
+
+    def list_edge_contours(self) -> list[EdgeContour]:
+        """Group Edge.Cuts graphic elements into connected contours.
+
+        Each contour is a set of connected graphic elements (gr_line,
+        gr_arc, gr_rect, gr_circle) on the Edge.Cuts layer.  A gr_rect
+        or gr_circle is always its own contour; gr_line/gr_arc elements
+        are chained by endpoint proximity.
+
+        Small contours (bounding-box area < 25 mm^2) are flagged as
+        mounting holes.
+
+        Returns:
+            Ordered list of ``EdgeContour`` objects with index, bounding
+            box, element count, and sexp node references.
+        """
+        # Collect Edge.Cuts sexp nodes, keyed by identity, with endpoints
+        # Each entry: (sexp_node, endpoints_list)
+        # endpoints_list items are (x, y) tuples at segment ends
+        edge_elements: list[tuple[SExp, list[tuple[float, float]]]] = []
+
+        for child in self._sexp.children:
+            if child.is_atom:
+                continue
+            tag = child.tag
+            if tag not in ("gr_line", "gr_arc", "gr_rect", "gr_circle"):
+                continue
+            layer_node = child.find("layer")
+            if not layer_node:
+                continue
+            layer_name = layer_node.get_string(0) or ""
+            if layer_name != "Edge.Cuts":
+                continue
+
+            endpoints: list[tuple[float, float]] = []
+            if tag in ("gr_line", "gr_arc"):
+                s = child.find("start")
+                e = child.find("end")
+                if s and e:
+                    endpoints = [
+                        (s.get_float(0) or 0.0, s.get_float(1) or 0.0),
+                        (e.get_float(0) or 0.0, e.get_float(1) or 0.0),
+                    ]
+            elif tag in ("gr_rect", "gr_circle"):
+                # Self-contained shape -- not chainable with lines/arcs
+                endpoints = []  # sentinel: standalone contour
+
+            edge_elements.append((child, endpoints))
+
+        if not edge_elements:
+            return []
+
+        # Partition into groups.
+        # Standalone shapes (gr_rect, gr_circle) are each their own group.
+        # Line/arc elements are chained by endpoint proximity.
+        standalone: list[list[int]] = []
+        chainable_indices: list[int] = []
+        for idx, (node, eps) in enumerate(edge_elements):
+            tag = node.tag
+            if tag in ("gr_rect", "gr_circle"):
+                standalone.append([idx])
+            else:
+                chainable_indices.append(idx)
+
+        # Union-Find for chainable elements
+        parent = {i: i for i in chainable_indices}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        tolerance = 0.001
+        for i_pos, i in enumerate(chainable_indices):
+            eps_i = edge_elements[i][1]
+            for j in chainable_indices[i_pos + 1 :]:
+                eps_j = edge_elements[j][1]
+                for pi in eps_i:
+                    for pj in eps_j:
+                        dx = pi[0] - pj[0]
+                        dy = pi[1] - pj[1]
+                        if (dx * dx + dy * dy) < (tolerance * tolerance):
+                            union(i, j)
+
+        # Group chainable elements by root
+        from collections import defaultdict
+
+        chain_groups: dict[int, list[int]] = defaultdict(list)
+        for i in chainable_indices:
+            chain_groups[find(i)].append(i)
+
+        all_groups = standalone + list(chain_groups.values())
+
+        # Build EdgeContour objects
+        contours: list[EdgeContour] = []
+        for group_idx, group in enumerate(all_groups):
+            nodes = [edge_elements[i][0] for i in group]
+            all_points = self._collect_edge_points(nodes)
+            if not all_points:
+                continue
+            xs = [p[0] for p in all_points]
+            ys = [p[1] for p in all_points]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+            area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            contour = EdgeContour(
+                index=group_idx,
+                element_count=len(nodes),
+                bbox=bbox,
+                is_mounting_hole=area < self._MOUNTING_HOLE_AREA_THRESHOLD,
+                sexp_nodes=nodes,
+            )
+            contours.append(contour)
+
+        # Re-index
+        for idx, c in enumerate(contours):
+            c.index = idx
+        return contours
+
+    @staticmethod
+    def _collect_edge_points(nodes: list[SExp]) -> list[tuple[float, float]]:
+        """Collect all coordinate points from a list of sexp graphic nodes."""
+        points: list[tuple[float, float]] = []
+        for node in nodes:
+            for attr in ("start", "end", "mid", "center"):
+                n = node.find(attr)
+                if n:
+                    points.append((n.get_float(0) or 0.0, n.get_float(1) or 0.0))
+        return points
+
+    def remove_edge_contour(self, index: int) -> bool:
+        """Remove an Edge.Cuts contour by index.
+
+        Removes the graphic sexp nodes belonging to the contour from the
+        S-expression tree and from the in-memory ``_graphic_lines``,
+        ``_graphic_arcs``, and ``_graphics`` lists.
+
+        Args:
+            index: Contour index as returned by ``list_edge_contours()``.
+
+        Returns:
+            True if the contour was found and removed, False otherwise.
+        """
+        contours = self.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == index:
+                target = c
+                break
+        if target is None:
+            return False
+
+        # Remove from sexp tree
+        for node in target.sexp_nodes:
+            self._sexp.remove(node)
+
+        # Clean in-memory lists by matching UUID
+        target_uuids: set[str] = set()
+        for node in target.sexp_nodes:
+            uuid_n = node.find("uuid")
+            if uuid_n:
+                u = uuid_n.get_string(0) or ""
+                if u:
+                    target_uuids.add(u)
+
+        if target_uuids:
+            self._graphic_lines = [
+                gl for gl in self._graphic_lines if gl.uuid not in target_uuids
+            ]
+            self._graphic_arcs = [
+                ga for ga in self._graphic_arcs if ga.uuid not in target_uuids
+            ]
+            self._graphics = [
+                g for g in self._graphics if g.uuid not in target_uuids
+            ]
+        else:
+            # Fallback: re-parse the in-memory lists from sexp
+            self._graphic_lines = []
+            self._graphic_arcs = []
+            self._graphics = []
+            for child in self._sexp.children:
+                if child.is_atom:
+                    continue
+                tag = child.tag
+                if tag == "gr_line":
+                    self._graphic_lines.append(GraphicLine.from_sexp(child))
+                elif tag == "gr_arc":
+                    self._graphic_arcs.append(GraphicArc.from_sexp(child))
+                elif tag in ("gr_rect", "gr_circle"):
+                    graphic_type = tag[3:]
+                    self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
+
+        return True
+
+    def replace_outline(
+        self,
+        origin_x: float,
+        origin_y: float,
+        width: float,
+        height: float,
+    ) -> int:
+        """Replace all outline contours with a single rectangle.
+
+        Removes every Edge.Cuts contour whose bounding-box area is above
+        the mounting-hole threshold, then inserts a new ``gr_rect`` at
+        the given origin and size.  Mounting-hole contours are preserved.
+
+        Args:
+            origin_x: X coordinate of top-left corner (mm).
+            origin_y: Y coordinate of top-left corner (mm).
+            width: Board width (mm).
+            height: Board height (mm).
+
+        Returns:
+            Number of outline contours removed.
+        """
+        contours = self.list_edge_contours()
+        removed = 0
+        # Remove outlines (non-mounting-hole contours)
+        # Process in reverse index order so earlier indices stay valid
+        for c in sorted(contours, key=lambda c: c.index, reverse=True):
+            if not c.is_mounting_hole:
+                for node in c.sexp_nodes:
+                    self._sexp.remove(node)
+                removed += 1
+
+        # Insert new rect outline
+        new_rect = PCB._build_board_outline_sexp(width, height, origin_x, origin_y)
+        self._sexp.append(new_rect)
+
+        # Rebuild in-memory lists
+        self._graphic_lines = []
+        self._graphic_arcs = []
+        self._graphics = []
+        for child in self._sexp.children:
+            if child.is_atom:
+                continue
+            tag = child.tag
+            if tag == "gr_line":
+                self._graphic_lines.append(GraphicLine.from_sexp(child))
+            elif tag == "gr_arc":
+                self._graphic_arcs.append(GraphicArc.from_sexp(child))
+            elif tag in ("gr_rect", "gr_circle"):
+                graphic_type = tag[3:]
+                self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
+
+        return removed
 
     @property
     def setup(self) -> Setup | None:
