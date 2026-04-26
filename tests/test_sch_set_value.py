@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.modify_schematic import find_symbol_text_range, set_value_text
+from kicad_tools.cli.modify_schematic import (
+    delete_symbol_text,
+    find_symbol_text_range,
+    regen_uuids_text,
+    set_footprint_text,
+    set_lib_id_text,
+    set_value_text,
+)
 from kicad_tools.cli.sch_set_value import run_set_value
 
 # ---------------------------------------------------------------------------
@@ -539,3 +546,266 @@ class TestHierarchicalSchematic:
         # Should still succeed (partial match) but return 0 because some changed
         assert ret == 0
         assert '"Value" "4.7k"' in parent.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Regression: symbols without (instances ...) block (#2100)
+# ---------------------------------------------------------------------------
+
+# C18 lacks an (instances ...) block; C21 has one.
+# The old regex would span from C18 through C21, causing set-value on C21
+# to incorrectly modify C18's value.
+MULTI_SYMBOL_NO_INSTANCES = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "C18"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "100nF"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "C21"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "1uF"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "C21") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Both symbols lack (instances ...) blocks
+MULTI_SYMBOL_BOTH_NO_INSTANCES = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R5"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "R6"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "dddddddd-dddd-dddd-dddd-dddddddddddd")
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+
+class TestNoInstancesBlock:
+    """Regression tests for issue #2100: symbols without (instances ...) block."""
+
+    def test_find_symbol_without_instances(self):
+        """find_symbol_text_range locates C18 which has no instances block."""
+        result = find_symbol_text_range(MULTI_SYMBOL_NO_INSTANCES, "C18")
+        assert result is not None
+        _, _, info = result
+        assert info["lib_id"] == "Device:C"
+        assert info["value"] == "100nF"
+        assert info["uuid"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def test_find_symbol_with_instances(self):
+        """find_symbol_text_range locates C21 which has an instances block."""
+        result = find_symbol_text_range(MULTI_SYMBOL_NO_INSTANCES, "C21")
+        assert result is not None
+        _, _, info = result
+        assert info["lib_id"] == "Device:C"
+        assert info["value"] == "1uF"
+        assert info["uuid"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    def test_set_value_targets_correct_symbol(self):
+        """set_value_text on C21 must not modify C18 (the bug in #2100)."""
+        result, success, msg = set_value_text(MULTI_SYMBOL_NO_INSTANCES, "C21", "2.2uF")
+        assert success is True
+        assert "Changed C21 value" in msg
+        # C21 should have the new value
+        c21 = find_symbol_text_range(result, "C21")
+        assert c21 is not None
+        assert c21[2]["value"] == "2.2uF"
+        # C18 must be unchanged
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["value"] == "100nF"
+
+    def test_set_value_on_symbol_without_instances(self):
+        """set_value_text on C18 (no instances block) works correctly."""
+        result, success, msg = set_value_text(MULTI_SYMBOL_NO_INSTANCES, "C18", "220nF")
+        assert success is True
+        assert "Changed C18 value" in msg
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["value"] == "220nF"
+        # C21 must be unchanged
+        c21 = find_symbol_text_range(result, "C21")
+        assert c21 is not None
+        assert c21[2]["value"] == "1uF"
+
+    def test_set_footprint_targets_correct_symbol(self):
+        """set_footprint_text on C21 must not modify C18."""
+        new_fp = "Capacitor_SMD:C_0805_2012Metric"
+        result, success, _ = set_footprint_text(MULTI_SYMBOL_NO_INSTANCES, "C21", new_fp)
+        assert success is True
+        c21 = find_symbol_text_range(result, "C21")
+        assert c21 is not None
+        assert c21[2]["footprint"] == new_fp
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["footprint"] == "Capacitor_SMD:C_0402_1005Metric"
+
+    def test_set_lib_id_targets_correct_symbol(self):
+        """set_lib_id_text on C21 must not modify C18."""
+        result, success, _ = set_lib_id_text(MULTI_SYMBOL_NO_INSTANCES, "C21", "Device:C_Polarized")
+        assert success is True
+        c21 = find_symbol_text_range(result, "C21")
+        assert c21 is not None
+        assert c21[2]["lib_id"] == "Device:C_Polarized"
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["lib_id"] == "Device:C"
+
+    def test_delete_targets_correct_symbol(self):
+        """delete_symbol_text on C21 must not delete C18."""
+        result, success, _ = delete_symbol_text(MULTI_SYMBOL_NO_INSTANCES, "C21")
+        assert success is True
+        # C18 must still be present
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["value"] == "100nF"
+        # C21 must be gone
+        assert find_symbol_text_range(result, "C21") is None
+
+    def test_regen_uuids_targets_correct_symbol(self):
+        """regen_uuids_text on C21 must not change C18 UUIDs."""
+        result, success, _ = regen_uuids_text(MULTI_SYMBOL_NO_INSTANCES, "C21")
+        assert success is True
+        # C18 UUID must be unchanged
+        c18 = find_symbol_text_range(result, "C18")
+        assert c18 is not None
+        assert c18[2]["uuid"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        # C21 UUID must be different
+        c21 = find_symbol_text_range(result, "C21")
+        assert c21 is not None
+        assert c21[2]["uuid"] != "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    def test_both_symbols_without_instances(self):
+        """Operations work when both symbols lack instances blocks."""
+        result, success, _ = set_value_text(MULTI_SYMBOL_BOTH_NO_INSTANCES, "R6", "100k")
+        assert success is True
+        r6 = find_symbol_text_range(result, "R6")
+        assert r6 is not None
+        assert r6[2]["value"] == "100k"
+        r5 = find_symbol_text_range(result, "R5")
+        assert r5 is not None
+        assert r5[2]["value"] == "10k"
+
+    def test_single_symbol_without_instances(self):
+        """A schematic with a single symbol lacking instances still works."""
+        single = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+        result = find_symbol_text_range(single, "R1")
+        assert result is not None
+        _, _, info = result
+        assert info["value"] == "10k"
+        # set-value should also work
+        modified, success, _ = set_value_text(single, "R1", "22k")
+        assert success is True
+        r1 = find_symbol_text_range(modified, "R1")
+        assert r1 is not None
+        assert r1[2]["value"] == "22k"
