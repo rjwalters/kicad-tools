@@ -896,3 +896,98 @@ class TestLShapedReroute:
         # Straight route: 1 IC-to-R wire + 1 R-to-power wire = 2
         # (one may be zero-length and skipped)
         assert len(sch.wires) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Instances block verification
+# ---------------------------------------------------------------------------
+
+
+class TestInstancesBlock:
+    """Verify that placed symbols include the (instances ...) S-expression."""
+
+    def test_resistor_has_instances_block(self, tmp_path):
+        """The resistor placed by add-pull-resistor must have an instances block."""
+        sch_path = _write_sch(tmp_path)
+
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref", "U1",
+                "--pin", "3",
+                "--direction", "up",
+                "--value", "10k",
+            ]
+        )
+        assert rc == 0
+
+        sch = Schematic.load(sch_path)
+        r_syms = [s for s in sch.symbols if s.lib_id == "Device:R"]
+        assert len(r_syms) == 1
+        r_sym = r_syms[0]
+        assert r_sym.project_name, "Resistor must have project_name set"
+        assert r_sym.instance_path, "Resistor must have instance_path set"
+        assert r_sym.instance_path.startswith("/")
+
+    def test_power_symbol_has_instances_block(self, tmp_path):
+        """The power symbol placed by add-pull-resistor must have an instances block."""
+        sch_path = _write_sch(tmp_path)
+
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref", "U1",
+                "--pin", "3",
+                "--direction", "up",
+                "--value", "10k",
+            ]
+        )
+        assert rc == 0
+
+        sch = Schematic.load(sch_path)
+        power_syms = [s for s in sch.symbols if s.lib_id.startswith("power:")]
+        assert len(power_syms) >= 1
+        pwr_sym = power_syms[0]
+        assert pwr_sym.project_name, "Power symbol must have project_name set"
+        assert pwr_sym.instance_path, "Power symbol must have instance_path set"
+        assert pwr_sym.instance_path.startswith("/")
+
+    def test_instances_use_schematic_stem(self, tmp_path):
+        """Without .kicad_pro, project name should be the schematic stem."""
+        sch_path = _write_sch(tmp_path)
+
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref", "U1",
+                "--pin", "3",
+                "--direction", "up",
+                "--value", "10k",
+            ]
+        )
+        assert rc == 0
+
+        sch = Schematic.load(sch_path)
+        r_syms = [s for s in sch.symbols if s.lib_id == "Device:R"]
+        assert len(r_syms) == 1
+        assert r_syms[0].project_name == "test_pull"
+
+    def test_instances_reference_and_unit_in_file(self, tmp_path):
+        """The instances block in the raw file must include reference and unit."""
+        sch_path = _write_sch(tmp_path)
+
+        rc = add_pull_main(
+            [
+                str(sch_path),
+                "--ref", "U1",
+                "--pin", "3",
+                "--direction", "up",
+                "--value", "10k",
+                "--reference", "R42",
+            ]
+        )
+        assert rc == 0
+
+        content = sch_path.read_text()
+        assert '(reference "R42")' in content
+        assert "(unit 1)" in content

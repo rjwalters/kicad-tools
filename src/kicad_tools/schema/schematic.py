@@ -425,6 +425,8 @@ class Schematic:
         name: str,
         position: tuple[float, float],
         rotation: float = 0,
+        project_name: str = "",
+        instance_path: str = "",
     ) -> SymbolInstance:
         """Add a power symbol (e.g. GND, +3V3).
 
@@ -435,6 +437,9 @@ class Schematic:
             name: Power symbol name (e.g. ``"GND"``, ``"+3V3"``).
             position: ``(x, y)`` placement.
             rotation: Rotation in degrees (default 0).
+            project_name: Optional project name for ``(instances)`` block.
+            instance_path: Optional hierarchy path for the ``(instances)``
+                block.
 
         Returns:
             The created :class:`SymbolInstance`.
@@ -497,6 +502,8 @@ class Schematic:
             dnp=False,
             properties=props,
             pins=pins,
+            project_name=project_name,
+            instance_path=instance_path,
         )
 
         idx = self._find_insertion_index()

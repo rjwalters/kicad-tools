@@ -34,6 +34,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
+from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.library import LibrarySymbol
 
 
@@ -429,6 +430,11 @@ def run_add_bypass_cap(args) -> int:
         gnd_lib_sym = _make_default_gnd_lib_sym(args.ground_net)
         sch.embed_lib_symbol(gnd_lib_sym)
 
+    # 1b. Derive project name and instance path for the instances block
+    project_name = find_project_name(schematic_path)
+    sch_uuid = sch.uuid or ""
+    instance_path = build_instance_path(schematic_path, sch_uuid) if sch_uuid else ""
+
     # 2. Place the capacitor
     sch.add_symbol(
         lib_id=cap_lib_id,
@@ -437,10 +443,17 @@ def run_add_bypass_cap(args) -> int:
         footprint=args.footprint,
         position=cap_pos,
         rotation=cap_rotation,
+        project_name=project_name,
+        instance_path=instance_path,
     )
 
     # 3. Place the ground symbol
-    sch.add_power(args.ground_net, gnd_pos)
+    sch.add_power(
+        args.ground_net,
+        gnd_pos,
+        project_name=project_name,
+        instance_path=instance_path,
+    )
 
     # 4. Add wires
     # Wire from target pin to near (VDD) cap pin

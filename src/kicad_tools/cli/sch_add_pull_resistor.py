@@ -40,6 +40,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
+from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.wire import Wire
 
 
@@ -659,6 +660,11 @@ def run_add_pull_resistor(args) -> int:
             power_lib_sym.name = power_lib_id
         sch.embed_lib_symbol(power_lib_sym)
 
+    # 1b. Derive project name and instance path for the instances block
+    project_name = find_project_name(schematic_path)
+    sch_uuid = sch.uuid or ""
+    instance_path = build_instance_path(schematic_path, sch_uuid) if sch_uuid else ""
+
     # 2. Place the resistor
     sch.add_symbol(
         lib_id=resistor_lib_id,
@@ -667,10 +673,18 @@ def run_add_pull_resistor(args) -> int:
         footprint=footprint,
         position=res_position,
         rotation=res_rotation,
+        project_name=project_name,
+        instance_path=instance_path,
     )
 
     # 3. Place the power/ground symbol
-    sch.add_power(power_net, power_position, power_rotation)
+    sch.add_power(
+        power_net,
+        power_position,
+        power_rotation,
+        project_name=project_name,
+        instance_path=instance_path,
+    )
 
     # 4. Add wires
     for seg_start, seg_end in wire_segments:
