@@ -65,6 +65,7 @@ def _make_symbol_instance(
     dnp: bool = False,
     in_bom: bool = True,
     on_board: bool = True,
+    rotation: float = 0,
 ) -> str:
     """Generate a symbol instance S-expression."""
     pin_entries = "\n".join(
@@ -75,7 +76,7 @@ def _make_symbol_instance(
     on_board_str = "yes" if on_board else "no"
     return f"""(symbol
         (lib_id "{lib_id}")
-        (at {x} {y} 0)
+        (at {x} {y} {rotation})
         (unit 1)
         (in_bom {in_bom_str})
         (on_board {on_board_str})
@@ -139,8 +140,11 @@ def _build_schematic(
             lib_symbols.append(_make_lib_symbol(lib_id, pins))
             seen_lib_ids.add(lib_id)
 
+        rotation = comp.get("rotation", 0)
         symbol_instances.append(
-            _make_symbol_instance(ref, lib_id, pins, x, y, dnp, in_bom, on_board)
+            _make_symbol_instance(
+                ref, lib_id, pins, x, y, dnp, in_bom, on_board, rotation
+            )
         )
 
         for pin_idx, (pin_num, _, _) in enumerate(pins):
@@ -492,3 +496,78 @@ class TestFullyUnconnectedComponent:
         assert "R1" in refs_flagged
         assert "C1" in refs_flagged
         assert "R2" not in refs_flagged
+
+    def test_rotated_component_not_false_positive(self, tmp_path: Path):
+        """A 90-degree rotated capacitor with correctly-placed wires must NOT
+        be flagged as unconnected.
+
+        This is the core regression from issue #2118: when Y was negated
+        before rotation, pin positions for rotated symbols were mirror-imaged,
+        causing every rotated component to appear unconnected.
+
+        C_Small has pins at library coords (0, 0) and (0, 2.54).
+        Placed at (100, 50) with 90-degree rotation:
+          Pin 1 (0,0)    -> rotate 90 -> (0,0)      -> negate Y -> (0,0)
+                           -> schematic (100, 50)
+          Pin 2 (0,2.54) -> rotate 90 -> (-2.54, 0) -> negate Y -> (-2.54, 0)
+                           -> schematic (97.46, 50)
+        """
+        # Build schematic with correctly-placed wires for the rotated symbol.
+        lib_sym = _make_lib_symbol(
+            "Device:C_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+        )
+        sym_inst = _make_symbol_instance(
+            "C1",
+            "Device:C_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+            x=100.0,
+            y=50.0,
+            rotation=90,
+        )
+        # Wires at correct pin positions (post-fix):
+        #   Pin 1 at (100, 50) -- wire runs right to a label
+        #   Pin 2 at (97.46, 50) -- wire runs left to a label
+        sch_text = f"""(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "test-rotated-uuid")
+    (paper "A4")
+    (lib_symbols
+        {lib_sym}
+    )
+    {sym_inst}
+    (wire
+        (pts (xy 100.00 50.00) (xy 110.00 50.00))
+        (stroke (width 0) (type default))
+        (uuid "wire-c1-1")
+    )
+    (wire
+        (pts (xy 97.46 50.00) (xy 87.46 50.00))
+        (stroke (width 0) (type default))
+        (uuid "wire-c1-2")
+    )
+    (label "VCC"
+        (at 110.00 50.00 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "lbl-c1-1")
+    )
+    (label "GND"
+        (at 87.46 50.00 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "lbl-c1-2")
+    )
+)
+"""
+        sch_path = tmp_path / "rotated.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component" and i.severity == "error"
+        ]
+        # With the fix, the rotated C1 should NOT be flagged.
+        assert len(errors) == 0, (
+            f"Rotated component C1 should not be flagged; got: {errors}"
+        )

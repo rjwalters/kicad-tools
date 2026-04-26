@@ -1191,11 +1191,13 @@ class TestGridAwareSnap:
             "1", instance_pos=(100.33, 80.01), instance_rot=90
         )
         assert pos is not None
-        # Pin 1 is at (0, 3.81) in lib coords -> (0, -3.81) after Y-negate
-        # Rotated 90: x' = 0*cos90 - (-3.81)*sin90 = 3.81
-        #              y' = 0*sin90 + (-3.81)*cos90 = 0
-        # With grid snap: x = 100.33 + 3.81 = 104.14, y = 80.01 + 0 = 80.01
-        assert pos[0] == pytest.approx(104.14, abs=0.001)
+        # Pin 1 is at (0, 3.81) in lib coords.
+        # Rotated 90 in lib coords (Y-up):
+        #   x' = 0*cos90 - 3.81*sin90 = -3.81
+        #   y' = 0*sin90 + 3.81*cos90 = 0
+        # Then Y negated for schematic: y' = 0
+        # With grid snap: x = 100.33 + (-3.81) = 96.52, y = 80.01 + 0 = 80.01
+        assert pos[0] == pytest.approx(96.52, abs=0.001)
         assert pos[1] == pytest.approx(80.01, abs=0.001)
 
     def test_non_standard_pin_offset_snaps(self, tmp_path: Path):
