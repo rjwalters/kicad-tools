@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.sch_pin_map import _snap_coord, _to_coord
 from kicad_tools.cli.sch_validate import (
     ValidationIssue,
     check_fully_unconnected_components,
@@ -105,6 +106,7 @@ def _make_symbol_instance(
 def _build_schematic(
     components: list[dict],
     no_connect_positions: list[tuple[float, float]] | None = None,
+    wire_jitter: float = 0.0,
 ) -> str:
     """Build a complete schematic string from component descriptors.
 
@@ -117,6 +119,12 @@ def _build_schematic(
         dnp: bool         - Do Not Populate flag (optional, default False)
         in_bom: bool      - In BOM flag (optional, default True)
         on_board: bool    - On Board flag (optional, default True)
+
+    Args:
+        wire_jitter: If non-zero, shift wire start X by this amount.
+            This simulates the sub-grid rounding mismatch where a wire
+            endpoint rounds to a different integer coordinate than the
+            pin position computed from instance_pos + lib_pin_offset.
     """
     lib_symbols = []
     symbol_instances = []
@@ -152,12 +160,12 @@ def _build_schematic(
                 continue
             net_name = pin_nets[pin_num]
             pin_y = y - pin_idx * 2.54
-            pin_x = x
+            pin_x = x + wire_jitter
             label_x = pin_x + 10.0
 
             wires.append(
                 f"""(wire
-                (pts (xy {pin_x:.2f} {pin_y:.2f}) (xy {label_x:.2f} {pin_y:.2f}))
+                (pts (xy {pin_x:.4f} {pin_y:.4f}) (xy {label_x:.4f} {pin_y:.4f}))
                 (stroke (width 0) (type default))
                 (uuid "wire-{ref.lower()}-{pin_num}")
             )"""
@@ -571,3 +579,174 @@ class TestFullyUnconnectedComponent:
         assert len(errors) == 0, (
             f"Rotated component C1 should not be flagged; got: {errors}"
         )
+
+    def test_subgrid_component_connected_via_snap(self, tmp_path: Path):
+        """Component at sub-grid position should resolve as connected when
+        wire endpoints are within 0.1mm (1 integer unit) of pin positions.
+
+        This is the core false-positive scenario: the component is placed at
+        a sub-grid position like (100.05, 50.03), causing _to_coord to round
+        the pin position differently than the wire endpoint.  The _snap_coord
+        tolerance should bridge the 1-unit gap.
+        """
+        # wire_jitter=0.05 shifts the wire start X by 0.05mm relative to
+        # the pin position.  After _to_coord scaling (*10, round), the pin
+        # coord is (1000, 500) and the wire start is (1001, 500) -- a 1-unit
+        # difference that _snap_coord should resolve.
+        components = [
+            {
+                "ref": "R1",
+                "lib_id": "Device:R_Small",
+                "pins": [
+                    ("1", "~", "passive"),
+                    ("2", "~", "passive"),
+                ],
+                "pin_nets": {
+                    "1": "NET_A",
+                    "2": "NET_B",
+                },
+                "x": 100.0,
+                "y": 50.0,
+            },
+        ]
+        sch_text = _build_schematic(components, wire_jitter=0.05)
+        sch_path = tmp_path / "subgrid_connected.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component" and i.severity == "error"
+        ]
+        assert errors == [], (
+            f"Sub-grid component R1 should not be flagged as unconnected, "
+            f"but got: {[e.message for e in errors]}"
+        )
+
+    def test_subgrid_truly_unconnected_still_flagged(self, tmp_path: Path):
+        """Component at sub-grid position with no wires should still be flagged."""
+        components = [
+            {
+                "ref": "R1",
+                "lib_id": "Device:R_Small",
+                "pins": [
+                    ("1", "~", "passive"),
+                    ("2", "~", "passive"),
+                ],
+                # No pin_nets -- truly unconnected
+                "x": 100.05,
+                "y": 50.03,
+            },
+        ]
+        sch_text = _build_schematic(components)
+        sch_path = tmp_path / "subgrid_unconnected.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component" and i.severity == "error"
+        ]
+        assert len(errors) == 1
+        assert "R1" in errors[0].message
+        assert "floating" in errors[0].message
+
+    def test_near_miss_distance_in_diagnostic(self, tmp_path: Path):
+        """When a component IS flagged, the message should include near-miss
+        wire distances for diagnostic purposes."""
+        # Place a connected component nearby so there ARE wires in the
+        # schematic, then place an unconnected component close enough that
+        # its pins are within 5mm of those wires.
+        components = [
+            {
+                "ref": "R1",
+                "lib_id": "Device:R_Small",
+                "pins": [
+                    ("1", "~", "passive"),
+                    ("2", "~", "passive"),
+                ],
+                # No pin_nets -- unconnected
+                "x": 100.0,
+                "y": 50.0,
+            },
+            {
+                "ref": "R2",
+                "lib_id": "Device:R_Small",
+                "pins": [
+                    ("1", "~", "passive"),
+                    ("2", "~", "passive"),
+                ],
+                "pin_nets": {
+                    "1": "VCC",
+                    "2": "GND",
+                },
+                "x": 102.0,  # Close enough that R1 pins are within 5mm
+                "y": 50.0,
+            },
+        ]
+        sch_text = _build_schematic(components)
+        sch_path = tmp_path / "near_miss.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component"
+            and i.severity == "error"
+            and "R1" in i.message
+        ]
+        assert len(errors) == 1
+        # The message should contain near-miss pin distance info
+        assert "nearest wire" in errors[0].message
+        assert "pin" in errors[0].message
+        assert "mm" in errors[0].message
+
+
+class TestSnapCoord:
+    """Unit tests for the _snap_coord tolerance function."""
+
+    def test_exact_match_returns_same(self):
+        """Coordinate already in the known set should be returned unchanged."""
+        known = {(100, 200), (300, 400)}
+        assert _snap_coord((100, 200), known) == (100, 200)
+
+    def test_snap_within_tolerance(self):
+        """Coordinate 1 unit away from a known node should snap to it."""
+        known = {(100, 200)}
+        # Off by 1 in X
+        assert _snap_coord((101, 200), known) == (100, 200)
+        # Off by 1 in Y
+        assert _snap_coord((100, 201), known) == (100, 200)
+        # Off by -1 in X
+        assert _snap_coord((99, 200), known) == (100, 200)
+
+    def test_no_snap_beyond_tolerance(self):
+        """Coordinate more than 1 unit away should not snap."""
+        known = {(100, 200)}
+        # Off by 2 in X -- Manhattan distance 2, but default tolerance is 1
+        result = _snap_coord((102, 200), known)
+        assert result == (102, 200)
+
+    def test_snap_picks_nearest(self):
+        """When multiple known nodes are within tolerance, pick the closest."""
+        known = {(100, 200), (102, 200)}
+        # (101, 200) is equidistant -- either is acceptable
+        result = _snap_coord((101, 200), known)
+        assert result in known
+
+    def test_empty_known_set(self):
+        """Empty known set should return the original coordinate."""
+        assert _snap_coord((100, 200), set()) == (100, 200)
+
+    def test_diagonal_within_tolerance(self):
+        """Diagonal offset of (1, 1) has Manhattan distance 2, which exceeds
+        the default tolerance of 1, so it should NOT snap."""
+        known = {(100, 200)}
+        result = _snap_coord((101, 201), known)
+        assert result == (101, 201)
+
+    def test_custom_tolerance(self):
+        """With tolerance=2, diagonal (1,1) should snap."""
+        known = {(100, 200)}
+        result = _snap_coord((101, 201), known, tolerance=2)
+        assert result == (100, 200)
