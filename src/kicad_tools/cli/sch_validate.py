@@ -1528,6 +1528,159 @@ def check_power_net_shorts(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Power pin polarity error detection (VDD on GND net, GND on VCC net)
+# ---------------------------------------------------------------------------
+
+
+def _is_power_positive_net(net_name: str) -> bool:
+    """Return True if *net_name* represents a positive power rail.
+
+    Checks tokenized keywords against ``_POWER_POSITIVE_KEYWORDS`` and
+    common voltage patterns like ``+3.3V``, ``+5V``, ``3V3``, etc.
+    """
+    tokens = _tokenize_name(net_name)
+    if tokens & _POWER_POSITIVE_KEYWORDS:
+        return True
+    # Strip leading +/- (common in power net names like +3V3, +5V)
+    stripped = net_name.lstrip("+-")
+    if stripped != net_name:
+        tokens2 = _tokenize_name(stripped)
+        if tokens2 & _POWER_POSITIVE_KEYWORDS:
+            return True
+    # Match common voltage patterns: +3.3V, +5V, +1.8V, etc.
+    if re.match(r"^\+?\d+(\.\d+)?V$", net_name):
+        return True
+    return False
+
+
+def _is_power_negative_net(net_name: str) -> bool:
+    """Return True if *net_name* represents a ground/negative rail.
+
+    Checks tokenized keywords against ``_POWER_NEGATIVE_KEYWORDS``.
+    """
+    tokens = _tokenize_name(net_name)
+    if tokens & _POWER_NEGATIVE_KEYWORDS:
+        return True
+    # Strip leading +/- just in case
+    stripped = net_name.lstrip("+-")
+    if stripped != net_name:
+        tokens2 = _tokenize_name(stripped)
+        if tokens2 & _POWER_NEGATIVE_KEYWORDS:
+            return True
+    return False
+
+
+def check_power_pin_polarity(schematic_path: str) -> list[ValidationIssue]:
+    """Detect power pins connected to nets of opposite polarity.
+
+    For example, a VDD pin connected to a GND net, or a GND pin connected
+    to a +3.3V net.  This is different from the ``power_short`` check which
+    detects VCC and GND pins on the *same* net -- polarity errors involve a
+    single pin on a net whose polarity contradicts the pin name.
+
+    Power symbols (``lib_id`` starting with ``power:``) are skipped since
+    they define nets rather than consume them.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Skip power symbols -- they define nets, not consume them
+                    if lib_id.startswith("power:"):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+
+                        pin_name = pin_info.get("name", "")
+                        pin_type = pin_info.get("type", "")
+
+                        # Only consider power pins
+                        if pin_type not in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        pin_is_positive = bool(pin_tokens & _POWER_POSITIVE_KEYWORDS)
+                        pin_is_negative = bool(pin_tokens & _POWER_NEGATIVE_KEYWORDS)
+
+                        # Skip ambiguous or unrecognized pin names
+                        if not pin_is_positive and not pin_is_negative:
+                            continue
+
+                        net_is_positive = _is_power_positive_net(net_name)
+                        net_is_negative = _is_power_negative_net(net_name)
+
+                        # Skip nets that don't match any power classification
+                        if not net_is_positive and not net_is_negative:
+                            continue
+
+                        # Detect polarity mismatch
+                        if pin_is_positive and net_is_negative:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="power_polarity",
+                                    message=(
+                                        f"Power pin polarity error: {ref}.{pin_name} "
+                                        f"(pin {pin_num}) is a positive supply pin "
+                                        f"but connected to negative net '{net_name}'"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+                        elif pin_is_negative and net_is_positive:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="power_polarity",
+                                    message=(
+                                        f"Power pin polarity error: {ref}.{pin_name} "
+                                        f"(pin {pin_num}) is a ground pin "
+                                        f"but connected to positive net '{net_name}'"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="power_polarity",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="power_polarity",
+                message=f"Power polarity check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -1575,6 +1728,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Power net short detection (VCC-to-GND)
     result.checks_run.append("power_short")
     result.issues.extend(check_power_net_shorts(schematic_path))
+
+    # Power pin polarity error detection (VDD on GND net, etc.)
+    result.checks_run.append("power_polarity")
+    result.issues.extend(check_power_pin_polarity(schematic_path))
 
     # I2C pull-up resistor detection
     result.checks_run.append("i2c_pullups")
