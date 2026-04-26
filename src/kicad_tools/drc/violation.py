@@ -84,6 +84,10 @@ def _init_type_category_map() -> None:
             ViolationType.SILKSCREEN_LINE_WIDTH: ViolationCategory.COSMETIC,
             ViolationType.SILKSCREEN_TEXT_HEIGHT: ViolationCategory.COSMETIC,
             ViolationType.SILKSCREEN_OVER_PAD: ViolationCategory.COSMETIC,
+            # Zone fill: connectivity issues
+            ViolationType.ZONE_UNFILLED: ViolationCategory.CONNECTIVITY,
+            ViolationType.ZONE_FILL_DISABLED: ViolationCategory.CONNECTIVITY,
+            ViolationType.ZONE_NO_NET: ViolationCategory.CONNECTIVITY,
             # Placement: footprint/outline issues
             ViolationType.FOOTPRINT: ViolationCategory.PLACEMENT,
             ViolationType.MALFORMED_OUTLINE: ViolationCategory.PLACEMENT,
@@ -165,6 +169,11 @@ class ViolationType(Enum):
     EXTRA_FOOTPRINT = "extra_footprint"
     MISSING_FOOTPRINT = "missing_footprint"
 
+    # Zone fill
+    ZONE_UNFILLED = "zone_unfilled"
+    ZONE_FILL_DISABLED = "zone_fill_disabled"
+    ZONE_NO_NET = "zone_no_net"
+
     # Unknown (catch-all)
     UNKNOWN = "unknown"
 
@@ -227,6 +236,10 @@ class ViolationType(Enum):
             "footprint_outside_board": cls.FOOTPRINT_OUTSIDE_BOARD,
             # netlist integrity rule from validate netlist checker
             "net_undeclared": cls.NET_UNDECLARED,
+            # zone fill rules from validate zone_fill checker
+            "zone_unfilled": cls.ZONE_UNFILLED,
+            "zone_fill_disabled": cls.ZONE_FILL_DISABLED,
+            "zone_no_net": cls.ZONE_NO_NET,
         }
 
         alias_match = _ALIASES.get(s_lower)

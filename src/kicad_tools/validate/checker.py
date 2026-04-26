@@ -14,6 +14,7 @@ from .rules.clearance import ClearanceRule
 from .rules.edge import EdgeClearanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
+from .rules.zone_fill import ZoneFillRule
 from .violations import DRCResults
 
 if TYPE_CHECKING:
@@ -94,6 +95,7 @@ class DRCChecker:
         results.merge(self.check_solder_mask_pads())
         results.merge(self.check_footprint_placement())
         results.merge(self.check_netlist())
+        results.merge(self.check_zones())
 
         return results
 
@@ -181,6 +183,8 @@ class DRCChecker:
             DRCResults containing placement violations
         """
         rule = FootprintOutsideBoardRule()
+        return rule.check(self.pcb, self.design_rules)
+
     def check_netlist(self) -> DRCResults:
         """Check for pads referencing undeclared nets.
 
@@ -194,6 +198,19 @@ class DRCChecker:
         from .rules.netlist import NetlistRule
 
         rule = NetlistRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_zones(self) -> DRCResults:
+        """Check zone fill rules (unfilled zones, disabled fill, unassigned nets).
+
+        Validates that all copper zones have been filled with polygon data
+        and are assigned to a net. Unfilled zones break power/ground
+        connectivity.
+
+        Returns:
+            DRCResults containing zone fill violations
+        """
+        rule = ZoneFillRule()
         return rule.check(self.pcb, self.design_rules)
 
     def __repr__(self) -> str:
