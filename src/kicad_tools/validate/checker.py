@@ -93,6 +93,7 @@ class DRCChecker:
         results.merge(self.check_silkscreen())
         results.merge(self.check_solder_mask_pads())
         results.merge(self.check_footprint_placement())
+        results.merge(self.check_netlist())
 
         return results
 
@@ -180,6 +181,19 @@ class DRCChecker:
             DRCResults containing placement violations
         """
         rule = FootprintOutsideBoardRule()
+    def check_netlist(self) -> DRCResults:
+        """Check for pads referencing undeclared nets.
+
+        Validates that every pad net name appears in the board-level
+        net declarations.  Pads whose net name was never declared
+        indicate a stale or incomplete netlist import.
+
+        Returns:
+            DRCResults containing netlist integrity warnings
+        """
+        from .rules.netlist import NetlistRule
+
+        rule = NetlistRule()
         return rule.check(self.pcb, self.design_rules)
 
     def __repr__(self) -> str:

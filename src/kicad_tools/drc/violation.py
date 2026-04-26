@@ -77,6 +77,7 @@ def _init_type_category_map() -> None:
             # Connectivity: netlist issues
             ViolationType.UNCONNECTED_ITEMS: ViolationCategory.CONNECTIVITY,
             ViolationType.SHORTING_ITEMS: ViolationCategory.CONNECTIVITY,
+            ViolationType.NET_UNDECLARED: ViolationCategory.CONNECTIVITY,
             # Cosmetic: visual only
             ViolationType.SILK_OVER_COPPER: ViolationCategory.COSMETIC,
             ViolationType.SILK_OVERLAP: ViolationCategory.COSMETIC,
@@ -154,6 +155,8 @@ class ViolationType(Enum):
 
     # Placement
     FOOTPRINT_OUTSIDE_BOARD = "footprint_outside_board"
+    # Netlist integrity
+    NET_UNDECLARED = "net_undeclared"
 
     # Misc
     FOOTPRINT = "footprint"
@@ -222,6 +225,8 @@ class ViolationType(Enum):
             "impedance": cls.IMPEDANCE,
             # placement rule from validate placement checker
             "footprint_outside_board": cls.FOOTPRINT_OUTSIDE_BOARD,
+            # netlist integrity rule from validate netlist checker
+            "net_undeclared": cls.NET_UNDECLARED,
         }
 
         alias_match = _ALIASES.get(s_lower)
