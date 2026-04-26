@@ -1707,6 +1707,184 @@ def _detect_systematic_offset(
 
 
 # ---------------------------------------------------------------------------
+# SWD debug pin routing check
+# ---------------------------------------------------------------------------
+
+# Known SWD/JTAG dedicated pins on STM32 MCUs.
+# Maps alternate-function pin name -> expected net keyword.
+_ARM_DEBUG_PINS: dict[str, str] = {
+    "PA13": "SWDIO",
+    "PA14": "SWCLK",
+    # Extended JTAG pins on STM32F4/F7/H7 families:
+    "PA15": "JTDI",
+    "PB3": "JTDO",
+    "PB4": "JTRST",
+}
+
+# The core SWD pair that is universal across all STM32 families.
+_SWD_CORE_PINS: frozenset[str] = frozenset({"PA13", "PA14"})
+
+
+def _is_stm32_mcu(lib_id: str) -> bool:
+    """Return True if *lib_id* identifies an STM32 MCU symbol."""
+    # KiCad standard library uses "MCU_ST_STM32*" or "MCU_ST:STM32*".
+    # Normalise to uppercase for comparison.
+    upper = lib_id.upper()
+    # Match both "MCU_ST:STM32..." and "MCU_ST_STM32..." prefixes.
+    if "MCU_ST" in upper and "STM32" in upper:
+        return True
+    # Also accept lib_id that starts directly with "STM32" (custom libs).
+    if upper.startswith("STM32"):
+        return True
+    return False
+
+
+def _swd_net_ok(net_name: str, expected_keyword: str) -> bool:
+    """Return True if *net_name* is a valid SWD/JTAG net for *expected_keyword*.
+
+    Matches if:
+    - Any token in the net name equals the expected keyword (e.g. "SWDIO")
+    - The net name contains "SWD" and the keyword starts with "SWD"
+    - The net name contains "JTAG" or "JT" and the keyword starts with "JT"
+    """
+    tokens = _tokenize_name(net_name)
+    if expected_keyword in tokens:
+        return True
+    # Accept broader SWD/JTAG net names (e.g. "SWD_IO", "JTAG_TDI")
+    if expected_keyword.startswith("SWD") and "SWD" in tokens:
+        return True
+    if expected_keyword.startswith("JT") and ("JTAG" in tokens or "JT" in tokens):
+        return True
+    # Accept "SWDIO" inside a compound name like "MCU_SWDIO"
+    upper = net_name.upper()
+    if expected_keyword in upper:
+        return True
+    return False
+
+
+def _swd_override_present(net_name: str) -> bool:
+    """Return True if the net name indicates explicit GPIO reuse."""
+    tokens = _tokenize_name(net_name)
+    if "GPIO" in tokens:
+        return True
+    # Also match "GPIO13" etc. where the tokenizer keeps it as one token.
+    return any(t.startswith("GPIO") for t in tokens)
+
+
+def check_swd_pin_routing(schematic_path: str) -> list[ValidationIssue]:
+    """Check that SWD debug pins on STM32 MCUs are routed to SWD nets.
+
+    For each STM32 MCU symbol (identified by ``lib_id``), resolves pin-to-net
+    assignments via ``resolve_pin_map``.  For each known SWD debug pin
+    (PA13 = SWDIO, PA14 = SWCLK), verifies that the connected net name
+    contains the expected SWD keyword.
+
+    Unconnected SWD pins emit a warning (debug port unusable).  Mis-routed
+    SWD pins (connected to a non-SWD net) emit an error.
+
+    The check is suppressed for a pin when the net name contains "GPIO"
+    (explicit reuse acknowledgment).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    if not _is_stm32_mcu(lib_id):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Build pin_name -> (pin_num, pin_info) lookup
+                    name_to_pin: dict[str, tuple[str, dict]] = {}
+                    for pin_num, pin_info in pins_data.items():
+                        pname = pin_info.get("name", "")
+                        if pname:
+                            name_to_pin[pname.upper()] = (pin_num, pin_info)
+
+                    for debug_pin, expected_kw in _ARM_DEBUG_PINS.items():
+                        pin_entry = name_to_pin.get(debug_pin.upper())
+                        if pin_entry is None:
+                            # Pin not present on this MCU variant -- skip
+                            continue
+
+                        _pin_num, pin_info = pin_entry
+                        net_name = pin_info.get("net")
+
+                        if net_name is None:
+                            # Only warn about unconnected *core* SWD pins
+                            # (PA13/PA14).  Extended JTAG pins (PA15, PB3,
+                            # PB4) are commonly left unconnected in
+                            # SWD-only designs.
+                            if debug_pin.upper() not in _SWD_CORE_PINS:
+                                continue
+                            issues.append(
+                                ValidationIssue(
+                                    severity="warning",
+                                    category="swd_routing",
+                                    message=(
+                                        f"{ref}: SWD pin {debug_pin} is "
+                                        f"unconnected (expected {expected_kw} "
+                                        f"net) -- debug port unusable"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+                            continue
+
+                        # Check for explicit GPIO override
+                        if _swd_override_present(net_name):
+                            continue
+
+                        # Verify net matches expected SWD keyword
+                        if not _swd_net_ok(net_name, expected_kw):
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="swd_routing",
+                                    message=(
+                                        f"{ref}: SWD pin {debug_pin} "
+                                        f"connected to net '{net_name}' "
+                                        f"(expected {expected_kw})"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="swd_routing",
+                        message=f"Skipped sheet {sheet_path}: {e}",
+                        location=sheet_path,
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="swd_routing",
+                message=f"SWD pin routing check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Power net short detection (VCC-to-GND)
 # ---------------------------------------------------------------------------
 
@@ -2341,77 +2519,84 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
     return issues
 
 
-def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
-    """Run all validation checks."""
+def validate_schematic(
+    schematic_path: str,
+    lib_paths: list[str] = None,
+    skip_checks: set[str] | None = None,
+) -> ValidationResult:
+    """Run all validation checks.
+
+    Args:
+        schematic_path: Path to the root ``.kicad_sch`` file.
+        lib_paths: Optional symbol library paths.
+        skip_checks: Set of check category names to skip (e.g.
+            ``{"swd_routing", "i2c_pullups"}``).
+    """
     result = ValidationResult(schematic=schematic_path)
+    _skip: set[str] = skip_checks or set()
+
+    def _run(category: str, fn):
+        if category in _skip:
+            return
+        result.checks_run.append(category)
+        result.issues.extend(fn(schematic_path))
 
     # ERC
-    result.checks_run.append("erc")
-    result.issues.extend(run_erc(schematic_path))
+    _run("erc", run_erc)
 
     # Missing footprints
-    result.checks_run.append("footprints")
-    result.issues.extend(check_missing_footprints(schematic_path))
+    _run("footprints", check_missing_footprints)
 
     # Missing values
-    result.checks_run.append("values")
-    result.issues.extend(check_missing_values(schematic_path))
+    _run("values", check_missing_values)
 
     # Hierarchy
-    result.checks_run.append("hierarchy")
-    result.issues.extend(check_hierarchy(schematic_path))
+    _run("hierarchy", check_hierarchy)
 
     # No-connect on input pins
-    result.checks_run.append("no_connect_input")
-    result.issues.extend(check_no_connect_on_input_pins(schematic_path))
+    _run("no_connect_input", check_no_connect_on_input_pins)
 
     # Global label directions
-    result.checks_run.append("global_label_directions")
-    result.issues.extend(check_global_label_directions(schematic_path))
+    _run("global_label_directions", check_global_label_directions)
 
     # Connector pinout verification
-    result.checks_run.append("connector_pinout")
-    result.issues.extend(check_connector_pinout(schematic_path))
+    _run("connector_pinout", check_connector_pinout)
 
     # Missing project instances
-    result.checks_run.append("project_instances")
-    result.issues.extend(check_missing_project_instances(schematic_path))
+    _run("project_instances", check_missing_project_instances)
 
     # Duplicate references across sheets
-    result.checks_run.append("duplicate_references")
-    result.issues.extend(check_duplicate_references(schematic_path))
+    _run("duplicate_references", check_duplicate_references)
 
     # Pin-net semantic mismatch (pin assignment audit)
-    result.checks_run.append("pin_assignment")
-    result.issues.extend(check_pin_net_semantic_mismatch(schematic_path))
+    _run("pin_assignment", check_pin_net_semantic_mismatch)
+
+    # SWD debug pin routing verification
+    _run("swd_routing", check_swd_pin_routing)
 
     # Power net short detection (VCC-to-GND)
-    result.checks_run.append("power_short")
-    result.issues.extend(check_power_net_shorts(schematic_path))
+    _run("power_short", check_power_net_shorts)
 
     # Power pin polarity error detection (VDD on GND net, etc.)
-    result.checks_run.append("power_polarity")
-    result.issues.extend(check_power_pin_polarity(schematic_path))
+    _run("power_polarity", check_power_pin_polarity)
 
     # I2C pull-up resistor detection
-    result.checks_run.append("i2c_pullups")
-    result.issues.extend(check_i2c_pullups(schematic_path))
+    _run("i2c_pullups", check_i2c_pullups)
 
     # BOOT0 pull-down resistor detection (STM32 MCUs)
-    result.checks_run.append("boot0_pulldown")
-    result.issues.extend(check_boot0_pulldown(schematic_path))
+    _run("boot0_pulldown", check_boot0_pulldown)
 
     # Fully unconnected component detection
-    result.checks_run.append("unconnected_component")
-    result.issues.extend(check_fully_unconnected_components(schematic_path))
+    _run("unconnected_component", check_fully_unconnected_components)
 
     # STM32 NRST filter capacitor detection
-    result.checks_run.append("nrst_filter")
-    result.issues.extend(check_nrst_filter_cap(schematic_path))
+    _run("nrst_filter", check_nrst_filter_cap)
 
     # Symbol-to-footprint pin/pad count mismatch
-    result.checks_run.append("symbol_footprint_pin_count")
-    result.issues.extend(check_symbol_footprint_pin_mismatch(schematic_path))
+    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
+
+    # Matched channel symmetry detection
+    _run("matched_channel_symmetry", check_matched_channel_symmetry)
 
     return result
 
@@ -2429,6 +2614,13 @@ def main(argv=None):
     )
     parser.add_argument("--strict", action="store_true", help="Exit with error on any warning")
     parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
+    parser.add_argument(
+        "--skip",
+        action="append",
+        dest="skip_checks",
+        metavar="CHECK",
+        help="Skip a validation check category (e.g. swd_routing, i2c_pullups). May be repeated.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -2436,7 +2628,8 @@ def main(argv=None):
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
         sys.exit(1)
 
-    result = validate_schematic(args.schematic, args.lib_paths)
+    skip_set: set[str] = set(args.skip_checks) if args.skip_checks else set()
+    result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
 
     if args.format == "json":
         print(
