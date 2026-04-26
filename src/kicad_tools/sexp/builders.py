@@ -418,6 +418,47 @@ def gr_line_node(
     )
 
 
+def gr_rect_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    layer: str,
+    width: float = 0.1,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB graphic rectangle S-expression (gr_rect).
+
+    Used for board outlines on Edge.Cuts layer.
+
+    Args:
+        start_x, start_y: Top-left corner coordinates in mm
+        end_x, end_y: Bottom-right corner coordinates in mm
+        layer: Layer name (e.g., "Edge.Cuts")
+        width: Stroke width in mm (default 0.1)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_rect
+            (start 100 100)
+            (end 150 130)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "...")
+        )
+    """
+    return SExp.list(
+        "gr_rect",
+        SExp.list("start", fmt(start_x), fmt(start_y)),
+        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("stroke", SExp.list("width", fmt(width)), SExp.list("type", "default")),
+        SExp.list("fill", "none"),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+    )
+
+
 def gr_text_node(
     text: str,
     x: float,
