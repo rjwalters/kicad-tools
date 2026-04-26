@@ -2231,6 +2231,116 @@ def check_nrst_filter_cap(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationIssue]:
+    """Check that each symbol's pin count matches its assigned footprint's pad count.
+
+    Compares the number of pins in the embedded ``lib_symbols`` entry against
+    the number of pads in the assigned footprint (from ``COMMON_FOOTPRINTS``,
+    on-disk ``.kicad_mod`` files, or a name-based heuristic).
+
+    Power symbols and DNP components are skipped.  A 1-pad surplus on the
+    footprint side is treated as a likely thermal/exposed pad and reported at
+    *info* severity rather than *warning*.
+    """
+    from kicad_tools.pcb.footprints import get_pad_count
+    from kicad_tools.schema.library import LibrarySymbol
+
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+
+                # Build a cache of lib_id -> LibrarySymbol for this sheet
+                lib_sym_cache: dict[str, LibrarySymbol] = {}
+                if sch.lib_symbols is not None:
+                    for sym_sexp in sch.lib_symbols.find_all("symbol"):
+                        ls = LibrarySymbol.from_sexp(sym_sexp)
+                        lib_sym_cache[ls.name] = ls
+
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Need both a footprint and a lib_symbols entry
+                    fp = sym.footprint
+                    if not fp or fp == "~":
+                        continue
+
+                    lib_sym = lib_sym_cache.get(sym.lib_id)
+                    if lib_sym is None:
+                        continue
+
+                    symbol_pins = lib_sym.pin_count
+                    if symbol_pins == 0:
+                        continue
+
+                    fp_pads = get_pad_count(fp)
+                    if fp_pads is None:
+                        continue
+
+                    if symbol_pins == fp_pads:
+                        continue
+
+                    # Thermal/exposed pad tolerance: if footprint has exactly
+                    # one more pad than the symbol has pins, it is likely an
+                    # exposed thermal pad.
+                    if fp_pads - symbol_pins == 1:
+                        issues.append(
+                            ValidationIssue(
+                                severity="info",
+                                category="pin_footprint_mismatch",
+                                message=(
+                                    f"{sym.reference}: footprint '{fp}' has {fp_pads} pads "
+                                    f"but symbol has {symbol_pins} pins "
+                                    f"(+1 pad may be thermal/exposed)"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+                    else:
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="pin_footprint_mismatch",
+                                message=(
+                                    f"{sym.reference}: footprint '{fp}' has {fp_pads} pads "
+                                    f"but symbol has {symbol_pins} pins"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="pin_footprint_mismatch",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="pin_footprint_mismatch",
+                message=f"Pin-footprint mismatch check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -2298,6 +2408,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # STM32 NRST filter capacitor detection
     result.checks_run.append("nrst_filter")
     result.issues.extend(check_nrst_filter_cap(schematic_path))
+
+    # Symbol-to-footprint pin/pad count mismatch
+    result.checks_run.append("symbol_footprint_pin_count")
+    result.issues.extend(check_symbol_footprint_pin_mismatch(schematic_path))
 
     return result
 
