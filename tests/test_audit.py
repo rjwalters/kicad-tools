@@ -1276,6 +1276,9 @@ class TestZoneConnectedNets:
     (polygon (pts
       (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
     ))
+    (filled_polygon (layer "F.Cu") (pts
+      (xy 1 1) (xy 99 1) (xy 99 99) (xy 1 99)
+    ))
   )
 )
 """
@@ -1343,6 +1346,9 @@ class TestZoneConnectedNets:
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
     (polygon (pts
       (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+    (filled_polygon (layer "F.Cu") (pts
+      (xy 1 1) (xy 99 1) (xy 99 99) (xy 1 99)
     ))
   )
 )
