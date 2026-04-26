@@ -46,6 +46,33 @@ class ViaFix:
 
 
 @dataclass
+class SameLayerViaFix:
+    """Record of a same-layer via that was repaired."""
+
+    x: float
+    y: float
+    net: int
+    old_start_layer: str
+    old_end_layer: str
+    new_start_layer: str
+    new_end_layer: str
+    uuid: str
+
+
+@dataclass
+class SameLayerViaWarning:
+    """Warning for a same-layer via that could not be auto-repaired (blind/buried)."""
+
+    x: float
+    y: float
+    net: int
+    start_layer: str
+    end_layer: str
+    via_type: str
+    uuid: str
+
+
+@dataclass
 class ViaClearanceWarning:
     """Warning for a via that may cause clearance issues after resize."""
 
@@ -148,11 +175,16 @@ def _closest_point_on_segment(
     return (cx, cy, dist)
 
 
-def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int, str]]:
+def find_all_vias(
+    doc: SExp,
+) -> list[tuple[SExp, float, float, float, float, int, str, str, str, str]]:
     """Find all vias in the PCB document.
 
     Returns:
-        List of (node, x, y, drill, diameter, net, uuid) tuples
+        List of (node, x, y, drill, diameter, net, uuid, start_layer, end_layer, via_type) tuples.
+        ``start_layer`` and ``end_layer`` are the layer names from the ``(layers ...)``
+        child node.  ``via_type`` is the value of the ``(type ...)`` child node
+        (e.g. ``"blind"``, ``"micro"``), or ``""`` for standard through-hole vias.
     """
     vias = []
 
@@ -169,6 +201,8 @@ def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int
         drill_node = via_node.find("drill")
         net_node = via_node.find("net")
         uuid_node = via_node.find("uuid")
+        layers_node = via_node.find("layers")
+        type_node = via_node.find("type")
 
         diameter = float(size_node.get_first_atom()) if size_node else 0
         drill = float(drill_node.get_first_atom()) if drill_node else 0
@@ -179,7 +213,19 @@ def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int
             net = 0  # KiCad 9 name-only format or empty string
         uuid = uuid_node.get_first_atom() if uuid_node else ""
 
-        vias.append((via_node, x, y, drill, diameter, net, uuid))
+        # Extract layer names
+        if layers_node:
+            layer_atoms = layers_node.get_atoms()
+            start_layer = str(layer_atoms[0]) if layer_atoms else ""
+            end_layer = str(layer_atoms[1]) if len(layer_atoms) > 1 else ""
+        else:
+            start_layer = ""
+            end_layer = ""
+
+        # Extract via type (empty string for standard through-hole)
+        via_type = str(type_node.get_first_atom()) if type_node else ""
+
+        vias.append((via_node, x, y, drill, diameter, net, uuid, start_layer, end_layer, via_type))
 
     return vias
 
@@ -263,6 +309,100 @@ def find_nearby_items(
     return items
 
 
+def get_board_outer_layers(doc: SExp) -> tuple[str, str]:
+    """Determine the outermost copper layers from the PCB document.
+
+    Reads the top-level ``(layers ...)`` section and returns the first and
+    last copper (signal/power) layer names.  Falls back to ``("F.Cu", "B.Cu")``
+    if detection fails.
+    """
+    layers_section = doc.find("layers")
+    if not layers_section:
+        return ("F.Cu", "B.Cu")
+
+    copper_layers: list[str] = []
+    for child in layers_section.children:
+        if not child.children:
+            continue
+        atoms = child.get_atoms()
+        # Each layer entry looks like: (0 "F.Cu" signal)
+        if len(atoms) >= 2:
+            layer_type = str(atoms[-1]) if len(atoms) >= 3 else ""
+            if layer_type in ("signal", "power"):
+                copper_layers.append(str(atoms[0]))
+
+    if len(copper_layers) >= 2:
+        return (copper_layers[0], copper_layers[-1])
+
+    return ("F.Cu", "B.Cu")
+
+
+def fix_same_layer_vias(
+    doc: SExp,
+    dry_run: bool = False,
+) -> tuple[list[SameLayerViaFix], list[SameLayerViaWarning]]:
+    """Detect and repair vias where start_layer == end_layer.
+
+    Through-hole vias (no ``(type ...)`` child, or ``type "through"``) are
+    auto-repaired by setting their layers to the board's outermost copper
+    layers.  Blind and micro vias produce a warning without auto-repair
+    because the correct target layer depends on the stackup.
+
+    Returns:
+        Tuple of (fixes, warnings).
+    """
+    fixes: list[SameLayerViaFix] = []
+    warnings: list[SameLayerViaWarning] = []
+
+    outer_start, outer_end = get_board_outer_layers(doc)
+    vias = find_all_vias(doc)
+
+    for via_node, x, y, _drill, _diameter, net, uuid, start_layer, end_layer, via_type in vias:
+        if not start_layer or not end_layer:
+            # Missing layers node -- skip gracefully
+            continue
+
+        if start_layer != end_layer:
+            continue
+
+        # Same-layer via detected
+        is_through = via_type in ("", "through")
+
+        if is_through:
+            fixes.append(
+                SameLayerViaFix(
+                    x=x,
+                    y=y,
+                    net=net,
+                    old_start_layer=start_layer,
+                    old_end_layer=end_layer,
+                    new_start_layer=outer_start,
+                    new_end_layer=outer_end,
+                    uuid=uuid,
+                )
+            )
+
+            if not dry_run:
+                layers_node = via_node.find("layers")
+                if layers_node:
+                    layers_node.set_value(0, outer_start)
+                    layers_node.set_value(1, outer_end)
+        else:
+            warnings.append(
+                SameLayerViaWarning(
+                    x=x,
+                    y=y,
+                    net=net,
+                    start_layer=start_layer,
+                    end_layer=end_layer,
+                    via_type=via_type,
+                    uuid=uuid,
+                )
+            )
+
+    return fixes, warnings
+
+
 def fix_vias(
     doc: SExp,
     target_drill: float,
@@ -298,7 +438,7 @@ def fix_vias(
 
     vias = find_all_vias(doc)
 
-    for via_node, x, y, current_drill, current_diameter, net, uuid in vias:
+    for via_node, x, y, current_drill, current_diameter, net, uuid, _sl, _el, _vt in vias:
         need_drill_fix = current_drill < target_drill
         need_diameter_fix = current_diameter < target_diameter
 
@@ -396,11 +536,13 @@ def print_fix_results(
     target_diameter: float = 0,
     mfr: str | None = None,
     skips: list[ViaSkip] | None = None,
+    same_layer_fixes: list[SameLayerViaFix] | None = None,
+    same_layer_warnings: list[SameLayerViaWarning] | None = None,
 ) -> None:
     """Print the results of via fixes.
 
     Args:
-        fixes: List of via fixes
+        fixes: List of via size fixes
         warnings: List of clearance warnings
         output_format: Output format ("text", "json", "summary")
         dry_run: Whether this was a dry run
@@ -408,8 +550,12 @@ def print_fix_results(
         target_diameter: Target diameter used
         mfr: Manufacturer name (for display)
         skips: List of vias skipped due to clearance violations
+        same_layer_fixes: List of same-layer vias that were repaired
+        same_layer_warnings: List of same-layer vias that could not be auto-repaired
     """
     skips = skips or []
+    same_layer_fixes = same_layer_fixes or []
+    same_layer_warnings = same_layer_warnings or []
 
     if output_format == "json":
         data = {
@@ -453,6 +599,31 @@ def print_fix_results(
                 }
                 for s in skips
             ],
+            "same_layer_fixes": [
+                {
+                    "x": f.x,
+                    "y": f.y,
+                    "net": f.net,
+                    "old_start_layer": f.old_start_layer,
+                    "old_end_layer": f.old_end_layer,
+                    "new_start_layer": f.new_start_layer,
+                    "new_end_layer": f.new_end_layer,
+                    "uuid": f.uuid,
+                }
+                for f in same_layer_fixes
+            ],
+            "same_layer_warnings": [
+                {
+                    "x": w.x,
+                    "y": w.y,
+                    "net": w.net,
+                    "start_layer": w.start_layer,
+                    "end_layer": w.end_layer,
+                    "via_type": w.via_type,
+                    "uuid": w.uuid,
+                }
+                for w in same_layer_warnings
+            ],
         }
         print(json.dumps(data, indent=2))
         return
@@ -466,11 +637,46 @@ def print_fix_results(
             print(f"  {len(skips)} vias skipped (clearance violation)")
         if warnings:
             print(f"  {len(warnings)} potential clearance violations")
+        if same_layer_fixes:
+            sl_action = "Would repair" if dry_run else "Repaired"
+            print(f"  {sl_action} {len(same_layer_fixes)} same-layer via(s)")
+        if same_layer_warnings:
+            print(
+                f"  {len(same_layer_warnings)} same-layer via(s) need manual repair "
+                f"(blind/micro)"
+            )
         return
 
-    # Text output
+    # Text output -- same-layer section
+    if same_layer_fixes:
+        sl_action = "Would repair" if dry_run else "Repaired"
+        print(f"\n{sl_action} {len(same_layer_fixes)} same-layer via(s):")
+        for f in same_layer_fixes[:5]:
+            print(
+                f"  Via at ({f.x:.2f}, {f.y:.2f}): "
+                f"layers {f.old_start_layer}/{f.old_end_layer} "
+                f"-> {f.new_start_layer}/{f.new_end_layer}"
+            )
+        if len(same_layer_fixes) > 5:
+            print(f"  ... and {len(same_layer_fixes) - 5} more")
+
+    if same_layer_warnings:
+        print(
+            f"\nWarning: {len(same_layer_warnings)} same-layer via(s) need manual repair "
+            f"(blind/micro type, cannot auto-determine target layer):"
+        )
+        for w in same_layer_warnings[:5]:
+            print(
+                f"  Via at ({w.x:.2f}, {w.y:.2f}): "
+                f"type={w.via_type}, layers={w.start_layer}/{w.end_layer}"
+            )
+        if len(same_layer_warnings) > 5:
+            print(f"  ... and {len(same_layer_warnings) - 5} more")
+
+    # Size fix section
     if not fixes and not skips:
-        print("No vias needed resizing.")
+        if not same_layer_fixes and not same_layer_warnings:
+            print("No vias needed resizing.")
         return
 
     action = "Would resize" if dry_run else "Resizing"
@@ -485,15 +691,15 @@ def print_fix_results(
         for f in fixes:
             print(
                 f"    Via at ({f.x:.2f}, {f.y:.2f}): "
-                f"drill {f.old_drill:.3f}→{f.new_drill:.3f}mm, "
-                f"diameter {f.old_diameter:.3f}→{f.new_diameter:.3f}mm"
+                f"drill {f.old_drill:.3f}->{f.new_drill:.3f}mm, "
+                f"diameter {f.old_diameter:.3f}->{f.new_diameter:.3f}mm"
             )
     else:
         for f in fixes[:3]:
             print(
                 f"    Via at ({f.x:.2f}, {f.y:.2f}): "
-                f"drill {f.old_drill:.3f}→{f.new_drill:.3f}mm, "
-                f"diameter {f.old_diameter:.3f}→{f.new_diameter:.3f}mm"
+                f"drill {f.old_drill:.3f}->{f.new_drill:.3f}mm, "
+                f"diameter {f.old_diameter:.3f}->{f.new_diameter:.3f}mm"
             )
         print(f"    ... and {len(fixes) - 3} more")
 
@@ -633,7 +839,12 @@ Examples:
         print(f"Error parsing PCB file: {e}", file=sys.stderr)
         return 1
 
-    # Fix vias
+    # Fix same-layer vias first (layer correction before size fixes)
+    same_layer_fixes, same_layer_warnings = fix_same_layer_vias(
+        doc, dry_run=args.dry_run
+    )
+
+    # Fix undersized vias
     fixes, warnings, skips = fix_vias(
         doc,
         target_drill,
@@ -655,10 +866,13 @@ Examples:
             target_diameter=target_diameter,
             mfr=args.mfr,
             skips=skips,
+            same_layer_fixes=same_layer_fixes,
+            same_layer_warnings=same_layer_warnings,
         )
 
-    # Save if not dry run and there were fixes
-    if fixes and not args.dry_run:
+    # Save if not dry run and there were any fixes (size or same-layer)
+    has_fixes = bool(fixes) or bool(same_layer_fixes)
+    if has_fixes and not args.dry_run:
         output_path = Path(args.output) if args.output else pcb_path
         try:
             save_pcb(doc, output_path)
@@ -671,7 +885,8 @@ Examples:
     # Return exit code 2 for success-with-warnings (pipeline treats this as
     # "completed with warnings" and continues).  Exit code 1 is reserved for
     # actual errors (file not found, parse failure, save failure).
-    return 2 if warnings else 0
+    has_warnings = bool(warnings) or bool(same_layer_warnings)
+    return 2 if has_warnings else 0
 
 
 if __name__ == "__main__":

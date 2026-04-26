@@ -5,11 +5,15 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.fix_vias_cmd import (
+    SameLayerViaFix,
+    SameLayerViaWarning,
     ViaSkip,
     _closest_point_on_segment,
     find_all_vias,
     find_nearby_items,
+    fix_same_layer_vias,
     fix_vias,
+    get_board_outer_layers,
     get_design_rules,
     main,
 )
@@ -128,13 +132,16 @@ class TestFindAllVias:
         assert len(vias) == 3
 
         # Check first via properties
-        node, x, y, drill, diameter, net, uuid = vias[0]
+        node, x, y, drill, diameter, net, uuid, start_layer, end_layer, via_type = vias[0]
         assert x == 110
         assert y == 110
         assert drill == 0.2
         assert diameter == 0.45
         assert net == 1
         assert uuid == "via-1"
+        assert start_layer == "F.Cu"
+        assert end_layer == "B.Cu"
+        assert via_type == ""
 
 
 class TestFixVias:
@@ -161,14 +168,14 @@ class TestFixVias:
 
         # Get original values
         vias_before = find_all_vias(doc)
-        _, _, _, drill_before, diameter_before, _, _ = vias_before[0]
+        _, _, _, drill_before, diameter_before, _, _, _, _, _ = vias_before[0]
 
         # Run fix with dry_run=True
         fix_vias(doc, target_drill=0.3, target_diameter=0.6, dry_run=True)
 
         # Values should be unchanged
         vias_after = find_all_vias(doc)
-        _, _, _, drill_after, diameter_after, _, _ = vias_after[0]
+        _, _, _, drill_after, diameter_after, _, _, _, _, _ = vias_after[0]
 
         assert drill_before == drill_after
         assert diameter_before == diameter_after
@@ -181,7 +188,7 @@ class TestFixVias:
 
         # Values should be updated
         vias = find_all_vias(doc)
-        _, _, _, drill, diameter, _, _ = vias[0]
+        _, _, _, drill, diameter, _, _, _, _, _ = vias[0]
 
         assert drill == 0.3
         assert diameter == 0.6
@@ -340,7 +347,7 @@ class TestCLI:
         assert output_file.exists()
         output_doc = parse_file(output_file)
         vias = find_all_vias(output_doc)
-        _, _, _, drill, diameter, _, _ = vias[0]
+        _, _, _, drill, diameter, _, _, _, _, _ = vias[0]
         assert drill == 0.3
         assert diameter == 0.6
 
@@ -388,7 +395,7 @@ class TestCLI:
 
         output_doc = parse_file(output_file)
         vias = find_all_vias(output_doc)
-        _, _, _, drill, diameter, _, _ = vias[0]
+        _, _, _, drill, diameter, _, _, _, _, _ = vias[0]
 
         # Should use specified values
         assert drill == 0.35
@@ -496,7 +503,7 @@ class TestCLI:
         # Verify the via was resized to minimum
         output_doc = parse_file(output_file)
         vias = find_all_vias(output_doc)
-        _, _, _, drill, diameter, _, _ = vias[0]
+        _, _, _, drill, diameter, _, _, _, _, _ = vias[0]
 
         assert drill == 0.2  # Drill meets min (0.2mm for 4-layer)
         assert diameter == 0.45  # Enlarged to min_via_diameter
@@ -1066,7 +1073,7 @@ class TestSelectiveViaSkip:
 
         # Verify the via retains its original size in the document
         vias = find_all_vias(doc)
-        _, _, _, drill, diameter, _, _ = vias[0]
+        _, _, _, drill, diameter, _, _, _, _, _ = vias[0]
         assert drill == 0.2
         assert diameter == 0.45
 
@@ -1295,3 +1302,434 @@ class TestLayerAutoDetection:
         assert drill == 0.3
         assert diameter == 0.6
         assert clearance == 0.127
+
+
+class TestSameLayerViaDetection:
+    """Tests for same-layer via detection and repair."""
+
+    def test_detect_same_layer_vias_dry_run(self, tmp_path: Path):
+        """Same-layer vias should be detected in dry-run mode."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+          (via (at 120 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-2"))
+        )
+        """
+        pcb_file = tmp_path / "same_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=True)
+
+        assert len(fixes) == 1
+        assert fixes[0].uuid == "via-1"
+        assert fixes[0].old_start_layer == "F.Cu"
+        assert fixes[0].old_end_layer == "F.Cu"
+        assert fixes[0].new_start_layer == "F.Cu"
+        assert fixes[0].new_end_layer == "B.Cu"
+        assert len(warnings) == 0
+
+    def test_repair_same_layer_through_hole_vias(self, tmp_path: Path):
+        """Through-hole same-layer vias should be repaired to span outer layers."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "repair_same_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 1
+
+        # Verify the layers node was actually updated
+        vias = find_all_vias(doc)
+        _, _, _, _, _, _, _, start_layer, end_layer, _ = vias[0]
+        assert start_layer == "F.Cu"
+        assert end_layer == "B.Cu"
+
+    def test_same_layer_blind_via_flagged_not_repaired(self, tmp_path: Path):
+        """Blind same-layer vias should produce a warning without auto-repair."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.45) (drill 0.2) (type blind) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-blind"))
+        )
+        """
+        pcb_file = tmp_path / "blind_same_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 0
+        assert len(warnings) == 1
+        assert warnings[0].uuid == "via-blind"
+        assert warnings[0].via_type == "blind"
+
+        # Verify the layers node was NOT changed
+        vias = find_all_vias(doc)
+        _, _, _, _, _, _, _, start_layer, end_layer, _ = vias[0]
+        assert start_layer == "F.Cu"
+        assert end_layer == "F.Cu"
+
+    def test_same_layer_micro_via_flagged_not_repaired(self, tmp_path: Path):
+        """Micro same-layer vias should produce a warning without auto-repair."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.3) (drill 0.15) (type micro) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-micro"))
+        )
+        """
+        pcb_file = tmp_path / "micro_same_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 0
+        assert len(warnings) == 1
+        assert warnings[0].via_type == "micro"
+
+    def test_via_missing_layers_node_skipped(self, tmp_path: Path):
+        """Via with missing layers node should be skipped gracefully."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (net 1) (uuid "via-nolayers"))
+        )
+        """
+        pcb_file = tmp_path / "no_layers.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 0
+        assert len(warnings) == 0
+
+    def test_correct_vias_no_false_positives(self, tmp_path: Path):
+        """Vias with distinct layers should not be flagged."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (via (at 120 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-2"))
+        )
+        """
+        pcb_file = tmp_path / "correct_vias.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 0
+        assert len(warnings) == 0
+
+    def test_mixed_same_layer_and_undersized(self, tmp_path: Path):
+        """Both same-layer and undersized fixes should be applied in one file."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-same"))
+          (via (at 120 110) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-small"))
+        )
+        """
+        pcb_file = tmp_path / "mixed.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        # Fix same-layer first
+        sl_fixes, sl_warnings = fix_same_layer_vias(doc, dry_run=False)
+        assert len(sl_fixes) == 1
+        assert sl_fixes[0].uuid == "via-same"
+
+        # Fix undersized second
+        size_fixes, _, _ = fix_vias(doc, target_drill=0.3, target_diameter=0.6, dry_run=False)
+        assert len(size_fixes) == 1
+        assert size_fixes[0].uuid == "via-small"
+
+    def test_4layer_board_uses_outer_layers(self, tmp_path: Path):
+        """On a 4-layer board, through-hole same-layer via should span F.Cu to B.Cu."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "In1.Cu" "In1.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "4layer_same.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, _ = fix_same_layer_vias(doc, dry_run=False)
+
+        assert len(fixes) == 1
+        assert fixes[0].new_start_layer == "F.Cu"
+        assert fixes[0].new_end_layer == "B.Cu"
+
+    def test_dry_run_does_not_modify_same_layer(self, tmp_path: Path):
+        """Dry run should not modify same-layer vias."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "dry_same.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, _ = fix_same_layer_vias(doc, dry_run=True)
+        assert len(fixes) == 1
+
+        # Layers should be unchanged
+        vias = find_all_vias(doc)
+        _, _, _, _, _, _, _, start_layer, end_layer, _ = vias[0]
+        assert start_layer == "F.Cu"
+        assert end_layer == "F.Cu"
+
+
+class TestSameLayerViaCLI:
+    """CLI integration tests for same-layer via detection."""
+
+    def test_cli_dry_run_reports_same_layer(self, tmp_path: Path, capsys):
+        """CLI --dry-run should report same-layer vias."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "cli_same.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "same-layer" in captured.out.lower()
+
+    def test_cli_json_includes_same_layer_keys(self, tmp_path: Path, capsys):
+        """JSON output should include same_layer_fixes and same_layer_warnings."""
+        import json as json_mod
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "cli_json_same.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--dry-run", "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json_mod.loads(captured.out)
+
+        assert "same_layer_fixes" in data
+        assert len(data["same_layer_fixes"]) == 1
+        assert data["same_layer_fixes"][0]["uuid"] == "via-1"
+        assert data["same_layer_fixes"][0]["old_start_layer"] == "F.Cu"
+        assert data["same_layer_fixes"][0]["new_end_layer"] == "B.Cu"
+        assert "same_layer_warnings" in data
+        assert len(data["same_layer_warnings"]) == 0
+
+    def test_cli_repairs_same_layer_and_saves(self, tmp_path: Path):
+        """CLI without --dry-run should repair same-layer vias and save."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "repair_cli.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        output_file = tmp_path / "repaired.kicad_pcb"
+
+        result = main([str(pcb_file), "-o", str(output_file)])
+        assert result == 0
+
+        # Verify output file has corrected layers
+        output_doc = parse_file(output_file)
+        vias = find_all_vias(output_doc)
+        _, _, _, _, _, _, _, start_layer, end_layer, _ = vias[0]
+        assert start_layer == "F.Cu"
+        assert end_layer == "B.Cu"
+
+    def test_cli_exit_code_2_for_blind_same_layer_warning(self, tmp_path: Path):
+        """CLI should return exit code 2 when blind same-layer vias produce warnings."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.45) (drill 0.2) (type blind) (layers "F.Cu" "F.Cu") (net 1) (uuid "via-blind"))
+        )
+        """
+        pcb_file = tmp_path / "blind_cli.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--dry-run"])
+        assert result == 2
+
+
+class TestGetBoardOuterLayers:
+    """Tests for get_board_outer_layers helper."""
+
+    def test_2layer_board(self, tmp_path: Path):
+        """2-layer board should return F.Cu and B.Cu."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+        )
+        """
+        pcb_file = tmp_path / "2layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        start, end = get_board_outer_layers(doc)
+        assert start == "F.Cu"
+        assert end == "B.Cu"
+
+    def test_4layer_board(self, tmp_path: Path):
+        """4-layer board should return F.Cu and B.Cu (outermost copper)."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+        )
+        """
+        pcb_file = tmp_path / "4layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        start, end = get_board_outer_layers(doc)
+        assert start == "F.Cu"
+        assert end == "B.Cu"
