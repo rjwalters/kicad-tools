@@ -6,6 +6,7 @@ Provides a high-level interface to KiCad schematic files.
 
 from __future__ import annotations
 
+import re
 import uuid as uuid_mod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -457,10 +458,22 @@ class Schematic:
             # Power symbols typically have a single pin "1"
             pin_numbers = ["1"]
 
+        # Determine reference prefix: PWR_FLAG -> #FLG, everything else -> #PWR
+        ref_prefix = "#FLG" if name == "PWR_FLAG" else "#PWR"
+
+        # Find the next available number for this prefix
+        max_num = 0
+        pat = re.compile(re.escape(ref_prefix) + r"(\d+)")
+        for sym in self.symbols:
+            m = pat.fullmatch(sym.reference)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        ref_value = f"{ref_prefix}{max_num + 1:02d}"
+
         props: dict[str, SymbolProperty] = {
             "Reference": SymbolProperty(
                 name="Reference",
-                value=f"#{name}",
+                value=ref_value,
                 position=position,
                 rotation=0,
                 visible=False,
