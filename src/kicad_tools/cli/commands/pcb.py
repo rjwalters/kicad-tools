@@ -11,13 +11,17 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline")
+        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline")
         return 1
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
+
+    # Handle zones command
+    if args.pcb_command == "zones":
+        return _run_zones_command(args, pcb_path)
 
     # Handle strip command separately (doesn't use pcb_query)
     if args.pcb_command == "strip":
@@ -94,6 +98,73 @@ def run_pcb_command(args) -> int:
         return pcb_main(sub_argv) or 0
 
     return 1
+
+
+def _run_zones_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb zones' command."""
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    zones = pcb.zones
+    output_format = getattr(args, "format", "text")
+
+    if output_format == "json":
+        zone_data = []
+        for zone in zones:
+            # Compute bounding box from polygon points
+            bounding_box = None
+            if zone.polygon:
+                xs = [p[0] for p in zone.polygon]
+                ys = [p[1] for p in zone.polygon]
+                bounding_box = {
+                    "min_x": min(xs),
+                    "min_y": min(ys),
+                    "max_x": max(xs),
+                    "max_y": max(ys),
+                }
+            zone_data.append(
+                {
+                    "net_number": zone.net_number,
+                    "net_name": zone.net_name,
+                    "layer": zone.layer,
+                    "priority": zone.priority,
+                    "clearance": zone.clearance,
+                    "thermal_gap": zone.thermal_gap,
+                    "thermal_bridge_width": zone.thermal_bridge_width,
+                    "is_filled": zone.is_filled,
+                    "fill_type": zone.fill_type,
+                    "boundary_points": len(zone.polygon),
+                    "bounding_box": bounding_box,
+                }
+            )
+        print(json.dumps({"zones": zone_data, "count": len(zones)}, indent=2))
+    else:
+        if not zones:
+            print("No zones found in PCB.")
+            return 0
+
+        print(f"Found {len(zones)} zone(s):\n")
+        for i, zone in enumerate(zones, 1):
+            print(f"Zone {i}:")
+            print(f"  Net:       {zone.net_name or f'(net {zone.net_number})'}")
+            print(f"  Layer:     {zone.layer}")
+            print(f"  Priority:  {zone.priority}")
+            print(f"  Clearance: {zone.clearance}mm")
+            print(f"  Fill type: {zone.fill_type}")
+            print(f"  Filled:    {'Yes' if zone.is_filled else 'No'}")
+            print(f"  Boundary:  {len(zone.polygon)} points")
+            if zone.polygon:
+                xs = [p[0] for p in zone.polygon]
+                ys = [p[1] for p in zone.polygon]
+                print(f"  Bounds:    ({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f})")
+            print()
+
+    return 0
 
 
 def _run_strip_command(args, pcb_path: Path) -> int:

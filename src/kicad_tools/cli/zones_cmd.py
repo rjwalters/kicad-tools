@@ -283,6 +283,17 @@ def _run_list(args) -> int:
     if args.format == "json":
         zone_data = []
         for zone in zones:
+            # Compute bounding box from polygon points
+            bounding_box = None
+            if zone.polygon:
+                xs = [p[0] for p in zone.polygon]
+                ys = [p[1] for p in zone.polygon]
+                bounding_box = {
+                    "min_x": min(xs),
+                    "min_y": min(ys),
+                    "max_x": max(xs),
+                    "max_y": max(ys),
+                }
             zone_data.append(
                 {
                     "net_number": zone.net_number,
@@ -293,7 +304,9 @@ def _run_list(args) -> int:
                     "thermal_gap": zone.thermal_gap,
                     "thermal_bridge_width": zone.thermal_bridge_width,
                     "is_filled": zone.is_filled,
+                    "fill_type": zone.fill_type,
                     "boundary_points": len(zone.polygon),
+                    "bounding_box": bounding_box,
                 }
             )
         print(json.dumps({"zones": zone_data, "count": len(zones)}, indent=2))
