@@ -1298,6 +1298,56 @@ def _add_pcb_parser(subparsers) -> None:
         help="Output format for results",
     )
 
+    # pcb snap-rotation
+    pcb_snap_rot = pcb_subparsers.add_parser(
+        "snap-rotation",
+        help="Normalize component rotation angles to cardinal directions",
+        description="Snap footprint rotations to the nearest multiple of a grid angle "
+        "(default 90 degrees). Useful for cleaning up arbitrary rotations left "
+        "by placement optimization.",
+    )
+    pcb_snap_rot.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_snap_rot.add_argument(
+        "--grid",
+        type=float,
+        default=90.0,
+        help="Rotation grid in degrees (default: 90). Use 45 for 45-degree snapping.",
+    )
+    pcb_snap_rot.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="Maximum angular distance (degrees) from the nearest grid angle to snap. "
+        "Footprints further from the grid than this are left unchanged.",
+    )
+    pcb_snap_rot.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated reference designators to skip (e.g., --exclude U8,J1)",
+    )
+    pcb_snap_rot.add_argument(
+        "--only",
+        default=None,
+        help="Comma-separated reference designators to snap (only these are modified)",
+    )
+    pcb_snap_rot.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input)",
+    )
+    pcb_snap_rot.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_snap_rot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview rotation changes without modifying the PCB file",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
