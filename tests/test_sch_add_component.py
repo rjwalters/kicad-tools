@@ -282,6 +282,43 @@ class TestConnect:
         # Let's just verify the command succeeded and a wire was added.
         assert len(sch.wires) >= 2
 
+    def test_power_symbol_on_wire_midpoint_creates_junction(self, tmp_path: Path):
+        """When a power symbol's pin lands directly on a wire midpoint
+        (pin_pos == connect target), a junction must still be created
+        even though no wire is added.  Regression test for #2119."""
+        # Use grid-aligned coordinates (multiples of 1.27) so that
+        # _snap() doesn't shift the placement away from the target.
+        # Wire from (100.33, 49.53) to (149.86, 49.53) -- y=49.53 is
+        # 39*1.27.  Midpoint x=124.46 is 98*1.27.
+        sch_content = SCHEMATIC_WITH_LIB.replace(
+            "(wire (pts (xy 100 50) (xy 150 50))",
+            "(wire (pts (xy 100.33 49.53) (xy 149.86 49.53))",
+        )
+        sch_path = _write_sch(tmp_path, content=sch_content)
+        # Place GND at (124.46, 49.53).  GND pin "1" is at offset (0,0),
+        # so pin_pos == target == (124.46, 49.53).  No wire needed but a
+        # junction IS required because the target is a wire midpoint.
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "124.46", "49.53",
+            "--connect", "1:124.46,49.53",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        # No new wire should be added (only the original wire remains).
+        assert len(sch.wires) == 1
+        # A junction must exist at the midpoint.
+        assert len(sch.junctions) >= 1
+        jx = [j for j in sch.junctions
+              if abs(j.position[0] - 124.46) < 0.2
+              and abs(j.position[1] - 49.53) < 0.2]
+        assert len(jx) == 1, (
+            f"Expected exactly one junction near (124.46, 49.53), "
+            f"found {len(jx)}: {[(j.position) for j in sch.junctions]}"
+        )
+
     def test_connect_invalid_pin(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
         result = add_component_main([
