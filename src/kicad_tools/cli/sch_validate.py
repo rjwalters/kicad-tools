@@ -1210,6 +1210,216 @@ def check_i2c_pullups(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# BOOT0 pull-down detection helpers and check
+# ---------------------------------------------------------------------------
+
+# SWD / debug signal keywords used to detect unrelated signal contamination
+_SWD_KEYWORDS: frozenset[str] = frozenset({
+    "SWCLK", "SWDIO", "SWO", "JTAG", "TDI", "TDO", "TMS", "TCK", "NRST",
+    "NTRST", "TRACECLK", "TRACEDATA",
+})
+
+# Combined set of all bus + debug keywords for signal contamination checks
+_SIGNAL_CONTAMINATION_KEYWORDS: frozenset[str] = _ALL_BUS_KEYWORDS | _SWD_KEYWORDS
+
+
+def _is_stm32_symbol(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to an STM32 MCU symbol.
+
+    Checks for ``STM32`` as a case-insensitive substring in the library
+    identifier, which matches patterns like ``MCU_ST_STM32:STM32C011F6Px``
+    or ``STM32:STM32F401``.
+    """
+    return "STM32" in lib_id.upper()
+
+
+def _is_boot0_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* represents a BOOT0 pin.
+
+    Uses ``_tokenize_name`` to extract tokens and checks for ``BOOT0``
+    as a discrete token.
+    """
+    tokens = _tokenize_name(pin_name)
+    return "BOOT0" in tokens
+
+
+def _is_switch_or_button(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a switch or button symbol."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    switch_prefixes = ("SW", "BTN", "Button", "Key")
+    for prefix in switch_prefixes:
+        if part == prefix or part.startswith(prefix + "_"):
+            return True
+    return False
+
+
+def check_boot0_pulldown(schematic_path: str) -> list[ValidationIssue]:
+    """Detect missing BOOT0 pull-down resistors on STM32 MCUs.
+
+    STM32 microcontrollers require the BOOT0 pin to be pulled low via a
+    resistor to GND for normal flash boot.  Without this pull-down, the
+    MCU may enter bootloader mode or behave unpredictably on power-up.
+
+    This check also flags BOOT0 pins that are tied to unrelated signal
+    nets (e.g. SWCLK, SPI_MOSI) which indicates a wiring error.
+
+    The detection strategy mirrors ``check_i2c_pullups``:
+
+    1. Walk all sheets and resolve pin maps.
+    2. Find STM32 symbols (``lib_id`` contains ``STM32``).
+    3. For each BOOT0 pin, collect the net name.
+    4. Verify a resistor bridges the net to a GND-family rail.
+    5. Check for unrelated signal contamination on the net.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulated state across all sheets
+        boot0_nets: set[str] = set()
+        boot0_net_to_refs: dict[str, list[str]] = {}  # net -> [MCU refs]
+        net_to_sheets: dict[str, set[str]] = {}
+        resistor_pin_nets: dict[str, list[str]] = {}
+        # net -> set of (ref, lib_id, pin_name) for all connected pins
+        net_connections: dict[str, list[tuple[str, str, str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+                        pin_name = pin_info.get("name", "")
+
+                        # Track which sheets each net appears on
+                        net_to_sheets.setdefault(net_name, set()).add(sheet_path)
+
+                        # Track all connections per net
+                        net_connections.setdefault(net_name, []).append(
+                            (ref, lib_id, pin_name)
+                        )
+
+                        # Identify BOOT0 nets on STM32 symbols
+                        if _is_stm32_symbol(lib_id) and _is_boot0_pin(pin_name):
+                            boot0_nets.add(net_name)
+                            boot0_net_to_refs.setdefault(net_name, []).append(ref)
+
+                    # Track resistor pin-to-net connections
+                    if _is_resistor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num2, pin_info2 in pins_data.items():
+                            n = pin_info2.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        if ref not in resistor_pin_nets:
+                            resistor_pin_nets[ref] = nets_for_ref
+                        else:
+                            resistor_pin_nets[ref].extend(nets_for_ref)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="boot0_pulldown",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check 1: Verify pull-down resistor to GND exists for each BOOT0 net
+        boot0_nets_with_pulldown: set[str] = set()
+        for _ref, pin_net_list in resistor_pin_nets.items():
+            net_set = set(pin_net_list)
+            boot0_on_resistor = net_set & boot0_nets
+            gnd_on_resistor = {n for n in net_set if _is_power_negative_net(n)}
+            if boot0_on_resistor and gnd_on_resistor:
+                boot0_nets_with_pulldown.update(boot0_on_resistor)
+
+        for net_name in sorted(boot0_nets - boot0_nets_with_pulldown):
+            sheets = sorted(net_to_sheets.get(net_name, set()))
+            sheet_str = ", ".join(sheets) if sheets else "unknown"
+            mcu_refs = boot0_net_to_refs.get(net_name, [])
+            ref_str = ", ".join(sorted(set(mcu_refs)))
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="boot0_pulldown",
+                    message=(
+                        f"STM32 BOOT0 net '{net_name}' on {ref_str} has no "
+                        f"pull-down resistor to GND"
+                    ),
+                    location=sheet_str,
+                )
+            )
+
+        # Check 2: Detect signal contamination on BOOT0 nets
+        for net_name in sorted(boot0_nets):
+            connections = net_connections.get(net_name, [])
+            for conn_ref, conn_lib_id, conn_pin_name in connections:
+                # Skip the MCU itself
+                if _is_stm32_symbol(conn_lib_id):
+                    continue
+                # Skip resistors (pull-down or current-limiting)
+                if _is_resistor(conn_lib_id):
+                    continue
+                # Skip passive components (capacitors, inductors, etc.)
+                if _is_passive_component(conn_lib_id):
+                    continue
+                # Skip switches/buttons (legitimate for entering bootloader)
+                if _is_switch_or_button(conn_lib_id):
+                    continue
+                # Skip power symbols
+                if conn_lib_id.startswith("power:"):
+                    continue
+                # Skip pins that are themselves BOOT0-named
+                if _is_boot0_pin(conn_pin_name):
+                    continue
+
+                # Check if the pin name contains signal keywords
+                pin_tokens = _tokenize_name(conn_pin_name)
+                signal_match = pin_tokens & _SIGNAL_CONTAMINATION_KEYWORDS
+                if signal_match:
+                    sheets = sorted(net_to_sheets.get(net_name, set()))
+                    sheet_str = ", ".join(sheets) if sheets else "unknown"
+                    mcu_refs = boot0_net_to_refs.get(net_name, [])
+                    ref_str = ", ".join(sorted(set(mcu_refs)))
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="boot0_pulldown",
+                            message=(
+                                f"STM32 BOOT0 net '{net_name}' on {ref_str} is "
+                                f"tied to signal pin {conn_ref}/{conn_pin_name} "
+                                f"(contains {', '.join(sorted(signal_match))})"
+                            ),
+                            location=sheet_str,
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="boot0_pulldown",
+                message=f"BOOT0 pull-down check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue]:
     """Flag pins where the connected net name has no semantic overlap with the pin name.
 
@@ -1866,6 +2076,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # I2C pull-up resistor detection
     result.checks_run.append("i2c_pullups")
     result.issues.extend(check_i2c_pullups(schematic_path))
+
+    # BOOT0 pull-down resistor detection (STM32 MCUs)
+    result.checks_run.append("boot0_pulldown")
+    result.issues.extend(check_boot0_pulldown(schematic_path))
 
     # Fully unconnected component detection
     result.checks_run.append("unconnected_component")
