@@ -56,8 +56,7 @@ def cmd_summary(pcb: PCB, args):
     print(f"Nets: {summary['nets']}")
     print(f"Traces: {summary['segments']} segments ({summary['trace_length_mm']} mm)")
     print(f"Vias: {summary['vias']}")
-    if summary["zones"]:
-        print(f"Zones: {summary['zones']}")
+    print(f"Zones: {summary['zones']}")
     print()
 
 

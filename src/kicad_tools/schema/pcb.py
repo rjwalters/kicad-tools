@@ -5,12 +5,15 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
@@ -2121,8 +2124,23 @@ class PCB:
         Counts top-level ``(zone ...)`` nodes in the S-expression tree
         so the result always reflects the actual file content, even if the
         in-memory ``_zones`` list has drifted.
+
+        Cross-validates against the in-memory ``_zones`` list and logs a
+        warning if the two disagree, which aids diagnosis of counting
+        discrepancies.
         """
-        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "zone")
+        sexp_count = sum(
+            1 for child in self._sexp.children if not child.is_atom and child.name == "zone"
+        )
+        mem_count = len(self._zones)
+        if sexp_count != mem_count:
+            logger.warning(
+                "Zone count mismatch: S-expression tree has %d zone nodes "
+                "but in-memory list has %d entries",
+                sexp_count,
+                mem_count,
+            )
+        return sexp_count
 
     @property
     def net_count(self) -> int:
