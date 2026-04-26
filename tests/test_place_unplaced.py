@@ -359,6 +359,22 @@ class TestBoardBounds:
         assert pytest.approx(max_x - min_x, abs=0.5) == 50.0
         assert pytest.approx(max_y - min_y, abs=0.5) == 50.0
 
+    def test_nonzero_origin_bounds_are_board_relative(self, tmp_path: Path):
+        """Board bounds must start near (0,0) when origin is non-zero.
+
+        The board rect is (100,100)-(150,150), so board origin is (100,100).
+        After the origin transform, bounds should be (0,0)-(50,50).
+        """
+        pcb_path = _write_pcb(tmp_path, BOARD_WITH_UNPLACED)
+        pcb = PCB.load(str(pcb_path))
+        bounds = _get_board_bounds(pcb)
+        assert bounds is not None
+        min_x, min_y, max_x, max_y = bounds
+        assert min_x == pytest.approx(0.0, abs=0.5)
+        assert min_y == pytest.approx(0.0, abs=0.5)
+        assert max_x == pytest.approx(50.0, abs=0.5)
+        assert max_y == pytest.approx(50.0, abs=0.5)
+
     def test_returns_none_without_outline(self, tmp_path: Path):
         pcb_path = _write_pcb(tmp_path, BOARD_NO_OUTLINE)
         pcb = PCB.load(str(pcb_path))

@@ -79,11 +79,9 @@ def _get_board_bounds(pcb: PCB) -> tuple[float, float, float, float] | None:
     if not outline:
         return None
 
-    # Outline points are in sheet-absolute coordinates.
-    # Convert to board-relative by subtracting the board origin.
-    ox, oy = pcb.board_origin
-    xs = [p[0] - ox for p in outline]
-    ys = [p[1] - oy for p in outline]
+    # get_board_outline() already returns board-relative coordinates.
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
     return (min(xs), min(ys), max(xs), max(ys))
 
 

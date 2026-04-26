@@ -339,10 +339,9 @@ def _get_board_edge_position(pcb) -> tuple[float, float]:
     if outline:
         max_x = max(pt[0] for pt in outline)
         min_y = min(pt[1] for pt in outline)
-        # Place 10mm to the right of the board, at the top edge
-        # Subtract board origin since add_footprint uses board-relative coords
-        origin_x, origin_y = pcb.board_origin
-        return (max_x - origin_x + 10.0, min_y - origin_y)
+        # Place 10mm to the right of the board, at the top edge.
+        # get_board_outline() already returns board-relative coords.
+        return (max_x + 10.0, min_y)
     return (0.0, 0.0)
 
 

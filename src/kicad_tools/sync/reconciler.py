@@ -651,10 +651,9 @@ class Reconciler:
             # Place below the board outline with 10mm margin
             max_y = max(pt[1] for pt in outline)
             min_x = min(pt[0] for pt in outline)
-            # Convert from sheet-absolute to board-relative coordinates
-            origin_x, origin_y = pcb.board_origin
-            start_x = min_x - origin_x
-            start_y = (max_y - origin_y) + 10.0
+            # get_board_outline() already returns board-relative coordinates
+            start_x = min_x
+            start_y = max_y + 10.0
         else:
             start_x = 10.0
             start_y = 10.0

@@ -331,6 +331,67 @@ class TestZoneGeneratorIntegration:
         assert zone.boundary == custom_boundary
 
 
+class TestZoneGeneratorNonzeroOrigin:
+    """Tests for ZoneGenerator when board origin is non-zero."""
+
+    @pytest.fixture
+    def offset_pcb_path(self, tmp_path):
+        """Create a PCB file with board outline at (100,80)."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect
+    (start 100 80)
+    (end 150 110)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "offset.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_board_outline_is_sheet_absolute(self, offset_pcb_path):
+        """Zone boundary from board_outline must be sheet-absolute for PCB output.
+
+        get_board_outline() returns board-relative coords, but the zone
+        generator must convert back so zone_node writes correct coordinates.
+        """
+        gen = ZoneGenerator.from_pcb(offset_pcb_path)
+        outline = gen.board_outline
+
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        # Should be in sheet-absolute: x in [100,150], y in [80,110]
+        assert min(xs) == pytest.approx(100.0, abs=0.5)
+        assert max(xs) == pytest.approx(150.0, abs=0.5)
+        assert min(ys) == pytest.approx(80.0, abs=0.5)
+        assert max(ys) == pytest.approx(110.0, abs=0.5)
+
+    def test_add_zone_uses_sheet_absolute_boundary(self, offset_pcb_path):
+        """Zone added without explicit boundary uses sheet-absolute outline."""
+        gen = ZoneGenerator.from_pcb(offset_pcb_path)
+        zone = gen.add_zone(net="GND", layer="B.Cu")
+
+        xs = [p[0] for p in zone.boundary]
+        ys = [p[1] for p in zone.boundary]
+        assert min(xs) == pytest.approx(100.0, abs=0.5)
+        assert max(xs) == pytest.approx(150.0, abs=0.5)
+        assert min(ys) == pytest.approx(80.0, abs=0.5)
+        assert max(ys) == pytest.approx(110.0, abs=0.5)
+
+
 class TestZoneOverlapDetection:
     """Tests for overlap detection in ZoneGenerator.add_zone()."""
 

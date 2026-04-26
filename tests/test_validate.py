@@ -1390,6 +1390,73 @@ class TestEdgeClearanceRule:
             assert v.actual_value < v.required_value
 
 
+    def test_nonzero_origin_trace_close_to_edge_detected(self, tmp_path: Path):
+        """Trace near edge is still detected when board origin is non-zero.
+
+        The board outline is at (100,100)-(150,150) in sheet-absolute space.
+        A trace at (100.1, 125) is 0.1mm from the left edge.  After the
+        origin transform the outline is (0,0)-(50,50) and the trace should
+        be at (0.1, 25) -- still close to the edge.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (gr_rect (start 100 100) (end 150 150)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "edge-rect"))
+          (segment (start 100.1 125) (end 110 125) (width 0.2) (layer "F.Cu") (net 1))
+        )"""
+        pcb_file = tmp_path / "offset_edge.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        trace_violations = [v for v in results if "edge_clearance_trace" in v.rule_id]
+        assert len(trace_violations) > 0
+
+    def test_nonzero_origin_centered_trace_no_violation(self, tmp_path: Path):
+        """Trace well inside board with non-zero origin should not violate.
+
+        Board outline (100,100)-(150,150), trace at (125,125) is
+        25mm from each edge -- well within limits.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (gr_rect (start 100 100) (end 150 150)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "edge-rect"))
+          (segment (start 125 125) (end 135 125) (width 0.2) (layer "F.Cu") (net 1))
+          (via (at 125 130) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
+        )"""
+        pcb_file = tmp_path / "offset_centered.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        assert len(results.errors) == 0
+
+
 class TestPointToSegmentDistance:
     """Tests for point-to-segment distance calculation."""
 
