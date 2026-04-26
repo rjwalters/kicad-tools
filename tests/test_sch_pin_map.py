@@ -733,6 +733,154 @@ class TestBFSBarrier:
 
 
 # ---------------------------------------------------------------------------
+# Pin-to-pin connectivity through passive filter networks
+# ---------------------------------------------------------------------------
+
+
+# RC filter chain: R1 and C1 connected via a shared horizontal bus wire.
+# Label "AUDIO_L" at one end of a long wire. R1 pin 1 and C1 pin 1 both
+# connect to points on that wire (their pin coordinates land on the wire interior).
+#
+# Layout:
+#   AUDIO_L label at (80, 40)
+#   Wire from (80, 40) to (140, 40)  -- long horizontal bus
+#   R1 at (100, 50): pin 1 at (100, 46.19), wire down to (100, 40) on bus
+#   C1 at (120, 50): pin 1 at (120, 46.19), wire down to (120, 40) on bus
+#   R1 pin 2 at (100, 53.81), C1 pin 2 at (120, 53.81) -- both floating
+RC_FILTER_CHAIN_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000020")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+    (symbol "Device:C"
+      (symbol "C_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 2.794) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 2.794) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "rc01")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "100" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "Device:C") (at 120 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "rc02")
+    (property "Reference" "C1" (at 122 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "100nF" (at 122 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p3")) (pin "2" (uuid "p4"))
+  )
+  (wire (pts (xy 80 40) (xy 140 40))
+    (stroke (width 0) (type default)) (uuid "w-bus"))
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-r1"))
+  (wire (pts (xy 120 46.19) (xy 120 40))
+    (stroke (width 0) (type default)) (uuid "w-c1"))
+  (label "AUDIO_L" (at 80 40 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-audio"))
+)
+"""
+
+# Pin on wire interior: R1 pin 1 at (100, 46.19) sits on a long wire from (100, 30) to (100, 60).
+# Label "NET1" at (100, 30). The pin coordinate is in the interior of the wire, not at an endpoint.
+PIN_ON_WIRE_INTERIOR_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000030")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "int01")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (wire (pts (xy 100 30) (xy 100 60))
+    (stroke (width 0) (type default)) (uuid "w1"))
+  (label "NET1" (at 100 30 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-net1"))
+)
+"""
+
+
+class TestRCFilterChain:
+    """Pins connected through a passive filter chain must all resolve to the net label."""
+
+    def test_all_chain_pins_resolve(self, tmp_path):
+        """R1 and C1 pin 1 both connect to a horizontal bus wire with label AUDIO_L."""
+        sch = Schematic.load(_write_sch(tmp_path, RC_FILTER_CHAIN_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert pin_map["R1"]["pins"]["1"]["net"] == "AUDIO_L"
+        assert pin_map["C1"]["pins"]["1"]["net"] == "AUDIO_L"
+        # Pin 2 of both components has no wire -- should be None
+        assert pin_map["R1"]["pins"]["2"]["net"] is None
+        assert pin_map["C1"]["pins"]["2"]["net"] is None
+
+    def test_ref_filter_with_chain(self, tmp_path):
+        """Filtering by ref still resolves nets correctly in a chain."""
+        sch = Schematic.load(_write_sch(tmp_path, RC_FILTER_CHAIN_SCHEMATIC))
+        pin_map = resolve_pin_map(sch, ref_filter="C1")
+
+        assert "C1" in pin_map
+        assert "R1" not in pin_map
+        assert pin_map["C1"]["pins"]["1"]["net"] == "AUDIO_L"
+
+
+class TestPinOnWireInterior:
+    """A pin whose coordinate lands on the interior of a wire segment (not at an endpoint)."""
+
+    def test_pin_interior_resolves(self, tmp_path):
+        """R1 pin 1 at (100, 46.19) is in the interior of wire (100,30)-(100,60)."""
+        sch = Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert pin_map["R1"]["pins"]["1"]["net"] == "NET1"
+
+    def test_pin_interior_both_pins(self, tmp_path):
+        """Both R1 pins land on the interior of the same long wire."""
+        sch = Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert pin_map["R1"]["pins"]["1"]["net"] == "NET1"
+        assert pin_map["R1"]["pins"]["2"]["net"] == "NET1"
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: real fixture
 # ---------------------------------------------------------------------------
 
