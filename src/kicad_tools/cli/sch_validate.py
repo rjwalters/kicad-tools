@@ -2519,6 +2519,247 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Matched channel symmetry detection
+# ---------------------------------------------------------------------------
+
+# Suffix pairs that indicate matched output channels.  Each tuple is
+# (suffix_a, suffix_b, pair_type) where pair_type controls severity:
+#   "stereo"       -> warning
+#   "differential" -> error
+_CHANNEL_SUFFIX_PAIRS: list[tuple[str, str, str]] = [
+    ("_L", "_R", "stereo"),
+    ("_P", "_N", "differential"),
+    ("_A", "_B", "stereo"),
+    ("+", "-", "differential"),
+]
+
+
+def _find_matched_pairs(
+    net_names: set[str],
+) -> list[tuple[str, str, str, str]]:
+    """Identify matched net pairs from a set of net names.
+
+    Returns a deduplicated list of (net_a, net_b, base_name, pair_type).
+    """
+    pairs: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for net in sorted(net_names):
+        for suffix_a, suffix_b, pair_type in _CHANNEL_SUFFIX_PAIRS:
+            if net.endswith(suffix_a):
+                base = net[: -len(suffix_a)]
+                partner = base + suffix_b
+                if partner in net_names:
+                    key = (min(net, partner), max(net, partner))
+                    if key not in seen:
+                        seen.add(key)
+                        pairs.append((net, partner, base, pair_type))
+    return pairs
+
+
+def _classify_passive(lib_id: str) -> str | None:
+    """Return a passive type tag or None if not a passive component.
+
+    Recognized types: "R", "C", "L", "FB" (ferrite bead).
+    """
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    for prefix in ("R", "C", "L", "FB", "Ferrite"):
+        if part == prefix or part.startswith(prefix + "_"):
+            # Normalize ferrite variants to "FB"
+            if prefix in ("FB", "Ferrite"):
+                return "FB"
+            return prefix
+    return None
+
+
+@dataclass
+class _ChannelFilterSignature:
+    """Describes the passive filtering topology attached to a net."""
+
+    shunt_caps: int = 0
+    shunt_resistors: int = 0
+    series_components: list[str] = field(default_factory=list)
+    shunt_values: list[str] = field(default_factory=list)
+    series_values: list[str] = field(default_factory=list)
+
+    @property
+    def total_passives(self) -> int:
+        return self.shunt_caps + self.shunt_resistors + len(self.series_components)
+
+    def describe_diff(self, other: "_ChannelFilterSignature") -> str | None:
+        """Return a human-readable description of differences, or None if equal."""
+        diffs: list[str] = []
+        if self.shunt_caps != other.shunt_caps:
+            diffs.append(f"shunt caps: {self.shunt_caps} vs {other.shunt_caps}")
+        if self.shunt_resistors != other.shunt_resistors:
+            diffs.append(
+                f"shunt resistors: {self.shunt_resistors} vs {other.shunt_resistors}"
+            )
+        self_series_types = sorted(self.series_components)
+        other_series_types = sorted(other.series_components)
+        if self_series_types != other_series_types:
+            diffs.append(
+                f"series components: {self_series_types} vs {other_series_types}"
+            )
+        if not diffs:
+            return None
+        return "; ".join(diffs)
+
+
+def _build_filter_signature(
+    net_name: str,
+    pin_map_all: dict[str, dict],
+    all_net_names: set[str],
+) -> _ChannelFilterSignature:
+    """Build a filter signature for a single net.
+
+    Walks one hop through passive components attached to *net_name*:
+    - A shunt component has one pin on *net_name* and the other on a
+      ground/power net (not another signal net in the matched set).
+    - A series component has one pin on *net_name* and the other on
+      another signal-path net (not ground/power).
+    """
+    sig = _ChannelFilterSignature()
+
+    for ref, entry in pin_map_all.items():
+        lib_id: str = entry.get("lib_id", "")
+        ptype = _classify_passive(lib_id)
+        if ptype is None:
+            continue
+
+        pins_data: dict[str, dict] = entry.get("pins", {})
+        pin_nets: list[str | None] = [p.get("net") for p in pins_data.values()]
+
+        # Component must have at least one pin on our target net
+        if net_name not in pin_nets:
+            continue
+
+        # Determine the "other" nets (pins not on our target net)
+        other_nets = [n for n in pin_nets if n is not None and n != net_name]
+
+        if not other_nets:
+            # Single-pin connection or both pins on same net -- skip
+            continue
+
+        # Get value for reporting
+        value = entry.get("value", "")
+
+        for other_net in other_nets:
+            if _is_power_negative_net(other_net):
+                # Shunt to ground
+                if ptype == "C":
+                    sig.shunt_caps += 1
+                    if value:
+                        sig.shunt_values.append(value)
+                elif ptype == "R":
+                    sig.shunt_resistors += 1
+                    if value:
+                        sig.shunt_values.append(value)
+            elif _is_power_positive_net(other_net):
+                # Pull-up or shunt to power -- treat as shunt
+                if ptype == "R":
+                    sig.shunt_resistors += 1
+                    if value:
+                        sig.shunt_values.append(value)
+            else:
+                # Series component to another signal net
+                sig.series_components.append(ptype)
+                if value:
+                    sig.series_values.append(value)
+
+    return sig
+
+
+def check_matched_channel_symmetry(schematic_path: str) -> list[ValidationIssue]:
+    """Detect asymmetric filtering across matched output channels.
+
+    Identifies matched net pairs (e.g. AUDIO_L/AUDIO_R, USB_D_P/USB_D_N)
+    and compares the passive component topology attached to each channel.
+    Flags warnings (stereo) or errors (differential) when the filter
+    signatures differ.
+
+    Only pairs where at least one channel has passive components are
+    compared, to avoid false positives on nets that happen to share
+    matched naming but are not filtered outputs.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulate a combined pin_map and net name set across all sheets.
+        combined_pin_map: dict[str, dict] = {}
+        all_net_names: set[str] = set()
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    # Merge (first occurrence wins for multi-sheet)
+                    if ref not in combined_pin_map:
+                        combined_pin_map[ref] = entry
+                    else:
+                        combined_pin_map[ref]["pins"].update(entry.get("pins", {}))
+
+                    for pin_info in entry.get("pins", {}).values():
+                        net = pin_info.get("net")
+                        if net is not None:
+                            all_net_names.add(net)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="matched_channel_symmetry",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Find matched pairs
+        pairs = _find_matched_pairs(all_net_names)
+
+        for net_a, net_b, base_name, pair_type in pairs:
+            sig_a = _build_filter_signature(net_a, combined_pin_map, all_net_names)
+            sig_b = _build_filter_signature(net_b, combined_pin_map, all_net_names)
+
+            # Only compare if at least one channel has passive components
+            if sig_a.total_passives == 0 and sig_b.total_passives == 0:
+                continue
+
+            diff = sig_a.describe_diff(sig_b)
+            if diff is None:
+                continue
+
+            severity = "error" if pair_type == "differential" else "warning"
+            issues.append(
+                ValidationIssue(
+                    severity=severity,
+                    category="matched_channel_symmetry",
+                    message=(
+                        f"Asymmetric filtering on matched pair "
+                        f"{net_a}/{net_b}: {diff}"
+                    ),
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="matched_channel_symmetry",
+                message=f"Matched channel symmetry check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(
     schematic_path: str,
     lib_paths: list[str] = None,
@@ -2594,6 +2835,9 @@ def validate_schematic(
 
     # Symbol-to-footprint pin/pad count mismatch
     _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
+
+    # Matched channel symmetry detection
+    _run("matched_channel_symmetry", check_matched_channel_symmetry)
 
     return result
 
