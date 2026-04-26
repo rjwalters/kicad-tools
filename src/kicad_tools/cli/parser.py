@@ -1205,6 +1205,53 @@ def _add_pcb_parser(subparsers) -> None:
         help="Remove footprint even if it has routed traces",
     )
 
+    # pcb move-footprint
+    pcb_move_fp = pcb_subparsers.add_parser(
+        "move-footprint",
+        help="Move a footprint to new board-relative coordinates",
+        description="Relocate a footprint to a new position (and optionally "
+        "rotation) by reference designator.  Supports batch mode via --map.",
+    )
+    pcb_move_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_move_fp.add_argument(
+        "--ref",
+        help="Reference designator of footprint to move (e.g., J2)",
+    )
+    pcb_move_fp.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="New board-relative position (e.g., --to 132.5 98.25)",
+    )
+    pcb_move_fp.add_argument(
+        "--rotation",
+        type=float,
+        help="New rotation in degrees (optional)",
+    )
+    pcb_move_fp.add_argument(
+        "--map",
+        dest="batch_map",
+        help='JSON map for batch moves (e.g., \'{"J2": {"x": 132.5, "y": 98.25}}\')',
+    )
+    pcb_move_fp.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_move_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_move_fp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview moves without modifying the PCB file",
+    )
+
     # pcb add-zone
     pcb_add_zone = pcb_subparsers.add_parser(
         "add-zone",

@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone, snap-rotation, edit-outline")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -34,6 +34,10 @@ def run_pcb_command(args) -> int:
     # Handle remove-footprint command
     if args.pcb_command == "remove-footprint":
         return _run_remove_footprint_command(args, pcb_path)
+
+    # Handle move-footprint command
+    if args.pcb_command == "move-footprint":
+        return _run_move_footprint_command(args, pcb_path)
 
     # Handle add-zone command
     if args.pcb_command == "add-zone":
@@ -541,6 +545,54 @@ def _run_remove_footprint_command(args, pcb_path: Path) -> int:
         dry_run=dry_run,
         output_path=output_path,
         force=force,
+        output_format=output_format,
+    )
+
+
+def _run_move_footprint_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb move-footprint' command."""
+    from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+    ref = getattr(args, "ref", None)
+    to = getattr(args, "to", None)
+    rotation = getattr(args, "rotation", None)
+    batch_map_str = getattr(args, "batch_map", None)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    # Parse batch map JSON if provided
+    batch_map = None
+    if batch_map_str is not None:
+        try:
+            batch_map = json.loads(batch_map_str)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in --map: {e}", file=sys.stderr)
+            return 1
+        if not isinstance(batch_map, dict):
+            print("Error: --map must be a JSON object", file=sys.stderr)
+            return 1
+
+    # Validate: need either --ref/--to or --map
+    if batch_map is None:
+        if not ref:
+            print("Error: --ref is required (or use --map for batch mode)", file=sys.stderr)
+            return 1
+        if not to:
+            print("Error: --to is required (or use --map for batch mode)", file=sys.stderr)
+            return 1
+
+    to_tuple = tuple(to) if to else None
+
+    return run_move_footprint(
+        pcb_path=pcb_path,
+        reference=ref,
+        to=to_tuple,
+        rotation=rotation,
+        batch_map=batch_map,
+        dry_run=dry_run,
+        output_path=output_path,
         output_format=output_format,
     )
 
