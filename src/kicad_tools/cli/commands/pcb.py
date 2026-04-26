@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -34,6 +34,10 @@ def run_pcb_command(args) -> int:
     # Handle remove-footprint command
     if args.pcb_command == "remove-footprint":
         return _run_remove_footprint_command(args, pcb_path)
+
+    # Handle add-zone command
+    if args.pcb_command == "add-zone":
+        return _run_add_zone_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -531,3 +535,134 @@ def _run_remove_footprint_command(args, pcb_path: Path) -> int:
         force=force,
         output_format=output_format,
     )
+
+
+def _run_add_zone_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-zone' command.
+
+    Delegates to the existing ZoneGenerator infrastructure from
+    kicad_tools.zones, adding support for --rect/--origin/--size
+    rectangular boundary specification.
+    """
+    from kicad_tools.zones import ZoneGenerator
+
+    # Validate --rect requires --origin and --size
+    use_rect = getattr(args, "rect", False)
+    origin = getattr(args, "origin", None)
+    size = getattr(args, "size", None)
+
+    if use_rect:
+        if origin is None or size is None:
+            print(
+                "Error: --rect requires both --origin X Y and --size W H",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Build rectangular boundary polygon if requested
+    boundary = None
+    if use_rect and origin is not None and size is not None:
+        x0, y0 = origin
+        w, h = size
+        if w <= 0 or h <= 0:
+            print("Error: --size width and height must be positive", file=sys.stderr)
+            return 1
+        boundary = [
+            (x0, y0),
+            (x0 + w, y0),
+            (x0 + w, y0 + h),
+            (x0, y0 + h),
+        ]
+
+    # Determine output path
+    output = getattr(args, "output", None)
+    if output:
+        output_path = Path(output)
+    else:
+        output_path = pcb_path.with_stem(pcb_path.stem + "_zones")
+
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    try:
+        gen = ZoneGenerator.from_pcb(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Map CLI flags to ZoneGenerator parameters
+    try:
+        zone = gen.add_zone(
+            net=args.net,
+            layer=args.layer,
+            priority=getattr(args, "priority", 0),
+            clearance=getattr(args, "min_clearance", 0.3),
+            thermal_gap=getattr(args, "thermal_relief_gap", 0.3),
+            thermal_bridge_width=getattr(args, "thermal_relief_width", 0.4),
+            min_thickness=getattr(args, "min_thickness", 0.25),
+            boundary=boundary,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Build result for reporting
+    result = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "zone": {
+            "net": zone.config.net,
+            "layer": zone.config.layer,
+            "priority": zone.config.priority,
+            "clearance": zone.config.clearance,
+            "thermal_gap": zone.config.thermal_gap,
+            "thermal_bridge_width": zone.config.thermal_bridge_width,
+            "boundary_points": len(zone.boundary),
+            "boundary_type": "rectangle" if use_rect else "board_outline",
+        },
+        "warnings": [w.message for w in gen.warnings],
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        label = "(dry run) " if dry_run else ""
+        print(f"PCB Add Zone {label}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print(f"  Net:              {zone.config.net}")
+        print(f"  Layer:            {zone.config.layer}")
+        print(f"  Priority:         {zone.config.priority}")
+        print(f"  Clearance:        {zone.config.clearance}mm")
+        print(f"  Thermal gap:      {zone.config.thermal_gap}mm")
+        print(f"  Thermal width:    {zone.config.thermal_bridge_width}mm")
+        print(f"  Boundary:         {len(zone.boundary)} points", end="")
+        if use_rect:
+            print(" (rectangle)")
+        else:
+            print(" (board outline)")
+
+    # Surface overlap warnings
+    if gen.warnings:
+        if output_format == "text":
+            print(f"\n{len(gen.warnings)} overlap warning(s):")
+            for w in gen.warnings:
+                print(f"  WARNING: {w.message}", file=sys.stderr)
+
+    if dry_run:
+        return 0
+
+    # Save
+    try:
+        gen.save(output_path)
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    if output_format == "text":
+        print(f"\n  Saved to: {output_path}")
+
+    return 0
