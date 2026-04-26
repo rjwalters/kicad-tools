@@ -1398,8 +1398,7 @@ class TestSchValidateGlobalLabelDirections:
         assert "no receiver" in gl_issues[0].message
 
     def test_valid_output_input_mix(self, tmp_path: Path):
-        """One output and one input on the same net -- no driver/receiver issues,
-        but a shape-consistency warning is expected."""
+        """One output and one input on the same net -- complementary pair, no warnings."""
         from kicad_tools.cli.sch_validate import check_global_label_directions
 
         parent_sch = self._make_schematic("""
@@ -1419,20 +1418,8 @@ class TestSchValidateGlobalLabelDirections:
         (tmp_path / "sub.kicad_sch").write_text(child_sch)
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
-        driver_receiver_issues = [
-            i
-            for i in issues
-            if i.category == "global_label"
-            and ("no driver" in i.message or "no receiver" in i.message)
-        ]
-        assert len(driver_receiver_issues) == 0
-        # Shape-consistency warning IS expected since output != input
-        consistency_issues = [
-            i
-            for i in issues
-            if i.category == "global_label" and "inconsistent" in i.message
-        ]
-        assert len(consistency_issues) == 1
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
 
     def test_bidirectional_counts_as_both(self, tmp_path: Path):
         """All bidirectional -- counts as both driver and receiver."""
@@ -1531,8 +1518,8 @@ class TestSchValidateGlobalLabelDirections:
         assert "global_label_directions" in result.checks_run
 
 
-    def test_inconsistent_shapes_detected(self, tmp_path: Path):
-        """Same label with different shapes across sheets emits a warning."""
+    def test_input_bidirectional_no_warning(self, tmp_path: Path):
+        """input + bidirectional is a valid complementary pair -- no warning."""
         from kicad_tools.cli.sch_validate import check_global_label_directions
 
         parent_sch = self._make_schematic("""
@@ -1552,17 +1539,8 @@ class TestSchValidateGlobalLabelDirections:
         (tmp_path / "sub.kicad_sch").write_text(child_sch)
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
-        gl_issues = [
-            i
-            for i in issues
-            if i.category == "global_label" and "inconsistent" in i.message
-        ]
-
-        assert len(gl_issues) == 1
-        assert gl_issues[0].severity == "warning"
-        assert "SWCLK" in gl_issues[0].message
-        assert "input" in gl_issues[0].message
-        assert "bidirectional" in gl_issues[0].message
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
 
     def test_consistent_shapes_no_warning(self, tmp_path: Path):
         """Same shape on all sheets should not emit a shape-consistency warning."""
@@ -1611,8 +1589,8 @@ class TestSchValidateGlobalLabelDirections:
         ]
         assert len(consistency_issues) == 0
 
-    def test_multiple_shapes_across_three_sheets(self, tmp_path: Path):
-        """Inconsistent shapes across 3+ sheets lists all shapes and locations."""
+    def test_mixed_non_driver_shapes_no_warning(self, tmp_path: Path):
+        """input + bidirectional + passive across 3 sheets -- no conflicting drivers."""
         from kicad_tools.cli.sch_validate import check_global_label_directions
 
         parent_sch = self._make_schematic("""
@@ -1641,18 +1619,89 @@ class TestSchValidateGlobalLabelDirections:
         (tmp_path / "sub2.kicad_sch").write_text(sub2_sch)
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
-        consistency_issues = [
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
+
+    def test_conflicting_drivers_detected(self, tmp_path: Path):
+        """output + tri_state on the same net -- conflicting drivers warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "BUS_CONFLICT" (shape output) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "m1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "BUS_CONFLICT" (shape tri_state) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "m2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        conflict_issues = [
             i
             for i in issues
-            if i.category == "global_label" and "inconsistent" in i.message
+            if i.category == "global_label" and "conflicting" in i.message
         ]
 
-        assert len(consistency_issues) == 1
-        msg = consistency_issues[0].message
-        assert "MULTI" in msg
-        assert "input" in msg
-        assert "bidirectional" in msg
-        assert "passive" in msg
+        assert len(conflict_issues) == 1
+        assert conflict_issues[0].severity == "warning"
+        assert "BUS_CONFLICT" in conflict_issues[0].message
+        assert "output" in conflict_issues[0].message
+        assert "tri_state" in conflict_issues[0].message
+
+    def test_output_bidirectional_no_warning(self, tmp_path: Path):
+        """output + bidirectional is a valid combination -- no warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_OB" (shape output) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "n1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_OB" (shape bidirectional) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "n2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
+
+    def test_tri_state_input_no_warning(self, tmp_path: Path):
+        """tri_state + input is a valid complementary pair -- no warning."""
+        from kicad_tools.cli.sch_validate import check_global_label_directions
+
+        parent_sch = self._make_schematic("""
+          (global_label "SIG_TI" (shape tri_state) (at 10 20 0)
+            (effects (font (size 1.27 1.27))) (uuid "o1"))
+          (sheet (at 100 100) (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "Sub" (at 100 99 0))
+            (property "Sheetfile" "sub.kicad_sch" (at 100 111 0)))
+        """)
+        child_sch = self._make_schematic("""
+          (global_label "SIG_TI" (shape input) (at 30 40 0)
+            (effects (font (size 1.27 1.27))) (uuid "o2"))
+        """)
+
+        (tmp_path / "top.kicad_sch").write_text(parent_sch)
+        (tmp_path / "sub.kicad_sch").write_text(child_sch)
+
+        issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
+        gl_issues = [i for i in issues if i.category == "global_label"]
+        assert len(gl_issues) == 0
 
 
 class TestSchValidateSheetParseFailure:
