@@ -1168,6 +1168,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Apply reference renames without interactive confirmation",
     )
 
+    # pcb zones
+    pcb_zones = pcb_subparsers.add_parser("zones", help="List copper pour zones")
+    pcb_zones.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_zones.add_argument("--format", choices=["text", "json"], default="text")
+
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(
         "remove-footprint",
