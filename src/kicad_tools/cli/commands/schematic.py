@@ -24,7 +24,7 @@ def run_sch_command(args) -> int:
             " add-label, cleanup-wires, remove-wire, insert-inline,"
         )
         print(
-            "          disconnect, re-annotate,"
+            "          disconnect, remove-component, re-annotate,"
         )
         print("          repair-instances")
         return 1
@@ -473,6 +473,24 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return disconnect_main(sub_argv) or 0
+
+    elif args.sch_command == "remove-component":
+        from ..sch_remove_component import main as remove_component_main
+
+        sub_argv = [str(schematic_path), "--ref", args.ref]
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return remove_component_main(sub_argv) or 0
 
     elif args.sch_command == "repair-instances":
         from ..sch_repair_instances import run_repair_instances
