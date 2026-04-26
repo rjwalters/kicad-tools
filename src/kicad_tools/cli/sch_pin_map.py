@@ -62,12 +62,19 @@ def _point_on_segment(
 
 def _build_wire_graph(
     schematic: Schematic,
+    extra_points: set[Coord] | None = None,
 ) -> tuple[dict[Coord, set[Coord]], dict[Coord, str]]:
     """Build a connectivity graph from wires, labels, and power symbols.
 
     Labels and other connection points may sit on the interior of a wire
     segment (not just at endpoints). We split wire edges at such points
     so that flood-fill can reach them.
+
+    Args:
+        schematic: Loaded schematic
+        extra_points: Additional coordinates (e.g., component pin positions)
+            that should be treated as graph nodes. Wire segments passing
+            through these points will be split so BFS can traverse them.
 
     Returns:
         adjacency: Maps each coordinate node to its connected neighbors
@@ -104,6 +111,19 @@ def _build_wire_graph(
             net_name = ps.value or ps.lib_id.split(":", 1)[-1]
             net_names[coord] = net_name
             special_points.add(coord)
+
+    # Include caller-supplied points (e.g., component pin positions) so that
+    # wire segments are split at those locations and BFS can start there.
+    if extra_points:
+        special_points.update(extra_points)
+
+    # Also include all wire endpoints as split points.  When one wire's
+    # endpoint lands on the interior of another wire (e.g., a T-junction
+    # without an explicit junction symbol), the second wire must be split
+    # at that point so BFS can traverse between them.
+    for wire in schematic.wires:
+        special_points.add(_to_coord(*wire.start))
+        special_points.add(_to_coord(*wire.end))
 
     # Build adjacency by processing each wire segment.
     # If any special point lies on the interior of a wire, split the wire at that point.
@@ -203,12 +223,13 @@ def resolve_pin_map(
     Returns:
         Dict mapping reference -> {"lib_id": str, "pins": {pin_num: {name, net, type, position}}}
     """
-    adjacency, net_names = _build_wire_graph(schematic)
     result: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
-    # Pre-compute pin coordinates for every non-power symbol so that we
-    # can build per-component barrier sets.  A barrier set for symbol S
+    # First pass: collect all component pin positions.
+    # We need these BEFORE building the wire graph so that wire segments
+    # are split at pin coordinates, making them reachable by BFS.
+    # We also build per-component barrier sets: a barrier set for symbol S
     # contains every pin coordinate that does NOT belong to S.  This
     # prevents the BFS from traversing *through* another component's
     # body (i.e. hopping from pin 1 to pin 2 of an intermediate
@@ -246,8 +267,11 @@ def resolve_pin_map(
         all_pin_coords.update(coords)
         _sym_cache.append((symbol, lib_sym, pin_positions))
 
+    # --- Build wire graph with pin coordinates as split points ---
+    adjacency, net_names = _build_wire_graph(schematic, extra_points=all_pin_coords)
+
     # ------------------------------------------------------------------
-    # Resolve nets for each symbol using per-component barrier sets.
+    # Second pass: resolve nets for each symbol using per-component barrier sets.
     # ------------------------------------------------------------------
     for symbol, lib_sym, pin_positions in _sym_cache:
         # Apply reference filter
