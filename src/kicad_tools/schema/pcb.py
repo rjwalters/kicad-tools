@@ -6,6 +6,7 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -27,6 +28,25 @@ from ..footprints.library_path import (
 if TYPE_CHECKING:
     from ..manufacturers import DesignRules
     from ..query.footprints import FootprintList
+
+# Default regex for detecting power/ground net names.
+# Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
+_DEFAULT_POWER_NET_PATTERN = re.compile(
+    r"^(\+|GND|GNDA|GNDPWR|VCC|VDD|VBUS|VSS|V[0-9])",
+    re.IGNORECASE,
+)
+
+
+def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
+    """Return True if *name* looks like a power or ground net.
+
+    Uses *pattern* if provided, otherwise falls back to the built-in
+    heuristic ``_DEFAULT_POWER_NET_PATTERN``.
+    """
+    if not name:
+        return False
+    pat = pattern if pattern is not None else _DEFAULT_POWER_NET_PATTERN
+    return pat.search(name) is not None
 
 
 @dataclass
@@ -3930,7 +3950,11 @@ class PCB:
         self,
         *,
         nets: list[str] | None = None,
+        layers: list[str] | None = None,
         keep_zones: bool = True,
+        exclude_power: bool = False,
+        power_pattern: re.Pattern[str] | None = None,
+        remove_orphan_vias: bool = False,
     ) -> dict[str, int]:
         """Remove trace segments and vias from the PCB.
 
@@ -3943,8 +3967,24 @@ class PCB:
             nets: Optional list of net names to strip. If None, strips all nets.
                   When specified, only segments/vias belonging to these nets
                   are removed.
+            layers: Optional list of layer names to strip (e.g. ``["In1.Cu"]``).
+                    When provided, only segments on the listed layers are
+                    candidates for removal.  Vias are removed only when ALL of
+                    their layers are in the strip set.  When both *nets* and
+                    *layers* are given they are ANDed together.
             keep_zones: If True (default), preserve copper pour zones.
                         If False, remove zones as well.
+            exclude_power: If True, power/ground nets are never stripped
+                           even when they match other filters.  Defaults to
+                           ``False`` for backward compatibility; the CLI
+                           defaults to excluding power nets.
+            power_pattern: Optional compiled regex overriding the built-in
+                           power-net heuristic used when *exclude_power* is
+                           ``True``.
+            remove_orphan_vias: If True, remove vias that no longer connect
+                                to any remaining segment on either of their
+                                layers after layer-filtered stripping.
+                                Only meaningful when *layers* is specified.
 
         Returns:
             Dictionary with counts of removed elements:
@@ -3963,6 +4003,9 @@ class PCB:
 
             # Strip everything including zones
             >>> stats = pcb.strip_traces(keep_zones=False)
+
+            # Strip only inner-layer signal traces (power excluded by default)
+            >>> stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu"])
         """
         # Build set of net numbers to strip (if filtering by net name)
         net_numbers_to_strip: set[int] | None = None
@@ -3974,6 +4017,32 @@ class PCB:
                         net_numbers_to_strip.add(net_num)
                         break
 
+        # Build layer set for fast membership tests
+        layer_set: set[str] | None = None
+        if layers is not None:
+            layer_set = set(layers)
+
+        # Build set of power-net numbers for exclusion
+        power_net_numbers: set[int] = set()
+        if exclude_power:
+            for net_num, net in self._nets.items():
+                if _is_power_net(net.name, power_pattern):
+                    power_net_numbers.add(net_num)
+
+        def _net_num_from_child(child: SExp) -> int:
+            net_node = child.find("net")
+            if net_node:
+                return net_node.get_int(0) or 0
+            return 0
+
+        def _should_strip_net(net_num: int) -> bool:
+            """Return True if *net_num* passes the net filter."""
+            if net_numbers_to_strip is not None and net_num not in net_numbers_to_strip:
+                return False
+            if exclude_power and net_num in power_net_numbers:
+                return False
+            return True
+
         removed_segments = 0
         removed_vias = 0
         removed_zones = 0
@@ -3984,46 +4053,61 @@ class PCB:
             should_remove = False
 
             if child.name == "segment":
-                if net_numbers_to_strip is None:
-                    # Remove all segments
-                    should_remove = True
-                else:
-                    # Check if segment belongs to a net we're stripping
-                    net_node = child.find("net")
-                    if net_node:
-                        net_num = net_node.get_int(0) or 0
-                        if net_num in net_numbers_to_strip:
-                            should_remove = True
+                net_num = _net_num_from_child(child)
+                if _should_strip_net(net_num):
+                    if layer_set is not None:
+                        # Only remove segments on specified layers
+                        layer_node = child.find("layer")
+                        if layer_node:
+                            seg_layer = layer_node.get_string(0) or ""
+                            if seg_layer in layer_set:
+                                should_remove = True
+                    elif net_numbers_to_strip is not None:
+                        # Net filter only — already passed net check
+                        should_remove = True
+                    else:
+                        # No net or layer filter — remove all (non-power) segments
+                        should_remove = True
 
                 if should_remove:
                     removed_segments += 1
 
             elif child.name == "via":
-                if net_numbers_to_strip is None:
-                    # Remove all vias
-                    should_remove = True
-                else:
-                    # Check if via belongs to a net we're stripping
-                    net_node = child.find("net")
-                    if net_node:
-                        net_num = net_node.get_int(0) or 0
-                        if net_num in net_numbers_to_strip:
-                            should_remove = True
+                net_num = _net_num_from_child(child)
+                if _should_strip_net(net_num):
+                    if layer_set is not None:
+                        # Remove via only if ALL its layers are in the strip set
+                        layers_node = child.find("layers")
+                        if layers_node:
+                            via_layers = [
+                                layers_node.get_string(i) or ""
+                                for i in range(len(layers_node.values))
+                                if isinstance(layers_node.values[i], str)
+                            ]
+                            if via_layers and all(vl in layer_set for vl in via_layers):
+                                should_remove = True
+                    elif net_numbers_to_strip is not None:
+                        should_remove = True
+                    else:
+                        should_remove = True
 
                 if should_remove:
                     removed_vias += 1
 
             elif child.name == "zone" and not keep_zones:
-                if net_numbers_to_strip is None:
-                    # Remove all zones
-                    should_remove = True
-                else:
-                    # Check if zone belongs to a net we're stripping
-                    net_node = child.find("net")
-                    if net_node:
-                        net_num = net_node.get_int(0) or 0
-                        if net_num in net_numbers_to_strip:
-                            should_remove = True
+                net_num = _net_num_from_child(child)
+                if _should_strip_net(net_num):
+                    if layer_set is not None:
+                        # Only remove zones on specified layers
+                        layer_node = child.find("layer")
+                        if layer_node:
+                            zone_layer = layer_node.get_string(0) or ""
+                            if zone_layer in layer_set:
+                                should_remove = True
+                    elif net_numbers_to_strip is not None:
+                        should_remove = True
+                    else:
+                        should_remove = True
 
                 if should_remove:
                     removed_zones += 1
@@ -4034,21 +4118,111 @@ class PCB:
         # Update the S-expression tree
         self._sexp.children = new_children
 
+        # --- Orphan via removal ------------------------------------------------
+        # After stripping layer-filtered segments, detect vias that no longer
+        # connect to any remaining segment on either of their layers.
+        removed_orphan_vias = 0
+        if remove_orphan_vias and layer_set is not None:
+            # Build a set of (position, layer) pairs from remaining segments
+            remaining_endpoints: set[tuple[float, float, str]] = set()
+            for child in self._sexp.children:
+                if child.name == "segment":
+                    layer_node = child.find("layer")
+                    seg_layer = (layer_node.get_string(0) or "") if layer_node else ""
+                    start_node = child.find("start")
+                    end_node = child.find("end")
+                    if start_node:
+                        sx = start_node.get_float(0) or 0.0
+                        sy = start_node.get_float(1) or 0.0
+                        remaining_endpoints.add((round(sx, 4), round(sy, 4), seg_layer))
+                    if end_node:
+                        ex = end_node.get_float(0) or 0.0
+                        ey = end_node.get_float(1) or 0.0
+                        remaining_endpoints.add((round(ex, 4), round(ey, 4), seg_layer))
+
+            new_children2 = []
+            for child in self._sexp.children:
+                if child.name == "via":
+                    at_node = child.find("at")
+                    layers_node = child.find("layers")
+                    if at_node and layers_node:
+                        vx = round(at_node.get_float(0) or 0.0, 4)
+                        vy = round(at_node.get_float(1) or 0.0, 4)
+                        via_layers = [
+                            layers_node.get_string(i) or ""
+                            for i in range(len(layers_node.values))
+                            if isinstance(layers_node.values[i], str)
+                        ]
+                        # Via is orphan if NONE of its layers have a segment endpoint at its position
+                        connected = any(
+                            (vx, vy, vl) in remaining_endpoints for vl in via_layers
+                        )
+                        if not connected:
+                            removed_orphan_vias += 1
+                            removed_vias += 1
+                            continue
+                new_children2.append(child)
+            self._sexp.children = new_children2
+
         # Update internal state to reflect the changes
-        if net_numbers_to_strip is None:
+        def _seg_matches(seg: Segment) -> bool:
+            """Return True if segment should be KEPT."""
+            if exclude_power and seg.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and seg.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and seg.layer not in layer_set:
+                return True
+            return False
+
+        def _via_matches(via: Via) -> bool:
+            """Return True if via should be KEPT."""
+            if exclude_power and via.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and via.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and not all(vl in layer_set for vl in via.layers):
+                return True
+            return False
+
+        def _zone_matches(zone: Zone) -> bool:
+            """Return True if zone should be KEPT."""
+            if exclude_power and zone.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and zone.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and zone.layer not in layer_set:
+                return True
+            return False
+
+        # Apply filtering helpers
+        has_any_filter = (
+            net_numbers_to_strip is not None
+            or layer_set is not None
+            or exclude_power
+        )
+        if has_any_filter:
+            self._segments = [seg for seg in self._segments if _seg_matches(seg)]
+            self._vias = [via for via in self._vias if _via_matches(via)]
+            if not keep_zones:
+                self._zones = [zone for zone in self._zones if _zone_matches(zone)]
+        else:
             self._segments = []
             self._vias = []
             if not keep_zones:
                 self._zones = []
-        else:
-            self._segments = [
-                seg for seg in self._segments if seg.net_number not in net_numbers_to_strip
+
+        # Handle orphan via removal in internal state
+        if remove_orphan_vias and layer_set is not None and removed_orphan_vias > 0:
+            remaining_ep_set: set[tuple[float, float, str]] = set()
+            for seg in self._segments:
+                remaining_ep_set.add((round(seg.start[0], 4), round(seg.start[1], 4), seg.layer))
+                remaining_ep_set.add((round(seg.end[0], 4), round(seg.end[1], 4), seg.layer))
+            self._vias = [
+                v for v in self._vias
+                if any((round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
+                       for vl in v.layers)
             ]
-            self._vias = [via for via in self._vias if via.net_number not in net_numbers_to_strip]
-            if not keep_zones:
-                self._zones = [
-                    zone for zone in self._zones if zone.net_number not in net_numbers_to_strip
-                ]
 
         return {
             "segments": removed_segments,

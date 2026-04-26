@@ -1157,6 +1157,29 @@ def _add_pcb_parser(subparsers) -> None:
         help="Comma-separated list of net names to strip (default: all nets)",
     )
     pcb_strip.add_argument(
+        "--layers",
+        help="Comma-separated list of layer names to strip "
+        "(e.g. In1.Cu,In2.Cu). Only segments on these layers are removed. "
+        "Vias are removed only when ALL their layers are in the set.",
+    )
+    pcb_strip.add_argument(
+        "--include-power",
+        action="store_true",
+        default=False,
+        help="Include power/ground nets in stripping (default: exclude them)",
+    )
+    pcb_strip.add_argument(
+        "--power-pattern",
+        help="Regex pattern for power net names (overrides built-in heuristic)",
+    )
+    pcb_strip.add_argument(
+        "--remove-orphan-vias",
+        action="store_true",
+        default=False,
+        help="Remove vias that no longer connect to any remaining segment "
+        "on either of their layers (only meaningful with --layers)",
+    )
+    pcb_strip.add_argument(
         "--no-keep-zones",
         dest="keep_zones",
         action="store_false",

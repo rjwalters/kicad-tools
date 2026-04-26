@@ -672,6 +672,226 @@ class TestPcbStrip:
         expected_output = minimal_pcb.with_stem(f"{minimal_pcb.stem}-stripped")
         assert expected_output.exists()
 
+    def test_strip_layers_filter(self, tmp_path, capsys):
+        """Test --layers filter strips only specified layers."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_B")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="B.Cu", net="SIG_C")
+
+        input_file = tmp_path / "multi_layer.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 2
+        remaining_layers = {seg.layer for seg in stripped_pcb.segments}
+        assert "In1.Cu" not in remaining_layers
+        assert "F.Cu" in remaining_layers
+        assert "B.Cu" in remaining_layers
+
+    def test_strip_layers_and_nets_combined_cli(self, tmp_path, capsys):
+        """Test combined --layers and --nets filter via CLI."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="AUDIO_R")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="AUDIO_L")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="F.Cu", net="AUDIO_R")
+
+        input_file = tmp_path / "combined.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets="AUDIO_R",
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        # Only In1.Cu + AUDIO_R removed, others kept
+        assert len(stripped_pcb.segments) == 2
+
+    def test_strip_power_exclusion_cli(self, tmp_path, capsys):
+        """Test that --layers excludes power nets by default in CLI."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "power_test.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=False,  # default — power excluded
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        # GND preserved, SIG_A removed
+        assert len(stripped_pcb.segments) == 1
+        # The remaining segment should be on a GND net (check via net name lookup)
+        gnd_num = None
+        for num, net in stripped_pcb.nets.items():
+            if net.name == "GND":
+                gnd_num = num
+                break
+        assert stripped_pcb.segments[0].net_number == gnd_num
+
+    def test_strip_include_power_cli(self, tmp_path, capsys):
+        """Test --include-power overrides power exclusion."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "power_include.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 0  # both stripped
+
+    def test_strip_json_output_includes_layers(self, tmp_path, capsys):
+        """Test JSON output includes layer filter info."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "json_test.kicad_pcb"
+        pcb.save(input_file)
+
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="json",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers_filtered"] == ["In1.Cu"]
+        assert "exclude_power" in data
+        assert data["removed"]["segments"] == 1
+
+    def test_strip_dry_run_with_layers(self, tmp_path, capsys):
+        """Test --dry-run with --layers shows correct removal count."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="F.Cu", net="SIG_B")
+
+        input_file = tmp_path / "dry_run_layers.kicad_pcb"
+        pcb.save(input_file)
+
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Filtering layers: In1.Cu" in captured.out
+
 
 # PCB with multiple footprints for reannotation testing
 MULTI_FOOTPRINT_PCB = """(kicad_pcb

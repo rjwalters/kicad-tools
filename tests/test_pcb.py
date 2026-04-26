@@ -2606,6 +2606,254 @@ class TestStripTraces:
         assert stats["vias"] == 0
         assert len(pcb.segments) == 0
 
+    # ------------------------------------------------------------------
+    # Layer filtering tests
+    # ------------------------------------------------------------------
+
+    def test_strip_layers_only_removes_matching_layer(self):
+        """Strip with layers=['In1.Cu'] removes only In1.Cu segments."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_B")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="In2.Cu", net="SIG_C")
+        pcb.add_trace(start=(10, 40), end=(50, 40), width=0.25, layer="B.Cu", net="SIG_D")
+
+        assert len(pcb.segments) == 4
+
+        stats = pcb.strip_traces(layers=["In1.Cu"])
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 3
+        remaining_layers = {seg.layer for seg in pcb.segments}
+        assert "In1.Cu" not in remaining_layers
+        assert "F.Cu" in remaining_layers
+        assert "B.Cu" in remaining_layers
+
+    def test_strip_multiple_layers(self):
+        """Strip with layers=['In1.Cu', 'In2.Cu'] removes both."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_B")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="In2.Cu", net="SIG_C")
+        pcb.add_trace(start=(10, 40), end=(50, 40), width=0.25, layer="B.Cu", net="SIG_D")
+
+        stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu"])
+
+        assert stats["segments"] == 2
+        assert len(pcb.segments) == 2
+        remaining_layers = {seg.layer for seg in pcb.segments}
+        assert remaining_layers == {"F.Cu", "B.Cu"}
+
+    def test_strip_layers_and_nets_combined(self):
+        """Combining layers and nets ANDs the two filters."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="AUDIO_R")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="AUDIO_L")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="F.Cu", net="AUDIO_R")
+
+        # Look up net numbers for verification
+        audio_r_num = None
+        audio_l_num = None
+        for num, net in pcb.nets.items():
+            if net.name == "AUDIO_R":
+                audio_r_num = num
+            elif net.name == "AUDIO_L":
+                audio_l_num = num
+
+        stats = pcb.strip_traces(layers=["In1.Cu"], nets=["AUDIO_R"])
+
+        # Only the AUDIO_R segment on In1.Cu should be removed
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 2
+        # Remaining: AUDIO_L on In1.Cu and AUDIO_R on F.Cu
+        remaining = {(seg.layer, seg.net_number) for seg in pcb.segments}
+        assert ("In1.Cu", audio_l_num) in remaining
+        assert ("F.Cu", audio_r_num) in remaining
+
+    # ------------------------------------------------------------------
+    # Power net exclusion tests
+    # ------------------------------------------------------------------
+
+    def test_strip_exclude_power_default_off(self):
+        """By default (API), power nets ARE stripped."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+
+        stats = pcb.strip_traces(layers=["In1.Cu"])
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 0
+
+    def test_strip_exclude_power_preserves_power_nets(self):
+        """With exclude_power=True, power nets are preserved."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        gnd_num = None
+        for num, net in pcb.nets.items():
+            if net.name == "GND":
+                gnd_num = num
+                break
+
+        stats = pcb.strip_traces(layers=["In1.Cu"], exclude_power=True)
+
+        assert stats["segments"] == 1  # only SIG_A removed
+        assert len(pcb.segments) == 1
+        assert pcb.segments[0].net_number == gnd_num
+
+    def test_strip_exclude_power_various_names(self):
+        """Power heuristic catches common power net names."""
+        pcb = PCB.create(width=100, height=100)
+        power_names = ["GND", "+3V3", "+5V", "VCC", "VDD", "VBUS"]
+        for i, name in enumerate(power_names):
+            pcb.add_trace(
+                start=(10, 10 + i * 10), end=(50, 10 + i * 10),
+                width=0.25, layer="In1.Cu", net=name,
+            )
+        pcb.add_trace(start=(10, 80), end=(50, 80), width=0.25, layer="In1.Cu", net="AUDIO")
+
+        stats = pcb.strip_traces(layers=["In1.Cu"], exclude_power=True)
+
+        # Only AUDIO should be removed
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == len(power_names)
+
+    def test_strip_custom_power_pattern(self):
+        """Custom power_pattern overrides built-in heuristic."""
+        import re
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="PWR_RAIL")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        pwr_num = None
+        for num, net in pcb.nets.items():
+            if net.name == "PWR_RAIL":
+                pwr_num = num
+                break
+
+        # Custom pattern that matches PWR_*
+        pattern = re.compile(r"^PWR_", re.IGNORECASE)
+        stats = pcb.strip_traces(
+            layers=["In1.Cu"], exclude_power=True, power_pattern=pattern
+        )
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 1
+        assert pcb.segments[0].net_number == pwr_num
+
+    # ------------------------------------------------------------------
+    # Via behavior with layer filtering
+    # ------------------------------------------------------------------
+
+    def test_strip_via_kept_when_not_all_layers_match(self):
+        """Via connecting F.Cu-B.Cu is kept when stripping In1.Cu."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        pcb.add_via(x=50, y=10, layers=("F.Cu", "B.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(layers=["In1.Cu"])
+
+        assert stats["segments"] == 1
+        assert stats["vias"] == 0  # via NOT removed — it connects F.Cu-B.Cu
+        assert len(pcb.vias) == 1
+
+    def test_strip_via_removed_when_all_layers_match(self):
+        """Via whose layers are all in the strip set gets removed."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        pcb.add_via(x=50, y=10, layers=("In1.Cu", "In2.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu"])
+
+        assert stats["segments"] == 1
+        assert stats["vias"] == 1
+        assert len(pcb.vias) == 0
+
+    # ------------------------------------------------------------------
+    # Orphan via removal
+    # ------------------------------------------------------------------
+
+    def test_strip_orphan_via_removal(self):
+        """After stripping layer segments, orphan vias are removed."""
+        pcb = PCB.create(width=100, height=100)
+        # Segment on In1.Cu ending at (50, 10)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        # Via at (50, 10) connecting F.Cu-B.Cu — after In1.Cu strip, no segment
+        # touches this via on F.Cu or B.Cu
+        pcb.add_via(x=50, y=10, layers=("F.Cu", "B.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(layers=["In1.Cu"], remove_orphan_vias=True)
+
+        assert stats["segments"] == 1
+        assert stats["vias"] == 1  # orphan via removed
+        assert len(pcb.vias) == 0
+
+    def test_strip_orphan_via_kept_when_connected(self):
+        """Via with remaining segments on its layers is NOT orphaned."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        pcb.add_trace(start=(50, 10), end=(90, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_via(x=50, y=10, layers=("F.Cu", "B.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(layers=["In1.Cu"], remove_orphan_vias=True)
+
+        assert stats["segments"] == 1  # In1.Cu segment removed
+        assert stats["vias"] == 0  # via still connected to F.Cu segment at (50,10)
+        assert len(pcb.vias) == 1
+
+    # ------------------------------------------------------------------
+    # Zone interaction with layer filter
+    # ------------------------------------------------------------------
+
+    def test_strip_zones_respect_layer_filter(self):
+        """Zones are only removed if their layer matches the filter."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        # We can't easily add zones via the API, so test via strip_traces
+        # with keep_zones=True (default) — zones should never be removed
+        stats = pcb.strip_traces(layers=["In1.Cu"], keep_zones=True)
+        assert stats["zones"] == 0
+
+    # ------------------------------------------------------------------
+    # Edge cases
+    # ------------------------------------------------------------------
+
+    def test_strip_empty_layers_list_is_noop(self):
+        """Empty layer list removes nothing."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(layers=[])
+
+        assert stats["segments"] == 0
+        assert len(pcb.segments) == 1
+
+    def test_strip_nonexistent_layer_removes_nothing(self):
+        """Non-existent layer name removes nothing."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(layers=["Nonexistent.Cu"])
+
+        assert stats["segments"] == 0
+        assert len(pcb.segments) == 1
+
+    def test_strip_roundtrip_with_layers(self, tmp_path):
+        """Stripping with layers saves/loads correctly."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_B")
+
+        pcb.strip_traces(layers=["In1.Cu"])
+
+        out = tmp_path / "stripped.kicad_pcb"
+        pcb.save(out)
+        reloaded = PCB.load(out)
+        assert len(reloaded.segments) == 1
+        assert reloaded.segments[0].layer == "F.Cu"
+
 
 # ---------------------------------------------------------------------------
 # KiCad 10 name-only net format: net_number recovery from PCB headers
