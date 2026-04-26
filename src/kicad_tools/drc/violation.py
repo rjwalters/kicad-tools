@@ -152,6 +152,9 @@ class ViolationType(Enum):
     # Impedance
     IMPEDANCE = "impedance"
 
+    # Placement
+    FOOTPRINT_OUTSIDE_BOARD = "footprint_outside_board"
+
     # Misc
     FOOTPRINT = "footprint"
     MALFORMED_OUTLINE = "malformed_outline"
@@ -217,6 +220,8 @@ class ViolationType(Enum):
             "pth_annular_ring": cls.PTH_ANNULAR_RING,
             # impedance rule from validate impedance checker
             "impedance": cls.IMPEDANCE,
+            # placement rule from validate placement checker
+            "footprint_outside_board": cls.FOOTPRINT_OUTSIDE_BOARD,
         }
 
         alias_match = _ALIASES.get(s_lower)
@@ -271,6 +276,8 @@ class ViolationType(Enum):
         if "impedance" in s_lower:
             return cls.IMPEDANCE
         if "footprint" in s_lower:
+            if "outside" in s_lower:
+                return cls.FOOTPRINT_OUTSIDE_BOARD
             if "duplicate" in s_lower:
                 return cls.DUPLICATE_FOOTPRINT
             if "extra" in s_lower:

@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
 from .rules.edge import EdgeClearanceRule
+from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .violations import DRCResults
 
@@ -91,6 +92,7 @@ class DRCChecker:
         results.merge(self.check_edge_clearances())
         results.merge(self.check_silkscreen())
         results.merge(self.check_solder_mask_pads())
+        results.merge(self.check_footprint_placement())
 
         return results
 
@@ -166,6 +168,18 @@ class DRCChecker:
         from .rules.solder_mask import SolderMaskPadRules
 
         rule = SolderMaskPadRules()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_footprint_placement(self) -> DRCResults:
+        """Check that footprints are placed inside the board outline.
+
+        Uses a point-in-polygon test on each footprint's centroid to
+        detect components placed entirely outside the Edge.Cuts boundary.
+
+        Returns:
+            DRCResults containing placement violations
+        """
+        rule = FootprintOutsideBoardRule()
         return rule.check(self.pcb, self.design_rules)
 
     def __repr__(self) -> str:
