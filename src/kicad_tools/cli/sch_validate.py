@@ -2520,6 +2520,81 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
 
 
 # ---------------------------------------------------------------------------
+# lib_symbols definition mismatch detection
+# ---------------------------------------------------------------------------
+
+
+def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
+    """Check that every placed symbol's ``lib_id`` has a matching ``lib_symbols`` entry.
+
+    The ``lib_symbols`` section of a ``.kicad_sch`` file contains embedded
+    copies of library symbol definitions.  When a placed symbol's ``lib_id``
+    (e.g. ``Regulator_Linear:AP2112K-3.3``) has no matching entry in
+    ``lib_symbols``, downstream consumers such as ERC, pin-map, and other
+    validate checks silently fail because ``get_lib_symbol()`` returns ``None``.
+
+    Power symbols (``lib_id`` starting with ``power:``) are skipped because
+    KiCad handles them separately.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+
+                # Collect the set of lib_id names defined in lib_symbols
+                defined_lib_ids: set[str] = set()
+                if sch.lib_symbols is not None:
+                    for sym_sexp in sch.lib_symbols.find_all("symbol"):
+                        name = sym_sexp.get_string(0)
+                        if name:
+                            defined_lib_ids.add(name)
+
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    if sym.lib_id and sym.lib_id not in defined_lib_ids:
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                category="lib_symbols_mismatch",
+                                message=(
+                                    f"{sym.reference}: placed symbol references "
+                                    f"lib_id '{sym.lib_id}' which has no matching "
+                                    f"entry in lib_symbols"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="lib_symbols_mismatch",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="lib_symbols_mismatch",
+                message=f"lib_symbols mismatch check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Matched channel symmetry detection
 # ---------------------------------------------------------------------------
 
@@ -2835,6 +2910,9 @@ def validate_schematic(
 
     # Symbol-to-footprint pin/pad count mismatch
     _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
+
+    # lib_symbols definition mismatch (placed lib_id missing from lib_symbols)
+    _run("lib_symbols_mismatch", check_lib_symbols_mismatch)
 
     # Matched channel symmetry detection
     _run("matched_channel_symmetry", check_matched_channel_symmetry)
