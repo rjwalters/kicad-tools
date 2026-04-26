@@ -1059,6 +1059,73 @@ def _is_resistor(lib_id: str) -> bool:
     return part == "R" or part.startswith("R_")
 
 
+def _is_capacitor(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a capacitor symbol (C, C_Small, C_Polarized, etc.)."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    return part == "C" or part.startswith("C_")
+
+
+def _is_stm32(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to an STM32 MCU symbol.
+
+    Matches the ``MCU_ST_STM32`` prefix used by the standard KiCad
+    symbol libraries for all STM32 families (F0/F1/F4/G0/H7/etc.).
+    """
+    return "MCU_ST_STM32" in lib_id
+
+
+def _is_nrst_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* represents an NRST (reset) pin.
+
+    Handles common notations: ``NRST``, ``~{NRST}``, ``nRST``.
+    """
+    # Strip KiCad active-low markup: ~{NRST} -> NRST
+    cleaned = re.sub(r"~\{([^}]+)\}", r"\1", pin_name)
+    return cleaned.upper() == "NRST"
+
+
+def _parse_capacitance(value: str) -> float | None:
+    """Parse a capacitor value string to farads.
+
+    Handles common notations like ``100n``, ``100nF``, ``1u``, ``0.1uF``.
+    Returns ``None`` if the value cannot be parsed.
+    """
+    multipliers = {
+        "p": 1e-12,
+        "n": 1e-9,
+        "u": 1e-6,
+        "\u00b5": 1e-6,  # µ
+        "m": 1e-3,
+    }
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Remove farad unit suffix
+    for unit in ["F", "f"]:
+        value = value.rstrip(unit)
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Check for multiplier suffix
+    multiplier = 1.0
+    if value and value[-1] in multipliers:
+        multiplier = multipliers[value[-1]]
+        value = value[:-1]
+
+    value = value.strip()
+    if not value:
+        return None
+
+    try:
+        return float(value) * multiplier
+    except ValueError:
+        return None
+
+
 def _is_i2c_net(net_name: str) -> bool:
     """Return True if *net_name* represents an I2C signal (SDA or SCL).
 
@@ -1811,6 +1878,149 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
     return issues
 
 
+def check_nrst_filter_cap(schematic_path: str) -> list[ValidationIssue]:
+    """Warn when an STM32 MCU's NRST pin lacks a filter capacitor to GND.
+
+    ST hardware design guidelines (AN2586, AN4488) require a 100 nF capacitor
+    from NRST to GND for noise filtering on all STM32 families.  Without it
+    the MCU can suffer spurious resets from conducted or radiated noise.
+
+    The check walks every sheet, identifies STM32 symbols, locates the NRST
+    net, and verifies that at least one capacitor connects the NRST net to a
+    ground rail.  If the capacitor value can be parsed, it also warns when the
+    value falls outside the recommended 10 nF - 1 uF range.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulated across all sheets:
+        #   nrst_nets: mapping from net_name -> (ref, sheet_path) of the STM32
+        #   cap_pin_nets: ref -> list of (net_name, value) per pin
+        nrst_nets: dict[str, tuple[str, str]] = {}
+        # ref -> [(net_name, ...), ...]
+        cap_pin_nets: dict[str, list[str]] = {}
+        cap_values: dict[str, str] = {}  # ref -> value string
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                # Build a map of ref -> value from schematic symbols for
+                # capacitor value lookups.
+                ref_to_value: dict[str, str] = {}
+                for sym in sch.symbols:
+                    r = sym.reference
+                    if r:
+                        ref_to_value[r] = sym.value or ""
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Identify STM32 MCUs and find their NRST net
+                    if _is_stm32(lib_id):
+                        for pin_num, pin_info in pins_data.items():
+                            pin_name = pin_info.get("name", "")
+                            net_name = pin_info.get("net")
+                            if net_name is not None and _is_nrst_pin(pin_name):
+                                nrst_nets[net_name] = (ref, sheet_path)
+
+                    # Track capacitor pin-to-net connections
+                    if _is_capacitor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num, pin_info in pins_data.items():
+                            n = pin_info.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        if ref not in cap_pin_nets:
+                            cap_pin_nets[ref] = nets_for_ref
+                        else:
+                            cap_pin_nets[ref].extend(nets_for_ref)
+                        # Store value for range checking
+                        if ref not in cap_values:
+                            cap_values[ref] = ref_to_value.get(ref, "")
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="nrst_filter",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check each NRST net for a capacitor to GND.
+        for net_name, (mcu_ref, sheet_path) in nrst_nets.items():
+            found_cap = False
+            out_of_range_cap: str | None = None
+
+            for cap_ref, pin_net_list in cap_pin_nets.items():
+                net_set = set(pin_net_list)
+                if net_name not in net_set:
+                    continue
+                # Check if the other pin(s) connect to a GND net
+                other_nets = net_set - {net_name}
+                gnd_on_cap = {n for n in other_nets if _is_power_negative_net(n)}
+                if not gnd_on_cap:
+                    continue
+
+                # Capacitor connects NRST to GND -- check value range
+                val_str = cap_values.get(cap_ref, "")
+                if val_str:
+                    farads = _parse_capacitance(val_str)
+                    if farads is not None and (farads < 10e-9 or farads > 1e-6):
+                        out_of_range_cap = (
+                            f"NRST filter capacitor {cap_ref} ({val_str}) on "
+                            f"net '{net_name}' is outside the recommended "
+                            f"10nF-1uF range for {mcu_ref}"
+                        )
+                        # Still counts as present even if out of range
+                    found_cap = True
+                else:
+                    # No parseable value but capacitor is present
+                    found_cap = True
+
+            if not found_cap:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="nrst_filter",
+                        message=(
+                            f"STM32 MCU {mcu_ref} NRST net '{net_name}' has no "
+                            f"filter capacitor to GND (ST recommends 100nF)"
+                        ),
+                        location=sheet_path,
+                    )
+                )
+            elif out_of_range_cap:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="nrst_filter",
+                        message=out_of_range_cap,
+                        location=sheet_path,
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="nrst_filter",
+                message=f"NRST filter cap check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -1870,6 +2080,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # Fully unconnected component detection
     result.checks_run.append("unconnected_component")
     result.issues.extend(check_fully_unconnected_components(schematic_path))
+
+    # STM32 NRST filter capacitor detection
+    result.checks_run.append("nrst_filter")
+    result.issues.extend(check_nrst_filter_cap(schematic_path))
 
     return result
 
