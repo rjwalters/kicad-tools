@@ -741,7 +741,25 @@ def run_optimize_placement(
     # Get final result
     best_vector, best_score = strategy.best()
 
-    # Evaluate final result for full breakdown
+    # --- Post-convergence overlap resolution pass ---
+    post_slide_result = None
+    if not no_slide_off:
+        from kicad_tools.placement.slide_off import slide_off_overlaps
+
+        best_vector, post_slide_result = slide_off_overlaps(
+            best_vector,
+            components,
+            board_outline,
+            max_iterations=50,
+            max_displacement_mm=50.0,
+        )
+        if not quiet and post_slide_result.overlaps_resolved > 0:
+            print(
+                f"\n  Post-pass slide-off: resolved {post_slide_result.overlaps_resolved} "
+                f"overlaps ({post_slide_result.overlaps_remaining} remaining)"
+            )
+
+    # Evaluate final result for full breakdown (after post-pass)
     final_score = _evaluate(
         best_vector,
         components,
@@ -776,6 +794,26 @@ def run_optimize_placement(
         print(f"  Wall time: {elapsed:.2f}s")
         print(f"  Feasible: {final_score.is_feasible}")
 
+    # Report unresolvable overlaps
+    has_unresolved_overlaps = False
+    if post_slide_result is not None and post_slide_result.overlaps_remaining > 0:
+        has_unresolved_overlaps = True
+        if not quiet:
+            print(
+                f"\n  WARNING: {post_slide_result.overlaps_remaining} "
+                f"unresolved overlap(s) after post-pass:"
+            )
+            for detail in post_slide_result.overlap_details:
+                # Courtyard overlaps (actual_clearance >= 0 but within margin)
+                # are warnings; pad-pad overlaps (actual_clearance < 0) are errors
+                severity = "WARNING" if detail.actual_clearance_mm >= 0 else "ERROR"
+                print(f"    {severity}: {detail}")
+        else:
+            # Even in quiet mode, print errors to stderr
+            for detail in post_slide_result.overlap_details:
+                if detail.actual_clearance_mm < 0:
+                    print(f"ERROR: {detail}", file=sys.stderr)
+
     # Restore original signal handlers
     signal.signal(signal.SIGINT, prev_sigint)
     signal.signal(signal.SIGTERM, prev_sigterm)
@@ -797,7 +835,18 @@ def run_optimize_placement(
     if not quiet:
         print("Done.")
 
-    # Exit code 2 when interrupted (partial result saved), 0 otherwise.
+    # Exit code 2 when interrupted (partial result saved).
     if _interrupt_state["interrupted"]:
         return 2
+
+    # Exit code 1 when pad-pad overlaps remain (actual clearance < 0).
+    if has_unresolved_overlaps:
+        pad_overlaps = [
+            d
+            for d in post_slide_result.overlap_details
+            if d.actual_clearance_mm < 0
+        ]
+        if pad_overlaps:
+            return 1
+
     return 0
