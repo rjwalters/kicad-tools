@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone")
+        print("Commands: summary, footprints, nets, traces, stackup, strip, reannotate, sync-netlist, remove-footprint, add-zone, snap-rotation")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -38,6 +38,10 @@ def run_pcb_command(args) -> int:
     # Handle add-zone command
     if args.pcb_command == "add-zone":
         return _run_add_zone_command(args, pcb_path)
+
+    # Handle snap-rotation command
+    if args.pcb_command == "snap-rotation":
+        return _run_snap_rotation_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -664,5 +668,122 @@ def _run_add_zone_command(args, pcb_path: Path) -> int:
 
     if output_format == "text":
         print(f"\n  Saved to: {output_path}")
+
+    return 0
+
+
+def _run_snap_rotation_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb snap-rotation' command.
+
+    Normalizes footprint rotation angles to the nearest cardinal angle
+    (0, 90, 180, 270 by default).
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    grid = getattr(args, "grid", 90.0)
+    tolerance = getattr(args, "tolerance", None)
+    exclude = getattr(args, "exclude", None)
+    only = getattr(args, "only", None)
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    # Parse comma-separated reference lists
+    exclude_refs: set[str] = set()
+    if exclude:
+        exclude_refs = {r.strip() for r in exclude.split(",")}
+    only_refs: set[str] = set()
+    if only:
+        only_refs = {r.strip() for r in only.split(",")}
+
+    # Load PCB
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Snap rotations
+    changes: list[dict] = []
+    for fp in pcb.footprints:
+        ref = fp.reference
+
+        # Filter by --exclude / --only
+        if exclude_refs and ref in exclude_refs:
+            continue
+        if only_refs and ref not in only_refs:
+            continue
+
+        old_rotation = fp.rotation
+        snapped = round(old_rotation / grid) * grid % 360
+
+        # Apply tolerance filter: skip if delta exceeds tolerance
+        delta = abs(old_rotation - snapped)
+        # Handle wraparound (e.g., 359 -> 0 has delta 1, not 359)
+        if delta > 180:
+            delta = 360 - delta
+        if tolerance is not None and delta > tolerance:
+            continue
+
+        if abs(old_rotation - snapped) > 1e-6 or (abs(old_rotation - 360.0) < 1e-6 and snapped == 0.0):
+            changes.append({
+                "reference": ref,
+                "old_rotation": old_rotation,
+                "new_rotation": snapped,
+            })
+            if not dry_run:
+                fp.rotation = snapped
+                # When snapping to 0, remove the third child from the (at ...)
+                # node so KiCad does not serialize a stale rotation value.
+                if snapped == 0.0 and fp._sexp_node is not None:
+                    at_node = fp._sexp_node.find("at")
+                    if at_node is not None and len(at_node.children) >= 3:
+                        del at_node.children[2]
+
+    # Determine output path
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+
+    # Build result
+    result = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "grid": grid,
+        "tolerance": tolerance,
+        "total_footprints": len(pcb.footprints),
+        "snapped": len(changes),
+        "changes": changes,
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Snap Rotation {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print(f"  Grid:   {grid} degrees")
+        if tolerance is not None:
+            print(f"  Tolerance: {tolerance} degrees")
+        print()
+
+        if changes:
+            print(f"  {len(changes)} footprint(s) snapped:")
+            for c in changes:
+                print(f"    {c['reference']}: {c['old_rotation']:.1f} -> {c['new_rotation']:.1f}")
+        else:
+            print("  No footprints needed rotation adjustment.")
+
+    # Save unless dry-run
+    if not dry_run and changes:
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
 
     return 0
