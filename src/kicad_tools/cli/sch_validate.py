@@ -1867,8 +1867,8 @@ def check_swd_pin_routing(schematic_path: str) -> list[ValidationIssue]:
                     ValidationIssue(
                         severity="info",
                         category="swd_routing",
-                        message=f"Skipped sheet {sheet_path}: {e}",
-                        location=sheet_path,
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
                     )
                 )
 
@@ -2594,9 +2594,6 @@ def validate_schematic(
 
     # Symbol-to-footprint pin/pad count mismatch
     _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
-
-    # Matched channel symmetry detection
-    _run("matched_channel_symmetry", check_matched_channel_symmetry)
 
     return result
 
