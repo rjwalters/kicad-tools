@@ -458,6 +458,21 @@ def generate_fix_suggestions(
     Returns:
         FixSuggestion with recommended fix, or None if no suggestion available
     """
+    # Same-component pad-pad clearance is inherent to footprint geometry
+    if violation.type == ViolationType.CLEARANCE_PAD_PAD:
+        if violation.is_same_component_pad_clearance():
+            return FixSuggestion(
+                action=FixAction.ADJUST_RULE,
+                target="clearance rule",
+                parameters={},
+                description=(
+                    "No action needed - pad-pad clearance is inherent to "
+                    "IC footprint geometry (adjacent pins within a single package)"
+                ),
+                priority=3,
+                complexity="trivial",
+            )
+
     # Clearance violations
     if violation.type == ViolationType.CLEARANCE:
         return calculate_clearance_fix(violation)
