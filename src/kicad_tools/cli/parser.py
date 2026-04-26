@@ -2223,6 +2223,14 @@ def _add_fix_drc_parser(subparsers) -> None:
         ),
     )
     fix_drc_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run pure-Python DRC before and after repair and report "
+            "a before/after violation delta."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",

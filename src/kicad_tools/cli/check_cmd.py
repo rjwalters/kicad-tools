@@ -57,7 +57,7 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
-CHECK_CATEGORIES = ["clearance", "dimensions", "edge", "silkscreen"]
+CHECK_CATEGORIES = ["clearance", "dimensions", "edge", "silkscreen", "solder_mask"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,6 +261,7 @@ def run_selected_checks(
         "dimensions": checker.check_dimensions,
         "edge": checker.check_edge_clearances,
         "silkscreen": checker.check_silkscreen,
+        "solder_mask": checker.check_solder_mask_pads,
     }
 
     for category, method in check_methods.items():
