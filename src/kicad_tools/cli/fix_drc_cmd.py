@@ -144,6 +144,15 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run the pure-Python DRC before and after repair and report "
+            "a before/after violation delta.  Ensures fix-drc and check "
+            "agree on remaining violation counts."
+        ),
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -177,6 +186,16 @@ Examples:
 
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
+
+    # --verify: snapshot violation counts from pure-Python DRC before repair
+    verify_before: DRCReport | None = None
+    if args.verify:
+        verify_before = _run_python_drc(pcb_path)
+        if verify_before is not None and not args.quiet:
+            print(
+                f"[verify] Before repair: {len(verify_before.violations)} "
+                f"violation(s) via pure-Python DRC"
+            )
 
     pass_results: list[PassResult] = []
     do_connectivity_check = not args.dry_run and not args.no_connectivity_check
@@ -327,6 +346,31 @@ Examples:
             args.max_displacement,
             args.max_passes,
         )
+
+    # --verify: run pure-Python DRC on the (potentially modified) output and
+    # print a before/after delta so the user can confirm fix-drc and check agree.
+    if args.verify and not args.dry_run:
+        verify_after = _run_python_drc(output_path)
+        if verify_before is not None and verify_after is not None:
+            before_count = len(verify_before.violations)
+            after_count = len(verify_after.violations)
+            delta = before_count - after_count
+            if not args.quiet:
+                print(f"\n{'=' * 60}")
+                print("VERIFICATION (pure-Python DRC)")
+                print(f"{'=' * 60}")
+                print(f"  Before repair: {before_count} violation(s)")
+                print(f"  After repair:  {after_count} violation(s)")
+                if delta > 0:
+                    print(f"  Resolved:      {delta}")
+                elif delta == 0:
+                    print("  No change in violation count.")
+                else:
+                    print(f"  WARNING: {-delta} new violation(s) introduced!")
+                print(
+                    "\nThese counts use the same engine as `kct check` "
+                    "for consistent comparison."
+                )
 
     # Exit code: 0 = all repaired (no remaining violations of any type),
     #            1 = no violations found/no progress,

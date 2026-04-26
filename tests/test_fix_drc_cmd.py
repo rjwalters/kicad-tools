@@ -2471,3 +2471,130 @@ class TestFullDetectionFallback:
 
         # check_all must return at least as many violations as check_clearances
         assert len(all_checks.violations) >= len(clearance_only.violations)
+
+
+# ── Verify flag tests ────────────────────────────────────────────────
+
+
+class TestVerifyFlag:
+    """Tests for the --verify flag that runs pure-Python DRC before/after repair."""
+
+    def test_verify_flag_accepted(self, tmp_path: Path):
+        """--verify should be accepted as a valid CLI flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--verify", "--dry-run", "--quiet"])
+        assert result in (0, 1, 2, 3)
+
+    def test_verify_prints_before_after(self, tmp_path: Path, capsys):
+        """--verify should print before/after violation counts."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SAME_NET_VIAS)
+
+        # Create a DRC report with a dedup-able drill violation
+        report_content = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual -0.3000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "drc.rpt"
+        report_file.write_text(report_content)
+
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--verify",
+                "--no-connectivity-check",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "VERIFICATION" in captured.out
+        assert "Before repair" in captured.out
+        assert "After repair" in captured.out
+
+    def test_verify_skipped_on_dry_run(self, tmp_path: Path, capsys):
+        """--verify with --dry-run should not print after-repair verification."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        main(
+            [
+                str(pcb_file),
+                "--verify",
+                "--dry-run",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Verify block should NOT appear (dry-run skips post-repair DRC)
+        assert "VERIFICATION" not in captured.out
+
+    def test_verify_before_count_printed(self, tmp_path: Path, capsys):
+        """--verify should print the before-repair count even without changes."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        main(
+            [
+                str(pcb_file),
+                "--verify",
+                "--no-connectivity-check",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "[verify] Before repair" in captured.out
+
+
+# ── Category alignment tests ─────────────────────────────────────────
+
+
+class TestCategoryAlignment:
+    """Tests that check and fix-drc use the same DRC categories."""
+
+    def test_check_categories_include_solder_mask(self):
+        """CHECK_CATEGORIES in check_cmd should include solder_mask."""
+        pytest.importorskip("pydantic")
+        from kicad_tools.cli.check_cmd import CHECK_CATEGORIES
+
+        assert "solder_mask" in CHECK_CATEGORIES
+
+    def test_check_and_fix_drc_same_categories(self, tmp_path: Path):
+        """check and fix-drc pure-Python DRC should produce the same violation count."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        # fix-drc path: _run_python_drc calls checker.check_all()
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        fix_drc_count = len(report.violations)
+
+        # check path: checker.check_all() covers the same 5 categories
+        # that check_cmd now maps (clearance, dimensions, edge, silkscreen, solder_mask)
+        pcb = PCB.load(pcb_file)
+        checker = DRCChecker(pcb)
+        results = checker.check_all()
+        check_count = len(results.violations)
+
+        assert fix_drc_count == check_count, (
+            f"fix-drc reported {fix_drc_count} violations but check reported "
+            f"{check_count}; the two tools must use the same DRC categories"
+        )

@@ -169,6 +169,8 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--no-local-reroute")
     if getattr(args, "no_connectivity_check", False):
         sub_argv.append("--no-connectivity-check")
+    if getattr(args, "verify", False):
+        sub_argv.append("--verify")
     if args.format != "text":
         sub_argv.extend(["--format", args.format])
     # Use command-level quiet or global quiet
