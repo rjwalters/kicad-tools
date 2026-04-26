@@ -44,27 +44,81 @@ def generate_uuid() -> str:
 # Text-based modification functions (preserve original formatting)
 
 
+def _find_matching_close_paren(text: str, open_pos: int) -> int:
+    """
+    Find the position of the closing paren that matches the open paren at open_pos.
+
+    Uses paren-balanced counting to handle arbitrary nesting.
+    Returns the index of the matching ')' character.
+    Raises ValueError if no matching paren is found.
+    """
+    depth = 0
+    in_string = False
+    i = open_pos
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == "\\" and i + 1 < len(text):
+                i += 2  # skip escaped character
+                continue
+            if ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    raise ValueError(f"No matching close paren found starting at position {open_pos}")
+
+
 def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] | None:
     """
     Find the text range of a symbol instance by reference.
 
+    Uses paren-balanced block finding to correctly identify symbol boundaries
+    regardless of whether an (instances ...) block is present.
+
     Returns (start, end, info) or None if not found.
     """
-    # Pattern to match symbol blocks with the given reference
-    # We need to find (symbol ... (property "Reference" "U1" ...) ...)
+    # Find the end of (lib_symbols ...) so we skip library symbol definitions
+    lib_symbols_end = 0
+    lib_sym_match = re.search(r"\(lib_symbols\b", text)
+    if lib_sym_match:
+        try:
+            lib_symbols_end = _find_matching_close_paren(text, lib_sym_match.start()) + 1
+        except ValueError:
+            pass
 
-    # First find all symbol instance blocks (not lib_symbols)
-    symbol_pattern = re.compile(
-        r"\n(\s+\(symbol\n"
-        r'\s+\(lib_id "[^"]+"\)'
-        r".*?"
-        r"\s+\(instances\n.*?\s+\)\n"
-        r"\s+\))",
-        re.DOTALL,
-    )
+    # Find each top-level (symbol ...) block after lib_symbols using paren balancing
+    symbol_start_pattern = re.compile(r"\n(\s+)\(symbol\n")
 
-    for match in symbol_pattern.finditer(text):
-        block = match.group(1)
+    pos = lib_symbols_end
+    while pos < len(text):
+        m = symbol_start_pattern.search(text, pos)
+        if not m:
+            break
+
+        # The opening paren of (symbol ...)
+        block_open = text.index("(symbol", m.start())
+
+        try:
+            block_close = _find_matching_close_paren(text, block_open)
+        except ValueError:
+            pos = m.end()
+            continue
+
+        block = text[block_open : block_close + 1]
+
+        # Skip blocks without lib_id (these are not placed symbol instances)
+        if '(lib_id "' not in block:
+            pos = block_close + 1
+            continue
+
         # Check if this block has the reference we want
         ref_pattern = re.compile(r'\(property "Reference" "' + re.escape(reference) + r'"')
         if ref_pattern.search(block):
@@ -72,9 +126,7 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
             lib_id_match = re.search(r'\(lib_id "([^"]+)"\)', block)
             pos_match = re.search(r"\(at ([\d.]+) ([\d.]+)", block)
             uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
-            # Value property spans multiple lines - just capture the quoted value
             value_match = re.search(r'\(property "Value" "([^"]*)"', block)
-
             footprint_match = re.search(r'\(property "Footprint" "([^"]*)"', block)
 
             info = {
@@ -87,7 +139,14 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
                 "footprint": footprint_match.group(1) if footprint_match else "",
             }
 
-            return (match.start(), match.end(), info)
+            # Return range including the preceding newline for consistency
+            # with callers that expect the block to start at a newline boundary
+            newline_pos = text.rfind("\n", 0, block_open)
+            if newline_pos == -1:
+                newline_pos = block_open
+            return (newline_pos, block_close + 1, info)
+
+        pos = block_close + 1
 
     return None
 
