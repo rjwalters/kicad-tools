@@ -34,6 +34,7 @@ class TestMfrLimits:
         assert MFR_JLCPCB.min_clearance == 0.127  # 5 mil
         assert MFR_JLCPCB.min_via_drill == 0.3
         assert MFR_JLCPCB.min_via_annular == 0.15
+        assert MFR_JLCPCB.min_edge_clearance == 0.3
 
     def test_oshpark_limits(self):
         """Test OSHPark manufacturer limits are correct."""
@@ -42,6 +43,7 @@ class TestMfrLimits:
         assert MFR_OSHPARK.min_clearance == 0.152  # 6 mil
         assert MFR_OSHPARK.min_via_drill == 0.254  # 10 mil
         assert MFR_OSHPARK.min_via_annular == 0.127
+        assert MFR_OSHPARK.min_edge_clearance == 0.381
 
     def test_pcbway_limits(self):
         """Test PCBWay manufacturer limits are correct."""
@@ -50,6 +52,20 @@ class TestMfrLimits:
         assert MFR_PCBWAY.min_clearance == 0.127  # 5 mil
         assert MFR_PCBWAY.min_via_drill == 0.2  # 8 mil
         assert MFR_PCBWAY.min_via_annular == 0.15
+        assert MFR_PCBWAY.min_edge_clearance == 0.25
+
+    def test_min_edge_clearance_default_is_zero(self):
+        """Test that min_edge_clearance defaults to 0 for custom MfrLimits."""
+        from kicad_tools.router.mfr_limits import MfrLimits
+
+        custom = MfrLimits(
+            name="custom",
+            min_trace=0.1,
+            min_clearance=0.1,
+            min_via_drill=0.2,
+            min_via_annular=0.1,
+        )
+        assert custom.min_edge_clearance == 0.0
 
     def test_mfr_limits_is_frozen(self):
         """Test that MfrLimits instances are immutable (frozen dataclass)."""

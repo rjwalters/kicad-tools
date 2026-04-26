@@ -2567,6 +2567,8 @@ def load_pcb_for_routing(
 
     # Apply edge clearance if specified
     if edge_clearance is not None and edge_clearance > 0:
+        # Store on router so EscapeRouter can clamp escape points (Issue #2136)
+        router._edge_clearance = edge_clearance
         if edge_segments:
             blocked_cells = router.grid.add_edge_keepout(edge_segments, edge_clearance)
             if blocked_cells > 0:

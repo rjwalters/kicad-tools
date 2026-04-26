@@ -374,6 +374,11 @@ class Autorouter:
         # actual board edge cuts bbox when available (Issue #2039).
         self._board_bbox: tuple[float, float, float, float] | None = None
 
+        # Copper-to-board-edge clearance for escape routing (Issue #2136).
+        # When set, the EscapeRouter clamps escape points to stay within
+        # the edge clearance zone.
+        self._edge_clearance: float | None = None
+
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
 
@@ -4204,7 +4209,9 @@ class Autorouter:
         """Lazy-initialize escape router."""
         if self._escape_router is None:
             self._escape_router = EscapeRouter(
-                self.grid, self.rules, net_class_map=self.net_class_map
+                self.grid, self.rules, net_class_map=self.net_class_map,
+                edge_clearance=self._edge_clearance,
+                board_bounds=self._board_bbox,
             )
         return self._escape_router
 
