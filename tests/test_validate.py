@@ -1154,6 +1154,108 @@ class TestBoardOutline:
             assert len(seg_end) == 2
 
 
+    def test_get_board_outline_nonzero_origin_returns_board_relative(
+        self, tmp_path: Path
+    ):
+        """Outline coordinates must be board-relative when origin != (0,0).
+
+        When the Edge.Cuts rect starts at e.g. (100, 80), _detect_board_origin
+        sets _board_origin = (100, 80) and footprint positions are converted to
+        board-relative. get_board_outline() must apply the same transform so
+        that outline and footprint coordinates are in the same frame.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 100 80) (end 150 110)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "offset_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        # All outline points should be in board-relative coords:
+        # rect (100,80)-(150,110) with origin (100,80) -> (0,0)-(50,30)
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        assert min(xs) == pytest.approx(0.0, abs=0.01)
+        assert min(ys) == pytest.approx(0.0, abs=0.01)
+        assert max(xs) == pytest.approx(50.0, abs=0.01)
+        assert max(ys) == pytest.approx(30.0, abs=0.01)
+
+    def test_get_board_outline_segments_nonzero_origin_returns_board_relative(
+        self, tmp_path: Path
+    ):
+        """Outline segments must be board-relative when origin != (0,0)."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 100 80) (end 150 110)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "offset_segments.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        segments = pcb.get_board_outline_segments()
+
+        # Collect all unique coordinates from segments
+        all_coords = set()
+        for (x1, y1), (x2, y2) in segments:
+            all_coords.add((round(x1, 2), round(y1, 2)))
+            all_coords.add((round(x2, 2), round(y2, 2)))
+
+        # Should be board-relative: corners at (0,0), (50,0), (50,30), (0,30)
+        assert (0.0, 0.0) in all_coords
+        assert (50.0, 0.0) in all_coords
+        assert (50.0, 30.0) in all_coords
+        assert (0.0, 30.0) in all_coords
+
+    def test_get_board_outline_zero_origin_unchanged(self, tmp_path: Path):
+        """With origin (0,0), outline coordinates are unchanged."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 0 0) (end 50 30)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "zero_origin.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        assert min(xs) == pytest.approx(0.0, abs=0.01)
+        assert min(ys) == pytest.approx(0.0, abs=0.01)
+        assert max(xs) == pytest.approx(50.0, abs=0.01)
+        assert max(ys) == pytest.approx(30.0, abs=0.01)
+
+
 class TestEdgeClearanceRule:
     """Tests for EdgeClearanceRule."""
 
