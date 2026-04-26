@@ -34,6 +34,14 @@ from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r'[ \t]+'
 
+# Mapping from bare symbol-name references (used as lib_id-derived
+# reference designators) to the proper KiCad annotation prefix.
+# For example, a PWR_FLAG symbol gets reference "#PWR_FLAG" which
+# should be re-annotated as "#FLG01", "#FLG02", etc.
+_BARE_REF_PREFIX_MAP: dict[str, str] = {
+    "#PWR_FLAG": "#FLG",
+}
+
 
 def _extract_symbols_with_instance_info(
     text: str, project_name: str
@@ -92,9 +100,19 @@ def _extract_symbols_with_instance_info(
 
         ref = ref_match.group(1)
 
-        # Skip power symbols
+        # Check if this symbol has an instances block with our project
+        has_instances_block = '(instances' in block
+        has_project = (
+            has_instances_block
+            and f'(project "{project_name}"' in block
+        )
+
+        # Skip power symbols only when they have no instances block at all
+        # (legacy behavior).  Power symbols with an instances block
+        # referencing the *wrong* project still need repair.
         if lib_id.startswith("power:"):
-            continue
+            if not has_instances_block or has_project:
+                continue
 
         # Find the symbol-level uuid (the last uuid in the block, or the
         # one that's a direct child of the symbol -- not inside a pin)
@@ -129,13 +147,6 @@ def _extract_symbols_with_instance_info(
 
         prefix, number, unit_suffix = _parse_reference(ref)
 
-        # Check if this symbol has an instances block with our project
-        has_instances_block = '(instances' in block
-        has_project = (
-            has_instances_block
-            and f'(project "{project_name}"' in block
-        )
-
         symbols.append({
             "reference": ref,
             "prefix": prefix,
@@ -144,6 +155,7 @@ def _extract_symbols_with_instance_info(
             "lib_id": lib_id,
             "uuid": sym_uuid,
             "has_project_instance": has_project,
+            "has_wrong_project": has_instances_block and not has_project,
         })
 
     return symbols
@@ -200,12 +212,21 @@ def _insert_project_instance(
     instance_path: str,
     new_ref: str,
     unit: int = 1,
+    *,
+    replace_wrong_project: bool = False,
 ) -> str:
-    """Insert a project instance entry into a symbol's block.
+    """Insert or replace a project instance entry in a symbol's block.
 
-    If the symbol has an ``(instances)`` block, appends a new
-    ``(project ...)`` entry.  If not, creates an ``(instances)`` block
-    before the symbol's closing parenthesis.
+    If the symbol has an ``(instances)`` block and *replace_wrong_project*
+    is ``True``, any existing ``(project "...")`` entry whose name does
+    **not** match *project_name* will have its name replaced in-place so
+    that stale project references are corrected without leaving duplicates.
+
+    If the symbol has an ``(instances)`` block but *replace_wrong_project*
+    is ``False``, a new ``(project ...)`` entry is appended.
+
+    If the symbol has no ``(instances)`` block, one is created before the
+    symbol's closing parenthesis.
 
     Uses bracket-depth parsing for robustness with varying file layouts.
     """
@@ -237,6 +258,46 @@ def _insert_project_instance(
         # Check if this project already exists
         if f'(project "{project_name}"' in block:
             return text
+
+        # If the instances block has a wrong project name, replace it
+        if replace_wrong_project:
+            wrong_project_match = re.search(
+                r'\(project "([^"]+)"', block
+            )
+            if wrong_project_match:
+                wrong_name = wrong_project_match.group(1)
+                # Replace the wrong project name with the correct one
+                # in the full text at the correct absolute position
+                abs_pos = start + wrong_project_match.start()
+                old_str = f'(project "{wrong_name}"'
+                new_str = f'(project "{project_name}"'
+                text = (
+                    text[:abs_pos]
+                    + new_str
+                    + text[abs_pos + len(old_str):]
+                )
+                # Also update the reference and path within this project block
+                # Re-find the symbol block since positions shifted
+                bounds2 = _find_symbol_block(text, sym_uuid)
+                if bounds2 is not None:
+                    s2, e2 = bounds2
+                    block2 = text[s2:e2]
+                    # Replace the path
+                    new_block = re.sub(
+                        r'(\(path ")[^"]+"',
+                        rf'\g<1>{instance_path}"',
+                        block2,
+                        count=1,
+                    )
+                    # Replace the reference
+                    new_block = re.sub(
+                        r'(\(reference ")[^"]+"',
+                        rf'\g<1>{new_ref}"',
+                        new_block,
+                        count=1,
+                    )
+                    text = text[:s2] + new_block + text[e2:]
+                return text
 
         # Find the closing ) of the (instances block
         # Walk from instances_pos tracking depth
@@ -399,13 +460,20 @@ def run_repair_instances(
             # Already annotated, just needs instances block
             new_ref = sym["reference"]
         else:
-            # Unannotated (R?, C?, etc.) - assign next available
-            new_number = _next_available(sym["prefix"])
+            # Unannotated (R?, C?, etc.) - assign next available.
+            # Map bare symbol-name prefixes (e.g. #PWR_FLAG -> #FLG)
+            # to proper KiCad annotation prefixes.
+            prefix = _BARE_REF_PREFIX_MAP.get(sym["prefix"], sym["prefix"])
+            new_number = _next_available(prefix)
             new_ref = _format_reference(
-                sym["prefix"], new_number, sym["unit_suffix"]
+                prefix, new_number, sym["unit_suffix"]
             )
 
         instance_path = file_instance_paths.get(sch_file, "")
+
+        repair_type = (
+            "wrong_project" if sym.get("has_wrong_project") else "missing_instances"
+        )
 
         repairs.append({
             "file": sch_file,
@@ -415,6 +483,7 @@ def run_repair_instances(
             "new_ref": new_ref,
             "instance_path": instance_path,
             "needs_rename": sym["number"] is None,
+            "repair_type": repair_type,
         })
 
     # Phase 4: Output
@@ -429,6 +498,7 @@ def run_repair_instances(
                     "old_ref": r["old_ref"],
                     "new_ref": r["new_ref"],
                     "instance_path": r["instance_path"],
+                    "repair_type": r["repair_type"],
                 }
                 for r in repairs
             ],
@@ -437,7 +507,14 @@ def run_repair_instances(
         }
         print(json.dumps(output, indent=2))
     else:
-        print(f"Found {len(repairs)} symbol(s) missing project instances:")
+        n_wrong = sum(1 for r in repairs if r["repair_type"] == "wrong_project")
+        n_missing = len(repairs) - n_wrong
+        parts = []
+        if n_missing:
+            parts.append(f"{n_missing} missing instances")
+        if n_wrong:
+            parts.append(f"{n_wrong} wrong project")
+        print(f"Found {len(repairs)} symbol(s) needing repair ({', '.join(parts)}):")
         print()
         # Group by file for display
         by_file: dict[Path, list[dict]] = {}
@@ -447,15 +524,20 @@ def run_repair_instances(
         for sch_file, file_repairs in by_file.items():
             print(f"  {sch_file.name}:")
             for r in file_repairs:
+                tag = (
+                    "[wrong project]"
+                    if r["repair_type"] == "wrong_project"
+                    else "[add instances block]"
+                )
                 if r["needs_rename"]:
                     print(
                         f"    {r['old_ref']} -> {r['new_ref']}"
-                        f"  ({r['lib_id']})"
+                        f"  ({r['lib_id']}) {tag}"
                     )
                 else:
                     print(
                         f"    {r['new_ref']}"
-                        f"  ({r['lib_id']}) [add instances block]"
+                        f"  ({r['lib_id']}) {tag}"
                     )
         print()
 
@@ -477,7 +559,7 @@ def run_repair_instances(
                 text, r["uuid"], r["new_ref"]
             )
 
-        # Add the project instance block
+        # Add or replace the project instance block
         if r["instance_path"]:
             text = _insert_project_instance(
                 text,
@@ -485,6 +567,7 @@ def run_repair_instances(
                 project_name,
                 r["instance_path"],
                 r["new_ref"],
+                replace_wrong_project=r["repair_type"] == "wrong_project",
             )
 
         modified_files[sch_file] = text

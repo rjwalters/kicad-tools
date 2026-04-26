@@ -87,12 +87,12 @@ def _parse_reference(ref: str) -> tuple[str, int | None, str]:
         "#PWR01" -> ("#PWR", 1, "")
         "R?"   -> ("R", None, "")
     """
-    # Match prefix (letters, optionally starting with #), number, optional unit letter
-    m = re.match(r'^(#?[A-Za-z]+)(\d+)([A-Za-z]?)$', ref)
+    # Match prefix (letters/underscores, optionally starting with #), number, optional unit letter
+    m = re.match(r'^(#?[A-Za-z_]+)(\d+)([A-Za-z]?)$', ref)
     if m:
         return m.group(1), int(m.group(2)), m.group(3)
-    # Unannotated reference like "R?"
-    m = re.match(r'^(#?[A-Za-z]+)\?$', ref)
+    # Unannotated reference like "R?" or "#PWR_FLAG?"
+    m = re.match(r'^(#?[A-Za-z_]+)\?$', ref)
     if m:
         return m.group(1), None, ""
     return ref, None, ""

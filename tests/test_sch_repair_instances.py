@@ -274,7 +274,7 @@ class TestRunRepairInstances:
         assert result == 0
 
         captured = capsys.readouterr()
-        assert "2 symbol(s) missing project instances" in captured.out
+        assert "2 symbol(s) needing repair" in captured.out
         assert "Dry run: no changes made" in captured.out
         # File should not be modified
         assert sub.read_text(encoding="utf-8") == SUB_SCHEMATIC_MISSING
@@ -469,3 +469,331 @@ class TestRunRepairInstances:
             "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
         )
         assert f'(path "{expected_path}"' in modified_text
+
+
+# ---------------------------------------------------------------------------
+# Tests for wrong-project detection and repair
+# ---------------------------------------------------------------------------
+
+# Sub-sheet with a symbol that has instances for the WRONG project
+SUB_SCHEMATIC_WRONG_PROJECT = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-3")
+\t\t)
+\t\t(pin "2"
+\t\t\t(uuid "pin-uuid-4")
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "wrong_project_name"
+\t\t\t\t(path "/old-uuid/old-sheet-uuid"
+\t\t\t\t\t(reference "R2")
+\t\t\t\t\t(unit 1)
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+
+# Sub-sheet with a PWR_FLAG that has instances for the WRONG project
+SUB_SCHEMATIC_WRONG_PROJECT_POWER = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "power:PWR_FLAG")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "#PWR_FLAG"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "PWR_FLAG"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-pwr")
+\t\t)
+\t\t(uuid "66666666-6666-6666-6666-666666666666")
+\t\t(instances
+\t\t\t(project "wrong_project_name"
+\t\t\t\t(path "/old-uuid"
+\t\t\t\t\t(reference "#FLG01")
+\t\t\t\t\t(unit 1)
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+
+
+class TestWrongProjectDetection:
+    """Tests for wrong-project-name detection and replacement."""
+
+    def test_extract_detects_wrong_project(self):
+        """Symbol with instances for wrong project is flagged."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_WRONG_PROJECT, "test_project"
+        )
+        assert len(symbols) == 1
+        assert symbols[0]["has_project_instance"] is False
+        assert symbols[0]["has_wrong_project"] is True
+
+    def test_wrong_project_replaced_not_appended(self, tmp_path, capsys):
+        """Wrong project name is replaced, not duplicated."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        # Correct project name should appear
+        assert '(project "test_project"' in modified_text
+        # Wrong project name should be gone
+        assert "wrong_project_name" not in modified_text
+        # Should only have ONE (project entry, not two
+        assert modified_text.count("(project") == 1
+
+    def test_wrong_project_updates_path_and_ref(self, tmp_path, capsys):
+        """Wrong project replacement also updates path and reference."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        expected_path = (
+            "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        assert f'(path "{expected_path}"' in modified_text
+        assert '(reference "R2")' in modified_text
+
+    def test_dry_run_reports_wrong_project(self, tmp_path, capsys):
+        """Dry-run distinguishes wrong-project from missing-instances."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=True, backup=False)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "[wrong project]" in captured.out
+
+    def test_json_output_includes_repair_type(self, tmp_path, capsys):
+        """JSON output includes repair_type field."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(
+            root, dry_run=True, backup=False, format="json"
+        )
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["repairs"][0]["repair_type"] == "wrong_project"
+
+
+class TestPowerSymbolWrongProject:
+    """Tests for power symbols with wrong project names."""
+
+    def test_power_symbol_no_instances_still_skipped(self):
+        """Power symbols with no instances block are still skipped."""
+        text = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(uuid "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "power:GND")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "#PWR01"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "GND"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-pwr")
+\t\t)
+\t\t(uuid "55555555-5555-5555-5555-555555555555")
+\t)
+)
+"""
+        symbols = _extract_symbols_with_instance_info(text, "test_project")
+        assert len(symbols) == 0
+
+    def test_power_symbol_correct_project_skipped(self):
+        """Power symbols with the correct project are skipped."""
+        text = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(uuid "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "power:GND")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "#PWR01"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "GND"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-pwr")
+\t\t)
+\t\t(uuid "55555555-5555-5555-5555-555555555555")
+\t\t(instances
+\t\t\t(project "test_project"
+\t\t\t\t(path "/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+\t\t\t\t\t(reference "#PWR01")
+\t\t\t\t\t(unit 1)
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+        symbols = _extract_symbols_with_instance_info(text, "test_project")
+        assert len(symbols) == 0
+
+    def test_power_symbol_wrong_project_detected(self):
+        """Power symbols with wrong project ARE detected for repair."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_WRONG_PROJECT_POWER, "test_project"
+        )
+        assert len(symbols) == 1
+        assert symbols[0]["has_project_instance"] is False
+        assert symbols[0]["has_wrong_project"] is True
+        assert symbols[0]["lib_id"] == "power:PWR_FLAG"
+
+    def test_power_symbol_wrong_project_repaired(self, tmp_path, capsys):
+        """Power symbol with wrong project gets its project name fixed."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT_POWER, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        assert '(project "test_project"' in modified_text
+        assert "wrong_project_name" not in modified_text
+
+
+class TestPwrFlagReferenceReannotation:
+    """Tests for #PWR_FLAG bare-name reference re-annotation."""
+
+    def test_parse_reference_pwr_flag(self):
+        """_parse_reference handles #PWR_FLAG correctly."""
+        from kicad_tools.cli.sch_re_annotate import _parse_reference
+
+        prefix, number, suffix = _parse_reference("#PWR_FLAG")
+        # Bare name with no number -- parsed as unannotated
+        assert prefix == "#PWR_FLAG"
+        assert number is None
+        assert suffix == ""
+
+    def test_parse_reference_pwr_flag_annotated(self):
+        """_parse_reference handles #PWR_FLAG01 correctly."""
+        from kicad_tools.cli.sch_re_annotate import _parse_reference
+
+        prefix, number, suffix = _parse_reference("#PWR_FLAG01")
+        assert prefix == "#PWR_FLAG"
+        assert number == 1
+        assert suffix == ""
+
+    def test_pwr_flag_gets_flg_prefix(self, tmp_path, capsys):
+        """#PWR_FLAG reference is re-annotated with #FLG prefix."""
+        # Root with no existing #FLG refs
+        simple_root = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "power:PWR_FLAG")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "#PWR_FLAG"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "PWR_FLAG"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-flag")
+\t\t)
+\t\t(uuid "77777777-7777-7777-7777-777777777777")
+\t\t(instances
+\t\t\t(project "wrong_name"
+\t\t\t\t(path "/old-uuid"
+\t\t\t\t\t(reference "#PWR_FLAG")
+\t\t\t\t\t(unit 1)
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+        root = tmp_path / "test_project.kicad_sch"
+        root.write_text(simple_root, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = root.read_text(encoding="utf-8")
+        assert '(project "test_project"' in modified_text
+        # The reference should be re-annotated as #FLG01
+        assert '(reference "#FLG01")' in modified_text
