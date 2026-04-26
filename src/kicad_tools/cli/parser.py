@@ -1205,6 +1205,99 @@ def _add_pcb_parser(subparsers) -> None:
         help="Remove footprint even if it has routed traces",
     )
 
+    # pcb add-zone
+    pcb_add_zone = pcb_subparsers.add_parser(
+        "add-zone",
+        help="Add a copper pour zone to the PCB",
+        description="Create a copper pour zone on a specified layer and net. "
+        "By default the zone boundary follows the board outline (--fill-board). "
+        "Use --rect with --origin and --size to specify a rectangular boundary.",
+    )
+    pcb_add_zone.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_zone.add_argument(
+        "--net",
+        required=True,
+        help="Net name for the zone (e.g., GND, +3.3V)",
+    )
+    pcb_add_zone.add_argument(
+        "--layer",
+        required=True,
+        help="Copper layer (e.g., F.Cu, B.Cu, In1.Cu)",
+    )
+    pcb_add_zone.add_argument(
+        "--priority",
+        type=int,
+        default=0,
+        help="Zone fill priority (higher = fills later, default: 0)",
+    )
+    pcb_add_zone.add_argument(
+        "--min-clearance",
+        type=float,
+        default=0.3,
+        help="Clearance to other nets in mm (default: 0.3)",
+    )
+    pcb_add_zone.add_argument(
+        "--thermal-relief-gap",
+        type=float,
+        default=0.3,
+        help="Thermal relief gap in mm (default: 0.3)",
+    )
+    pcb_add_zone.add_argument(
+        "--thermal-relief-width",
+        type=float,
+        default=0.4,
+        help="Thermal relief spoke width in mm (default: 0.4)",
+    )
+    pcb_add_zone.add_argument(
+        "--min-thickness",
+        type=float,
+        default=0.25,
+        help="Minimum copper thickness in mm (default: 0.25)",
+    )
+    pcb_add_zone.add_argument(
+        "--fill-board",
+        action="store_true",
+        default=False,
+        help="Use board outline as zone boundary (this is the default behavior)",
+    )
+    pcb_add_zone.add_argument(
+        "--rect",
+        action="store_true",
+        default=False,
+        help="Use a rectangular zone boundary (requires --origin and --size)",
+    )
+    pcb_add_zone.add_argument(
+        "--origin",
+        type=float,
+        nargs=2,
+        metavar=("X", "Y"),
+        help="Rectangle origin in mm (bottom-left corner)",
+    )
+    pcb_add_zone.add_argument(
+        "--size",
+        type=float,
+        nargs=2,
+        metavar=("W", "H"),
+        help="Rectangle size in mm (width height)",
+    )
+    pcb_add_zone.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: <input>_zones.kicad_pcb)",
+    )
+    pcb_add_zone.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without writing output",
+    )
+    pcb_add_zone.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
