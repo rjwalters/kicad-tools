@@ -352,6 +352,32 @@ def compare_with_manufacturer(
             message=msg,
         )
 
+    # Pad-to-pad clearance -- same-component violations are inherent
+    if violation.type == ViolationType.CLEARANCE_PAD_PAD:
+        if violation.is_same_component_pad_clearance():
+            msg = (
+                "Same-component pad-pad clearance inherent to IC footprint "
+                f"({mfr_name} accepts for IC packages)"
+            )
+            return ManufacturerComparison(
+                violation=violation,
+                is_false_positive=True,
+                manufacturer_limit=rules.min_clearance_mm,
+                actual_value=actual,
+                message=msg,
+            )
+        # Inter-component pad-pad: check against clearance limit
+        mfr_limit = rules.min_clearance_mm
+        is_false_positive = actual >= mfr_limit
+        msg = f"{mfr_name} accepts {mfr_limit:.3f}mm" if is_false_positive else ""
+        return ManufacturerComparison(
+            violation=violation,
+            is_false_positive=is_false_positive,
+            manufacturer_limit=mfr_limit,
+            actual_value=actual,
+            message=msg,
+        )
+
     # Solder mask bridge -- fine-pitch IC bridges are inherent
     if violation.type == ViolationType.SOLDER_MASK_BRIDGE:
         mfr_limit = rules.min_solder_mask_dam_mm

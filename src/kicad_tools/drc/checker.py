@@ -249,6 +249,21 @@ def _check_violation(
             manufacturer_limit=rules.min_via_drill_mm,
         )
 
+    # Pad-to-pad clearance: same-component violations are inherent to the
+    # footprint geometry (e.g., adjacent TSSOP pins) and not actionable.
+    if violation.type == ViolationType.CLEARANCE_PAD_PAD:
+        if violation.is_same_component_pad_clearance():
+            return ManufacturerCheck(
+                violation=violation,
+                result=CheckResult.PASS,
+                message=(
+                    "Same-component pad-pad clearance - inherent to IC footprint "
+                    "geometry (adjacent pins within a single package)"
+                ),
+                manufacturer_id=manufacturer_id,
+                rule_name="pad_pad_clearance",
+            )
+
     # Solder mask bridge violations
     if violation.type == ViolationType.SOLDER_MASK_BRIDGE:
         # Check if this is a fine-pitch IC pad-to-pad bridge

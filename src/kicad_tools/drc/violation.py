@@ -368,6 +368,24 @@ class DRCViolation:
 
         return _TYPE_CATEGORY_MAP.get(self.type, ViolationCategory.ROUTING)
 
+    def is_same_component_pad_clearance(self) -> bool:
+        """Check if this is a pad-pad clearance violation between pads on the same component.
+
+        Adjacent pads within a single IC footprint (e.g., TSSOP-28 with 0.65mm pitch)
+        can trigger CLEARANCE_PAD_PAD violations when the board-level clearance rule
+        exceeds the inherent pad gap.  These are false positives because the pad
+        spacing is fixed by the footprint geometry and cannot be changed by layout.
+
+        Returns:
+            True if this is a CLEARANCE_PAD_PAD violation where both items
+            reference pads on the same component.
+        """
+        if self.type != ViolationType.CLEARANCE_PAD_PAD:
+            return False
+
+        refs = _extract_component_refs(self.items)
+        return len(refs) == 1
+
     def is_fine_pitch_inherent(self, min_solder_mask_dam_mm: float = 0.1) -> bool:
         """Check if this solder mask bridge is inherent to a fine-pitch IC.
 

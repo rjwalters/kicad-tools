@@ -390,6 +390,171 @@ class TestSummaryFinePitchSolderMask:
 
 
 # ---------------------------------------------------------------------------
+# is_same_component_pad_clearance()
+# ---------------------------------------------------------------------------
+
+class TestIsSameComponentPadClearance:
+    """Tests for DRCViolation.is_same_component_pad_clearance()."""
+
+    def test_returns_true_same_component_pads(self):
+        """Adjacent pads on the same IC should return True."""
+        v = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 8 of U6", "Pad 9 of U6"],
+        )
+        assert v.is_same_component_pad_clearance() is True
+
+    def test_returns_false_different_component_pads(self):
+        """Pads on different components should return False."""
+        v = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 1 of U6", "Pad 1 of C12"],
+        )
+        assert v.is_same_component_pad_clearance() is False
+
+    def test_returns_false_wrong_violation_type(self):
+        """Non-CLEARANCE_PAD_PAD violations always return False."""
+        v = _make_violation(
+            ViolationType.CLEARANCE,
+            items=["Pad 1 of U6", "Pad 2 of U6"],
+        )
+        assert v.is_same_component_pad_clearance() is False
+
+    def test_returns_false_solder_mask_bridge_type(self):
+        """SOLDER_MASK_BRIDGE with same-component pads is NOT pad clearance."""
+        v = _make_violation(
+            ViolationType.SOLDER_MASK_BRIDGE,
+            items=["Pad 1 of U3", "Pad 2 of U3"],
+        )
+        assert v.is_same_component_pad_clearance() is False
+
+    def test_returns_false_no_items(self):
+        """No items should return False (no refs to compare)."""
+        v = _make_violation(ViolationType.CLEARANCE_PAD_PAD)
+        assert v.is_same_component_pad_clearance() is False
+
+    def test_returns_false_adjacent_ref_designators(self):
+        """Adjacent ref designators (U6, U7) are different components."""
+        v = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 1 of U6", "Pad 1 of U7"],
+        )
+        assert v.is_same_component_pad_clearance() is False
+
+
+# ---------------------------------------------------------------------------
+# checker.py CLEARANCE_PAD_PAD handler
+# ---------------------------------------------------------------------------
+
+class TestCheckerPadPadClearance:
+    """Tests for _check_violation() handling CLEARANCE_PAD_PAD."""
+
+    @pytest.fixture
+    def jlcpcb_rules(self):
+        profile = get_profile("jlcpcb")
+        return profile.id, profile.name, profile.get_design_rules(2)
+
+    def test_same_component_pad_pad_returns_pass(self, jlcpcb_rules):
+        """Same-component pad-pad clearance should return PASS."""
+        mfr_id, mfr_name, rules = jlcpcb_rules
+        v = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 8 of U6", "Pad 9 of U6"],
+            actual_value_mm=-0.853,
+        )
+        check = _check_violation(v, mfr_id, mfr_name, rules)
+
+        assert check is not None
+        assert check.result == CheckResult.PASS
+        assert "same-component" in check.message.lower() or "inherent" in check.message.lower()
+
+    def test_different_component_pad_pad_not_suppressed(self, jlcpcb_rules):
+        """Inter-component pad-pad clearance should NOT return PASS."""
+        mfr_id, mfr_name, rules = jlcpcb_rules
+        v = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 1 of U6", "Pad 1 of C12"],
+            actual_value_mm=0.05,
+        )
+        check = _check_violation(v, mfr_id, mfr_name, rules)
+
+        # Should not be suppressed (returns None since no specific handler for
+        # inter-component pad-pad beyond same-component filter)
+        assert check is None or check.result != CheckResult.PASS
+
+
+# ---------------------------------------------------------------------------
+# drc_summary CLEARANCE_PAD_PAD handling
+# ---------------------------------------------------------------------------
+
+class TestSummaryPadPadClearance:
+    """Tests for same-component pad-pad clearance in drc_summary."""
+
+    def _make_report(self, violations: list[DRCViolation]) -> DRCReport:
+        return DRCReport(
+            source_file="test.json",
+            created_at=None,
+            pcb_name="test.kicad_pcb",
+            violations=violations,
+        )
+
+    def test_same_component_pad_pad_reclassified_as_fab_acceptable(self):
+        """Same-component pad-pad with manufacturer should be FAB_ACCEPTABLE."""
+        violation = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 8 of U6", "Pad 9 of U6"],
+            actual_value_mm=-0.853,
+        )
+        report = self._make_report([violation])
+        summary = create_summary(report, manufacturer_id="jlcpcb", layers=2)
+
+        assert summary.fab_acceptable_count == 1
+        assert summary.blocking_count == 0
+
+    def test_different_component_pad_pad_not_reclassified(self):
+        """Inter-component pad-pad below limit should NOT be fab-acceptable."""
+        violation = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 1 of U6", "Pad 1 of C12"],
+            actual_value_mm=0.05,
+        )
+        report = self._make_report([violation])
+        summary = create_summary(report, manufacturer_id="jlcpcb", layers=2)
+
+        # Should not be reclassified as fab-acceptable (it's a real violation)
+        assert summary.fab_acceptable_count == 0
+
+    def test_compare_with_manufacturer_same_component_is_false_positive(self):
+        """compare_with_manufacturer should flag same-component pad-pad as false positive."""
+        violation = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 8 of U6", "Pad 9 of U6"],
+            actual_value_mm=-0.853,
+        )
+        rules = get_profile("jlcpcb").get_design_rules(2)
+
+        comparison = compare_with_manufacturer(violation, rules, "jlcpcb")
+
+        assert comparison is not None
+        assert comparison.is_false_positive is True
+        assert "same-component" in comparison.message.lower() or "inherent" in comparison.message.lower()
+
+    def test_compare_with_manufacturer_different_component_is_true_violation(self):
+        """Pad-pad between different components below limit is a true violation."""
+        violation = _make_violation(
+            ViolationType.CLEARANCE_PAD_PAD,
+            items=["Pad 1 of U6", "Pad 1 of C12"],
+            actual_value_mm=0.05,
+        )
+        rules = get_profile("jlcpcb").get_design_rules(2)
+
+        comparison = compare_with_manufacturer(violation, rules, "jlcpcb")
+
+        assert comparison is not None
+        assert comparison.is_false_positive is False
+
+
+# ---------------------------------------------------------------------------
 # to_dict includes category
 # ---------------------------------------------------------------------------
 
