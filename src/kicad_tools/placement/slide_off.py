@@ -46,6 +46,30 @@ from .vector import (
 
 
 @dataclass(frozen=True)
+class OverlapDetail:
+    """Detail of a single remaining overlap pair.
+
+    Attributes:
+        ref1: Reference designator of the first component.
+        ref2: Reference designator of the second component.
+        actual_clearance_mm: Actual clearance between the pair (negative
+            means overlap).
+        required_clearance_mm: Required clearance (i.e. the margin).
+    """
+
+    ref1: str
+    ref2: str
+    actual_clearance_mm: float
+    required_clearance_mm: float
+
+    def __str__(self) -> str:
+        return (
+            f"{self.ref1}/{self.ref2}: {self.actual_clearance_mm:+.3f}mm clearance, "
+            f"required {self.required_clearance_mm:.3f}mm"
+        )
+
+
+@dataclass(frozen=True)
 class SlideOffResult:
     """Result of running the slide-off overlap resolver.
 
@@ -56,12 +80,15 @@ class SlideOffResult:
             the final iteration.
         max_displacement_applied: Maximum Euclidean displacement applied
             to any single component (mm).
+        overlap_details: Detailed information about each remaining overlap
+            pair (empty when no overlaps remain).
     """
 
     iterations_run: int
     overlaps_resolved: int
     overlaps_remaining: int
     max_displacement_applied: float
+    overlap_details: tuple[OverlapDetail, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -521,11 +548,21 @@ def slide_off_overlaps(
 
     max_disp = float(np.max(cumulative_disp)) if n > 0 else 0.0
 
+    # Collect detailed overlap information when overlaps remain
+    overlap_details: tuple[OverlapDetail, ...] = ()
+    if remaining_overlaps > 0:
+        detail_list = _get_overlap_details(
+            positions, half_sizes, sides, margin_mm, n,
+            component_defs, spatial_grid,
+        )
+        overlap_details = tuple(detail_list)
+
     return PlacementVector(data=out_data), SlideOffResult(
         iterations_run=iterations_run,
         overlaps_resolved=actual_resolved,
         overlaps_remaining=remaining_overlaps,
         max_displacement_applied=max_disp,
+        overlap_details=overlap_details,
     )
 
 
@@ -565,3 +602,58 @@ def _count_overlaps(
             count += 1
 
     return count
+
+
+def _get_overlap_details(
+    positions: np.ndarray,
+    half_sizes: np.ndarray,
+    sides: np.ndarray,
+    margin: float,
+    n: int,
+    component_defs: Sequence[ComponentDef],
+    spatial_grid: _SpatialGrid | None = None,
+) -> list[OverlapDetail]:
+    """Return detailed information about each remaining overlap pair.
+
+    For each overlapping pair, computes the worst-axis clearance (the
+    minimum of x-axis and y-axis clearance) and returns an
+    :class:`OverlapDetail` with both component references and clearance
+    values.
+    """
+    details: list[OverlapDetail] = []
+
+    if spatial_grid is not None:
+        spatial_grid.build(positions, half_sizes, margin)
+        pairs = sorted(spatial_grid.potential_pairs())
+    else:
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+
+    for i, j in pairs:
+        if sides[i] != sides[j]:
+            continue
+
+        dx = abs(positions[j, 0] - positions[i, 0])
+        dy = abs(positions[j, 1] - positions[i, 1])
+
+        combined_hw = half_sizes[i, 0] + half_sizes[j, 0] + margin
+        combined_hh = half_sizes[i, 1] + half_sizes[j, 1] + margin
+
+        overlap_x = combined_hw - dx
+        overlap_y = combined_hh - dy
+
+        if overlap_x > 0 and overlap_y > 0:
+            # Actual clearance is negative of the worst overlap
+            # (the minimum-overlap axis determines how far apart they need
+            # to move).  Clearance = gap between edges; negative = overlap.
+            worst_overlap = min(overlap_x, overlap_y)
+            actual_clearance = -worst_overlap + margin  # undo the margin inflation
+            details.append(
+                OverlapDetail(
+                    ref1=component_defs[i].reference,
+                    ref2=component_defs[j].reference,
+                    actual_clearance_mm=round(actual_clearance, 3),
+                    required_clearance_mm=margin,
+                )
+            )
+
+    return details

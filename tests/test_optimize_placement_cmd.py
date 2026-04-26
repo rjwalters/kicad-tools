@@ -812,3 +812,108 @@ class TestBoardOriginCoordinates:
         assert abs(outline.min_y - 0.0) < 0.01
         assert abs(outline.max_x - 30.0) < 0.01
         assert abs(outline.max_y - 20.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Post-convergence slide-off tests (issue #2096)
+# ---------------------------------------------------------------------------
+
+
+class TestPostConvergenceSlideOff:
+    """Verify post-convergence overlap resolution behaviour."""
+
+    def test_post_pass_runs_after_optimization(self, tmp_pcb, tmp_path, capsys):
+        """Optimization should apply post-pass slide-off and report feasibility."""
+        output = tmp_path / "output.kicad_pcb"
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=3,
+            output_path=str(output),
+        )
+        captured = capsys.readouterr()
+        # The small test board should converge without overlaps
+        assert result == 0
+        assert output.exists()
+        assert "Feasible" in captured.out
+
+    def test_no_slide_off_skips_post_pass(self, tmp_pcb, tmp_path, monkeypatch):
+        """When --no-slide-off is set, both pre and post slide-off are skipped."""
+        import kicad_tools.placement.slide_off as slide_mod
+
+        call_count = 0
+        original_fn = slide_mod.slide_off_overlaps
+
+        def counting_slide_off(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return original_fn(*args, **kwargs)
+
+        monkeypatch.setattr(slide_mod, "slide_off_overlaps", counting_slide_off)
+
+        output = tmp_path / "output.kicad_pcb"
+        run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=2,
+            output_path=str(output),
+            quiet=True,
+            no_slide_off=True,
+        )
+        assert call_count == 0
+
+    def test_post_pass_resolves_overlaps_on_clean_board(self, tmp_pcb, tmp_path):
+        """On a board where components fit, post-pass is a no-op and exits 0."""
+        output = tmp_path / "output.kicad_pcb"
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=2,
+            output_path=str(output),
+            quiet=True,
+        )
+        assert result == 0
+
+
+class TestSlideOffOverlapDetails:
+    """Test that SlideOffResult includes detailed overlap information."""
+
+    def test_overlap_details_populated_when_overlaps_remain(self):
+        """When overlaps cannot be resolved, overlap_details should be non-empty."""
+        from kicad_tools.placement.slide_off import OverlapDetail, slide_off_overlaps
+
+        # Create two large components on a tiny board -- overlaps are inevitable
+        comps = [
+            ComponentDef(reference="U1", pads=(), width=20.0, height=20.0),
+            ComponentDef(reference="U2", pads=(), width=20.0, height=20.0),
+        ]
+        board = BoardOutline(min_x=0.0, min_y=0.0, max_x=15.0, max_y=15.0)
+        # Place both at the centre
+        data = np.array([7.5, 7.5, 0.0, 0.0, 7.5, 7.5, 0.0, 0.0], dtype=np.float64)
+        vector = PlacementVector(data=data)
+
+        _, result = slide_off_overlaps(
+            vector, comps, board,
+            max_iterations=5, max_displacement_mm=5.0,
+        )
+        assert result.overlaps_remaining > 0
+        assert len(result.overlap_details) > 0
+        detail = result.overlap_details[0]
+        assert isinstance(detail, OverlapDetail)
+        assert detail.ref1 == "U1"
+        assert detail.ref2 == "U2"
+        assert detail.actual_clearance_mm < 0  # negative = overlap
+
+    def test_overlap_details_empty_when_no_overlaps(self):
+        """When all overlaps are resolved, overlap_details should be empty."""
+        from kicad_tools.placement.slide_off import slide_off_overlaps
+
+        comps = [
+            ComponentDef(reference="R1", pads=(), width=2.0, height=1.0),
+            ComponentDef(reference="R2", pads=(), width=2.0, height=1.0),
+        ]
+        board = BoardOutline(min_x=0.0, min_y=0.0, max_x=50.0, max_y=50.0)
+        # Place far apart -- no overlap
+        data = np.array([5.0, 5.0, 0.0, 0.0, 40.0, 40.0, 0.0, 0.0], dtype=np.float64)
+        vector = PlacementVector(data=data)
+
+        _, result = slide_off_overlaps(vector, comps, board)
+        assert result.overlaps_remaining == 0
+        assert len(result.overlap_details) == 0

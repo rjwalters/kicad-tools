@@ -494,6 +494,20 @@ def optimize_placement(
 
     # Get final result
     best_vector, best_score_value = optimizer.best()
+
+    # Post-convergence slide-off pass to resolve residual overlaps
+    post_slide_result = None
+    if pre_slide_off:
+        from kicad_tools.placement.slide_off import slide_off_overlaps as _post_slide_off
+
+        best_vector, post_slide_result = _post_slide_off(
+            best_vector,
+            components,
+            board_outline,
+            max_iterations=50,
+            max_displacement_mm=50.0,
+        )
+
     final_score = _evaluate_vector(
         best_vector, components, nets, rules, board_outline, cost_config, footprint_sizes
     )
@@ -532,6 +546,18 @@ def optimize_placement(
             {"reference": fr.reference, "ratsnest_mm": fr.ratsnest_mm} for fr in ratsnest_list
         ],
     }
+
+    # Include overlap details when post-pass found unresolvable overlaps
+    if post_slide_result is not None and post_slide_result.overlaps_remaining > 0:
+        result["unresolved_overlaps"] = [
+            {
+                "ref1": d.ref1,
+                "ref2": d.ref2,
+                "actual_clearance_mm": d.actual_clearance_mm,
+                "required_clearance_mm": d.required_clearance_mm,
+            }
+            for d in post_slide_result.overlap_details
+        ]
 
     # Write output if requested
     if output_path:
