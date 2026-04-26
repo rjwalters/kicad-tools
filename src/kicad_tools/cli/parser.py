@@ -1026,6 +1026,30 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch remove-component
+    sch_remove_component = sch_subparsers.add_parser(
+        "remove-component", help="Remove a symbol from a schematic"
+    )
+    sch_remove_component.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_remove_component.add_argument(
+        "--ref", required=True, help="Symbol reference designator (e.g., U1)"
+    )
+    sch_remove_component.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_remove_component.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_remove_component.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_remove_component.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_remove_component.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
     # sch re-annotate
     sch_reannotate = sch_subparsers.add_parser(
         "re-annotate", help="Renumber reference designators sequentially"
