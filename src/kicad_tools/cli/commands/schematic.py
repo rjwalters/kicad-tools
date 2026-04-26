@@ -21,7 +21,10 @@ def run_sch_command(args) -> int:
         )
         print(
             "          add-wire, add-junction,"
-            " add-label, cleanup-wires, remove-wire, disconnect, re-annotate,"
+            " add-label, cleanup-wires, remove-wire, insert-inline,"
+        )
+        print(
+            "          disconnect, re-annotate,"
         )
         print("          repair-instances")
         return 1
@@ -416,6 +419,42 @@ def run_sch_command(args) -> int:
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
         return remove_wire_main(sub_argv) or 0
+
+    elif args.sch_command == "insert-inline":
+        from ..sch_insert_inline import main as insert_inline_main
+
+        sub_argv = [str(schematic_path), "--lib-id", args.lib_id]
+        if args.reference:
+            sub_argv.extend(["--reference", args.reference])
+        if args.value:
+            sub_argv.extend(["--value", args.value])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        if args.from_pt:
+            sub_argv.extend(["--from", str(args.from_pt[0]), str(args.from_pt[1])])
+        if args.to_pt:
+            sub_argv.extend(["--to", str(args.to_pt[0]), str(args.to_pt[1])])
+        if args.near:
+            sub_argv.extend(["--near", str(args.near[0]), str(args.near[1])])
+        if args.pin_a != "1":
+            sub_argv.extend(["--pin-a", args.pin_a])
+        if args.pin_b != "2":
+            sub_argv.extend(["--pin-b", args.pin_b])
+        if args.rotation is not None:
+            sub_argv.extend(["--rotation", str(args.rotation)])
+        if args.expand_gap:
+            sub_argv.append("--expand-gap")
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return insert_inline_main(sub_argv) or 0
 
     elif args.sch_command == "disconnect":
         from ..sch_disconnect import main as disconnect_main
