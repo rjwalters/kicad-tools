@@ -612,6 +612,143 @@ class TestInstancesBlock:
 
 
 # ---------------------------------------------------------------------------
+# Project name disambiguation (multiple .kicad_pro files)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectNameDisambiguation:
+    """find_project_name must prefer the .kicad_pro matching the schematic stem."""
+
+    def test_prefers_matching_stem(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        # Create two .kicad_pro files -- only one matches the schematic stem
+        (tmp_path / "test_add_comp.kicad_pro").write_text("{}")
+        (tmp_path / "test_add_comp-backup.kicad_pro").write_text("{}")
+
+        from kicad_tools.schema.instances import find_project_name
+        assert find_project_name(sch_path) == "test_add_comp"
+
+    def test_falls_back_sorted_when_no_match(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        # Neither stem matches the schematic stem
+        (tmp_path / "alpha.kicad_pro").write_text("{}")
+        (tmp_path / "beta.kicad_pro").write_text("{}")
+
+        from kicad_tools.schema.instances import find_project_name
+        assert find_project_name(sch_path) == "alpha"
+
+    def test_falls_back_to_sch_stem_no_pro(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        # No .kicad_pro at all -> schematic stem
+        from kicad_tools.schema.instances import find_project_name
+        assert find_project_name(sch_path) == "test_add_comp"
+
+    def test_instances_block_uses_correct_project(self, tmp_path: Path):
+        """Integration: add-component picks the right project with multiple .kicad_pro."""
+        sch_path = _write_sch(tmp_path)
+        (tmp_path / "test_add_comp.kicad_pro").write_text("{}")
+        (tmp_path / "test_add_comp-fresh.kicad_pro").write_text("{}")
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "Device:R",
+            "--reference", "R1",
+            "--value", "10k",
+            "--footprint", "SMD:R_0402",
+            "--at", "100.33", "80.01",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.project_name == "test_add_comp"
+
+
+# ---------------------------------------------------------------------------
+# Power symbol reference auto-assignment
+# ---------------------------------------------------------------------------
+
+
+class TestPowerSymbolReference:
+    """add_power must auto-assign reference designators, not use bare names."""
+
+    def test_gnd_gets_pwr_prefix(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "100.33", "90.17",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.reference == "#PWR01"
+
+    def test_pwr_flag_gets_flg_prefix(self, tmp_path: Path):
+        # Add PWR_FLAG lib_symbol to the schematic
+        pwr_flag_lib = """\
+    (symbol "power:PWR_FLAG"
+      (property "Reference" "#FLG" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "PWR_FLAG" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (symbol "power:PWR_FLAG_0_1"
+        (polyline (pts (xy 0 0) (xy 0 1.27)) (stroke (width 0) (type default)) (fill (type none)))
+      )
+      (symbol "power:PWR_FLAG_1_1"
+        (pin power_out line (at 0 0 0) (length 0) (name "pwr" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      )
+    )"""
+        content = SCHEMATIC_WITH_LIB.replace(
+            "  )\n  (wire",
+            f"{pwr_flag_lib}\n  )\n  (wire",
+        )
+        sch_path = _write_sch(tmp_path, content=content)
+
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "power:PWR_FLAG",
+            "--at", "100.33", "90.17",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.reference == "#FLG01"
+
+    def test_sequential_numbering(self, tmp_path: Path):
+        sch_path = _write_sch(tmp_path)
+        # Place two GND symbols sequentially
+        add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "100.33", "90.17",
+        ])
+        result = add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "110.33", "90.17",
+        ])
+        assert result == 0
+
+        sch = Schematic.load(sch_path)
+        refs = sorted(sym.reference for sym in sch.symbols)
+        assert refs == ["#PWR01", "#PWR02"]
+
+    def test_reference_not_bare_name(self, tmp_path: Path):
+        """Regression: reference must never be '#GND' or '#PWR_FLAG'."""
+        sch_path = _write_sch(tmp_path)
+        add_component_main([
+            str(sch_path),
+            "--lib-id", "power:GND",
+            "--at", "100.33", "90.17",
+        ])
+        sch = Schematic.load(sch_path)
+        sym = sch.symbols[0]
+        assert sym.reference != "#GND"
+        assert sym.reference.startswith("#PWR")
+
+
+# ---------------------------------------------------------------------------
 # Schematic.add_junction method
 # ---------------------------------------------------------------------------
 

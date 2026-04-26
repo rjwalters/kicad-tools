@@ -11,17 +11,33 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def _select_pro_file(pro_files: list[Path], schematic_path: Path) -> Path:
+    """Choose the best ``.kicad_pro`` from *pro_files*.
+
+    When multiple ``.kicad_pro`` files exist in the same directory (e.g.
+    ``board.kicad_pro`` and ``board-backup.kicad_pro``), prefer the one
+    whose stem matches the schematic stem.  Falls back to the first file
+    in sorted order for determinism.
+    """
+    sch_stem = schematic_path.stem
+    for pf in pro_files:
+        if pf.stem == sch_stem:
+            return pf
+    return sorted(pro_files)[0]
+
+
 def find_project_name(schematic_path: Path) -> str:
     """Derive the project name from the nearest ``.kicad_pro`` file.
 
     Walks up from *schematic_path* looking for a ``.kicad_pro`` file.
-    Falls back to the schematic stem if none is found.
+    When multiple are found, prefers the one whose stem matches the
+    schematic stem.  Falls back to the schematic stem if none is found.
     """
     directory = schematic_path.resolve().parent
     for parent in [directory, *directory.parents]:
         pro_files = list(parent.glob("*.kicad_pro"))
         if pro_files:
-            return pro_files[0].stem
+            return _select_pro_file(pro_files, schematic_path).stem
     return schematic_path.stem
 
 
@@ -43,7 +59,8 @@ def build_instance_path(schematic_path: Path, sch_uuid: str) -> str:
     for parent in [directory, *directory.parents]:
         pro_files = list(parent.glob("*.kicad_pro"))
         if pro_files:
-            candidate = pro_files[0].with_suffix(".kicad_sch")
+            best = _select_pro_file(pro_files, schematic_path)
+            candidate = best.with_suffix(".kicad_sch")
             if candidate.exists():
                 root_sch_path = candidate
             break
