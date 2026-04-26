@@ -574,6 +574,58 @@ def get_footprint_pads(footprint: str) -> dict[str, tuple]:
     return get_library().get_pads(footprint)
 
 
+# Regex for extracting pad count from footprint names.
+# Matches -N or _N patterns like SOT-23-5, TSSOP-20, QFN-48, DIP-8.
+# The lookahead ensures the digits are followed by a separator, end-of-string,
+# or a non-digit character (to avoid matching embedded dimensions like "5x5mm").
+_FP_PAD_COUNT_RE = re.compile(r'[-_](\d+)(?=[-_]|$)')
+
+
+def get_pad_count(footprint: str) -> int | None:
+    """Return the pad count for *footprint*, or ``None`` if unresolvable.
+
+    Unlike :func:`get_footprint_pads`, this function does **not** fall back to
+    a default 2-pad layout when the footprint is unknown.  It first checks
+    ``COMMON_FOOTPRINTS`` and the on-disk library, then falls back to a
+    name-based heuristic (e.g. ``SOT-23-5`` -> 5).
+
+    Args:
+        footprint: Footprint name (full or short form).
+
+    Returns:
+        Number of pads, or ``None`` if the footprint cannot be resolved.
+    """
+    if not footprint or footprint == "~":
+        return None
+
+    lib = get_library()
+
+    # Resolve aliases
+    resolved = FOOTPRINT_ALIASES.get(footprint, footprint)
+
+    # Check built-in data
+    if resolved in COMMON_FOOTPRINTS:
+        return len(COMMON_FOOTPRINTS[resolved])
+
+    # Try to parse from library file
+    if ":" in resolved:
+        lib_name, fp_name = resolved.split(":", 1)
+        fp_path = lib._find_footprint_file(lib_name, fp_name)
+        if fp_path:
+            pads = lib._parse_footprint_file(fp_path)
+            return len(pads)
+
+    # Fallback: extract pad count from footprint name heuristic.
+    # Use the last component of the footprint name (after ':') for matching.
+    # Take the *last* match so that "SOT-23-5" yields 5, not 23.
+    fp_short = resolved.split(":")[-1] if ":" in resolved else resolved
+    matches = _FP_PAD_COUNT_RE.findall(fp_short)
+    if matches:
+        return int(matches[-1])
+
+    return None
+
+
 # =============================================================================
 # STM32C011 Pin Mapping
 # =============================================================================
