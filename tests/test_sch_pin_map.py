@@ -307,6 +307,115 @@ MIRRORED_SCHEMATIC = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# Schematic with diode + resistor where wire path traverses through resistor
+# body to a power net.  Without BFS barriers, D1 pin K (cathode) would
+# incorrectly resolve to GND by hopping through R1's body.
+#
+# Topology:
+#   D1 (D_Schottky) at (120, 50) rotated 90 degrees
+#     Pin 1 (K, cathode) -> (120, 46.19) -> wire to (110, 46.19) = R1 pin 1
+#     Pin 2 (A, anode)   -> (120, 53.81) -> wire to (120, 60)    -> label "VBUS"
+#
+#   R1 (Device:R) at (110, 50) rotation 0
+#     Pin 1 at (110, 46.19) -- shared junction with D1 cathode
+#     Pin 2 at (110, 53.81) -> wire to (110, 60) -> label "GND"
+#
+# Without barriers, BFS from D1 cathode (120, 46.19) traverses:
+#   -> (110, 46.19) [R1 pin 1] -> (110, 53.81) [R1 pin 2] -> (110, 60) [GND]
+# and incorrectly returns "GND".
+#
+# With barriers, BFS stops at R1 pin 1 (110, 46.19) because it belongs to
+# another component.  D1 cathode should resolve to None (unnamed net).
+# ---------------------------------------------------------------------------
+DIODE_RESISTOR_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000020")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:D_Schottky"
+      (symbol "D_Schottky_0_1"
+      )
+      (symbol "D_Schottky_1_1"
+        (pin passive line
+          (at 0 3.81 270)
+          (length 1.27)
+          (name "K")
+          (number "1")
+        )
+        (pin passive line
+          (at 0 -3.81 90)
+          (length 1.27)
+          (name "A")
+          (number "2")
+        )
+      )
+    )
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270)
+          (length 1.27)
+          (name "~")
+          (number "1")
+        )
+        (pin passive line
+          (at 0 -3.81 90)
+          (length 1.27)
+          (name "~")
+          (number "2")
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:D_Schottky")
+    (at 120 50 0)
+    (unit 1)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "d1-uuid")
+    (property "Reference" "D1" (at 122 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "BAT54" (at 122 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "d1p1"))
+    (pin "2" (uuid "d1p2"))
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 110 50 0)
+    (unit 1)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "r1-uuid")
+    (property "Reference" "R1" (at 112 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 112 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "r1p1"))
+    (pin "2" (uuid "r1p2"))
+  )
+  (wire (pts (xy 120 46.19) (xy 110 46.19))
+    (stroke (width 0) (type default)) (uuid "w-d1k-r1p1"))
+  (wire (pts (xy 120 53.81) (xy 120 60))
+    (stroke (width 0) (type default)) (uuid "w-d1a-vbus"))
+  (wire (pts (xy 110 53.81) (xy 110 60))
+    (stroke (width 0) (type default)) (uuid "w-r1p2-gnd"))
+  (label "VBUS" (at 120 60 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-vbus"))
+  (label "GND" (at 110 60 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-gnd"))
+)
+"""
+
+
 def _write_sch(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "test.kicad_sch"
     p.write_text(content)
@@ -572,6 +681,55 @@ class TestResolvePinMap:
         assert abs(pos1[1] - 46.19) < 0.01
         assert abs(pos2[0] - 100.0) < 0.01
         assert abs(pos2[1] - 53.81) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: BFS barrier prevents traversal through other components
+# ---------------------------------------------------------------------------
+
+
+class TestBFSBarrier:
+    """Verify that net tracing does not traverse through another component's body."""
+
+    def test_diode_cathode_does_not_resolve_through_resistor(self, tmp_path):
+        """D1 cathode connects to R1 pin 1 via wire.  R1 pin 2 connects to GND.
+
+        Without BFS barriers, D1 cathode would incorrectly resolve to GND by
+        traversing through R1's body.  With barriers, the BFS stops at R1 pin 1
+        and D1 cathode resolves to None (unnamed net at the junction).
+        """
+        sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "D1" in pin_map
+        assert "R1" in pin_map
+
+        # D1 cathode (pin 1) must NOT resolve to GND
+        d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
+        assert d1_pin1_net is None, (
+            f"D1 cathode should be None (unnamed net), got {d1_pin1_net!r}"
+        )
+
+        # D1 anode (pin 2) should resolve to VBUS
+        assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
+
+        # R1 should still resolve correctly
+        # R1 pin 1 shares junction with D1 cathode -- unnamed net
+        assert pin_map["R1"]["pins"]["1"]["net"] is None
+        # R1 pin 2 connects to GND
+        assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
+
+    def test_shared_junction_still_resolves(self, tmp_path):
+        """Components sharing a junction (same coordinate) should both see the
+        net name at that junction, even with barriers enabled."""
+        sch = Schematic.load(_write_sch(tmp_path, MINIMAL_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        # R1 and C1 share the VIN junction at (100, 40) and GND at (100, 60)
+        assert pin_map["R1"]["pins"]["1"]["net"] == "VIN"
+        assert pin_map["C1"]["pins"]["1"]["net"] == "VIN"
+        assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
+        assert pin_map["C1"]["pins"]["2"]["net"] == "GND"
 
 
 # ---------------------------------------------------------------------------

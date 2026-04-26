@@ -143,11 +143,26 @@ def _flood_fill_net(
     start: Coord,
     adjacency: dict[Coord, set[Coord]],
     net_names: dict[Coord, str],
+    barrier_pins: set[Coord] | None = None,
 ) -> str | None:
     """BFS from a coordinate to find the first net name reachable along wires.
 
+    Args:
+        start: Starting coordinate (a pin position of the component being traced).
+        adjacency: Wire connectivity graph.
+        net_names: Map of coordinates to net names (labels/power symbols).
+        barrier_pins: Pin coordinates of *other* components.  When the BFS
+            reaches a barrier pin it records any net name but does **not**
+            continue traversal through that node.  This prevents the flood
+            fill from crossing through another component's body (e.g. tracing
+            from one pin of a resistor through a wire that happens to
+            connect its other pin to a different net).
+
     Returns the net name, or None if no label/power symbol is reachable.
     """
+    if barrier_pins is None:
+        barrier_pins = set()
+
     visited: set[Coord] = set()
     queue = [start]
     visited.add(start)
@@ -158,6 +173,13 @@ def _flood_fill_net(
         # Check if this node has a net name
         if current in net_names:
             return net_names[current]
+
+        # If this node is a pin of another component, do not traverse further
+        # from it.  The pin is a terminal -- the net stops here.  We already
+        # checked for a net name above, so unnamed junctions at foreign pins
+        # simply become dead-ends for BFS.
+        if current != start and current in barrier_pins:
+            continue
 
         # Traverse neighbors
         for neighbor in adjacency.get(current, set()):
@@ -184,28 +206,56 @@ def resolve_pin_map(
     adjacency, net_names = _build_wire_graph(schematic)
     result: dict[str, dict] = {}
 
+    # ------------------------------------------------------------------
+    # Pre-compute pin coordinates for every non-power symbol so that we
+    # can build per-component barrier sets.  A barrier set for symbol S
+    # contains every pin coordinate that does NOT belong to S.  This
+    # prevents the BFS from traversing *through* another component's
+    # body (i.e. hopping from pin 1 to pin 2 of an intermediate
+    # resistor/diode via a wire that connects them in the schematic
+    # drawing).
+    # ------------------------------------------------------------------
+    # Map: reference -> set of Coord for that symbol's pins
+    ref_pin_coords: dict[str, set[Coord]] = defaultdict(set)
+    # All non-power pin coordinates across the whole schematic
+    all_pin_coords: set[Coord] = set()
+
+    # We also cache resolved LibrarySymbol + pin_positions per symbol
+    # instance so we don't have to compute them twice.
+    _sym_cache: list[tuple] = []  # (symbol, lib_sym, pin_positions)
+
     for symbol in schematic.symbols:
-        # Skip power symbols
         if symbol.lib_id.startswith("power:"):
             continue
 
-        # Apply reference filter
-        if ref_filter and symbol.reference != ref_filter:
-            continue
-
-        # Look up embedded library symbol
         lib_sexp = schematic.get_lib_symbol(symbol.lib_id)
         if not lib_sexp:
             continue
 
         lib_sym = LibrarySymbol.from_sexp(lib_sexp)
-
-        # Get transformed pin positions
         pin_positions = lib_sym.get_all_pin_positions(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
         )
+
+        coords: set[Coord] = set()
+        for pin_num, pos in pin_positions.items():
+            coords.add(_to_coord(*pos))
+        ref_pin_coords[symbol.reference].update(coords)
+        all_pin_coords.update(coords)
+        _sym_cache.append((symbol, lib_sym, pin_positions))
+
+    # ------------------------------------------------------------------
+    # Resolve nets for each symbol using per-component barrier sets.
+    # ------------------------------------------------------------------
+    for symbol, lib_sym, pin_positions in _sym_cache:
+        # Apply reference filter
+        if ref_filter and symbol.reference != ref_filter:
+            continue
+
+        # Barrier = all pin coords except this symbol's own pins
+        barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference]
 
         pins_data: dict[str, dict] = {}
         for lib_pin in lib_sym.pins:
@@ -216,7 +266,7 @@ def resolve_pin_map(
             coord = _to_coord(*pos)
 
             # Trace from pin position to find net name
-            net = _flood_fill_net(coord, adjacency, net_names)
+            net = _flood_fill_net(coord, adjacency, net_names, barrier_pins)
 
             pins_data[lib_pin.number] = {
                 "name": lib_pin.name,
