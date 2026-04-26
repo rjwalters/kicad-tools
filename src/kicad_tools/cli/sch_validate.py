@@ -1681,6 +1681,130 @@ def check_power_pin_polarity(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIssue]:
+    """Detect components where every pin is floating (no wire, label, or no-connect).
+
+    A fully unconnected component is one where ``resolve_pin_map()`` reports
+    ``net=None`` for every pin **and** no no-connect marker is placed at any
+    of its pin positions.  Such components are almost always placement errors.
+
+    Exclusions (to avoid false positives):
+    - Power symbols (``lib_id`` starts with ``power:``) -- already skipped by
+      ``resolve_pin_map``
+    - DNP symbols
+    - Graphical-only symbols (``in_bom=no`` and ``on_board=no``)
+    - Symbols whose library pins are all typed ``no_connect``
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                # Collect no-connect marker positions from the raw S-expression.
+                nc_points: set[tuple[float, float]] = set()
+                for nc_sexp in sch.sexp.find_children("no_connect"):
+                    at = nc_sexp.find("at")
+                    if at:
+                        x = at.get_float(0)
+                        y = at.get_float(1)
+                        if x is not None and y is not None:
+                            nc_points.add((round(x, 2), round(y, 2)))
+
+                # Build a set of DNP / graphical-only references for exclusion.
+                # Also collect per-reference metadata for the error message.
+                skip_refs: set[str] = set()
+                ref_values: dict[str, str] = {}
+                for sym in sch.symbols:
+                    ref = sym.reference
+                    if not ref:
+                        continue
+                    ref_values[ref] = sym.value or "?"
+
+                    if sym.lib_id.startswith("power:"):
+                        skip_refs.add(ref)
+                    if sym.dnp:
+                        skip_refs.add(ref)
+                    if not sym.in_bom and not sym.on_board:
+                        skip_refs.add(ref)
+
+                for ref, entry in pin_map.items():
+                    if ref in skip_refs:
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+                    if not pins_data:
+                        continue
+
+                    # Check if all library pin types are "no_connect"
+                    pin_types = {p.get("type", "") for p in pins_data.values()}
+                    if pin_types and pin_types <= {"no_connect"}:
+                        continue
+
+                    # Check connectivity: any pin with a net means connected
+                    has_any_connection = False
+                    has_any_nc_marker = False
+
+                    for pin_num, pin_info in pins_data.items():
+                        if pin_info.get("net") is not None:
+                            has_any_connection = True
+                            break
+
+                        # Check for no-connect marker at this pin position
+                        pos = pin_info.get("position")
+                        if pos:
+                            pos_r = (round(pos[0], 2), round(pos[1], 2))
+                            if pos_r in nc_points:
+                                has_any_nc_marker = True
+
+                    if has_any_connection:
+                        continue
+                    if has_any_nc_marker:
+                        continue
+
+                    # All pins are floating with no no-connect markers
+                    value = ref_values.get(ref, entry.get("lib_id", "?"))
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="unconnected_component",
+                            message=(
+                                f"Fully unconnected component: {ref} ({value}) "
+                                f"-- all pins are floating"
+                            ),
+                            location=sheet_path,
+                        )
+                    )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="unconnected_component",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="unconnected_component",
+                message=f"Unconnected component check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
@@ -1736,6 +1860,10 @@ def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> Vali
     # I2C pull-up resistor detection
     result.checks_run.append("i2c_pullups")
     result.issues.extend(check_i2c_pullups(schematic_path))
+
+    # Fully unconnected component detection
+    result.checks_run.append("unconnected_component")
+    result.issues.extend(check_fully_unconnected_components(schematic_path))
 
     return result
 
