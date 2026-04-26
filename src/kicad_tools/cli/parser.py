@@ -945,6 +945,68 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_remove_wire.add_argument("--format", choices=["text", "json"], default="text")
 
+    # sch insert-inline
+    sch_insert_inline = sch_subparsers.add_parser(
+        "insert-inline",
+        help="Break a wire and insert a component inline in a signal path",
+    )
+    sch_insert_inline.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_insert_inline.add_argument(
+        "--lib-id", required=True, help="Library symbol ID (e.g., Device:D)"
+    )
+    sch_insert_inline.add_argument("--reference", help="Symbol reference (e.g., D1)")
+    sch_insert_inline.add_argument("--value", default="", help="Component value (e.g., BAT54)")
+    sch_insert_inline.add_argument("--footprint", default="", help="Footprint name")
+    sch_insert_inline.add_argument(
+        "--from",
+        nargs=2,
+        type=float,
+        dest="from_pt",
+        metavar=("X", "Y"),
+        help="Start endpoint of the target wire",
+    )
+    sch_insert_inline.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        dest="to_pt",
+        metavar=("X", "Y"),
+        help="End endpoint of the target wire",
+    )
+    sch_insert_inline.add_argument(
+        "--near",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Find target wire nearest to this point",
+    )
+    sch_insert_inline.add_argument(
+        "--pin-a", default="1", help="Upstream pin number (default: 1)"
+    )
+    sch_insert_inline.add_argument(
+        "--pin-b", default="2", help="Downstream pin number (default: 2)"
+    )
+    sch_insert_inline.add_argument(
+        "--rotation", type=float, default=None,
+        help="Symbol rotation in degrees (auto-detected if omitted)",
+    )
+    sch_insert_inline.add_argument(
+        "--expand-gap", action="store_true",
+        help="Shift downstream geometry if wire is too short for the component",
+    )
+    sch_insert_inline.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_insert_inline.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_insert_inline.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_insert_inline.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch disconnect
     sch_disconnect = sch_subparsers.add_parser("disconnect", help="Disconnect a pin from its net")
     sch_disconnect.add_argument("schematic", help="Path to .kicad_sch file")
