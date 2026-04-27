@@ -398,6 +398,9 @@ def run_sch_command(args) -> int:
             sub_argv.append("--backup")
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
+        stub_threshold = getattr(args, "stub_threshold", 1.27)
+        if stub_threshold != 1.27:
+            sub_argv.extend(["--stub-threshold", str(stub_threshold)])
         return cleanup_main(sub_argv) or 0
 
     elif args.sch_command == "remove-wire":

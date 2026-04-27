@@ -902,6 +902,13 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_cleanup.add_argument("--backup", action="store_true", help="Create backup before modifying")
     sch_cleanup.add_argument("--format", choices=["text", "json"], default="text")
+    sch_cleanup.add_argument(
+        "--stub-threshold",
+        type=float,
+        default=1.27,
+        dest="stub_threshold",
+        help="Max length (mm) for single-end-dangling stubs to remove (default: 1.27, 0 to disable)",
+    )
 
     # sch remove-wire
     sch_remove_wire = sch_subparsers.add_parser(

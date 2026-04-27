@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ from kicad_tools.sexp import SExp
 class WireIssue:
     """Describes a wire that should be cleaned up."""
 
-    reason: str  # "zero_length", "dangling", or "duplicate"
+    reason: str  # "zero_length", "dangling", "duplicate", or "stub"
     wire_sexp: SExp
     start: tuple[float, float]
     end: tuple[float, float]
@@ -124,8 +125,16 @@ def _wire_endpoint_counts(
     return counts
 
 
-def find_cleanup_candidates(schematic: Schematic) -> list[WireIssue]:
-    """Identify wires that should be removed."""
+def find_cleanup_candidates(
+    schematic: Schematic, *, stub_threshold: float = 1.27
+) -> list[WireIssue]:
+    """Identify wires that should be removed.
+
+    Args:
+        schematic: The schematic to analyze.
+        stub_threshold: Maximum wire length (in mm) for a single-end-dangling
+            wire to be flagged as a stub. Set to 0 to disable stub detection.
+    """
     wire_sexps = list(schematic.sexp.find_all("wire"))
     issues: list[WireIssue] = []
 
@@ -194,6 +203,42 @@ def find_cleanup_candidates(schematic: Schematic) -> list[WireIssue]:
                 )
             )
 
+    # Phase 3b: short single-end-dangling stubs
+    # These are sub-mm wire fragments left by repair operations that have one
+    # end connected and one end dangling.  Only flag them when their length is
+    # below the configurable threshold (default 1.27mm).
+    if stub_threshold > 0:
+        # Build a set of wires already flagged so we don't double-count
+        flagged_ids = {id(issue.wire_sexp) for issue in issues}
+
+        for ws in unique_wires:
+            if id(ws) in flagged_ids:
+                continue
+
+            start, end = _wire_start_end(ws)
+            length = math.hypot(end[0] - start[0], end[1] - start[1])
+            if length >= stub_threshold:
+                continue
+
+            dangling_ends = 0
+            for pt in [start, end]:
+                key = (int(pt[0] * 10), int(pt[1] * 10))
+                has_connection = key in connection_points
+                has_other_wire = endpoint_counts.get(key, 0) > 1
+                if not has_connection and not has_other_wire:
+                    dangling_ends += 1
+
+            # Exactly one dangling end means it's a stub
+            if dangling_ends == 1:
+                issues.append(
+                    WireIssue(
+                        reason="stub",
+                        wire_sexp=ws,
+                        start=start,
+                        end=end,
+                    )
+                )
+
     return issues
 
 
@@ -221,7 +266,8 @@ def run_cleanup_wires(args) -> int:
         print(f"Error: Schematic not found: {schematic_path}", file=sys.stderr)
         return 1
 
-    issues = find_cleanup_candidates(sch)
+    stub_threshold = getattr(args, "stub_threshold", 1.27)
+    issues = find_cleanup_candidates(sch, stub_threshold=stub_threshold)
 
     if not issues:
         if args.format == "json":
@@ -234,6 +280,7 @@ def run_cleanup_wires(args) -> int:
     zero_count = sum(1 for i in issues if i.reason == "zero_length")
     dangling_count = sum(1 for i in issues if i.reason == "dangling")
     duplicate_count = sum(1 for i in issues if i.reason == "duplicate")
+    stub_count = sum(1 for i in issues if i.reason == "stub")
 
     if args.format == "json":
         data = {
@@ -242,6 +289,7 @@ def run_cleanup_wires(args) -> int:
             "zero_length": zero_count,
             "dangling": dangling_count,
             "duplicate": duplicate_count,
+            "stub": stub_count,
             "issues": [
                 {
                     "reason": i.reason,
@@ -275,9 +323,16 @@ def run_cleanup_wires(args) -> int:
         print(f"  Duplicate: {duplicate_count}")
     if dangling_count:
         print(f"  Dangling: {dangling_count}")
+    if stub_count:
+        print(f"  Stub: {stub_count}")
     print()
 
-    reason_labels = {"zero_length": "zero-length", "dangling": "dangling", "duplicate": "duplicate"}
+    reason_labels = {
+        "zero_length": "zero-length",
+        "dangling": "dangling",
+        "duplicate": "duplicate",
+        "stub": "stub",
+    }
     for issue in issues:
         label = reason_labels.get(issue.reason, issue.reason)
         print(
@@ -310,6 +365,13 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument(
+        "--stub-threshold",
+        type=float,
+        default=1.27,
+        dest="stub_threshold",
+        help="Max length (mm) for single-end-dangling stubs to remove (default: 1.27, 0 to disable)",
+    )
 
     args = parser.parse_args(argv)
     return run_cleanup_wires(args)
