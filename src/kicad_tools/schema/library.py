@@ -1055,6 +1055,9 @@ class SymbolLibrary:
             sym = LibrarySymbol.from_sexp(sym_sexp)
             symbols[sym.name] = sym
 
+        # Resolve extends chains so derived symbols have populated pins
+        resolve_extends(symbols)
+
         return cls(
             path=path,
             symbols=symbols,
@@ -1198,6 +1201,77 @@ class SymbolLibrary:
         )
 
 
+def resolve_extends(symbols: dict[str, LibrarySymbol], *, max_depth: int = 10) -> None:
+    """Resolve extends chains in-place, copying base pins/graphics to derived symbols.
+
+    After calling this function, every symbol whose ``extends`` field is set
+    will have its ``pins`` and ``graphics`` lists populated from the base
+    symbol (unless it already defines its own pins).
+
+    Args:
+        symbols: Mapping of symbol name to ``LibrarySymbol``.  Names may be
+            either short (``"OpAmp"``) or fully-qualified (``"Device:OpAmp"``).
+            The ``extends`` value stored on derived symbols is always a short
+            name, so lookup tries both the raw value and a match against the
+            short portion of qualified keys.
+        max_depth: Maximum extends chain depth to prevent infinite loops.
+
+    Raises:
+        ValueError: If a circular extends chain or missing base is detected.
+    """
+
+    def _find_base(name: str) -> LibrarySymbol | None:
+        """Locate a base symbol by short or qualified name."""
+        if name in symbols:
+            return symbols[name]
+        # Fallback: match by short name portion of qualified keys
+        for key, sym in symbols.items():
+            short = key.split(":", 1)[1] if ":" in key else key
+            if short == name:
+                return sym
+        return None
+
+    for sym in symbols.values():
+        if sym.extends is None:
+            continue
+        # Only resolve if the symbol has no own pins
+        if sym.pins:
+            continue
+
+        # Walk the extends chain to find pins and graphics
+        visited: set[str] = {sym.name}
+        current_name = sym.extends
+        depth = 0
+        resolved_pins: list[LibraryPin] | None = None
+        resolved_graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] | None = None
+
+        while current_name is not None and depth < max_depth:
+            if current_name in visited:
+                raise ValueError(
+                    f"Circular extends chain detected: {sym.name} -> ... -> {current_name}"
+                )
+            visited.add(current_name)
+            depth += 1
+
+            base = _find_base(current_name)
+            if base is None:
+                # Base not found in this symbol set; leave unresolved
+                break
+
+            if base.pins:
+                resolved_pins = list(base.pins)
+                resolved_graphics = list(base.graphics)
+                break
+
+            # Base itself may also extend another symbol
+            current_name = base.extends
+
+        if resolved_pins is not None:
+            sym.pins = resolved_pins
+        if resolved_graphics is not None and not sym.graphics:
+            sym.graphics = resolved_graphics
+
+
 class LibraryManager:
     """
     Manages multiple symbol libraries.
@@ -1253,6 +1327,16 @@ class LibraryManager:
                 )
             if short_name not in self.libraries[lib_name].symbols:
                 self.libraries[lib_name].symbols[short_name] = sym
+
+        # Resolve extends chains: derived symbols inherit pins/graphics
+        # from their base.  We build a combined lookup across all embedded
+        # libraries so that cross-library extends (rare but valid) work.
+        all_embedded: dict[str, LibrarySymbol] = {}
+        for lib in self.libraries.values():
+            if lib.path == "<embedded>":
+                all_embedded.update(lib.symbols)
+        if all_embedded:
+            resolve_extends(all_embedded)
 
     def add_search_path(self, path: str) -> None:
         """Add a directory to search for libraries."""
