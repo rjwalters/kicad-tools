@@ -131,14 +131,35 @@ def check_pin_pad_count(schematic_path: str) -> list[ValidationIssue]:
                 sch = Schematic.load(node.path)
                 # Build map of library symbol name -> pin count from lib_symbols
                 lib_pin_counts: dict[str, int] = {}
+                extends_map: dict[str, str] = {}
                 lib_syms_sexp = sch.lib_symbols
                 if lib_syms_sexp is not None:
                     for sym_sexp in lib_syms_sexp.find_all("symbol"):
                         try:
                             lib_sym = LibrarySymbol.from_sexp(sym_sexp)
                             lib_pin_counts[lib_sym.name] = lib_sym.pin_count
+                            # Track extends relationships for derived symbols
+                            ext_node = sym_sexp.get("extends")
+                            if ext_node is not None:
+                                base_name = ext_node.get_string(0)
+                                if base_name:
+                                    extends_map[lib_sym.name] = base_name
                         except Exception:
                             pass
+
+                    # Resolve extends chains: derived symbols with 0 pins
+                    # inherit pin count from their base symbol.
+                    for name, base in extends_map.items():
+                        if lib_pin_counts.get(name, 0) == 0:
+                            visited: set[str] = {name}
+                            cur = base
+                            while cur and cur not in visited:
+                                count = lib_pin_counts.get(cur, 0)
+                                if count > 0:
+                                    lib_pin_counts[name] = count
+                                    break
+                                visited.add(cur)
+                                cur = extends_map.get(cur)
 
                 for sym in sch.symbols:
                     if sym.lib_id.startswith("power:"):

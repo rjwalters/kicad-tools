@@ -205,6 +205,142 @@ _SCH_SINGLE_PIN_NET = """(kicad_sch
 )
 """
 
+# A schematic with a derived symbol using (extends ...).
+# The base symbol "Regulator_Linear:AP2204K-1.5" has 5 pins.
+# The derived symbol "Regulator_Linear:AP2112K-3.3" uses extends and has 0
+# direct pins -- its pin count should be inherited from the base.
+_SCH_EXTENDS_SYMBOL = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Regulator_Linear:AP2204K-1.5"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "AP2204K-1.5" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_TO_SOT_SMD:SOT-23-5" (at 0 0 0) (effects (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+      (symbol "AP2204K-1.5_1_1"
+        (pin input line (at -10 2.54 0) (length 2.54)
+          (name "VIN" (effects (font (size 1.27 1.27))))
+          (number "1" (effects (font (size 1.27 1.27))))
+        )
+        (pin power_in line (at 0 -7.62 90) (length 2.54)
+          (name "GND" (effects (font (size 1.27 1.27))))
+          (number "2" (effects (font (size 1.27 1.27))))
+        )
+        (pin input line (at -10 -2.54 0) (length 2.54)
+          (name "EN" (effects (font (size 1.27 1.27))))
+          (number "3" (effects (font (size 1.27 1.27))))
+        )
+        (pin passive line (at 10 -2.54 180) (length 2.54)
+          (name "NC" (effects (font (size 1.27 1.27))))
+          (number "4" (effects (font (size 1.27 1.27))))
+        )
+        (pin power_out line (at 10 2.54 180) (length 2.54)
+          (name "VOUT" (effects (font (size 1.27 1.27))))
+          (number "5" (effects (font (size 1.27 1.27))))
+        )
+      )
+    )
+    (symbol "Regulator_Linear:AP2112K-3.3"
+      (extends "Regulator_Linear:AP2204K-1.5")
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "AP2112K-3.3" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_TO_SOT_SMD:SOT-23-5" (at 0 0 0) (effects (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+    )
+  )
+  (symbol
+    (lib_id "Regulator_Linear:AP2112K-3.3")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "U1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "AP2112K-3.3" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_TO_SOT_SMD:SOT-23-5" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000101"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000102"))
+    (pin "3" (uuid "00000000-0000-0000-0000-000000000103"))
+    (pin "4" (uuid "00000000-0000-0000-0000-000000000104"))
+    (pin "5" (uuid "00000000-0000-0000-0000-000000000105"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+
+# A schematic with a multi-level extends chain: C extends B extends A.
+_SCH_MULTI_LEVEL_EXTENDS = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:BaseWidget"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "BaseWidget" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_SO:SOIC-8" (at 0 0 0) (effects (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+      (symbol "BaseWidget_1_1"
+        (pin input line (at -10 0 0) (length 2.54)
+          (name "A" (effects (font (size 1.27 1.27))))
+          (number "1" (effects (font (size 1.27 1.27))))
+        )
+        (pin output line (at 10 0 180) (length 2.54)
+          (name "B" (effects (font (size 1.27 1.27))))
+          (number "2" (effects (font (size 1.27 1.27))))
+        )
+        (pin power_in line (at 0 -5 90) (length 2.54)
+          (name "GND" (effects (font (size 1.27 1.27))))
+          (number "3" (effects (font (size 1.27 1.27))))
+        )
+      )
+    )
+    (symbol "Device:MidWidget"
+      (extends "Device:BaseWidget")
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "MidWidget" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_SO:SOIC-8" (at 0 0 0) (effects (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+    )
+    (symbol "Device:LeafWidget"
+      (extends "Device:MidWidget")
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "LeafWidget" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_SO:SOIC-8" (at 0 0 0) (effects (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+    )
+  )
+  (symbol
+    (lib_id "Device:LeafWidget")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "U1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "LeafWidget" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_SO:SOIC-8" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000101"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000102"))
+    (pin "3" (uuid "00000000-0000-0000-0000-000000000103"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+
 # An empty schematic (no components) -- should pass cleanly.
 _SCH_EMPTY = """(kicad_sch
   (version 20231120)
@@ -313,6 +449,34 @@ class TestCheckPowerFlags:
         sch = _write_sch(_SCH_EMPTY)
         issues = check_power_flags(str(sch))
         assert len(issues) == 0
+
+
+class TestCheckPinPadCountExtends:
+    """Tests for check_pin_pad_count with derived (extends) symbols."""
+
+    def test_derived_symbol_inherits_pin_count(self, _write_sch):
+        """Derived symbol using (extends ...) should inherit base pin count."""
+        from kicad_tools.cli.sch_preflight import check_pin_pad_count
+
+        sch = _write_sch(_SCH_EXTENDS_SYMBOL)
+        issues = check_pin_pad_count(str(sch))
+        mismatch_issues = [i for i in issues if i.category == "pin_pad_mismatch"]
+        assert len(mismatch_issues) == 0, (
+            f"Expected no pin_pad_mismatch for derived symbol, got: "
+            f"{[i.message for i in mismatch_issues]}"
+        )
+
+    def test_multi_level_extends_chain(self, _write_sch):
+        """Multi-level extends chain (C extends B extends A) resolves transitively."""
+        from kicad_tools.cli.sch_preflight import check_pin_pad_count
+
+        sch = _write_sch(_SCH_MULTI_LEVEL_EXTENDS)
+        issues = check_pin_pad_count(str(sch))
+        mismatch_issues = [i for i in issues if i.category == "pin_pad_mismatch"]
+        assert len(mismatch_issues) == 0, (
+            f"Expected no pin_pad_mismatch for multi-level extends, got: "
+            f"{[i.message for i in mismatch_issues]}"
+        )
 
 
 class TestCheckSinglePinNets:
