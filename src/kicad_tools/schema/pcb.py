@@ -2491,9 +2491,13 @@ class PCB:
         cache lists, ensuring accuracy even after in-place modifications
         by other tools.
         """
+        w, h = self.board_size
         return {
             "title": self.title,
             "revision": self.revision,
+            "width_mm": round(w, 2),
+            "height_mm": round(h, 2),
+            "area_mm2": round(w * h, 2),
             "copper_layers": len(self.copper_layers),
             "footprints": self.footprint_count,
             "nets": self.net_count,
