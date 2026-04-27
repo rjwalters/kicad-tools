@@ -539,3 +539,141 @@ def filter_cross_sheet_power_violations(
         filtered.append(v)
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# Wire-dangling / endpoint-off-grid sheet re-attribution
+# ---------------------------------------------------------------------------
+
+_WIRE_POSITION_TYPES: frozenset[str] = frozenset(
+    {"wire_dangling", "endpoint_off_grid"}
+)
+
+
+def _build_wire_endpoint_map(
+    root_schematic: str,
+    tolerance: float = 0.01,
+) -> dict[tuple[float, float], str]:
+    """Build a mapping of wire endpoint coordinates to sheet paths.
+
+    Iterates every child sheet in the hierarchy, loads its wires, and
+    records each wire start/end coordinate together with the sheet's
+    hierarchical path string (e.g. ``/DAC``).
+
+    Coordinates are rounded to *tolerance*-sized buckets so that
+    floating-point imprecision does not prevent matching.
+
+    The root sheet's own wires are **not** included -- the purpose of
+    this map is to find a *child* sheet that owns a position that KiCad
+    incorrectly attributed to the root.
+    """
+    from kicad_tools.schema import Schematic
+    from kicad_tools.schema.hierarchy import build_hierarchy
+
+    hierarchy = build_hierarchy(root_schematic)
+    inv: dict[tuple[float, float], str] = {}
+
+    def _snap(v: float) -> float:
+        return round(v / tolerance) * tolerance
+
+    for node in hierarchy.all_nodes():
+        if node.is_root:
+            continue
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+        sheet_path = node.get_path_string()
+        for wire in sch.wires:
+            inv[(_snap(wire.start[0]), _snap(wire.start[1]))] = sheet_path
+            inv[(_snap(wire.end[0]), _snap(wire.end[1]))] = sheet_path
+
+    return inv
+
+
+def reattribute_wire_dangling_violations(
+    violations: list[dict],
+    root_schematic: str,
+) -> list[dict]:
+    """Re-attribute ``wire_dangling`` and ``endpoint_off_grid`` violations
+    from the root sheet to the correct child sheet.
+
+    KiCad's ERC JSON groups violations under a ``sheets`` array.  For
+    ``wire_dangling`` violations (and sometimes ``endpoint_off_grid``),
+    KiCad attributes them to the root sheet path (``/``) even when the
+    actual wire endpoint lives in a child sheet.
+
+    This function matches each root-attributed violation's ``pos``
+    coordinates against wire endpoints across the hierarchy and updates
+    ``_sheet_path`` to the correct child sheet when a match is found.
+
+    Additionally the violation ``description`` is enriched with the
+    position coordinates so the user can locate the offending wire.
+
+    Args:
+        violations: List of raw violation dicts (must already have
+            ``_sheet_path`` injected by the caller).
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        The same list (mutated in place for efficiency) with updated
+        ``_sheet_path`` values and enriched descriptions.
+    """
+    target_types = _WIRE_POSITION_TYPES
+
+    # Quick check: skip expensive hierarchy traversal when unnecessary.
+    has_target = any(
+        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/"
+        for v in violations
+    )
+    if not has_target:
+        # Still enrich descriptions with coordinates even when no
+        # re-attribution is needed.
+        for v in violations:
+            if v.get("type", "") in target_types:
+                _enrich_description_with_pos(v)
+        return violations
+
+    tolerance = 0.01
+    endpoint_map = _build_wire_endpoint_map(root_schematic, tolerance=tolerance)
+
+    def _snap(val: float) -> float:
+        return round(val / tolerance) * tolerance
+
+    for v in violations:
+        vtype = v.get("type", "")
+        if vtype not in target_types:
+            continue
+
+        # Enrich description with coordinates regardless of re-attribution.
+        _enrich_description_with_pos(v)
+
+        if v.get("_sheet_path", "") != "/":
+            continue
+
+        pos = v.get("pos", {})
+        x = pos.get("x", None)
+        y = pos.get("y", None)
+        if x is None or y is None:
+            continue
+
+        key = (_snap(float(x)), _snap(float(y)))
+        sheet_path = endpoint_map.get(key)
+        if sheet_path is not None:
+            v["_sheet_path"] = sheet_path
+
+    return violations
+
+
+def _enrich_description_with_pos(v: dict) -> None:
+    """Append ``at (x, y)`` to the violation description if position data
+    is available and not already present."""
+    pos = v.get("pos", {})
+    x = pos.get("x", None)
+    y = pos.get("y", None)
+    if x is None or y is None:
+        return
+    coord_str = f"at ({float(x):.1f}, {float(y):.1f})"
+    desc = v.get("description", "")
+    if coord_str not in desc:
+        v["description"] = f"{desc} {coord_str}"

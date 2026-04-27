@@ -31,6 +31,7 @@ from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.erc.cross_sheet import (
     filter_cross_sheet_global_labels,
     filter_cross_sheet_power_violations,
+    reattribute_wire_dangling_violations,
 )
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
@@ -153,6 +154,13 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                         # violations for power nets that have a
                         # power_out driver on another sheet.
                         raw_violations = filter_cross_sheet_power_violations(
+                            raw_violations, schematic_path
+                        )
+
+                        # Re-attribute wire_dangling / endpoint_off_grid
+                        # violations from root sheet to the correct child
+                        # sheet based on position coordinates.
+                        raw_violations = reattribute_wire_dangling_violations(
                             raw_violations, schematic_path
                         )
 
