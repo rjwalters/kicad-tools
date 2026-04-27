@@ -262,6 +262,10 @@ def _is_endpoint_connected(
     - it touches a label, junction, pin, or no-connect marker, OR
     - multiple wires share this exact endpoint, OR
     - it lies on the body (mid-segment) of another wire.
+
+    This is the *geometric* connectivity check used for Phase 3 (fully
+    dangling detection).  For stub detection see
+    :func:`_is_endpoint_electrically_connected`.
     """
     key = (_quantize(point[0]), _quantize(point[1]))
     if key in connection_points:
@@ -269,6 +273,32 @@ def _is_endpoint_connected(
     if endpoint_counts.get(key, 0) > 1:
         return True
     if _endpoint_touches_other_wire_body(point, wire_sexp, all_wires):
+        return True
+    return False
+
+
+def _is_endpoint_electrically_connected(
+    point: tuple[float, float],
+    wire_sexp: SExp,
+    connection_points: set[tuple[int, int]],
+    endpoint_counts: dict[tuple[int, int], int],
+) -> bool:
+    """Return True if *point* has a real electrical connection.
+
+    Unlike :func:`_is_endpoint_connected`, this does **not** count a
+    wire-body touch (T-junction without a junction marker) as connected.
+    In KiCad's electrical model, a wire endpoint that lands on the
+    interior of another wire without a junction symbol is *not* connected
+    -- the ERC reports it as "Wire endpoint is not connected".
+
+    This stricter check is used for stub detection (Phase 3b) so that
+    sub-mm stubs whose only "connection" is a wire-body overlap are
+    correctly flagged for removal.
+    """
+    key = (_quantize(point[0]), _quantize(point[1]))
+    if key in connection_points:
+        return True
+    if endpoint_counts.get(key, 0) > 1:
         return True
     return False
 
@@ -395,6 +425,12 @@ def find_cleanup_candidates(
     # These are sub-mm wire fragments left by repair operations that have one
     # end connected and one end dangling.  Only flag them when their length is
     # below the configurable threshold (default 1.27mm).
+    #
+    # We use the *strict* electrical connectivity check here: a wire
+    # endpoint that merely touches another wire's body (T-junction without
+    # a junction marker) is NOT considered connected, because KiCad's ERC
+    # treats it the same way.  This ensures that sub-mm stubs whose only
+    # "anchor" is a wire-body overlap are correctly detected.
     if stub_threshold > 0:
         # Build a set of wires already flagged so we don't double-count
         flagged_ids = {id(issue.wire_sexp) for issue in issues}
@@ -408,15 +444,20 @@ def find_cleanup_candidates(
             if length >= stub_threshold:
                 continue
 
-            dangling_ends = 0
+            electrically_dangling = 0
             for pt in [start, end]:
-                if not _is_endpoint_connected(
-                    pt, ws, connection_points, endpoint_counts, unique_wires
+                if not _is_endpoint_electrically_connected(
+                    pt, ws, connection_points, endpoint_counts
                 ):
-                    dangling_ends += 1
+                    electrically_dangling += 1
 
-            # Exactly one dangling end means it's a stub
-            if dangling_ends == 1:
+            # At least one electrically-dangling end on a short wire is a stub.
+            # With the strict check, a stub anchored only by a wire-body touch
+            # will show electrically_dangling == 2 (both ends have no real
+            # connection).  A stub with one end on a shared wire endpoint and
+            # the free end dangling will show electrically_dangling == 1.
+            # Both cases should be flagged.
+            if electrically_dangling >= 1:
                 issues.append(
                     WireIssue(
                         reason="stub",

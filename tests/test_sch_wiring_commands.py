@@ -512,6 +512,131 @@ SCHEMATIC_WITH_T_JUNCTION_CONNECTED = """\
 """
 
 
+# Schematic where a sub-mm stub has one endpoint sharing a wire endpoint
+# and the other endpoint landing on the body of another wire WITHOUT a
+# junction marker.  The old detection logic treated the body-touching end
+# as "connected" (via _endpoint_touches_other_wire_body), giving
+# dangling_ends == 0, so the stub escaped detection entirely.
+#
+# Layout:
+#   Wire A: (100,50) -> (200,50)  horizontal, labels at both ends
+#   Wire B: (150,50) -> (150,60)  vertical, label at far end
+#   Stub:   (150,60) -> (160,60.4) 0.4mm diagonal stub from wire B end
+#
+# The stub's start (150,60) shares an endpoint with wire B and a label.
+# The stub's end (160,60.4) lands on the body of wire A' (see wire-c).
+# Wire C: (100,60.4) -> (200,60.4) runs horizontally at y=60.4.
+# The stub endpoint at (160,60.4) sits on wire C's interior but has
+# no junction, label, pin, or shared wire endpoint there.
+# ERC flags (160,60.4) as "Wire endpoint is not connected".
+#
+# NOTE: we use a diagonal stub (not horizontal/vertical) to ensure it
+# cannot be flagged as a collinear overlap of wire C.
+SCHEMATIC_WITH_ERC_STUB_WIRE_BODY = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000050")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-a-horiz")
+  )
+  (wire (pts (xy 150 50) (xy 150 60))
+    (stroke (width 0) (type default))
+    (uuid "wire-b-vert")
+  )
+  (wire (pts (xy 100 60.4) (xy 200 60.4))
+    (stroke (width 0) (type default))
+    (uuid "wire-c-horiz")
+  )
+  (wire (pts (xy 150 60) (xy 150.3 60.4))
+    (stroke (width 0) (type default))
+    (uuid "erc-stub")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (label "NET3" (at 150 60 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-3")
+  )
+  (label "NET4" (at 100 60.4 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-4")
+  )
+  (label "NET5" (at 200 60.4 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-5")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic where a sub-mm stub has BOTH endpoints touching wire bodies
+# (no junction markers at either end, no shared wire endpoints).
+#
+# Layout:
+#   Wire A: (100,50) -> (200,50)   horizontal
+#   Wire B: (150,40) -> (150,60)   vertical, crossing wire A
+#   Stub:   (150.2,50) -> (150.2,50.3)  0.3mm stub near the crossing
+#
+# Both stub endpoints sit on wire bodies without junctions.
+# Labels at the outer ends of wire A and wire B ensure they aren't
+# flagged as dangling themselves.
+SCHEMATIC_WITH_BOTH_ENDS_ON_WIRE_BODY = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000051")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-a-horiz")
+  )
+  (wire (pts (xy 150 40) (xy 150 60))
+    (stroke (width 0) (type default))
+    (uuid "wire-b-vert")
+  )
+  (wire (pts (xy 150.2 50) (xy 150.2 50.3))
+    (stroke (width 0) (type default))
+    (uuid "floating-stub")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (label "NET3" (at 150 40 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-3")
+  )
+  (label "NET4" (at 150 60 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-4")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -999,6 +1124,52 @@ class TestCleanupWires:
             (0.0, 0.0), (10.0, 0.0),
             (2.0, 1.0), (8.0, 1.0),  # same direction but 1mm apart
         )
+
+    # --- ERC stub detection tests (wire-body false connectivity) ---
+
+    def test_erc_stub_one_end_on_wire_body(self, tmp_path):
+        """A sub-mm stub with one shared endpoint and one wire-body touch is flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_ERC_STUB_WIRE_BODY)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The stub is the ~0.5mm diagonal from (150,60) to (150.3,60.4)
+        assert stubs[0].start == (150.0, 60.0)
+        assert stubs[0].end == (150.3, 60.4)
+
+    def test_erc_stub_both_ends_on_wire_body(self, tmp_path):
+        """A sub-mm stub with both endpoints on wire bodies (no junctions) is flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_BOTH_ENDS_ON_WIRE_BODY)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The stub is the 0.3mm wire from (150.2,50) to (150.2,50.3)
+        assert stubs[0].start == (150.2, 50.0)
+        assert stubs[0].end == (150.2, 50.3)
+
+    def test_erc_stub_removal_preserves_real_wires(self, tmp_path):
+        """Removing ERC stubs does not affect legitimate wires."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates, remove_wires
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_ERC_STUB_WIRE_BODY)
+        sch = Schematic.load(path)
+
+        initial_wire_count = len(list(sch.sexp.find_all("wire")))
+        issues = find_cleanup_candidates(sch)
+        stubs = [i for i in issues if i.reason == "stub"]
+        removed = remove_wires(sch, stubs)
+
+        assert removed == 1
+        # 4 wires initially (wire-a, wire-b, wire-c, stub) -> 3 remaining
+        assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
 
 
 # ---------------------------------------------------------------------------
