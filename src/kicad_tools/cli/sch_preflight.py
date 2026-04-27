@@ -28,7 +28,6 @@ from pathlib import Path
 
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
-from kicad_tools.schema.library import LibrarySymbol
 
 from .sch_validate import (
     ValidationIssue,
@@ -129,37 +128,20 @@ def check_pin_pad_count(schematic_path: str) -> list[ValidationIssue]:
         for node in hierarchy.all_nodes():
             try:
                 sch = Schematic.load(node.path)
-                # Build map of library symbol name -> pin count from lib_symbols
+                # Build map of library symbol name -> pin count from lib_symbols.
+                # get_lib_symbol_resolved() handles extends chains so derived
+                # symbols return their effective (inherited) pin count.
                 lib_pin_counts: dict[str, int] = {}
-                extends_map: dict[str, str] = {}
                 lib_syms_sexp = sch.lib_symbols
                 if lib_syms_sexp is not None:
                     for sym_sexp in lib_syms_sexp.find_all("symbol"):
                         try:
-                            lib_sym = LibrarySymbol.from_sexp(sym_sexp)
-                            lib_pin_counts[lib_sym.name] = lib_sym.pin_count
-                            # Track extends relationships for derived symbols
-                            ext_node = sym_sexp.get("extends")
-                            if ext_node is not None:
-                                base_name = ext_node.get_string(0)
-                                if base_name:
-                                    extends_map[lib_sym.name] = base_name
+                            sym_name = sym_sexp.get_string(0) or ""
+                            lib_sym = sch.get_lib_symbol_resolved(sym_name)
+                            if lib_sym is not None:
+                                lib_pin_counts[lib_sym.name] = lib_sym.pin_count
                         except Exception:
                             pass
-
-                    # Resolve extends chains: derived symbols with 0 pins
-                    # inherit pin count from their base symbol.
-                    for name, base in extends_map.items():
-                        if lib_pin_counts.get(name, 0) == 0:
-                            visited: set[str] = {name}
-                            cur = base
-                            while cur and cur not in visited:
-                                count = lib_pin_counts.get(cur, 0)
-                                if count > 0:
-                                    lib_pin_counts[name] = count
-                                    break
-                                visited.add(cur)
-                                cur = extends_map.get(cur)
 
                 for sym in sch.symbols:
                     if sym.lib_id.startswith("power:"):

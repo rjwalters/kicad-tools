@@ -17,7 +17,7 @@ from kicad_tools.sexp import SExp
 
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
-from .library import LibrarySymbol
+from .library import LibrarySymbol, resolve_extends
 from .symbol import SymbolInstance, SymbolPin, SymbolProperty
 from .wire import Junction, Wire
 
@@ -291,6 +291,34 @@ class Schematic:
                     return sym
         return None
 
+    def get_lib_symbol_resolved(self, lib_id: str) -> LibrarySymbol | None:
+        """Return a :class:`LibrarySymbol` with extends chains resolved.
+
+        This is the recommended way for CLI commands to obtain a library
+        symbol from the schematic's embedded ``lib_symbols`` section.
+        If the symbol uses ``(extends "Base")``, its ``pins`` and
+        ``graphics`` will be populated from the base symbol.
+
+        Returns ``None`` if *lib_id* is not found in ``lib_symbols``.
+        """
+        sexp = self.get_lib_symbol(lib_id)
+        if sexp is None:
+            return None
+        sym = LibrarySymbol.from_sexp(sexp)
+        if sym.extends is not None and not sym.pins:
+            # Build a lookup of all embedded symbols for resolution
+            all_syms: dict[str, LibrarySymbol] = {}
+            if lib_syms := self.lib_symbols:
+                for s in lib_syms.find_all("symbol"):
+                    parsed = LibrarySymbol.from_sexp(s)
+                    all_syms[parsed.name] = parsed
+            resolve_extends(all_syms)
+            # The resolved copy is in all_syms
+            resolved = all_syms.get(sym.name)
+            if resolved is not None:
+                return resolved
+        return sym
+
     # Editing API
 
     def _find_insertion_index(self) -> int:
@@ -387,9 +415,8 @@ class Schematic:
 
         # Determine pin numbers from lib_symbols when not explicitly given
         if pin_numbers is None:
-            lib_sym_sexp = self.get_lib_symbol(lib_id)
-            if lib_sym_sexp is not None:
-                lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+            lib_sym = self.get_lib_symbol_resolved(lib_id)
+            if lib_sym is not None:
                 pin_numbers = [p.number for p in lib_sym.pins]
             else:
                 raise ValueError(
@@ -450,9 +477,8 @@ class Schematic:
 
         # Detect pins from lib_symbols
         pin_numbers: list[str] = []
-        lib_sym_sexp = self.get_lib_symbol(lib_id)
-        if lib_sym_sexp is not None:
-            lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+        lib_sym = self.get_lib_symbol_resolved(lib_id)
+        if lib_sym is not None:
             pin_numbers = [p.number for p in lib_sym.pins]
         else:
             # Power symbols typically have a single pin "1"
@@ -786,10 +812,9 @@ class Schematic:
 
         # Pin positions of existing symbol instances
         for sym in self.symbols:
-            lib_sym_sexp = self.get_lib_symbol(sym.lib_id)
-            if lib_sym_sexp is None:
+            lib_sym_obj = self.get_lib_symbol_resolved(sym.lib_id)
+            if lib_sym_obj is None:
                 continue
-            lib_sym_obj = LibrarySymbol.from_sexp(lib_sym_sexp)
             pin_positions = lib_sym_obj.get_all_pin_positions(
                 instance_pos=sym.position,
                 instance_rot=sym.rotation,

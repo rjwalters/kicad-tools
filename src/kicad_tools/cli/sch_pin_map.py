@@ -20,7 +20,6 @@ from collections import defaultdict
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.label import PowerSymbol
-from kicad_tools.schema.library import LibrarySymbol
 
 # Use integer-scaled coordinates for fast set lookup (matches sch_check_connections.py)
 Coord = tuple[int, int]
@@ -316,11 +315,9 @@ def resolve_pin_map(
         if symbol.lib_id.startswith("power:"):
             continue
 
-        lib_sexp = schematic.get_lib_symbol(symbol.lib_id)
-        if not lib_sexp:
+        lib_sym = schematic.get_lib_symbol_resolved(symbol.lib_id)
+        if not lib_sym:
             continue
-
-        lib_sym = LibrarySymbol.from_sexp(lib_sexp)
         pin_positions = lib_sym.get_all_pin_positions(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
