@@ -168,15 +168,16 @@ class DimensionRules(DRCRule):
         min_clearance = design_rules.min_clearance_mm
 
         # Collect all drill holes: vias + through-hole pads
-        # Each entry: (position, drill_diameter, item_description, footprint_reference)
+        # Each entry: (position, drill_diameter, item_description,
+        #              footprint_reference, net_name)
         # footprint_reference is "" for vias (no footprint context)
-        drills: list[tuple[tuple[float, float], float, str, str]] = []
+        drills: list[tuple[tuple[float, float], float, str, str, str]] = []
 
         # Add vias
         for via in pcb.vias:
             net = pcb.get_net(via.net_number)
             net_name = net.name if net else f"net:{via.net_number}"
-            drills.append((via.position, via.drill, net_name, ""))
+            drills.append((via.position, via.drill, net_name, "", net_name))
 
         # Add through-hole pads from footprints
         for fp in pcb.footprints:
@@ -192,13 +193,14 @@ class DimensionRules(DRCRule):
                             pad.drill,
                             f"{fp.reference}-{pad.number}:{net_name}",
                             fp.reference,
+                            net_name,
                         )
                     )
 
         # Check all pairs for clearance
         # Edge-to-edge distance = center-to-center - (r1 + r2)
-        for i, (pos1, drill1, item1, fp_ref1) in enumerate(drills):
-            for pos2, drill2, item2, fp_ref2 in drills[i + 1 :]:
+        for i, (pos1, drill1, item1, fp_ref1, net1) in enumerate(drills):
+            for pos2, drill2, item2, fp_ref2, net2 in drills[i + 1 :]:
                 # Calculate center-to-center distance
                 dx = pos2[0] - pos1[0]
                 dy = pos2[1] - pos1[1]
@@ -235,5 +237,6 @@ class DimensionRules(DRCRule):
                             actual_value=edge_distance,
                             required_value=min_clearance,
                             items=(item1, item2),
+                            nets=(net1, net2),
                         )
                     )
