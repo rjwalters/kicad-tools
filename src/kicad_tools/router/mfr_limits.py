@@ -30,6 +30,7 @@ class MfrLimits:
         min_via_drill: Minimum via drill diameter
         min_via_annular: Minimum via annular ring width
         min_via_diameter: Computed minimum via diameter (drill + 2*annular)
+        min_edge_clearance: Minimum copper-to-board-edge clearance
     """
 
     name: str
@@ -37,6 +38,7 @@ class MfrLimits:
     min_clearance: float
     min_via_drill: float
     min_via_annular: float
+    min_edge_clearance: float = 0.0
 
     @property
     def min_via_diameter(self) -> float:
@@ -54,6 +56,7 @@ MFR_JLCPCB = MfrLimits(
     min_clearance=0.127,  # 5 mil
     min_via_drill=0.3,  # 0.3mm is standard, 0.2mm costs extra
     min_via_annular=0.15,  # 6 mil annular ring
+    min_edge_clearance=0.3,  # 0.3mm copper-to-edge (matches .kicad_dru files)
 )
 
 MFR_OSHPARK = MfrLimits(
@@ -62,6 +65,7 @@ MFR_OSHPARK = MfrLimits(
     min_clearance=0.152,  # 6 mil
     min_via_drill=0.254,  # 10 mil
     min_via_annular=0.127,  # 5 mil
+    min_edge_clearance=0.381,  # 15 mil copper-to-edge (matches .kicad_dru files)
 )
 
 MFR_PCBWAY = MfrLimits(
@@ -70,6 +74,7 @@ MFR_PCBWAY = MfrLimits(
     min_clearance=0.127,  # 5 mil
     min_via_drill=0.2,  # 8 mil (can go smaller for extra cost)
     min_via_annular=0.15,  # 6 mil
+    min_edge_clearance=0.25,  # 0.25mm copper-to-edge (matches .kicad_dru files)
 )
 
 # Mapping of manufacturer names to their limits

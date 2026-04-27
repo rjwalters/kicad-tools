@@ -2613,6 +2613,24 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"Cleared {count} entries from routing cache")
 
+    # Auto-apply edge clearance from manufacturer when not explicitly set.
+    # This ensures --manufacturer jlcpcb automatically enforces the 0.3mm
+    # copper-to-edge clearance without requiring a separate --edge-clearance flag.
+    if args.edge_clearance is None:
+        from kicad_tools.router.mfr_limits import get_mfr_limits
+
+        try:
+            _mfr = get_mfr_limits(args.manufacturer)
+            if _mfr.min_edge_clearance > 0:
+                args.edge_clearance = _mfr.min_edge_clearance
+                if not args.quiet:
+                    print(
+                        f"Edge clearance: {args.edge_clearance}mm "
+                        f"(from {args.manufacturer} manufacturer limits)"
+                    )
+        except ValueError:
+            pass  # Unknown manufacturer -- edge_clearance stays None
+
     # Handle auto-layers mode (separate code path)
     if args.auto_layers and args.adaptive_rules:
         # Combined 2D search: layers + rules

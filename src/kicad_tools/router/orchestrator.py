@@ -560,7 +560,11 @@ class RoutingOrchestrator:
         if self._escape is None:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
-                self._escape = EscapeRouter(grid=grid, rules=self.rules, net_class_map=self.net_class_map)
+                self._escape = EscapeRouter(
+                    grid=grid, rules=self.rules, net_class_map=self.net_class_map,
+                    edge_clearance=getattr(self.pcb, "_edge_clearance", None),
+                    board_bounds=getattr(self.pcb, "_board_bbox", None),
+                )
 
         if self._escape is not None:
             package_info = self._escape.analyze_package(pads)
@@ -1175,7 +1179,11 @@ class RoutingOrchestrator:
         if self._escape is None:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
-                self._escape = EscapeRouter(grid=grid, rules=self.rules, net_class_map=self.net_class_map)
+                self._escape = EscapeRouter(
+                    grid=grid, rules=self.rules, net_class_map=self.net_class_map,
+                    edge_clearance=getattr(self.pcb, "_edge_clearance", None),
+                    board_bounds=getattr(self.pcb, "_board_bbox", None),
+                )
         return self._escape
 
     @property
