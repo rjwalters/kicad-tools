@@ -2358,13 +2358,16 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                             )
                             # Convert integer units (0.1mm) to mm
                             dist_mm = min_dist * 0.1
+                            coord_str = (
+                                f"at ({pos[0]:.2f}, {pos[1]:.2f})"
+                            )
                             if dist_mm <= 5.0:
                                 near_miss_parts.append(
-                                    f"pin {pin_num}: {dist_mm:.1f}mm"
+                                    f"pin {pin_num} {coord_str}: {dist_mm:.1f}mm"
                                 )
                             else:
                                 near_miss_parts.append(
-                                    f"pin {pin_num}: no wire within 5mm"
+                                    f"pin {pin_num} {coord_str}: no wire within 5mm"
                                 )
 
                     msg = (
