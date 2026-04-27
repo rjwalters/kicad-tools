@@ -2130,11 +2130,33 @@ def check_power_pin_polarity(schematic_path: str) -> list[ValidationIssue]:
 
                     for pin_num, pin_info in pins_data.items():
                         net_name = pin_info.get("net")
-                        if net_name is None:
-                            continue
-
                         pin_name = pin_info.get("name", "")
                         pin_type = pin_info.get("type", "")
+
+                        if net_name is None:
+                            # Warn when a recognized power pin has no
+                            # resolved net -- silently skipping could
+                            # hide reversed wiring.
+                            if pin_type in ("power_in", "power_out"):
+                                _pin_tokens = _tokenize_name(pin_name)
+                                if _pin_tokens & (
+                                    _POWER_POSITIVE_KEYWORDS
+                                    | _POWER_NEGATIVE_KEYWORDS
+                                ):
+                                    issues.append(
+                                        ValidationIssue(
+                                            severity="warning",
+                                            category="power_polarity",
+                                            message=(
+                                                f"Power pin {ref}.{pin_name} "
+                                                f"(pin {pin_num}) has no "
+                                                f"resolved net -- polarity "
+                                                f"cannot be verified"
+                                            ),
+                                            location=sheet_path,
+                                        )
+                                    )
+                            continue
 
                         # Only consider power pins
                         if pin_type not in ("power_in", "power_out"):
