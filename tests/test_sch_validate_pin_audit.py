@@ -10,6 +10,8 @@ from kicad_tools.cli.sch_validate import (
     ValidationIssue,
     _find_protocol,
     _is_generic_pin_name,
+    _is_mcu,
+    _is_mcu_gpio_pin,
     _is_passive_component,
     _tokenize_name,
     check_pin_net_semantic_mismatch,
@@ -432,3 +434,259 @@ class TestCheckPinNetSemanticMismatch:
         ]
         # Both have SPI keywords but MOSI != MISO -- should flag
         assert len(pin_issues) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests -- MCU GPIO pin detection
+# ---------------------------------------------------------------------------
+
+
+class TestIsMcu:
+    def test_stm32(self):
+        assert _is_mcu("MCU_ST_STM32:STM32C011F6Px") is True
+
+    def test_mcu_microchip(self):
+        assert _is_mcu("MCU_Microchip_ATSAM:ATSAMD21G18A") is True
+
+    def test_mcu_espressif(self):
+        assert _is_mcu("MCU_Espressif:ESP32-S3") is True
+
+    def test_mcu_rpi(self):
+        assert _is_mcu("MCU_RaspberryPi:RP2040") is True
+
+    def test_custom_stm32(self):
+        assert _is_mcu("STM32F401CCU6") is True
+
+    def test_custom_esp32(self):
+        assert _is_mcu("ESP32-WROOM-32") is True
+
+    def test_audio_codec_not_mcu(self):
+        assert _is_mcu("Audio_Codec:PCM5122") is False
+
+    def test_generic_ic_not_mcu(self):
+        assert _is_mcu("IC:SomeIC") is False
+
+    def test_connector_not_mcu(self):
+        assert _is_mcu("Connector:USB_C") is False
+
+
+class TestIsMcuGpioPin:
+    def test_stm32_pa(self):
+        assert _is_mcu_gpio_pin("PA5") is True
+
+    def test_stm32_pb(self):
+        assert _is_mcu_gpio_pin("PB3") is True
+
+    def test_stm32_pc_double_digit(self):
+        assert _is_mcu_gpio_pin("PC10") is True
+
+    def test_stm32_pd(self):
+        assert _is_mcu_gpio_pin("PD2") is True
+
+    def test_gpio_generic(self):
+        assert _is_mcu_gpio_pin("GPIO5") is True
+
+    def test_gpio_underscore(self):
+        assert _is_mcu_gpio_pin("GPIO_25") is True
+
+    def test_io_style(self):
+        assert _is_mcu_gpio_pin("IO5") is True
+
+    def test_io_double_digit(self):
+        assert _is_mcu_gpio_pin("IO25") is True
+
+    def test_named_pin_not_gpio(self):
+        assert _is_mcu_gpio_pin("BCLK") is False
+
+    def test_mode_pin_not_gpio(self):
+        assert _is_mcu_gpio_pin("MODE") is False
+
+    def test_sda_not_gpio(self):
+        assert _is_mcu_gpio_pin("SDA") is False
+
+    def test_empty(self):
+        assert _is_mcu_gpio_pin("") is False
+
+    def test_connector_p_pin_not_gpio(self):
+        # P1 is a connector pin (generic), not MCU GPIO
+        assert _is_mcu_gpio_pin("P1") is False
+
+
+# ---------------------------------------------------------------------------
+# Integration tests -- MCU GPIO suppression
+# ---------------------------------------------------------------------------
+
+
+class TestMcuGpioSuppression:
+    """MCU GPIO pins connected to protocol nets should not produce warnings."""
+
+    def test_mcu_gpio_to_spi_net_no_warning(self, tmp_path: Path):
+        """STM32 MCU GPIO pins (PA5, PA6, PA7) on SPI nets are not flagged."""
+        pins = [
+            ("1", "PA5", "bidirectional"),
+            ("2", "PA6", "bidirectional"),
+            ("3", "PA7", "bidirectional"),
+            ("4", "VDD", "power_in"),
+        ]
+        pin_nets = {
+            "1": "SPI_SCK",
+            "2": "SPI_MISO",
+            "3": "SPI_MOSI",
+        }
+        sch_text = _make_schematic(
+            "MCU_ST_STM32:STM32C011F6Px", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "mcu_spi.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
+
+    def test_mcu_gpio_to_i2c_net_no_warning(self, tmp_path: Path):
+        """MCU GPIO pins connected to I2C nets are not flagged."""
+        pins = [
+            ("1", "PB6", "bidirectional"),
+            ("2", "PB7", "bidirectional"),
+        ]
+        pin_nets = {
+            "1": "I2C_SCL",
+            "2": "I2C_SDA",
+        }
+        sch_text = _make_schematic(
+            "MCU_ST_STM32:STM32F401CCU6", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "mcu_i2c.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
+
+    def test_mcu_gpio_to_i2s_net_no_warning(self, tmp_path: Path):
+        """MCU GPIO pins connected to I2S nets are not flagged."""
+        pins = [
+            ("1", "PC7", "bidirectional"),
+            ("2", "PC10", "bidirectional"),
+            ("3", "PC12", "bidirectional"),
+        ]
+        pin_nets = {
+            "1": "I2S_MCK",
+            "2": "I2S_BCLK",
+            "3": "I2S_DIN",
+        }
+        sch_text = _make_schematic(
+            "MCU_ST_STM32:STM32F401CCU6", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "mcu_i2s.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
+
+    def test_non_mcu_named_pin_to_bus_net_still_warns(self, tmp_path: Path):
+        """Non-MCU component with non-bus pin connected to bus net still warns."""
+        pins = [
+            ("1", "MODE", "input"),
+            ("2", "BCLK", "input"),
+        ]
+        pin_nets = {
+            "1": "I2S_DIN",
+            "2": "I2S_BCLK",
+        }
+        sch_text = _make_schematic(
+            "Audio_Codec:PCM5122", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "codec_mode.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        # MODE pin on non-MCU connected to I2S_DIN should still warn
+        assert len(pin_issues) >= 1
+        assert any("MODE" in i.message for i in pin_issues)
+
+    def test_mcu_non_gpio_pin_to_bus_net_still_warns(self, tmp_path: Path):
+        """MCU component with non-GPIO pin names still warns on mismatch."""
+        pins = [
+            ("1", "NRST", "input"),
+            ("2", "BOOT0", "input"),
+        ]
+        pin_nets = {
+            "1": "SPI_MOSI",
+            "2": "I2C_SDA",
+        }
+        sch_text = _make_schematic(
+            "MCU_ST_STM32:STM32C011F6Px", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "mcu_nrst.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        # NRST and BOOT0 are not GPIO pins, so should still warn
+        assert len(pin_issues) >= 1
+
+    def test_esp32_gpio_to_spi_net_no_warning(self, tmp_path: Path):
+        """ESP32 GPIO pins connected to SPI nets are not flagged."""
+        pins = [
+            ("1", "GPIO5", "bidirectional"),
+            ("2", "GPIO18", "bidirectional"),
+            ("3", "GPIO19", "bidirectional"),
+        ]
+        pin_nets = {
+            "1": "SPI_CS",
+            "2": "SPI_SCK",
+            "3": "SPI_MISO",
+        }
+        sch_text = _make_schematic(
+            "MCU_Espressif:ESP32-S3", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "esp_spi.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
+
+    def test_esp_io_style_to_uart_net_no_warning(self, tmp_path: Path):
+        """ESP-style IO pins connected to UART nets are not flagged."""
+        pins = [
+            ("1", "IO1", "bidirectional"),
+            ("2", "IO3", "bidirectional"),
+        ]
+        pin_nets = {
+            "1": "UART_TX",
+            "2": "UART_RX",
+        }
+        sch_text = _make_schematic(
+            "MCU_Espressif:ESP32-C3", pins, pin_nets, ref="U1",
+        )
+        sch_path = tmp_path / "esp_uart.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_pin_net_semantic_mismatch(str(sch_path))
+        pin_issues = [
+            i for i in issues
+            if i.category == "pin_assignment" and i.severity == "warning"
+        ]
+        assert pin_issues == [], f"Unexpected warnings: {pin_issues}"

@@ -1041,6 +1041,34 @@ def _is_generic_pin_name(name: str) -> bool:
     return False
 
 
+def _is_mcu_gpio_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* matches common MCU GPIO naming patterns.
+
+    Recognised patterns:
+    - STM32-style: ``PA5``, ``PB3``, ``PC10`` (``P[A-K]\\d+``)
+    - Generic GPIO: ``GPIO5``, ``GPIO_25``
+    - ESP-style IO: ``IO5``, ``IO25``
+
+    These pin names represent the physical port identifier of an MCU
+    rather than the signal function.  The actual function is determined
+    by the MCU alternate-function table, so connecting ``PA5`` to
+    ``SPI_SCK`` is perfectly normal and should not trigger a warning.
+    """
+    if not pin_name:
+        return False
+    stripped = pin_name.strip().upper()
+    # STM32-style: PA0, PB12, PC3, PD10, etc.  Port letters A-K.
+    if re.match(r"^P[A-K]\d+$", stripped):
+        return True
+    # Generic GPIO: GPIO5, GPIO_25, GPIO25
+    if re.match(r"^GPIO[_]?\d+$", stripped):
+        return True
+    # ESP-style IO: IO5, IO25
+    if re.match(r"^IO\d+$", stripped):
+        return True
+    return False
+
+
 def _is_passive_component(lib_id: str) -> bool:
     """Return True for passive component lib_ids (R, C, L, etc.)."""
     # Common passive library prefixes
@@ -1063,6 +1091,27 @@ def _is_capacitor(lib_id: str) -> bool:
     """Return True if *lib_id* refers to a capacitor symbol (C, C_Small, C_Polarized, etc.)."""
     part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
     return part == "C" or part.startswith("C_")
+
+
+def _is_mcu(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to any MCU symbol.
+
+    Matches the ``MCU_`` prefix used by the standard KiCad symbol
+    libraries for MCUs across all vendors (ST, Microchip, Espressif,
+    Raspberry Pi, etc.).  Also accepts custom lib_ids that start with
+    common MCU family names.
+    """
+    upper = lib_id.upper()
+    # KiCad standard library MCU categories: MCU_ST, MCU_Microchip,
+    # MCU_NXP, MCU_Nordic, MCU_RaspberryPi, etc.
+    if "MCU_" in upper:
+        return True
+    # Custom libraries that use family names directly
+    for prefix in ("STM32", "ESP32", "ESP8266", "RP2040", "RP2350",
+                   "ATSAM", "NRF52", "NRF53", "PIC", "ATMEGA", "ATTINY"):
+        if prefix in upper:
+            return True
+    return False
 
 
 def _is_stm32(lib_id: str) -> bool:
@@ -1570,7 +1619,13 @@ def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue
                         elif net_bus and not pin_bus and net_protocol:
                             # Net has bus keywords but pin does not -- the net
                             # is likely on the wrong pin (e.g., I2S_DIN on a
-                            # MODE pin)
+                            # MODE pin).  However, MCU GPIO pins (PA5, PB3,
+                            # GPIO25, IO5, etc.) are named after their physical
+                            # port, not their signal function.  Connecting
+                            # SPI_SCK to PA5 is normal via the alternate-
+                            # function table, so suppress for MCU components.
+                            if _is_mcu(lib_id) and _is_mcu_gpio_pin(pin_name):
+                                continue
                             pin_num_int = int(pin_num) if pin_num.isdigit() else -1
                             mismatches.append(
                                 (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
