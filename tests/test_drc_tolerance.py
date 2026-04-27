@@ -34,22 +34,24 @@ class MockNet:
 
 
 class MockSegment:
-    def __init__(self, start, end, width, layer, net_number, uuid="seg0001"):
+    def __init__(self, start, end, width, layer, net_number, net_name="", uuid="seg0001"):
         self.start = start
         self.end = end
         self.width = width
         self.layer = layer
         self.net_number = net_number
+        self.net_name = net_name
         self.uuid = uuid
 
 
 class MockVia:
-    def __init__(self, position, size, drill, layers, net_number, uuid="via0001"):
+    def __init__(self, position, size, drill, layers, net_number, net_name="", uuid="via0001"):
         self.position = position
         self.size = size
         self.drill = drill
         self.layers = layers
         self.net_number = net_number
+        self.net_name = net_name
         self.uuid = uuid
 
 
