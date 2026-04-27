@@ -1075,6 +1075,33 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch reconnect-pin
+    sch_reconnect_pin = sch_subparsers.add_parser(
+        "reconnect-pin", help="Reconnect a pin from one net to another"
+    )
+    sch_reconnect_pin.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_reconnect_pin.add_argument(
+        "--ref", required=True, help="Symbol reference (e.g., C41)"
+    )
+    sch_reconnect_pin.add_argument(
+        "--pin", required=True, help="Pin number to reconnect"
+    )
+    sch_reconnect_pin.add_argument(
+        "--to-net", required=True, help="Target net name (e.g., GNDD)"
+    )
+    sch_reconnect_pin.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_reconnect_pin.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_reconnect_pin.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_reconnect_pin.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch remove-component
     sch_remove_component = sch_subparsers.add_parser(
         "remove-component", help="Remove a symbol from a schematic"
