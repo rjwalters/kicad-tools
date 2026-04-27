@@ -1731,9 +1731,8 @@ class TestReportCLI:
         assert report_path.exists()
 
         content = report_path.read_text(encoding="utf-8")
-        # Skeleton: header present, optional data sections absent
-        assert "# board" in content
-        assert "cover-block" in content
+        # Skeleton: YAML front matter present, optional data sections absent
+        assert 'title: "board"' in content
         assert "## Board Summary" not in content
 
     def test_version_dir_parameter_in_generator(self, tmp_path: Path) -> None:
@@ -1748,8 +1747,7 @@ class TestReportCLI:
         assert report_path.exists()
 
         content = report_path.read_text(encoding="utf-8")
-        assert "# TestBoard" in content
-        assert "cover-block" in content
+        assert 'title: "TestBoard"' in content
 
     def test_version_dir_none_auto_increments(self, tmp_path: Path) -> None:
         """When version_dir is None, generate() auto-increments as before."""
