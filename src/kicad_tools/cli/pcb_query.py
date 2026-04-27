@@ -51,6 +51,12 @@ def cmd_summary(pcb: PCB, args):
     if summary["revision"]:
         print(f"Revision: {summary['revision']}")
 
+    if summary.get("width_mm") and summary.get("height_mm"):
+        print(
+            f"Board: {summary['width_mm']} x {summary['height_mm']} mm"
+            f" ({summary['area_mm2']} mm\u00b2)"
+        )
+
     print(f"\nLayers: {summary['copper_layers']} copper")
     print(f"Footprints: {summary['footprints']}")
     print(f"Nets: {summary['nets']}")

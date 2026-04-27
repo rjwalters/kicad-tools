@@ -45,6 +45,9 @@ class TestPcbQuery:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert isinstance(data, dict)
+        assert "width_mm" in data
+        assert "height_mm" in data
+        assert "area_mm2" in data
 
     def test_footprints_command(self, minimal_pcb: Path, capsys, monkeypatch):
         """Test footprints command."""

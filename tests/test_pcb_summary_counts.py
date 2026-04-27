@@ -518,3 +518,103 @@ class TestZoneCountZeroRegression:
         cmd_summary(pcb, args)
         captured = capsys.readouterr()
         assert "Zones: 0" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Board dimensions in summary (issue #2169)
+# ---------------------------------------------------------------------------
+
+PCB_WITH_GR_RECT_OUTLINE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (gr_rect (start 100 100) (end 150 130)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+)
+"""
+
+
+@pytest.fixture
+def pcb_with_gr_rect(tmp_path: Path) -> Path:
+    """Create a PCB with a gr_rect Edge.Cuts outline (50 x 30 mm)."""
+    pcb_file = tmp_path / "board_rect.kicad_pcb"
+    pcb_file.write_text(PCB_WITH_GR_RECT_OUTLINE)
+    return pcb_file
+
+
+class TestSummaryDimensions:
+    """Verify summary() includes board dimensions from Edge.Cuts."""
+
+    def test_dimensions_from_gr_rect(self, pcb_with_gr_rect: Path):
+        """summary() must report width/height from gr_rect outline."""
+        pcb = PCB.load(pcb_with_gr_rect)
+        summary = pcb.summary()
+        assert summary["width_mm"] == 50.0
+        assert summary["height_mm"] == 30.0
+        assert summary["area_mm2"] == 1500.0
+
+    def test_dimensions_from_gr_line_polygon(self, pcb_kicad9_no_zones: Path):
+        """summary() must report bounding-box dimensions from gr_line outline.
+
+        The PCB_KICAD9_NO_ZONES fixture has gr_line segments forming a
+        60 x 30 mm rectangle (85,85 to 145,115).
+        """
+        pcb = PCB.load(pcb_kicad9_no_zones)
+        summary = pcb.summary()
+        assert summary["width_mm"] == 60.0
+        assert summary["height_mm"] == 30.0
+        assert summary["area_mm2"] == 1800.0
+
+    def test_dimensions_zero_when_no_edge_cuts(self, pcb_no_vias_zones: Path):
+        """summary() must report 0.0 dimensions when no Edge.Cuts geometry."""
+        pcb = PCB.load(pcb_no_vias_zones)
+        summary = pcb.summary()
+        assert summary["width_mm"] == 0.0
+        assert summary["height_mm"] == 0.0
+        assert summary["area_mm2"] == 0.0
+
+    def test_dimensions_in_json_output(self, pcb_with_gr_rect: Path):
+        """JSON serialisation must include dimension fields."""
+        pcb = PCB.load(pcb_with_gr_rect)
+        summary = pcb.summary()
+        output = json.dumps(summary, indent=2)
+        data = json.loads(output)
+        assert "width_mm" in data
+        assert "height_mm" in data
+        assert "area_mm2" in data
+
+    def test_dimensions_in_text_output(self, pcb_with_gr_rect: Path, capsys):
+        """Text output must display board dimensions line."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.pcb_query import cmd_summary
+
+        pcb = PCB.load(pcb_with_gr_rect)
+        args = SimpleNamespace(format="text", pcb="board_rect.kicad_pcb")
+        cmd_summary(pcb, args)
+        captured = capsys.readouterr()
+        assert "50.0 x 30.0 mm" in captured.out
+
+    def test_no_dimensions_line_when_zero(self, pcb_no_vias_zones: Path, capsys):
+        """Text output must omit board dimensions when both are zero."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.pcb_query import cmd_summary
+
+        pcb = PCB.load(pcb_no_vias_zones)
+        args = SimpleNamespace(format="text", pcb="board.kicad_pcb")
+        cmd_summary(pcb, args)
+        captured = capsys.readouterr()
+        assert "Board:" not in captured.out
