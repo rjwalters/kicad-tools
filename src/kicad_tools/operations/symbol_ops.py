@@ -172,12 +172,32 @@ def replace_symbol_lib_id(
                 f"Symbol '{new_lib_id}' not found in library '{lib_path}'"
             )
 
-        # Compare old and new pin types for reporting
+        # Resolve the effective pins: for derived symbols the pins live
+        # on the base symbol; for standalone symbols they are on the
+        # symbol itself.
+        if new_lib_sym.extends is not None:
+            base_sym = lib.resolve_base(new_lib_sym)
+            effective_pins = base_sym.pins
+        else:
+            base_sym = None
+            effective_pins = new_lib_sym.pins
+
+        # Compare old and new pin types for reporting (using effective pins)
         old_lib_sym_sexp = _find_lib_symbol_sexp(sexp, old_lib_id)
         if old_lib_sym_sexp is not None:
             old_lib_sym = LibrarySymbol.from_sexp(old_lib_sym_sexp)
-            old_pin_map = {p.number: p for p in old_lib_sym.pins}
-            for new_pin in new_lib_sym.pins:
+            # For the old symbol, also resolve via extends if applicable
+            if old_lib_sym.extends is not None:
+                old_base_sexp = _find_lib_symbol_sexp(sexp, old_lib_sym.extends)
+                if old_base_sexp is not None:
+                    old_base = LibrarySymbol.from_sexp(old_base_sexp)
+                    old_effective_pins = old_base.pins
+                else:
+                    old_effective_pins = old_lib_sym.pins
+            else:
+                old_effective_pins = old_lib_sym.pins
+            old_pin_map = {p.number: p for p in old_effective_pins}
+            for new_pin in effective_pins:
                 old_pin = old_pin_map.get(new_pin.number)
                 if old_pin and old_pin.type != new_pin.type:
                     pin_type_changes.append(
@@ -189,6 +209,26 @@ def replace_symbol_lib_id(
                         )
                     )
 
+        # Build the Schematic helper for lib_symbols manipulation
+        sch = Schematic.__new__(Schematic)
+        sch._sexp = sexp
+
+        # For derived symbols, embed the base symbol first (if not
+        # already present).  The base symbol is stored under its
+        # original library name, which KiCad resolves from (extends).
+        if base_sym is not None:
+            base_embed = LibrarySymbol(
+                name=base_sym.name,
+                properties=base_sym.properties,
+                pins=base_sym.pins,
+                graphics=base_sym.graphics,
+                units=base_sym.units,
+            )
+            sch.embed_lib_symbol(base_embed)
+            changes.append(
+                f"lib_symbols: embedded base symbol '{base_sym.name}'"
+            )
+
         # Replace the lib_symbols entry.  We need to rename the new
         # library symbol to match the lib_id used in the schematic so
         # that KiCad can resolve the reference.
@@ -198,17 +238,16 @@ def replace_symbol_lib_id(
             pins=new_lib_sym.pins,
             graphics=new_lib_sym.graphics,
             units=new_lib_sym.units,
+            extends=new_lib_sym.extends,
         )
 
-        # Use Schematic helper to swap the lib_symbols entry
-        sch = Schematic.__new__(Schematic)
-        sch._sexp = sexp
         sch.replace_lib_symbol(old_lib_id, renamed_sym)
         lib_symbol_updated = True
         changes.append(f"lib_symbols: replaced embedded definition for {old_lib_id}")
 
-        # Reconcile instance pins with the new library definition
-        new_pin_numbers = {p.number for p in new_lib_sym.pins}
+        # Reconcile instance pins with the effective pin set (base pins
+        # for derived symbols, own pins for standalone symbols).
+        new_pin_numbers = {p.number for p in effective_pins}
         old_instance_pins = {p.get_string(0) for p in old_pins}
 
         # Remove instance pins that don't exist in the new symbol
@@ -219,7 +258,7 @@ def replace_symbol_lib_id(
                 changes.append(f"Removed instance pin {pin_num} (not in new symbol)")
 
         # Add instance pins that exist in new symbol but not in instance
-        for pin in new_lib_sym.pins:
+        for pin in effective_pins:
             if pin.number not in old_instance_pins:
                 add_symbol_pin(symbol, pin.number)
                 changes.append(f"Added instance pin {pin.number} (new in replacement symbol)")
