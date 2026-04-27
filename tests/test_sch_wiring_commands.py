@@ -320,6 +320,64 @@ SCHEMATIC_WITH_MISSING_LIB_SYMBOL = """\
 """
 
 
+# Schematic with a short stub wire (0.5mm) that has one end on a label and one
+# end dangling -- should be detected as a stub.
+SCHEMATIC_WITH_STUB_WIRE = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000030")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "good-wire")
+  )
+  (wire (pts (xy 150 50) (xy 150.5 50))
+    (stroke (width 0) (type default))
+    (uuid "stub-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a long wire (5mm) that has one end dangling -- should NOT be
+# flagged as a stub at the default threshold.
+SCHEMATIC_WITH_LONG_SINGLE_DANGLING_WIRE = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000031")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "good-wire")
+  )
+  (wire (pts (xy 150 50) (xy 155 50))
+    (stroke (width 0) (type default))
+    (uuid "long-dangling-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -559,6 +617,114 @@ class TestCleanupWires:
         # other end at a label -- should NOT be flagged as dangling
         dangling = [i for i in issues if i.reason == "dangling"]
         assert len(dangling) == 0
+
+    # --- stub detection tests ---
+
+    def test_finds_stub_wire(self, tmp_path):
+        """Short single-end-dangling wire is detected as a stub."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The stub is the 0.5mm wire from (150,50) to (150.5,50)
+        assert stubs[0].start == (150.0, 50.0)
+        assert stubs[0].end == (150.5, 50.0)
+
+    def test_long_single_dangling_wire_not_flagged_as_stub(self, tmp_path):
+        """A wire longer than the threshold with one dangling end is NOT a stub."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_LONG_SINGLE_DANGLING_WIRE)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0
+
+    def test_stub_threshold_zero_disables_detection(self, tmp_path):
+        """Setting stub_threshold=0 disables stub detection entirely."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch, stub_threshold=0)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0
+
+    def test_stub_threshold_override_catches_longer_wire(self, tmp_path):
+        """A higher stub_threshold catches longer single-end-dangling wires."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_LONG_SINGLE_DANGLING_WIRE)
+        sch = Schematic.load(path)
+        # The dangling wire is 5mm long; threshold of 10 should catch it
+        issues = find_cleanup_candidates(sch, stub_threshold=10.0)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+
+    def test_stub_removal(self, tmp_path):
+        """Stub-flagged wires are removed and wire count decreases."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates, remove_wires
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        sch = Schematic.load(path)
+
+        initial_wire_count = len(list(sch.sexp.find_all("wire")))
+        issues = find_cleanup_candidates(sch)
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+
+        removed = remove_wires(sch, stubs)
+        assert removed == 1
+        assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
+
+    def test_stub_json_output(self, tmp_path, capsys):
+        """JSON output includes stub count and reason entries."""
+        import json
+
+        from kicad_tools.cli.sch_cleanup_wires import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        result = main([str(path), "--dry-run", "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["stub"] == 1
+        assert any(i["reason"] == "stub" for i in data["issues"])
+
+    def test_stub_text_output(self, tmp_path, capsys):
+        """Text output reports stubs with Stub count and [stub] label."""
+        from kicad_tools.cli.sch_cleanup_wires import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        result = main([str(path), "--dry-run"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Stub: 1" in captured.out
+        assert "[stub]" in captured.out
+
+    def test_stub_cli_threshold_arg(self, tmp_path, capsys):
+        """CLI --stub-threshold flag controls detection threshold."""
+        from kicad_tools.cli.sch_cleanup_wires import main
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_STUB_WIRE)
+        # Disable stubs via threshold=0
+        result = main([str(path), "--dry-run", "--format", "json", "--stub-threshold", "0"])
+        assert result == 0
+
+        import json
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data.get("stub", 0) == 0
 
 
 # ---------------------------------------------------------------------------
