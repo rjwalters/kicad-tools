@@ -1058,6 +1058,118 @@ class TestCollectNetStatusClassification:
         assert status["incomplete_count"] == 2
         assert status["unrouted_count"] == 0
 
+    def test_signal_incomplete_named_excludes_auto_generated(self, tmp_path):
+        """signal_incomplete_named excludes Net-(...) and unconnected-(...) nets."""
+        from kicad_tools.analysis.net_status import NetStatus, NetStatusResult
+
+        nets = []
+        # Named signal net (incomplete)
+        miso = NetStatus(net_number=1, net_name="MISO", total_pads=3)
+        miso.connected_pads = [object()]
+        miso.unconnected_pads = [object(), object()]
+        nets.append(miso)
+
+        # Auto-generated net (incomplete)
+        auto1 = NetStatus(net_number=2, net_name="Net-(U1-1)", total_pads=2)
+        auto1.connected_pads = [object()]
+        auto1.unconnected_pads = [object()]
+        nets.append(auto1)
+
+        # Another auto-generated net (incomplete)
+        auto2 = NetStatus(net_number=3, net_name="unconnected-(C40-2)", total_pads=2)
+        auto2.connected_pads = [object()]
+        auto2.unconnected_pads = [object()]
+        nets.append(auto2)
+
+        # Named signal net (incomplete)
+        sda = NetStatus(net_number=4, net_name="SDA", total_pads=2)
+        sda.connected_pads = [object()]
+        sda.unconnected_pads = [object()]
+        nets.append(sda)
+
+        # Named signal net (complete)
+        scl = NetStatus(net_number=5, net_name="SCL", total_pads=2)
+        scl.connected_pads = [object(), object()]
+        nets.append(scl)
+
+        mock_result = NetStatusResult(nets=nets, total_nets=5)
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        # signal_incomplete_named should contain only named nets
+        assert status["signal_incomplete_named"] == ["MISO", "SDA"]
+        # signal_incomplete_auto_count should count the auto-generated ones
+        assert status["signal_incomplete_auto_count"] == 2
+        # signal_incomplete_net_names (backward compat) should contain all four
+        assert status["signal_incomplete_net_names"] == [
+            "MISO", "Net-(U1-1)", "SDA", "unconnected-(C40-2)"
+        ]
+
+    def test_signal_incomplete_all_auto_generated(self, tmp_path):
+        """When all incomplete signal nets are auto-generated, named list is empty."""
+        from kicad_tools.analysis.net_status import NetStatus, NetStatusResult
+
+        nets = []
+        auto1 = NetStatus(net_number=1, net_name="Net-(U1-1)", total_pads=2)
+        auto1.connected_pads = [object()]
+        auto1.unconnected_pads = [object()]
+        nets.append(auto1)
+
+        auto2 = NetStatus(net_number=2, net_name="Net-(R3-2)", total_pads=2)
+        auto2.connected_pads = [object()]
+        auto2.unconnected_pads = [object()]
+        nets.append(auto2)
+
+        mock_result = NetStatusResult(nets=nets, total_nets=2)
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["signal_incomplete_named"] == []
+        assert status["signal_incomplete_auto_count"] == 2
+
+    def test_signal_incomplete_all_named(self, tmp_path):
+        """When all incomplete signal nets are named, auto count is zero."""
+        from kicad_tools.analysis.net_status import NetStatus, NetStatusResult
+
+        nets = []
+        sda = NetStatus(net_number=1, net_name="SDA", total_pads=2)
+        sda.connected_pads = [object()]
+        sda.unconnected_pads = [object()]
+        nets.append(sda)
+
+        scl = NetStatus(net_number=2, net_name="SCL", total_pads=2)
+        scl.connected_pads = [object()]
+        scl.unconnected_pads = [object()]
+        nets.append(scl)
+
+        mock_result = NetStatusResult(nets=nets, total_nets=2)
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["signal_incomplete_named"] == ["SCL", "SDA"]
+        assert status["signal_incomplete_auto_count"] == 0
+
     def test_no_zone_or_single_pad_nets(self, tmp_path):
         """When all nets are signal nets, zone/single-pad counts are zero."""
         mock_result = _make_net_status_result(

@@ -1911,6 +1911,144 @@ class TestNetClassification:
         assert "- GND" in content
         assert "- VCC" in content
 
+    def test_named_nets_listed_auto_count_shown(self, tmp_path: Path) -> None:
+        """Named nets are listed individually, auto-generated shown as count."""
+        data = _full_data(
+            net_status={
+                "total_nets": 20,
+                "complete_count": 10,
+                "completion_percent": 50.0,
+                "incomplete_count": 10,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 20,
+                "incomplete_net_names": [
+                    "AUDIO_L", "I2S_DIN", "Net-(U1-1)", "Net-(U2-3)",
+                    "unconnected-(C40-2)",
+                ],
+                "signal_net_count": 18,
+                "signal_complete_count": 10,
+                "signal_completion_percent": 55.6,
+                "signal_incomplete_net_names": [
+                    "AUDIO_L", "I2S_DIN", "Net-(U1-1)", "Net-(U2-3)",
+                    "unconnected-(C40-2)",
+                ],
+                "signal_incomplete_named": ["AUDIO_L", "I2S_DIN"],
+                "signal_incomplete_auto_count": 3,
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Named nets listed individually
+        assert "### Unrouted Signal Nets" in content
+        assert "- AUDIO_L" in content
+        assert "- I2S_DIN" in content
+        # Auto-generated nets shown as count, not listed
+        assert "3 auto-generated component nets" in content
+        assert "Net-(U1-1)" not in content
+        assert "unconnected-(C40-2)" not in content
+
+    def test_only_auto_generated_nets_no_heading(self, tmp_path: Path) -> None:
+        """When all incomplete signals are auto-generated, no named heading appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 5,
+                "completion_percent": 50.0,
+                "incomplete_count": 5,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 10,
+                "incomplete_net_names": ["Net-(U1-1)", "Net-(U2-3)"],
+                "signal_net_count": 8,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 62.5,
+                "signal_incomplete_net_names": ["Net-(U1-1)", "Net-(U2-3)"],
+                "signal_incomplete_named": [],
+                "signal_incomplete_auto_count": 2,
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # No "Unrouted Signal Nets" heading since named list is empty
+        assert "### Unrouted Signal Nets" not in content
+        # Count line still appears
+        assert "2 auto-generated component nets" in content
+
+    def test_only_named_nets_no_auto_count(self, tmp_path: Path) -> None:
+        """When all incomplete signals are named, no auto count line appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 7,
+                "completion_percent": 70.0,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 6,
+                "incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "signal_net_count": 10,
+                "signal_complete_count": 7,
+                "signal_completion_percent": 70.0,
+                "signal_incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "signal_incomplete_named": ["MISO", "MOSI", "SCL"],
+                "signal_incomplete_auto_count": 0,
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" in content
+        assert "- MISO" in content
+        assert "- MOSI" in content
+        assert "- SCL" in content
+        assert "auto-generated" not in content
+
+    def test_zero_named_zero_auto_no_section(self, tmp_path: Path) -> None:
+        """When no incomplete signal nets exist, neither section appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 5,
+                "complete_count": 5,
+                "completion_percent": 100.0,
+                "incomplete_count": 0,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 0,
+                "incomplete_net_names": [],
+                "signal_net_count": 5,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 100.0,
+                "signal_incomplete_net_names": [],
+                "signal_incomplete_named": [],
+                "signal_incomplete_auto_count": 0,
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" not in content
+        assert "### Incomplete Nets" not in content
+        assert "auto-generated" not in content
+
     def test_backward_compat_old_net_status_keys(self, tmp_path: Path) -> None:
         """Old net_status dict without new keys still renders correctly."""
         data = _full_data(
