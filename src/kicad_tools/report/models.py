@@ -29,7 +29,8 @@ class ReportData:
     """List of dicts: {value, footprint, qty, refs, mpn, lcsc}."""
 
     drc: dict | None = None
-    """DRC summary: {error_count, warning_count, blocking_count, passed}."""
+    """DRC summary: {error_count, warning_count, blocking_count, passed,
+    violations_by_type (optional): {rule_id: count}}."""
 
     erc: dict | None = None
     """ERC summary: {error_count, warning_count, passed, skipped, details}.

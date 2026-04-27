@@ -559,6 +559,91 @@ class TestReportGenerator:
         content = report_path.read_text(encoding="utf-8")
         assert "FAIL" in content
 
+    def test_drc_violations_by_type_rendered(self, tmp_path: Path) -> None:
+        """Violations by Type table renders when violations_by_type is present."""
+        data = _full_data(
+            drc={
+                "error_count": 5,
+                "warning_count": 2,
+                "blocking_count": 5,
+                "passed": False,
+                "violations_by_type": {
+                    "clearance_segment_segment": 3,
+                    "edge_clearance_trace": 2,
+                    "silk_over_copper": 2,
+                },
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Violations by Type" in content
+        assert "| Violation Type | Count |" in content
+        assert "| clearance_segment_segment | 3 |" in content
+        assert "| edge_clearance_trace | 2 |" in content
+        assert "| silk_over_copper | 2 |" in content
+
+    def test_drc_violations_by_type_sorted_descending(self, tmp_path: Path) -> None:
+        """Violations by Type rows are sorted by count descending."""
+        data = _full_data(
+            drc={
+                "error_count": 6,
+                "warning_count": 0,
+                "blocking_count": 6,
+                "passed": False,
+                "violations_by_type": {
+                    "footprint_outside_board": 1,
+                    "clearance_segment_segment": 5,
+                    "edge_clearance_trace": 3,
+                },
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Find positions to verify sort order
+        pos_clearance = content.index("clearance_segment_segment")
+        pos_edge = content.index("edge_clearance_trace")
+        pos_footprint = content.index("footprint_outside_board")
+        assert pos_clearance < pos_edge < pos_footprint
+
+    def test_drc_violations_by_type_omitted_when_absent(self, tmp_path: Path) -> None:
+        """Violations by Type table is omitted when key is absent (backward compat)."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## DRC Status" in content
+        assert "### Violations by Type" not in content
+
+    def test_drc_violations_by_type_omitted_when_empty(self, tmp_path: Path) -> None:
+        """Violations by Type table is omitted when dict is empty."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+                "violations_by_type": {},
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## DRC Status" in content
+        assert "### Violations by Type" not in content
+
     def test_erc_pass_status(self, tmp_path: Path) -> None:
         """ERC section renders PASS when passed is True."""
         data = _full_data(

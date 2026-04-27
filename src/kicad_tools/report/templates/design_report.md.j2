@@ -204,6 +204,16 @@ header-includes:
 
 **Status**: {% if drc.passed | default(false) %}PASS{% else %}FAIL{% endif %}
 
+{% if drc.violations_by_type is defined and drc.violations_by_type %}
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+{% for vtype, count in drc.violations_by_type | dictsort(by='value', reverse=true) %}
+| {{ vtype }} | {{ count }} |
+{% endfor %}
+{% endif %}
+
 {% endif %}
 {% if audit %}
 
