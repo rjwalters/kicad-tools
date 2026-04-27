@@ -65,6 +65,61 @@ def _endpoint_off_grid(x: float, y: float) -> dict:
     }
 
 
+def _no_connect_dangling(x: float, y: float) -> dict:
+    return {
+        "type": "no_connect_dangling",
+        "severity": "warning",
+        "description": "No-connect flag not connected to pin",
+        "pos": {"x": x, "y": y},
+        "items": [],
+    }
+
+
+def _label_dangling(x: float, y: float) -> dict:
+    return {
+        "type": "label_dangling",
+        "severity": "warning",
+        "description": "Label not connected",
+        "pos": {"x": x, "y": y},
+        "items": [],
+    }
+
+
+def _global_label_dangling(x: float, y: float) -> dict:
+    return {
+        "type": "global_label_dangling",
+        "severity": "warning",
+        "description": "Global label not connected",
+        "pos": {"x": x, "y": y},
+        "items": [],
+    }
+
+
+def _make_hierarchy_mocks(
+    child_sheet_path: str,
+    wire_start: tuple[float, float],
+    wire_end: tuple[float, float],
+):
+    """Build fake hierarchy, schematic, and wire mocks for a single child sheet."""
+    fake_wire = MagicMock()
+    fake_wire.start = wire_start
+    fake_wire.end = wire_end
+
+    fake_sch = MagicMock()
+    fake_sch.wires = [fake_wire]
+
+    fake_child = MagicMock()
+    fake_child.is_root = False
+    fake_child.path = f"/tmp/{child_sheet_path.strip('/').lower()}.kicad_sch"
+    fake_child.get_path_string.return_value = child_sheet_path
+
+    fake_root = MagicMock()
+    fake_root.is_root = True
+    fake_root.all_nodes.return_value = [fake_root, fake_child]
+
+    return fake_root, fake_sch
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: reattribute_wire_dangling_violations
 # ---------------------------------------------------------------------------
@@ -390,21 +445,7 @@ class TestCoordinateSnap:
         violations = [_wire_dangling(100.004, 50.003)]
         violations[0]["_sheet_path"] = "/"
 
-        fake_wire = MagicMock()
-        fake_wire.start = (100.0, 50.0)
-        fake_wire.end = (100.0, 80.0)
-
-        fake_sch = MagicMock()
-        fake_sch.wires = [fake_wire]
-
-        fake_child = MagicMock()
-        fake_child.is_root = False
-        fake_child.path = "/tmp/dac.kicad_sch"
-        fake_child.get_path_string.return_value = "/DAC"
-
-        fake_root = MagicMock()
-        fake_root.is_root = True
-        fake_root.all_nodes.return_value = [fake_root, fake_child]
+        fake_root, fake_sch = _make_hierarchy_mocks("/DAC", (100.0, 50.0), (100.0, 80.0))
 
         with (
             patch(
@@ -419,3 +460,208 @@ class TestCoordinateSnap:
             result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
 
         assert result[0]["_sheet_path"] == "/DAC"
+
+    def test_larger_offset_within_tolerance_matches(self):
+        """A violation at (100.04, 50.03) should match wire at (100.0, 50.0) with 0.1mm tolerance."""
+        violations = [_wire_dangling(100.04, 50.03)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/Power", (100.0, 50.0), (100.0, 80.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/Power"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: expanded violation type coverage
+# ---------------------------------------------------------------------------
+
+
+class TestExpandedViolationTypes:
+    """Verify that newly covered violation types are re-attributed."""
+
+    def test_no_connect_dangling_reattributed(self):
+        """A no_connect_dangling on '/' should be re-attributed to the child sheet."""
+        violations = [_no_connect_dangling(75.0, 30.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/Connectors", (75.0, 30.0), (75.0, 60.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/Connectors"
+
+    def test_label_dangling_reattributed(self):
+        """A label_dangling on '/' should be re-attributed to the child sheet."""
+        violations = [_label_dangling(60.0, 40.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/DAC", (60.0, 40.0), (60.0, 70.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/DAC"
+
+    def test_global_label_dangling_reattributed(self):
+        """A global_label_dangling on '/' should be re-attributed to the child sheet."""
+        violations = [_global_label_dangling(90.0, 20.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/Sync", (90.0, 20.0), (90.0, 50.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/Sync"
+
+    def test_new_types_child_violation_not_altered(self):
+        """New violation types already on a child sheet should not change."""
+        violations = [_no_connect_dangling(10.0, 20.0)]
+        violations[0]["_sheet_path"] = "/MCU"
+
+        result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+        assert result[0]["_sheet_path"] == "/MCU"
+
+    def test_new_types_enriched_with_coordinates(self):
+        """New violation types should have coordinates appended to description."""
+        violations = [_label_dangling(45.0, 67.0)]
+        violations[0]["_sheet_path"] = "/MCU"
+
+        result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+        assert "at (45.0, 67.0)" in result[0]["description"]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: wire midpoint matching
+# ---------------------------------------------------------------------------
+
+
+class TestWireMidpointMatching:
+    """Verify that violations at wire midpoints are correctly re-attributed."""
+
+    def test_midpoint_violation_reattributed(self):
+        """A violation at the midpoint of a wire should match the child sheet."""
+        # Wire from (100, 50) to (100, 80) -- midpoint is (100, 65)
+        violations = [_wire_dangling(100.0, 65.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/DAC", (100.0, 50.0), (100.0, 80.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/DAC"
+
+    def test_non_midpoint_non_endpoint_stays_on_root(self):
+        """A violation at an arbitrary point on a wire (not midpoint/endpoint) stays on '/'."""
+        # Wire from (100, 50) to (100, 80) -- point (100, 60) is not an endpoint or midpoint
+        violations = [_wire_dangling(100.0, 60.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/DAC", (100.0, 50.0), (100.0, 80.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/"
+
+    def test_midpoint_horizontal_wire(self):
+        """Midpoint matching works for horizontal wires too."""
+        # Wire from (20, 50) to (80, 50) -- midpoint is (50, 50)
+        violations = [_no_connect_dangling(50.0, 50.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/Power", (20.0, 50.0), (80.0, 50.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/Power"
+
+    def test_deeply_nested_sheet_reattributed(self):
+        """Violations should be attributed to deeply nested sheets like /Power/Regulator."""
+        violations = [_wire_dangling(30.0, 40.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        fake_root, fake_sch = _make_hierarchy_mocks("/Power/Regulator", (30.0, 40.0), (30.0, 70.0))
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_root,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                return_value=fake_sch,
+            ),
+        ):
+            result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
+
+        assert result[0]["_sheet_path"] == "/Power/Regulator"
