@@ -169,12 +169,28 @@ def _run_zones_command(args, pcb_path: Path) -> int:
 
 def _run_strip_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb strip' command."""
+    import re as _re
+
     from kicad_tools.schema.pcb import PCB
 
     # Parse net names if provided
     nets = None
     if args.nets:
         nets = [n.strip() for n in args.nets.split(",")]
+
+    # Parse layer names if provided
+    layers = None
+    if getattr(args, "layers", None):
+        layers = [l.strip() for l in args.layers.split(",")]
+
+    # Power net options — exclude power nets by default when --layers is used
+    include_power = getattr(args, "include_power", False)
+    exclude_power = not include_power if layers else False
+    power_pattern = None
+    if getattr(args, "power_pattern", None):
+        power_pattern = _re.compile(args.power_pattern, _re.IGNORECASE)
+
+    remove_orphan_vias = getattr(args, "remove_orphan_vias", False)
 
     # Load PCB
     try:
@@ -190,7 +206,14 @@ def _run_strip_command(args, pcb_path: Path) -> int:
 
     # Perform strip operation
     keep_zones = getattr(args, "keep_zones", True)
-    stats = pcb.strip_traces(nets=nets, keep_zones=keep_zones)
+    stats = pcb.strip_traces(
+        nets=nets,
+        layers=layers,
+        keep_zones=keep_zones,
+        exclude_power=exclude_power,
+        power_pattern=power_pattern,
+        remove_orphan_vias=remove_orphan_vias,
+    )
 
     # Determine output path
     output_path = pcb_path
@@ -209,7 +232,10 @@ def _run_strip_command(args, pcb_path: Path) -> int:
         "output": str(output_path) if not dry_run else None,
         "dry_run": dry_run,
         "nets_filtered": nets,
+        "layers_filtered": layers,
         "keep_zones": keep_zones,
+        "exclude_power": exclude_power,
+        "remove_orphan_vias": remove_orphan_vias,
         "before": {
             "segments": initial_segments,
             "vias": initial_vias,
@@ -237,7 +263,12 @@ def _run_strip_command(args, pcb_path: Path) -> int:
             print(f"  Filtering nets: {', '.join(nets)}")
         else:
             print("  Stripping all nets")
+        if layers:
+            print(f"  Filtering layers: {', '.join(layers)}")
+        print(f"  Exclude power nets: {exclude_power}")
         print(f"  Keep zones: {keep_zones}")
+        if remove_orphan_vias:
+            print("  Remove orphan vias: yes")
         print()
 
         print("  Removed:")
