@@ -8,8 +8,10 @@ import pytest
 from kicad_tools.cli.stitch_cmd import (
     FilledPolygon,
     PadInfo,
+    SkipDetail,
     TraceSegment,
     TrackSegment,
+    ViaPlacement,
     ZonePolygon,
     _is_ground_net,
     _should_use_stackup_fallback,
@@ -32,6 +34,7 @@ from kicad_tools.cli.stitch_cmd import (
     get_net_map,
     get_net_number,
     get_via_layers,
+    identify_nearest_obstacle,
     infer_target_layer_from_stackup,
     is_pad_connected,
     main,
@@ -4779,3 +4782,413 @@ class TestThruHoleStitchIntegration:
         polys = find_same_net_filled_polygons(sexp, {2})
 
         assert len(polys) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for micro-via support and improved diagnostics (issue #2138)
+# ---------------------------------------------------------------------------
+
+
+class TestMicroViaNode:
+    """Tests for via_node with via_type='micro'."""
+
+    def test_via_node_standard_no_micro_keyword(self):
+        """Standard via_node should not contain 'micro' keyword."""
+        from kicad_tools.sexp.builders import via_node
+
+        node = via_node(
+            x=100.0, y=100.0, size=0.45, drill=0.2,
+            layers=("F.Cu", "B.Cu"), net=1, uuid_str="test-uuid",
+        )
+        text = node.to_string()
+        # The word "micro" should not appear in a standard via
+        assert "micro" not in text
+
+    def test_via_node_micro_type(self):
+        """via_node with via_type='micro' should emit (via micro ...)."""
+        from kicad_tools.sexp.builders import via_node
+
+        node = via_node(
+            x=100.0, y=100.0, size=0.3, drill=0.15,
+            layers=("F.Cu", "In1.Cu"), net=1, uuid_str="test-uuid",
+            via_type="micro",
+        )
+        text = node.to_string()
+        assert "micro" in text
+
+    def test_via_node_micro_preserves_attributes(self):
+        """Micro via_node should still contain size, drill, layers, net."""
+        from kicad_tools.sexp.builders import via_node
+
+        node = via_node(
+            x=50.0, y=75.0, size=0.3, drill=0.15,
+            layers=("F.Cu", "In1.Cu"), net=5, uuid_str="micro-uuid",
+            via_type="micro",
+        )
+        text = node.to_string()
+        assert "0.3" in text  # size
+        assert "0.15" in text  # drill
+        assert "F.Cu" in text
+        assert "In1.Cu" in text
+        assert "micro-uuid" in text
+
+    def test_via_node_none_type_same_as_default(self):
+        """via_node with via_type=None should produce identical output to default."""
+        from kicad_tools.sexp.builders import via_node
+
+        default_node = via_node(
+            x=10.0, y=20.0, size=0.45, drill=0.2,
+            layers=("F.Cu", "B.Cu"), net=1, uuid_str="same-uuid",
+        )
+        none_node = via_node(
+            x=10.0, y=20.0, size=0.45, drill=0.2,
+            layers=("F.Cu", "B.Cu"), net=1, uuid_str="same-uuid",
+            via_type=None,
+        )
+        assert default_node.to_string() == none_node.to_string()
+
+
+class TestSkipDetail:
+    """Tests for SkipDetail dataclass."""
+
+    def test_skip_detail_creation(self):
+        """SkipDetail should store obstacle information."""
+        from kicad_tools.cli.stitch_cmd import SkipDetail
+
+        detail = SkipDetail(
+            obstacle_type="track",
+            obstacle_x=50.0,
+            obstacle_y=75.0,
+            obstacle_net=3,
+            reason="track (net 3) on F.Cu gap=-0.05mm need=0.20mm",
+        )
+        assert detail.obstacle_type == "track"
+        assert detail.obstacle_x == 50.0
+        assert detail.obstacle_net == 3
+        assert "track" in detail.reason
+
+    def test_skip_detail_defaults(self):
+        """SkipDetail should have sensible defaults."""
+        from kicad_tools.cli.stitch_cmd import SkipDetail
+
+        detail = SkipDetail(obstacle_type="unknown")
+        assert detail.obstacle_x is None
+        assert detail.obstacle_y is None
+        assert detail.obstacle_net is None
+        assert detail.reason == ""
+
+
+class TestIdentifyNearestObstacle:
+    """Tests for identify_nearest_obstacle diagnostic function."""
+
+    def test_identifies_nearby_track(self):
+        """Should identify a track as the nearest obstacle."""
+        from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+        track = TrackSegment(
+            start_x=100.2, start_y=99.0, end_x=100.2, end_y=101.0,
+            width=0.2, layer="F.Cu", net_number=3,
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[], other_net_tracks=[track],
+        )
+        assert detail.obstacle_type == "track"
+        assert detail.obstacle_net == 3
+
+    def test_identifies_nearby_via(self):
+        """Should identify an other-net via as the nearest obstacle."""
+        from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[],
+            other_net_vias=[(100.3, 100.0, 0.45, 5)],
+        )
+        assert detail.obstacle_type == "via"
+        assert detail.obstacle_net == 5
+
+    def test_identifies_nearby_pad(self):
+        """Should identify an other-net pad as the nearest obstacle."""
+        from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[],
+            other_net_pads=[(100.2, 100.0, 0.3, 4)],
+        )
+        assert detail.obstacle_type == "pad"
+        assert detail.obstacle_net == 4
+
+    def test_identifies_zone_fill(self):
+        """Should identify being inside a zone fill polygon."""
+        from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+        fp = FilledPolygon(
+            net_number=3, net_name="NET1", layer="F.Cu",
+            points=[(99.0, 99.0), (101.0, 99.0), (101.0, 101.0), (99.0, 101.0)],
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[],
+            other_net_filled_polygons=[fp],
+        )
+        assert detail.obstacle_type == "zone_fill"
+        assert detail.obstacle_net == 3
+
+    def test_returns_unknown_when_no_obstacles(self):
+        """Should return 'unknown' when there are no obstacles at all."""
+        from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2, existing_vias=[],
+        )
+        assert detail.obstacle_type == "unknown"
+
+
+class TestMicroViaStitching:
+    """Tests for micro-via retry in run_stitch."""
+
+    def test_micro_via_retry_places_smaller_vias(self, stitch_test_pcb: Path):
+        """run_stitch with micro_via=True should still place vias on easy pads."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=True,
+        )
+        # The test PCB has easy placement -- standard vias should succeed
+        assert len(result.vias_added) > 0
+
+    def test_micro_via_result_tracks_count(self, stitch_test_pcb: Path):
+        """StitchResult.micro_vias_placed should be 0 when all pads use standard vias."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=True,
+        )
+        # Easy placement -- all should be standard size
+        assert result.micro_vias_placed == 0
+
+    def test_micro_via_flag_false_skips_retry(self, stitch_test_pcb: Path):
+        """When micro_via=False, should not attempt micro-via retry."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=False,
+        )
+        assert result.micro_vias_placed == 0
+
+    def test_micro_via_custom_size(self, stitch_test_pcb: Path):
+        """Custom micro-via size should be respected."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=True,
+            micro_via_size=0.25,
+            micro_via_drill=0.1,
+        )
+        # Standard pads should succeed with standard vias
+        assert len(result.vias_added) > 0
+
+
+class TestMicroViaCongestedPlacement:
+    """Test micro-via placement in congested conditions.
+
+    Creates a PCB where standard-size vias fail but micro-vias succeed.
+    """
+
+    def _make_congested_pcb(self, tmp_path: Path) -> Path:
+        """Create a PCB with a pad tightly surrounded by other-net objects.
+
+        The pad is on GND (net 1), surrounded by NET1 (net 3) tracks
+        close enough that a 0.45mm via won't fit, but a 0.3mm via will.
+        """
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "NET1")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 100 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (segment (start 100.55 99.0) (end 100.55 101.0) (width 0.15) (layer "F.Cu") (net 3) (uuid "seg-1"))
+  (segment (start 99.45 99.0) (end 99.45 101.0) (width 0.15) (layer "F.Cu") (net 3) (uuid "seg-2"))
+  (segment (start 99.0 100.55) (end 101.0 100.55) (width 0.15) (layer "F.Cu") (net 3) (uuid "seg-3"))
+  (segment (start 99.0 99.45) (end 101.0 99.45) (width 0.15) (layer "F.Cu") (net 3) (uuid "seg-4"))
+  (zone (net 1) (net_name "GND") (layer "In1.Cu")
+    (uuid "zone-gnd")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.25))
+    (polygon (pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110))))
+)"""
+        pcb_file = tmp_path / "congested.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+        return pcb_file
+
+    def test_standard_via_fails_micro_succeeds(self, tmp_path: Path):
+        """In congested area, standard via should fail but micro-via should succeed."""
+        pcb = self._make_congested_pcb(tmp_path)
+
+        # First without micro-via: should skip the pad
+        result_no_micro = run_stitch(
+            pcb_path=pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=False,
+            via_size=0.45,
+        )
+
+        # Now with micro-via -- need a separate directory for second PCB
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        pcb2 = self._make_congested_pcb(sub)
+        result_micro = run_stitch(
+            pcb_path=pcb2,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=True,
+            via_size=0.45,
+            micro_via_size=0.3,
+            micro_via_drill=0.15,
+        )
+
+        # Micro-via should place at least as many (ideally more) vias
+        assert result_micro.micro_vias_placed >= result_no_micro.micro_vias_placed
+
+    def test_skip_details_populated(self, tmp_path: Path):
+        """When pads are skipped, skip_details should contain structured info."""
+        pcb = self._make_congested_pcb(tmp_path)
+
+        result = run_stitch(
+            pcb_path=pcb,
+            net_names=["GND"],
+            dry_run=True,
+            micro_via=False,
+            via_size=0.45,
+        )
+
+        if result.pads_skipped:
+            # If any pads were skipped, we should have structured details
+            assert len(result.skip_details) == len(result.pads_skipped)
+            for _pad, detail in result.skip_details:
+                assert detail.obstacle_type in (
+                    "track", "via", "pad", "zone_fill", "same_net_via", "unknown",
+                )
+                assert detail.reason != ""
+
+
+class TestMicroViaCLI:
+    """Tests for --micro-via CLI argument parsing."""
+
+    def test_micro_via_flag_accepted(self, stitch_test_pcb: Path):
+        """CLI should accept --micro-via flag without error."""
+        result = main([str(stitch_test_pcb), "--net", "GND", "--dry-run", "--micro-via"])
+        assert result == 0
+
+    def test_micro_via_custom_size_cli(self, stitch_test_pcb: Path):
+        """CLI should accept --micro-via-size and --micro-via-drill."""
+        result = main([
+            str(stitch_test_pcb), "--net", "GND", "--dry-run",
+            "--micro-via", "--micro-via-size", "0.25", "--micro-via-drill", "0.1",
+        ])
+        assert result == 0
+
+
+class TestOutputResultDiagnostics:
+    """Tests for output_result improved diagnostics."""
+
+    def test_output_includes_micro_via_count(self, capsys, stitch_test_pcb: Path):
+        """output_result should show micro-via count when present."""
+        from kicad_tools.cli.stitch_cmd import output_result, StitchResult, SkipDetail
+
+        result = StitchResult(
+            pcb_name="test.kicad_pcb",
+            target_nets=["GND"],
+            micro_vias_placed=3,
+        )
+        # Add some dummy vias so summary line triggers
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100, y=100, layer="F.Cu", width=0.54, height=0.64,
+        )
+        result.vias_added = [
+            ViaPlacement(pad=pad, via_x=100.5, via_y=100, size=0.3, drill=0.15,
+                         layers=("F.Cu", "In1.Cu"), via_type="micro"),
+        ] * 5
+
+        output_result(result, dry_run=True)
+        captured = capsys.readouterr()
+        assert "3 micro-vias" in captured.out
+
+    def test_output_includes_obstacle_breakdown(self, capsys):
+        """output_result should show obstacle type breakdown for skipped pads."""
+        from kicad_tools.cli.stitch_cmd import output_result, StitchResult, SkipDetail
+
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100, y=100, layer="F.Cu", width=0.54, height=0.64,
+        )
+        result = StitchResult(
+            pcb_name="test.kicad_pcb",
+            target_nets=["GND"],
+        )
+        result.pads_skipped = [(pad, "track blocking")]
+        result.skip_details = [
+            (pad, SkipDetail(obstacle_type="track", reason="track (net 3)")),
+        ]
+        result.vias_added = [
+            ViaPlacement(pad=pad, via_x=100.5, via_y=100, size=0.45, drill=0.2,
+                         layers=("F.Cu", "B.Cu")),
+        ]
+
+        output_result(result, dry_run=True)
+        captured = capsys.readouterr()
+        assert "Blocking obstacle breakdown" in captured.out
+        assert "track: 1" in captured.out

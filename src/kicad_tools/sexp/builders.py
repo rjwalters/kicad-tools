@@ -345,7 +345,14 @@ def segment_node(
 
 
 def via_node(
-    x: float, y: float, size: float, drill: float, layers: tuple[str, str], net: int, uuid_str: str
+    x: float,
+    y: float,
+    size: float,
+    drill: float,
+    layers: tuple[str, str],
+    net: int,
+    uuid_str: str,
+    via_type: str | None = None,
 ) -> SExp:
     """Build a PCB via S-expression.
 
@@ -356,8 +363,11 @@ def via_node(
         layers: Tuple of layer names (e.g., ("F.Cu", "B.Cu"))
         net: Net number
         uuid_str: Unique identifier
+        via_type: Optional via type. Use ``"micro"`` for micro-vias
+            (KiCad emits ``(via micro ...)``). When *None* (the default),
+            a standard through-hole via is produced.
 
-    Example output:
+    Example output (standard):
         (via
             (at 162.5 97.25)
             (size 0.6)
@@ -366,8 +376,29 @@ def via_node(
             (net 12)
             (uuid "...")
         )
+
+    Example output (micro):
+        (via micro
+            (at 162.5 97.25)
+            (size 0.3)
+            (drill 0.15)
+            (layers "F.Cu" "In1.Cu")
+            (net 12)
+            (uuid "...")
+        )
     """
     layers_node = SExp.list("layers", *layers)
+    if via_type == "micro":
+        return SExp.list(
+            "via",
+            SExp.atom("micro"),
+            SExp.list("at", fmt(x), fmt(y)),
+            SExp.list("size", fmt(size)),
+            SExp.list("drill", fmt(drill)),
+            layers_node,
+            SExp.list("net", net),
+            uuid_node(uuid_str),
+        )
     return SExp.list(
         "via",
         SExp.list("at", fmt(x), fmt(y)),

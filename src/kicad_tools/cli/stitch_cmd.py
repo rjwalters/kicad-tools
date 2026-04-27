@@ -73,6 +73,7 @@ class ViaPlacement:
     size: float
     drill: float
     layers: tuple[str, str]
+    via_type: str | None = None  # None for standard, "micro" for micro-via
 
 
 @dataclass
@@ -108,6 +109,21 @@ class TraceSegment:
 
 
 @dataclass
+class SkipDetail:
+    """Structured information about why a pad was skipped.
+
+    Provides the obstacle type, its coordinates, and a human-readable reason
+    so that diagnostics can report *which* object blocked via placement.
+    """
+
+    obstacle_type: str  # "track", "via", "pad", "zone_fill", "same_net_via"
+    obstacle_x: float | None = None
+    obstacle_y: float | None = None
+    obstacle_net: int | None = None
+    reason: str = ""
+
+
+@dataclass
 class StitchResult:
     """Result of the stitching operation."""
 
@@ -123,6 +139,10 @@ class StitchResult:
     fallback_nets: list[str] = field(default_factory=list)
     # Nets whose target layer was inferred from board stackup (no zone on inner layer)
     stackup_inferred_nets: list[str] = field(default_factory=list)
+    # Structured skip details for improved diagnostics
+    skip_details: list[tuple[PadInfo, SkipDetail]] = field(default_factory=list)
+    # Micro-via tracking: count of vias placed using micro-via retry
+    micro_vias_placed: int = 0
 
 
 @dataclass
@@ -909,6 +929,141 @@ def is_pad_connected(
                     return True
 
     return False
+
+
+def identify_nearest_obstacle(
+    pad: PadInfo,
+    via_size: float,
+    clearance: float,
+    existing_vias: list[tuple[float, float, int]],
+    other_net_tracks: list[TrackSegment] | None = None,
+    other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[tuple[float, float, float, int]] | None = None,
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
+) -> SkipDetail:
+    """Identify the nearest obstacle preventing via placement near a pad.
+
+    Checks each obstacle type (tracks, vias, pads, zone fills) and returns
+    a :class:`SkipDetail` describing the closest conflict.  This is used to
+    produce actionable diagnostics when a pad is skipped.
+
+    Args:
+        pad: The pad that could not receive a via
+        via_size: Via pad diameter tried
+        clearance: Required clearance
+        existing_vias: Same-net vias
+        other_net_tracks: Other-net track segments
+        other_net_vias: Other-net vias
+        other_net_pads: Other-net pads
+        other_net_filled_polygons: Other-net filled zone polygons
+
+    Returns:
+        SkipDetail with the type, location, and reason of the nearest obstacle
+    """
+    if other_net_tracks is None:
+        other_net_tracks = []
+    if other_net_vias is None:
+        other_net_vias = []
+    if other_net_pads is None:
+        other_net_pads = []
+    if other_net_filled_polygons is None:
+        other_net_filled_polygons = []
+
+    via_radius = via_size / 2
+    best: SkipDetail | None = None
+    best_dist = float("inf")
+
+    # Check same-net vias
+    for vx, vy, _vnet in existing_vias:
+        dist = math.sqrt((vx - pad.x) ** 2 + (vy - pad.y) ** 2)
+        if dist < best_dist:
+            best_dist = dist
+            best = SkipDetail(
+                obstacle_type="same_net_via",
+                obstacle_x=vx,
+                obstacle_y=vy,
+                obstacle_net=_vnet,
+                reason=f"same-net via at ({vx:.2f}, {vy:.2f}) dist={dist:.2f}mm",
+            )
+
+    # Check other-net tracks
+    for seg in other_net_tracks:
+        dist = point_to_segment_distance(
+            pad.x, pad.y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
+        )
+        effective = dist - via_radius - seg.width / 2
+        if dist < best_dist:
+            best_dist = dist
+            mid_x = (seg.start_x + seg.end_x) / 2
+            mid_y = (seg.start_y + seg.end_y) / 2
+            best = SkipDetail(
+                obstacle_type="track",
+                obstacle_x=mid_x,
+                obstacle_y=mid_y,
+                obstacle_net=seg.net_number,
+                reason=f"track (net {seg.net_number}) on {seg.layer} "
+                f"gap={effective:.2f}mm need={clearance:.2f}mm",
+            )
+
+    # Check other-net vias
+    for ovx, ovy, ov_size, onet in other_net_vias:
+        dist = math.sqrt((ovx - pad.x) ** 2 + (ovy - pad.y) ** 2)
+        effective = dist - via_radius - ov_size / 2
+        if dist < best_dist:
+            best_dist = dist
+            best = SkipDetail(
+                obstacle_type="via",
+                obstacle_x=ovx,
+                obstacle_y=ovy,
+                obstacle_net=onet,
+                reason=f"via (net {onet}) at ({ovx:.2f}, {ovy:.2f}) "
+                f"gap={effective:.2f}mm need={clearance:.2f}mm",
+            )
+
+    # Check other-net pads
+    for px, py, p_radius, pnet in other_net_pads:
+        dist = math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2)
+        effective = dist - via_radius - p_radius
+        if dist < best_dist:
+            best_dist = dist
+            best = SkipDetail(
+                obstacle_type="pad",
+                obstacle_x=px,
+                obstacle_y=py,
+                obstacle_net=pnet,
+                reason=f"pad (net {pnet}) at ({px:.2f}, {py:.2f}) "
+                f"gap={effective:.2f}mm need={clearance:.2f}mm",
+            )
+
+    # Check other-net filled polygons
+    for fp in other_net_filled_polygons:
+        # Quick bounding-box check
+        if (
+            pad.x + via_radius + clearance < fp.min_x
+            or pad.x - via_radius - clearance > fp.max_x
+            or pad.y + via_radius + clearance < fp.min_y
+            or pad.y - via_radius - clearance > fp.max_y
+        ):
+            continue
+        if point_in_polygon(pad.x, pad.y, fp.points):
+            best = SkipDetail(
+                obstacle_type="zone_fill",
+                obstacle_x=pad.x,
+                obstacle_y=pad.y,
+                obstacle_net=fp.net_number,
+                reason=f"inside zone fill (net {fp.net_number} '{fp.net_name}') "
+                f"on {fp.layer}",
+            )
+            best_dist = 0
+            break
+
+    if best is None:
+        return SkipDetail(
+            obstacle_type="unknown",
+            reason="no specific obstacle identified",
+        )
+
+    return best
 
 
 def calculate_via_position(
@@ -1738,6 +1893,7 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
         layers=placement.layers,
         net=placement.pad.net_number,
         uuid_str=str(uuid.uuid4()),
+        via_type=placement.via_type,
     )
     sexp.append(via)
 
@@ -2422,6 +2578,9 @@ def run_stitch(
     trace_width: float = 0.2,
     dry_run: bool = False,
     escape_distance: float = 3.0,
+    micro_via: bool = False,
+    micro_via_size: float = 0.3,
+    micro_via_drill: float = 0.15,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -2436,6 +2595,9 @@ def run_stitch(
         trace_width: Width of pad-to-via trace segments in mm
         dry_run: If True, don't modify the file
         escape_distance: Maximum escape trace length in mm for dense IC pads (default 3.0)
+        micro_via: If True, retry failed pads with smaller micro-vias
+        micro_via_size: Micro-via pad diameter in mm (default 0.3)
+        micro_via_drill: Micro-via drill diameter in mm (default 0.15)
 
     Returns:
         StitchResult with details of what was done
@@ -2569,18 +2731,142 @@ def run_stitch(
                 )
 
                 if extended_pos is None:
-                    result.pads_skipped.append(
-                        (
+                    # All standard-size strategies failed.
+                    # If micro-via is enabled, retry with smaller via size.
+                    if micro_via:
+                        micro_pos = calculate_via_position(
                             pad,
-                            "no valid via location (clearance conflict, dog-leg and "
-                            f"extended escape up to {escape_distance}mm also failed)",
+                            offset=offset,
+                            via_size=micro_via_size,
+                            existing_vias=existing_vias,
+                            clearance=clearance,
+                            other_net_tracks=other_net_tracks,
+                            other_net_vias=other_net_vias,
+                            other_net_pads=other_net_pads,
+                            trace_width=trace_width,
+                            other_net_filled_polygons=other_net_filled_polys,
                         )
-                    )
-                    continue
+                        if micro_pos is None:
+                            # Also try dogleg with micro-via size
+                            micro_dogleg = calculate_dogleg_via_position(
+                                pad,
+                                offset=offset,
+                                via_size=micro_via_size,
+                                existing_vias=existing_vias,
+                                clearance=clearance,
+                                other_net_tracks=other_net_tracks,
+                                other_net_vias=other_net_vias,
+                                other_net_pads=other_net_pads,
+                                trace_width=trace_width,
+                                other_net_filled_polygons=other_net_filled_polys,
+                            )
+                            if micro_dogleg is not None:
+                                # Use micro dogleg
+                                via_pos = None
+                                dogleg_pos = micro_dogleg
+                                extended_pos = None
+                                is_micro = True
+                            else:
+                                # Also try extended escape with micro-via
+                                micro_extended = calculate_extended_escape_position(
+                                    pad,
+                                    offset=offset,
+                                    via_size=micro_via_size,
+                                    existing_vias=existing_vias,
+                                    clearance=clearance,
+                                    escape_distance=escape_distance,
+                                    other_net_tracks=other_net_tracks,
+                                    other_net_vias=other_net_vias,
+                                    other_net_pads=other_net_pads,
+                                    trace_width=trace_width,
+                                )
+                                if micro_extended is not None:
+                                    via_pos = None
+                                    dogleg_pos = None
+                                    extended_pos = micro_extended
+                                    is_micro = True
+                                else:
+                                    is_micro = False
+                        else:
+                            # Micro straight-line succeeded
+                            via_pos = micro_pos
+                            dogleg_pos = None
+                            extended_pos = None
+                            is_micro = True
+
+                        if not is_micro:
+                            # Micro-via also failed -- record diagnostic
+                            detail = identify_nearest_obstacle(
+                                pad,
+                                micro_via_size,
+                                clearance,
+                                existing_vias,
+                                other_net_tracks,
+                                other_net_vias,
+                                other_net_pads,
+                                other_net_filled_polys,
+                            )
+                            result.skip_details.append((pad, detail))
+                            result.pads_skipped.append(
+                                (
+                                    pad,
+                                    "no valid via location (clearance conflict, all "
+                                    f"strategies up to {escape_distance}mm with "
+                                    f"micro-via {micro_via_size}mm also failed; "
+                                    f"nearest obstacle: {detail.reason})",
+                                )
+                            )
+                            continue
+                    else:
+                        # No micro-via retry -- record diagnostic
+                        detail = identify_nearest_obstacle(
+                            pad,
+                            via_size,
+                            clearance,
+                            existing_vias,
+                            other_net_tracks,
+                            other_net_vias,
+                            other_net_pads,
+                            other_net_filled_polys,
+                        )
+                        result.skip_details.append((pad, detail))
+                        result.pads_skipped.append(
+                            (
+                                pad,
+                                "no valid via location (clearance conflict, dog-leg and "
+                                f"extended escape up to {escape_distance}mm also failed; "
+                                f"nearest obstacle: {detail.reason})",
+                            )
+                        )
+                        continue
+                else:
+                    is_micro = False
+            else:
+                is_micro = False
+        else:
+            is_micro = False
+
+        # Determine actual via dimensions (micro or standard)
+        actual_via_size = micro_via_size if is_micro else via_size
+        actual_drill = micro_via_drill if is_micro else drill
 
         # Determine via layers using per-net target layer
         pad_target_layer = net_target_layers.get(pad.net_name)
-        layers = get_via_layers(pad.layer, pad_target_layer)
+        # Micro-vias span only adjacent layers per KiCad rules
+        if is_micro:
+            # For micro-vias, connect pad layer to immediately adjacent layer
+            copper = get_copper_layers(sexp)
+            if pad.layer == "F.Cu" and len(copper) > 1:
+                micro_target = copper[1]  # F.Cu -> first inner layer
+            elif pad.layer == "B.Cu" and len(copper) > 1:
+                micro_target = copper[-2]  # B.Cu -> last inner layer
+            else:
+                micro_target = pad_target_layer
+            layers = get_via_layers(pad.layer, micro_target)
+        else:
+            layers = get_via_layers(pad.layer, pad_target_layer)
+
+        via_type_str = "micro" if is_micro else None
 
         if extended_pos is not None:
             # Extended escape placement: (via_x, via_y, waypoints)
@@ -2590,12 +2876,15 @@ def run_stitch(
                 pad=pad,
                 via_x=via_x,
                 via_y=via_y,
-                size=via_size,
-                drill=drill,
+                size=actual_via_size,
+                drill=actual_drill,
                 layers=layers,
+                via_type=via_type_str,
             )
 
             result.vias_added.append(placement)
+            if is_micro:
+                result.micro_vias_placed += 1
 
             # Create a multi-waypoint trace segment
             trace = TraceSegment(
@@ -2618,12 +2907,15 @@ def run_stitch(
                 pad=pad,
                 via_x=via_x,
                 via_y=via_y,
-                size=via_size,
-                drill=drill,
+                size=actual_via_size,
+                drill=actual_drill,
                 layers=layers,
+                via_type=via_type_str,
             )
 
             result.vias_added.append(placement)
+            if is_micro:
+                result.micro_vias_placed += 1
 
             # Create an L-shaped trace segment
             trace = TraceSegment(
@@ -2645,12 +2937,15 @@ def run_stitch(
                 pad=pad,
                 via_x=via_pos[0],
                 via_y=via_pos[1],
-                size=via_size,
-                drill=drill,
+                size=actual_via_size,
+                drill=actual_drill,
                 layers=layers,
+                via_type=via_type_str,
             )
 
             result.vias_added.append(placement)
+            if is_micro:
+                result.micro_vias_placed += 1
 
             # Create a straight trace segment from pad center to via center
             trace = TraceSegment(
@@ -2832,13 +3127,24 @@ def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = F
         if len(vias) > 10:
             print(f"  ... ({len(vias) - 10} more)")
 
-    # Output skipped pads
+    # Output skipped pads with obstacle diagnostics
     if result.pads_skipped:
         print("\nSkipped pads (manual placement needed):")
         for pad, reason in result.pads_skipped[:5]:
             print(f"  {pad.reference}.{pad.pad_number}: {reason}")
         if len(result.pads_skipped) > 5:
             print(f"  ... ({len(result.pads_skipped) - 5} more)")
+
+    # Obstacle summary for skipped pads
+    if result.skip_details:
+        obstacle_counts: dict[str, int] = {}
+        for _pad, detail in result.skip_details:
+            obstacle_counts[detail.obstacle_type] = (
+                obstacle_counts.get(detail.obstacle_type, 0) + 1
+            )
+        print("\n  Blocking obstacle breakdown:")
+        for obs_type, count in sorted(obstacle_counts.items(), key=lambda x: -x[1]):
+            print(f"    {obs_type}: {count}")
 
     # Count trace types
     dogleg_traces = [t for t in result.traces_added if t.is_dogleg]
@@ -2849,6 +3155,11 @@ def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = F
     print(f"\n{'=' * 60}")
     print("Summary:")
     print(f"  + Added {len(result.vias_added)} stitching vias")
+    if result.micro_vias_placed:
+        print(
+            f"    ({result.micro_vias_placed} micro-vias, "
+            f"{len(result.vias_added) - result.micro_vias_placed} standard)"
+        )
     print(f"  + Added {len(result.traces_added)} pad-to-via traces")
     if dogleg_traces or extended_traces:
         print(f"    - {straight_traces} straight traces")
@@ -2930,6 +3241,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum escape trace length in mm for dense IC pads (default: 3.0). "
         "When both straight-line and dog-leg placement fail, extended escape traces "
         "up to this length are tried to navigate between dense pin fields.",
+    )
+    parser.add_argument(
+        "--micro-via",
+        action="store_true",
+        help="Retry failed pads with smaller micro-vias (0.3mm pad, 0.15mm drill). "
+        "Micro-vias span only adjacent layers per KiCad rules.",
+    )
+    parser.add_argument(
+        "--micro-via-size",
+        type=float,
+        default=0.3,
+        help="Micro-via pad diameter in mm (default: 0.3). Only used with --micro-via.",
+    )
+    parser.add_argument(
+        "--micro-via-drill",
+        type=float,
+        default=0.15,
+        help="Micro-via drill diameter in mm (default: 0.15). Only used with --micro-via.",
     )
     parser.add_argument(
         "--blanket",
@@ -3027,6 +3356,9 @@ def main(argv: list[str] | None = None) -> int:
                 trace_width=args.trace_width,
                 dry_run=args.dry_run,
                 escape_distance=args.escape_distance,
+                micro_via=args.micro_via,
+                micro_via_size=args.micro_via_size,
+                micro_via_drill=args.micro_via_drill,
             )
 
         output_result(result, dry_run=args.dry_run, run_drc=args.drc)
