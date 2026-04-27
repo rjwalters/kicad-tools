@@ -564,6 +564,23 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_set_val.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    # sch set-reference
+    sch_set_ref = sch_subparsers.add_parser(
+        "set-reference", help="Rename component reference designators"
+    )
+    sch_set_ref.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_ref.add_argument("--ref", help="Current reference designator (e.g., LED3)")
+    sch_set_ref.add_argument("--new-ref", help="New reference designator (e.g., D3)")
+    sch_set_ref.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (old_ref -> new_ref)",
+    )
+    sch_set_ref.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_ref.add_argument("--backup", action="store_true", help="Create backup before modifying")
+
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
         "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"
