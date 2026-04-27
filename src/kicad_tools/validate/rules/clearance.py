@@ -34,6 +34,8 @@ class CopperElement:
     geometry: tuple[float, ...]
     # Reference for violation reporting
     reference: str
+    # Net name for violation output (empty string for unconnected/net 0)
+    net_name: str = ""
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -44,6 +46,7 @@ class CopperElement:
             net_number=seg.net_number,
             geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
             reference=f"Trace-{seg.uuid[:8]}" if seg.uuid else "Trace",
+            net_name=seg.net_name if seg.net_number != 0 else "",
         )
 
     @classmethod
@@ -59,6 +62,7 @@ class CopperElement:
             net_number=pad.net_number,
             geometry=(abs_x, abs_y, width, height),
             reference=f"{footprint.reference}-{pad.number}",
+            net_name=pad.net_name if pad.net_number != 0 else "",
         )
 
     @classmethod
@@ -70,6 +74,7 @@ class CopperElement:
             net_number=via.net_number,
             geometry=(via.position[0], via.position[1], via.size, via.size),
             reference=f"Via-{via.uuid[:8]}" if via.uuid else "Via",
+            net_name=via.net_name if via.net_number != 0 else "",
         )
 
     def on_layer(self, layer: str) -> bool:
@@ -483,4 +488,5 @@ class ClearanceRule(DRCRule):
             actual_value=round(actual, 4),
             required_value=required,
             items=(elem1.reference, elem2.reference),
+            nets=(elem1.net_name, elem2.net_name),
         )

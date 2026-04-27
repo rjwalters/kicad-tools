@@ -60,6 +60,7 @@ def drc_results_to_report(
                 message=v.message,
                 locations=loc_list,
                 items=list(v.items),
+                nets=list(v.nets),
                 required_value_mm=v.required_value,
                 actual_value_mm=v.actual_value,
             )
