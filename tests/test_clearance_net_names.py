@@ -355,3 +355,172 @@ class TestClearanceRuleNetNames:
         assert len(results.violations) > 0
         v = results.violations[0]
         assert set(v.nets) == {"GND", "+3V3"}
+
+
+# ---------------------------------------------------------------------------
+# Reverse net name resolution: (net N) without inline name
+# ---------------------------------------------------------------------------
+
+
+class TestReverseNetNameResolution:
+    """Net names resolved from net_number using header declarations."""
+
+    PCB_NUMBER_ONLY = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "DAC_CLK")
+  (net 2 "GNDD")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-clk"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-gnd"))
+)
+"""
+
+    def test_segments_get_net_names_from_header(self, tmp_path: Path):
+        """Traditional (net N) format without inline name resolves from header."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(self.PCB_NUMBER_ONLY)
+        pcb = PCB.load(pcb_path)
+
+        # After fixup, segments should have net_name resolved
+        assert pcb.segments[0].net_name == "DAC_CLK"
+        assert pcb.segments[1].net_name == "GNDD"
+
+    def test_clearance_violation_has_resolved_net_names(self, tmp_path: Path):
+        """Clearance violations include net names resolved from number-only format."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(self.PCB_NUMBER_ONLY)
+        pcb = PCB.load(pcb_path)
+
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
+        results = checker.check_clearances()
+
+        assert len(results.violations) > 0
+        v = results.violations[0]
+        assert set(v.nets) == {"DAC_CLK", "GNDD"}
+
+    PCB_VIA_NUMBER_ONLY = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "DAC_CLK")
+  (net 2 "GNDD")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-clk"))
+  (via (at 100 100.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-gnd"))
+)
+"""
+
+    def test_via_gets_net_name_from_header(self, tmp_path: Path):
+        """Via with (net N) format resolves net_name from header."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(self.PCB_VIA_NUMBER_ONLY)
+        pcb = PCB.load(pcb_path)
+
+        assert pcb.vias[0].net_name == "GNDD"
+
+    def test_net_zero_stays_empty(self, tmp_path: Path):
+        """Net 0 (unconnected) keeps empty net_name."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 0) (uuid "seg-nc"))
+)
+"""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        # Net 0 should remain with empty name
+        assert pcb.segments[0].net_number == 0
+        assert pcb.segments[0].net_name == ""
+
+
+# ---------------------------------------------------------------------------
+# Drill clearance violations include nets
+# ---------------------------------------------------------------------------
+
+
+class TestDrillClearanceNets:
+    """Drill clearance violations include net names."""
+
+    PCB_DRILL_CLOSE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "VCC") (uuid "via-vcc"))
+  (via (at 100.3 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2 "GND") (uuid "via-gnd"))
+)
+"""
+
+    def test_drill_clearance_violation_has_nets(self, tmp_path: Path):
+        """Drill clearance violations include both net names."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(self.PCB_DRILL_CLOSE)
+        pcb = PCB.load(pcb_path)
+
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
+        results = checker.check_dimensions()
+
+        drill_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(drill_violations) > 0
+
+        v = drill_violations[0]
+        assert set(v.nets) == {"VCC", "GND"}

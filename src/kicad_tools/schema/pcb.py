@@ -1422,21 +1422,25 @@ class PCB:
         self._nets[net_num] = Net(net_num, net_name)
 
     def _fixup_net_numbers(self) -> None:
-        """Recover net_number from net_name for KiCad 10 name-only format.
+        """Reconcile net_number and net_name using PCB header declarations.
 
-        KiCad 10 may serialize inline net references as ``(net "name")``
-        without a numeric ID, while the PCB header still has ``(net N "name")``
-        declarations.  This method builds a name-to-number lookup from the
-        header and patches any pads, segments, or vias that have
-        ``net_number == 0`` but a non-empty ``net_name``.
+        Handles two complementary cases:
+
+        1. **KiCad 10 name-only format** -- inline references are
+           ``(net "name")`` without a numeric ID.  We resolve ``net_number``
+           from ``net_name`` using the header's ``(net N "name")`` map.
+
+        2. **Traditional number-only format** -- inline references are
+           ``(net N)`` without an inline name string.  We resolve
+           ``net_name`` from ``net_number`` using the same header map.
         """
-        # Build inverse lookup: name -> number
+        # Build bidirectional lookups from the header declarations
         name_to_number: dict[str, int] = {}
         for net in self._nets.values():
             if net.name and net.number != 0:
                 name_to_number[net.name] = net.number
 
-        if not name_to_number:
+        if not name_to_number and not self._nets:
             return
 
         # Fix pads
@@ -1444,21 +1448,37 @@ class PCB:
             for pad in fp.pads:
                 if pad.net_number == 0 and pad.net_name:
                     pad.net_number = name_to_number.get(pad.net_name, 0)
+                elif pad.net_number != 0 and not pad.net_name:
+                    net = self._nets.get(pad.net_number)
+                    if net:
+                        pad.net_name = net.name
 
         # Fix segments
         for seg in self._segments:
             if seg.net_number == 0 and seg.net_name:
                 seg.net_number = name_to_number.get(seg.net_name, 0)
+            elif seg.net_number != 0 and not seg.net_name:
+                net = self._nets.get(seg.net_number)
+                if net:
+                    seg.net_name = net.name
 
         # Fix vias
         for via in self._vias:
             if via.net_number == 0 and via.net_name:
                 via.net_number = name_to_number.get(via.net_name, 0)
+            elif via.net_number != 0 and not via.net_name:
+                net = self._nets.get(via.net_number)
+                if net:
+                    via.net_name = net.name
 
         # Fix zones
         for zone in self._zones:
             if zone.net_number == 0 and zone.net_name:
                 zone.net_number = name_to_number.get(zone.net_name, 0)
+            elif zone.net_number != 0 and not zone.net_name:
+                net = self._nets.get(zone.net_number)
+                if net:
+                    zone.net_name = net.name
 
     def _parse_setup(self, sexp: SExp):
         """Parse setup/design rules."""
