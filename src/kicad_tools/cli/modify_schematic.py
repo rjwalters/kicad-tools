@@ -315,6 +315,49 @@ def add_lib_symbol_text(text: str, lib_file: Path) -> tuple[str, bool, str]:
     return modified, True, "; ".join(msg_parts)
 
 
+def set_symbol_flag_text(
+    text: str, reference: str, flag_name: str, flag_value: str
+) -> tuple[str, bool, str]:
+    """
+    Set a symbol-level boolean flag (on_board, in_bom, dnp, exclude_from_sim).
+
+    flag_value must already be normalized to "yes" or "no".
+
+    Returns (modified_text, success, message).
+    """
+    result = find_symbol_text_range(text, reference)
+
+    if not result:
+        return text, False, f"Symbol '{reference}' not found"
+
+    start, end, info = result
+    block = text[start:end]
+
+    # Match the flag node, e.g. (on_board yes) or (dnp no)
+    pattern = re.compile(rf"(\({re.escape(flag_name)}\s+)(yes|no)(\))")
+    match = pattern.search(block)
+    if not match:
+        return text, False, f"Flag '{flag_name}' not found on symbol '{reference}'"
+
+    old_value = match.group(2)
+    new_block = pattern.sub(rf"\g<1>{flag_value}\3", block, count=1)
+
+    if new_block == block:
+        return (
+            text,
+            True,
+            f"{reference} {flag_name} already set to '{flag_value}'",
+        )
+
+    modified = text[:start] + new_block + text[end:]
+
+    return (
+        modified,
+        True,
+        f"Changed {reference} {flag_name}: '{old_value}' -> '{flag_value}'",
+    )
+
+
 def regen_uuids_text(text: str, reference: str) -> tuple[str, bool, str]:
     """
     Regenerate UUIDs for a symbol and its pins using text replacement.

@@ -581,6 +581,31 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_set_ref.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    # sch set-symbol-property
+    sch_set_prop = sch_subparsers.add_parser(
+        "set-symbol-property",
+        help="Set symbol-level boolean flags (on_board, in_bom, dnp, exclude_from_sim)",
+    )
+    sch_set_prop.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_prop.add_argument(
+        "--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)"
+    )
+    sch_set_prop.add_argument(
+        "--property",
+        dest="property_name",
+        required=True,
+        help="Flag to modify (on_board, in_bom, dnp, exclude_from_sim)",
+    )
+    sch_set_prop.add_argument(
+        "--value", required=True, help="Value to set (yes/no/true/false/1/0)"
+    )
+    sch_set_prop.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_prop.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
         "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"
