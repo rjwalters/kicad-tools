@@ -124,6 +124,8 @@ def run_sch_command(args) -> int:
         sub_argv = [str(schematic_path)]
         if args.ref:
             sub_argv.extend(["--ref", args.ref])
+        if getattr(args, "sheet", None):
+            sub_argv.extend(["--sheet", args.sheet])
         if args.format != "json":
             sub_argv.extend(["--format", args.format])
         return pin_map_main(sub_argv) or 0

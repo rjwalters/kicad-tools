@@ -1133,3 +1133,79 @@ class TestCLI:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data == {}
+
+
+# ---------------------------------------------------------------------------
+# Hierarchy traversal tests
+# ---------------------------------------------------------------------------
+
+HIERARCHICAL_ROOT = Path(__file__).parent / "fixtures" / "hierarchical" / "root.kicad_sch"
+
+
+class TestHierarchyTraversal:
+    """Verify that pin-map iterates all sheets in a hierarchical design."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing(self):
+        if not HIERARCHICAL_ROOT.exists():
+            pytest.skip("Hierarchical fixture not available")
+
+    def test_all_sheets_included(self, capsys):
+        """Components from root AND child sheets must appear in the output."""
+        rc = pin_map_main([str(HIERARCHICAL_ROOT), "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        # root.kicad_sch has R1
+        assert "R1" in data, "R1 from root sheet should be present"
+        # sub_a.kicad_sch has R2, C1
+        assert "R2" in data, "R2 from sub_a sheet should be present"
+        assert "C1" in data, "C1 from sub_a sheet should be present"
+        # sub_b.kicad_sch has R3, R4
+        assert "R3" in data, "R3 from sub_b sheet should be present"
+        assert "R4" in data, "R4 from sub_b sheet should be present"
+        # nested.kicad_sch has C2
+        assert "C2" in data, "C2 from nested sheet should be present"
+
+    def test_ref_filter_finds_child_component(self, capsys):
+        """--ref for a component on a child sheet must return it."""
+        rc = pin_map_main([str(HIERARCHICAL_ROOT), "--ref", "R3", "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        assert "R3" in data, "R3 from sub_b should be found with --ref filter"
+        assert len(data) == 1, "Only R3 should be returned"
+
+    def test_ref_filter_no_match(self, capsys):
+        """--ref for a non-existent component returns empty across all sheets."""
+        rc = pin_map_main([str(HIERARCHICAL_ROOT), "--ref", "U99", "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data == {}
+
+    def test_sheet_filter(self, capsys):
+        """--sheet restricts output to components on the matching sheet."""
+        rc = pin_map_main([
+            str(HIERARCHICAL_ROOT), "--sheet", "sub_b", "--format", "json"
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        # sub_b.kicad_sch has R3 and R4
+        assert "R3" in data
+        assert "R4" in data
+        # Components from other sheets should NOT be present
+        assert "R1" not in data
+        assert "R2" not in data
+        assert "C1" not in data
+        assert "C2" not in data
+
+    def test_single_sheet_still_works(self, capsys):
+        """A schematic with no child sheets should still work (just root)."""
+        # sub_b.kicad_sch has no child sheets
+        sub_b = Path(__file__).parent / "fixtures" / "hierarchical" / "sub_b.kicad_sch"
+        rc = pin_map_main([str(sub_b), "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "R3" in data
+        assert "R4" in data

@@ -488,6 +488,9 @@ def _add_sch_parser(subparsers) -> None:
     sch_pin_map.add_argument("schematic", help="Path to .kicad_sch file")
     sch_pin_map.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
     sch_pin_map.add_argument(
+        "--sheet", help="Restrict to a specific sheet (name or path substring)"
+    )
+    sch_pin_map.add_argument(
         "--format", choices=["table", "json"], default="json", help="Output format (default: json)"
     )
 
