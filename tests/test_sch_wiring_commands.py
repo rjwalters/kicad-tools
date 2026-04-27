@@ -378,6 +378,140 @@ SCHEMATIC_WITH_LONG_SINGLE_DANGLING_WIRE = """\
 """
 
 
+# Schematic with a stub branching from the midpoint of another wire.
+# The main wire runs from (100,50) to (200,50).  A short 0.5mm stub
+# branches from (150,50) -- the midpoint -- downward to (150,50.5).
+# The stub's anchored end (150,50) is NOT an endpoint of the main wire,
+# so endpoint-to-endpoint matching alone misses the T-junction connection.
+SCHEMATIC_WITH_MID_SEGMENT_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000040")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "main-wire")
+  )
+  (wire (pts (xy 150 50) (xy 150 50.5))
+    (stroke (width 0) (type default))
+    (uuid "mid-stub")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic where a wire endpoint is 0.05mm away from a label -- close
+# enough to collide in the old 0.1mm quantization bucket but far enough
+# to be genuinely disconnected at micron resolution.
+SCHEMATIC_WITH_NEAR_MISS_ENDPOINT = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000041")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100.05 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "near-miss-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a short collinear wire fully enclosed inside a longer wire.
+# The outer wire runs from (100,50) to (200,50).  The inner wire runs from
+# (120,50) to (130,50) -- same line, fully contained.
+SCHEMATIC_WITH_COLLINEAR_OVERLAP = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000042")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "outer-wire")
+  )
+  (wire (pts (xy 120 50) (xy 130 50))
+    (stroke (width 0) (type default))
+    (uuid "inner-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a T-junction where a wire endpoint lands on the middle of
+# another wire, and both ends of the branch are connected.  Nothing should
+# be flagged.
+SCHEMATIC_WITH_T_JUNCTION_CONNECTED = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000043")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "horizontal-wire")
+  )
+  (wire (pts (xy 150 50) (xy 150 100))
+    (stroke (width 0) (type default))
+    (uuid "vertical-wire")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (label "NET3" (at 150 100 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-3")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -725,6 +859,146 @@ class TestCleanupWires:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data.get("stub", 0) == 0
+
+    # --- mid-segment (T-junction) detection tests ---
+
+    def test_mid_segment_stub_detected(self, tmp_path):
+        """A stub branching from the midpoint of another wire is flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_MID_SEGMENT_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The stub is the 0.5mm wire from (150,50) to (150,50.5)
+        assert stubs[0].start == (150.0, 50.0)
+        assert stubs[0].end == (150.0, 50.5)
+
+    def test_t_junction_connected_wire_not_flagged(self, tmp_path):
+        """A wire whose endpoint lands on another wire body is not flagged as dangling."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_T_JUNCTION_CONNECTED)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        dangling = [i for i in issues if i.reason == "dangling"]
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(dangling) == 0, (
+            f"Expected no dangling wires but found: "
+            f"{[(d.start, d.end) for d in dangling]}"
+        )
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    # --- tighter quantization tests ---
+
+    def test_near_miss_endpoint_not_false_connected(self, tmp_path):
+        """A 0.05mm offset between wire endpoint and label is detected as dangling."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_NEAR_MISS_ENDPOINT)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        # The wire at (100.05, 50) -> (150, 50) has one end 0.05mm from the
+        # label at (100, 50).  With the old 0.1mm quantization both would hash
+        # to the same bucket; with micron quantization they differ.  The wire
+        # has no other connections, so both ends are dangling.
+        dangling = [i for i in issues if i.reason == "dangling"]
+        assert len(dangling) == 1
+
+    # --- collinear overlap detection tests ---
+
+    def test_collinear_enclosed_segment_flagged(self, tmp_path):
+        """A wire fully enclosed inside a longer collinear wire is flagged as overlap."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_COLLINEAR_OVERLAP)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        overlaps = [i for i in issues if i.reason == "overlap"]
+        assert len(overlaps) == 1
+        # The enclosed wire is (120,50) -> (130,50)
+        assert overlaps[0].start == (120.0, 50.0)
+        assert overlaps[0].end == (130.0, 50.0)
+
+    def test_overlap_removal(self, tmp_path):
+        """Overlap-flagged wires are removed and wire count decreases."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates, remove_wires
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_COLLINEAR_OVERLAP)
+        sch = Schematic.load(path)
+
+        initial_wire_count = len(list(sch.sexp.find_all("wire")))
+        issues = find_cleanup_candidates(sch)
+        overlaps = [i for i in issues if i.reason == "overlap"]
+        assert len(overlaps) == 1
+
+        removed = remove_wires(sch, overlaps)
+        assert removed == 1
+        assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
+
+    # --- _point_on_segment unit tests ---
+
+    def test_point_on_segment_midpoint(self):
+        """A point at the exact midpoint of a segment is detected."""
+        from kicad_tools.cli.sch_cleanup_wires import _point_on_segment
+
+        assert _point_on_segment((5.0, 0.0), (0.0, 0.0), (10.0, 0.0))
+
+    def test_point_on_segment_excludes_endpoints(self):
+        """Points at segment endpoints return False (handled separately)."""
+        from kicad_tools.cli.sch_cleanup_wires import _point_on_segment
+
+        assert not _point_on_segment((0.0, 0.0), (0.0, 0.0), (10.0, 0.0))
+        assert not _point_on_segment((10.0, 0.0), (0.0, 0.0), (10.0, 0.0))
+
+    def test_point_on_segment_off_line(self):
+        """A point not on the line is not detected."""
+        from kicad_tools.cli.sch_cleanup_wires import _point_on_segment
+
+        assert not _point_on_segment((5.0, 1.0), (0.0, 0.0), (10.0, 0.0))
+
+    def test_point_on_segment_within_tolerance(self):
+        """A point within tolerance of the segment body is detected."""
+        from kicad_tools.cli.sch_cleanup_wires import _point_on_segment
+
+        # 0.003mm off the line, within default 0.005mm tolerance
+        assert _point_on_segment((5.0, 0.003), (0.0, 0.0), (10.0, 0.0))
+
+    # --- _is_collinear_overlap unit tests ---
+
+    def test_collinear_overlap_basic(self):
+        """Shorter segment inside longer one is detected."""
+        from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
+
+        assert _is_collinear_overlap(
+            (0.0, 0.0), (10.0, 0.0),  # long
+            (2.0, 0.0), (8.0, 0.0),   # short, inside
+        )
+
+    def test_collinear_overlap_not_enclosed(self):
+        """Partially overlapping segments are not flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
+
+        assert not _is_collinear_overlap(
+            (0.0, 0.0), (10.0, 0.0),  # long
+            (5.0, 0.0), (15.0, 0.0),  # extends beyond
+        )
+
+    def test_collinear_overlap_parallel_not_collinear(self):
+        """Parallel but offset segments are not flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
+
+        assert not _is_collinear_overlap(
+            (0.0, 0.0), (10.0, 0.0),
+            (2.0, 1.0), (8.0, 1.0),  # same direction but 1mm apart
+        )
 
 
 # ---------------------------------------------------------------------------
