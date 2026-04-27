@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.sexp import SExp, parse_file, serialize_sexp
+from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
 
 # Valid KiCad pin types
 VALID_PIN_TYPES = frozenset(
@@ -456,6 +456,7 @@ class LibrarySymbol:
         default_factory=list
     )
     units: int = 1
+    extends: str | None = None
 
     @property
     def pin_count(self) -> int:
@@ -562,6 +563,12 @@ class LibrarySymbol:
         """Parse from S-expression."""
         name = sexp.get_string(0) or ""
 
+        # Parse extends (derived symbol relationship)
+        extends: str | None = None
+        extends_node = sexp.find("extends")
+        if extends_node is not None:
+            extends = extends_node.get_string(0) or None
+
         # Parse properties
         properties = {}
         for prop in sexp.find_all("property"):
@@ -595,6 +602,7 @@ class LibrarySymbol:
             properties=properties,
             pins=pins,
             graphics=graphics,
+            extends=extends,
         )
 
     def add_pin(
@@ -836,7 +844,8 @@ class LibrarySymbol:
     def to_sexp_node(self) -> SExp:
         """Generate S-expression for this symbol.
 
-        Format:
+        For a standalone symbol the format is::
+
             (symbol "<name>"
               (property "Reference" "U" (at 0 0 0) (effects ...))
               (property "Value" "<name>" (at 0 0 0) (effects ...))
@@ -852,10 +861,25 @@ class LibrarySymbol:
               )
             )
 
+        For a derived symbol (``extends`` is set) the format is::
+
+            (symbol "<name>"
+              (extends "<base_name>")
+              (property ...)
+              ...
+            )
+
+        Derived symbols inherit pins and graphics from their base and
+        must NOT contain unit sub-symbols.
+
         The ``_0_1`` sub-symbol holds graphical decoration (body shapes).
         The ``_N_1`` sub-symbols hold pins for each unit.
         """
         children: list[SExp] = [SExp(value=self.name)]
+
+        # Emit extends node for derived symbols
+        if self.extends:
+            children.append(SExp.list("extends", self.extends))
 
         # KiCad uses the fully-qualified lib_id (e.g. "Connector_Generic:Conn_01x04")
         # for the top-level symbol name, but the *short* name (after the colon)
@@ -881,25 +905,28 @@ class LibrarySymbol:
             children.append(prop_node)
             prop_y_offset += 2.54
 
-        # Add _0_1 sub-symbol for graphical shapes (body decoration)
-        if self.graphics:
-            gfx_name = f"{short_name}_0_1"
-            gfx_children: list[SExp] = [SExp(value=gfx_name)]
-            for graphic in self.graphics:
-                gfx_children.append(graphic.to_sexp_node())
-            children.append(SExp(name="symbol", children=gfx_children))
+        # Derived symbols inherit graphics and pins from the base --
+        # they must NOT emit unit sub-symbols.
+        if not self.extends:
+            # Add _0_1 sub-symbol for graphical shapes (body decoration)
+            if self.graphics:
+                gfx_name = f"{short_name}_0_1"
+                gfx_children: list[SExp] = [SExp(value=gfx_name)]
+                for graphic in self.graphics:
+                    gfx_children.append(graphic.to_sexp_node())
+                children.append(SExp(name="symbol", children=gfx_children))
 
-        # Add unit symbols with their pins
-        for unit_idx in range(1, self.units + 1):
-            unit_name = f"{short_name}_{unit_idx}_1"
-            unit_children: list[SExp] = [SExp(value=unit_name)]
+            # Add unit symbols with their pins
+            for unit_idx in range(1, self.units + 1):
+                unit_name = f"{short_name}_{unit_idx}_1"
+                unit_children: list[SExp] = [SExp(value=unit_name)]
 
-            # Add pins for this unit
-            for pin in self.pins:
-                if pin.unit == unit_idx:
-                    unit_children.append(pin.to_sexp_node())
+                # Add pins for this unit
+                for pin in self.pins:
+                    if pin.unit == unit_idx:
+                        unit_children.append(pin.to_sexp_node())
 
-            children.append(SExp(name="symbol", children=unit_children))
+                children.append(SExp(name="symbol", children=unit_children))
 
         return SExp(name="symbol", children=children)
 
@@ -921,6 +948,33 @@ class SymbolLibrary:
     def get_symbol(self, name: str) -> LibrarySymbol | None:
         """Get a symbol by name."""
         return self.symbols.get(name)
+
+    def resolve_base(self, symbol: LibrarySymbol) -> LibrarySymbol:
+        """Walk the ``extends`` chain and return the root base symbol.
+
+        If *symbol* is not a derived symbol (``extends is None``), it is
+        returned unchanged.
+
+        Raises:
+            ValueError: If a base symbol in the chain cannot be found in
+                this library.
+        """
+        visited: set[str] = set()
+        current = symbol
+        while current.extends is not None:
+            if current.name in visited:
+                raise ValueError(
+                    f"Circular extends chain detected at '{current.name}'"
+                )
+            visited.add(current.name)
+            base = self.symbols.get(current.extends)
+            if base is None:
+                raise ValueError(
+                    f"Base symbol '{current.extends}' (extended by "
+                    f"'{current.name}') not found in library '{self.path}'"
+                )
+            current = base
+        return current
 
     def __len__(self) -> int:
         return len(self.symbols)
@@ -1003,6 +1057,34 @@ class SymbolLibrary:
 
         return cls(
             path=path,
+            symbols=symbols,
+            version=version,
+            generator=generator,
+            _sexp=sexp,
+        )
+
+    @classmethod
+    def load_from_string(cls, text: str) -> SymbolLibrary:
+        """Load a symbol library from a string (for testing / in-memory use)."""
+        sexp = parse_string(text)
+
+        if sexp.tag != "kicad_symbol_lib":
+            raise ValueError("Not a KiCad symbol library string")
+
+        version = ""
+        generator = ""
+        if version_node := sexp.find("version"):
+            version = version_node.get_string(0) or ""
+        if generator_node := sexp.find("generator"):
+            generator = generator_node.get_string(0) or ""
+
+        symbols = {}
+        for sym_sexp in sexp.find_all("symbol"):
+            sym = LibrarySymbol.from_sexp(sym_sexp)
+            symbols[sym.name] = sym
+
+        return cls(
+            path="<string>",
             symbols=symbols,
             version=version,
             generator=generator,

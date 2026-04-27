@@ -468,6 +468,32 @@ DIFFERENT_PIN_COUNT_LIB = """(kicad_symbol_lib
 """
 
 
+# Library containing a derived symbol that extends a base.
+# AP2112K-3.3 extends AP2204K-1.5 (different output voltage variant).
+DERIVED_SYMBOL_LIB = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "AP2204K-1.5"
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "AP2204K-1.5" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "AP2204K-1.5_0_1"
+      (rectangle (start -5.08 5.08) (end 5.08 -5.08) (stroke (width 0)) (fill (type background)))
+    )
+    (symbol "AP2204K-1.5_1_1"
+      (pin power_in line (at -7.62 2.54 0) (length 2.54) (name "VIN") (number "1"))
+      (pin power_in line (at 0 -7.62 90) (length 2.54) (name "GND") (number "2"))
+      (pin power_out line (at 7.62 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+    )
+  )
+  (symbol "AP2112K-3.3"
+    (extends "AP2204K-1.5")
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "AP2112K-3.3" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+  )
+)
+"""
+
+
 class TestReplaceSymbolWithLibUpdate:
     """Tests for replace_symbol_lib_id with --lib-path (lib_symbols update)."""
 
@@ -651,6 +677,254 @@ class TestReplaceSymbolWithLibUpdate:
         sch = Schematic.load(sch_file)
         old_sym = sch.get_lib_symbol("Regulator_Linear:AP2204K-3.3")
         assert old_sym is not None, "Old lib_symbols entry should still be present"
+
+
+class TestDerivedSymbolRoundTrip:
+    """Tests for LibrarySymbol extends parsing and serialization."""
+
+    def test_from_sexp_parses_extends(self):
+        """Parsing a derived symbol sets the extends field."""
+        from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
+
+        lib = SymbolLibrary.load_from_string(DERIVED_SYMBOL_LIB)
+        derived = lib.get_symbol("AP2112K-3.3")
+        assert derived is not None
+        assert derived.extends == "AP2204K-1.5"
+        # Derived symbols have no pins of their own
+        assert len(derived.pins) == 0
+
+    def test_to_sexp_node_emits_extends(self):
+        """Serializing a derived symbol emits (extends ...) and no sub-symbols."""
+        from kicad_tools.schema.library import LibrarySymbol
+
+        sym = LibrarySymbol(
+            name="Regulator_Linear:AP2112K-3.3",
+            properties={"Reference": "U", "Value": "AP2112K-3.3"},
+            extends="AP2204K-1.5",
+        )
+        node = sym.to_sexp_node()
+        from kicad_tools.sexp import serialize_sexp
+
+        text = serialize_sexp(node)
+        assert '(extends "AP2204K-1.5")' in text
+        # No unit sub-symbols should be emitted
+        assert "_0_1" not in text
+        assert "_1_1" not in text
+
+    def test_to_sexp_node_standalone_no_extends(self):
+        """Standalone symbols do NOT emit (extends ...)."""
+        from kicad_tools.schema.library import LibrarySymbol
+
+        sym = LibrarySymbol(
+            name="MySymbol",
+            properties={"Reference": "U", "Value": "MySymbol"},
+        )
+        node = sym.to_sexp_node()
+        from kicad_tools.sexp import serialize_sexp
+
+        text = serialize_sexp(node)
+        assert "extends" not in text
+
+    def test_resolve_base(self):
+        """resolve_base walks the extends chain to the root."""
+        from kicad_tools.schema.library import SymbolLibrary
+
+        lib = SymbolLibrary.load_from_string(DERIVED_SYMBOL_LIB)
+        derived = lib.get_symbol("AP2112K-3.3")
+        assert derived is not None
+        base = lib.resolve_base(derived)
+        assert base.name == "AP2204K-1.5"
+        assert len(base.pins) == 3
+
+    def test_resolve_base_standalone(self):
+        """resolve_base returns the symbol itself if not derived."""
+        from kicad_tools.schema.library import SymbolLibrary
+
+        lib = SymbolLibrary.load_from_string(DERIVED_SYMBOL_LIB)
+        base = lib.get_symbol("AP2204K-1.5")
+        assert base is not None
+        resolved = lib.resolve_base(base)
+        assert resolved is base
+
+    def test_resolve_base_missing_raises(self):
+        """resolve_base raises ValueError when base is not in the library."""
+        from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
+
+        lib = SymbolLibrary(path="test", symbols={})
+        orphan = LibrarySymbol(name="Orphan", extends="MissingBase")
+        lib.symbols["Orphan"] = orphan
+
+        with pytest.raises(ValueError, match="not found in library"):
+            lib.resolve_base(orphan)
+
+
+class TestReplaceDerivedSymbol:
+    """Tests for replace_symbol_lib_id with derived (extends) symbols."""
+
+    def _write_schematic(self, tmp_path: Path) -> Path:
+        sch_file = tmp_path / "regulator.kicad_sch"
+        sch_file.write_text(REGULATOR_SCHEMATIC)
+        return sch_file
+
+    def _write_lib(self, tmp_path: Path, content: str, name: str = "lib.kicad_sym") -> Path:
+        lib_file = tmp_path / name
+        lib_file.write_text(content)
+        return lib_file
+
+    def test_replace_with_derived_embeds_base(self, tmp_path: Path):
+        """Replacing with a derived symbol embeds both derived and base entries."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DERIVED_SYMBOL_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:AP2112K-3.3",
+            lib_path=str(lib_file),
+        )
+
+        assert result.lib_symbol_updated is True
+
+        # Parse the result and check lib_symbols
+        sexp = parse_string(sch_file.read_text())
+        lib_syms = sexp.find("lib_symbols")
+        assert lib_syms is not None
+
+        names = [sym.get_string(0) for sym in lib_syms.find_all("symbol")]
+        # Base must be present
+        assert "AP2204K-1.5" in names, (
+            f"Base symbol should be embedded. Found: {names}"
+        )
+        # Derived entry must be present (renamed to the new lib_id)
+        assert "Regulator_Linear:AP2112K-3.3" in names, (
+            f"Derived symbol should be embedded. Found: {names}"
+        )
+        # Old entry must be gone
+        assert "Regulator_Linear:AP2204K-3.3" not in names
+
+    def test_derived_symbol_has_extends_in_output(self, tmp_path: Path):
+        """The embedded derived symbol entry must contain (extends ...)."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DERIVED_SYMBOL_LIB)
+
+        replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:AP2112K-3.3",
+            lib_path=str(lib_file),
+        )
+
+        from kicad_tools.sexp import serialize_sexp as ser
+
+        text = sch_file.read_text()
+        sexp = parse_string(text)
+        lib_syms = sexp.find("lib_symbols")
+        for sym in lib_syms.find_all("symbol"):
+            if sym.get_string(0) == "Regulator_Linear:AP2112K-3.3":
+                sym_text = ser(sym)
+                assert '(extends "AP2204K-1.5")' in sym_text
+                # Should NOT have unit sub-symbols
+                assert "_1_1" not in sym_text
+                break
+        else:
+            pytest.fail("Derived symbol not found in lib_symbols")
+
+    def test_pin_reconciliation_uses_base_pins(self, tmp_path: Path):
+        """Instance pins are reconciled against the base symbol's pins."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DERIVED_SYMBOL_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:AP2112K-3.3",
+            lib_path=str(lib_file),
+        )
+
+        # The base has 3 pins (1, 2, 3), same as old symbol
+        assert result.new_pin_count == 3
+
+        # Verify instance still has 3 pins
+        sexp = parse_string(sch_file.read_text())
+        symbol = find_symbol_by_reference(sexp, "U1")
+        pins = get_symbol_pins(symbol)
+        assert len(pins) == 3
+
+    def test_base_already_present_no_duplicate(self, tmp_path: Path):
+        """When the base symbol is already in lib_symbols it is not duplicated."""
+        # Build a schematic that already has the base symbol
+        sch_with_base = REGULATOR_SCHEMATIC.replace(
+            "  )\n  (symbol",
+            '    (symbol "AP2204K-1.5"\n'
+            '      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))\n'
+            '      (symbol "AP2204K-1.5_1_1"\n'
+            '        (pin power_in line (at -7.62 2.54 0) (length 2.54) (name "VIN") (number "1"))\n'
+            '        (pin power_in line (at 0 -7.62 90) (length 2.54) (name "GND") (number "2"))\n'
+            '        (pin power_out line (at 7.62 2.54 180) (length 2.54) (name "VOUT") (number "3"))\n'
+            "      )\n"
+            "    )\n"
+            "  )\n  (symbol",
+            1,
+        )
+        sch_file = tmp_path / "with_base.kicad_sch"
+        sch_file.write_text(sch_with_base)
+        lib_file = self._write_lib(tmp_path, DERIVED_SYMBOL_LIB)
+
+        replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:AP2112K-3.3",
+            lib_path=str(lib_file),
+        )
+
+        sexp = parse_string(sch_file.read_text())
+        lib_syms = sexp.find("lib_symbols")
+        base_count = sum(
+            1 for sym in lib_syms.find_all("symbol")
+            if sym.get_string(0) == "AP2204K-1.5"
+        )
+        assert base_count == 1, f"Base should appear exactly once, found {base_count}"
+
+    def test_pin_type_changes_from_base(self, tmp_path: Path):
+        """Pin type changes are correctly reported when new symbol is derived."""
+        # The old symbol has pin 3 as power_out, the base AP2204K-1.5 also
+        # has pin 3 as power_out, so no changes expected with this fixture.
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DERIVED_SYMBOL_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:AP2112K-3.3",
+            lib_path=str(lib_file),
+        )
+
+        # Both old and new have power_out on pin 3, power_in on 1 and 2
+        assert len(result.pin_type_changes) == 0
+
+    def test_missing_base_in_library_raises(self, tmp_path: Path):
+        """Clear error when the base symbol is not found in the library."""
+        # Library with a derived symbol but no base
+        orphan_lib = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "OrphanDerived"
+    (extends "MissingBase")
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "OrphanDerived" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+  )
+)
+"""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, orphan_lib)
+
+        with pytest.raises(ValueError, match="not found in library"):
+            replace_symbol_lib_id(
+                str(sch_file),
+                "U1",
+                "OrphanDerived",
+                lib_path=str(lib_file),
+            )
 
 
 class TestNetOpsHelpers:
