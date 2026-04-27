@@ -3061,6 +3061,104 @@ def check_matched_channel_symmetry(schematic_path: str) -> list[ValidationIssue]
     return issues
 
 
+def check_bom_variety(schematic_path: str) -> list[ValidationIssue]:
+    """Flag same-value passives that use multiple distinct footprints.
+
+    Groups passive components (R, C, L, etc.) by (component_type, value) and
+    emits a warning when any group uses more than one footprint.  Components
+    whose value includes voltage/wattage qualifiers (e.g. "100nF 25V" vs
+    "100nF 50V") naturally form separate groups because the full value string
+    is used as the grouping key.
+
+    Skips power symbols, DNP symbols, and symbols missing footprint or value.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Mapping: (component_type, value) -> {footprint: [references]}
+        groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Must be a passive
+                    if not _is_passive_component(sym.lib_id):
+                        continue
+
+                    # Must have both value and footprint
+                    if not sym.value or sym.value in ("~", "?"):
+                        continue
+                    if not sym.footprint or sym.footprint == "~":
+                        continue
+
+                    # Determine component type from reference prefix
+                    ref = sym.reference or ""
+                    comp_type = ""
+                    for ch in ref:
+                        if ch.isalpha():
+                            comp_type += ch
+                        else:
+                            break
+                    if not comp_type:
+                        continue
+
+                    # Extract just the footprint name (strip library prefix)
+                    fp = sym.footprint
+                    fp_name = fp.split(":")[-1] if ":" in fp else fp
+
+                    key = (comp_type, sym.value)
+                    if key not in groups:
+                        groups[key] = {}
+                    if fp_name not in groups[key]:
+                        groups[key][fp_name] = []
+                    groups[key][fp_name].append(ref)
+
+            except Exception:
+                pass  # Skip sheets that fail to load
+
+        # Emit warnings for groups with multiple footprints
+        for (comp_type, value), fp_map in sorted(groups.items()):
+            if len(fp_map) <= 1:
+                continue
+
+            # Build descriptive message listing footprints and their references
+            parts = []
+            for fp_name, refs in sorted(fp_map.items()):
+                sorted_refs = sorted(refs, key=lambda r: (r.rstrip("0123456789"), int("".join(c for c in r if c.isdigit()) or "0")))
+                parts.append(f"{fp_name} ({', '.join(sorted_refs)})")
+            detail = ", ".join(parts)
+
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="bom_variety",
+                    message=f"BOM variety: {value} uses multiple footprints - {detail} -- consider consolidating",
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="bom_variety",
+                message=f"BOM variety check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(
     schematic_path: str,
     lib_paths: list[str] = None,
@@ -3091,6 +3189,9 @@ def validate_schematic(
 
     # Missing values
     _run("values", check_missing_values)
+
+    # BOM variety (same-value passives with different footprints)
+    _run("bom_variety", check_bom_variety)
 
     # Hierarchy
     _run("hierarchy", check_hierarchy)
