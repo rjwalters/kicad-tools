@@ -10,6 +10,8 @@ from kicad_tools.cli.sch_validate import (
     ValidationIssue,
     _ChannelFilterSignature,
     _find_matched_pairs,
+    _is_bypass_cap,
+    _parse_capacitance_farads,
     check_matched_channel_symmetry,
 )
 
@@ -140,11 +142,13 @@ def _make_lib_symbol(
 
 def _make_symbol_instance(
     ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    value: str | None = None,
 ) -> str:
     """Generate a symbol instance S-expression."""
     pin_entries = "\n".join(
         f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
     )
+    value_str = value if value is not None else lib_id.split(':')[-1]
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -157,7 +161,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{value_str}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -193,7 +197,8 @@ def _build_schematic(components: list[dict]) -> str:
             lib_symbols.append(_make_lib_symbol(lib_id, pins))
             seen_lib_ids.add(lib_id)
 
-        symbol_instances.append(_make_symbol_instance(ref, lib_id, pins, x, y))
+        value = comp.get("value")
+        symbol_instances.append(_make_symbol_instance(ref, lib_id, pins, x, y, value=value))
 
         for pin_idx, (pin_num, _, _) in enumerate(pins):
             if pin_num not in pin_nets:
@@ -535,3 +540,202 @@ class TestCheckMatchedChannelSymmetry:
         assert len(warnings) == 1
         assert "CH_A" in warnings[0].message
         assert "CH_B" in warnings[0].message
+
+    def test_bypass_cap_not_counted_as_shunt(self, tmp_path: Path):
+        """Extra bypass cap (10uF) on one channel should not cause asymmetry warning.
+
+        Both channels have matching 100nF filter caps. One channel also has a
+        10uF bypass cap -- this should be classified separately and not trigger
+        a shunt cap mismatch.
+        """
+        components = [
+            {
+                "ref": "U1",
+                "lib_id": "IC:DAC",
+                "pins": [
+                    ("1", "OUTL", "output"),
+                    ("2", "OUTR", "output"),
+                ],
+                "pin_nets": {
+                    "1": "AUDIO_L",
+                    "2": "AUDIO_R",
+                },
+            },
+            # Matching 100nF shunt caps on both channels
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_L", "2": "GND"},
+                "value": "100nF",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_R", "2": "GND"},
+                "value": "100nF",
+            },
+            # Extra 10uF bypass cap on AUDIO_R only
+            {
+                "ref": "C3",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_R", "2": "GND"},
+                "value": "10uF",
+            },
+        ]
+        sch_text = _build_schematic(components)
+        sch_path = tmp_path / "bypass_cap.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_matched_channel_symmetry(str(sch_path))
+        # The shunt cap counts should match (1 vs 1).
+        # The bypass cap difference should be reported separately.
+        shunt_warnings = [
+            i for i in issues
+            if i.category == "matched_channel_symmetry"
+            and "shunt caps" in i.message
+        ]
+        assert shunt_warnings == [], (
+            f"Should not warn about shunt cap mismatch: {shunt_warnings}"
+        )
+
+    def test_mismatched_filter_caps_still_warns(self, tmp_path: Path):
+        """Different numbers of small-value filter caps should still warn."""
+        components = [
+            {
+                "ref": "U1",
+                "lib_id": "IC:DAC",
+                "pins": [
+                    ("1", "OUTL", "output"),
+                    ("2", "OUTR", "output"),
+                ],
+                "pin_nets": {
+                    "1": "AUDIO_L",
+                    "2": "AUDIO_R",
+                },
+            },
+            # Two 100nF filter caps on AUDIO_R
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_R", "2": "GND"},
+                "value": "100nF",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_R", "2": "GND"},
+                "value": "100nF",
+            },
+            # Only one 100nF filter cap on AUDIO_L
+            {
+                "ref": "C3",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_L", "2": "GND"},
+                "value": "100nF",
+            },
+        ]
+        sch_text = _build_schematic(components)
+        sch_path = tmp_path / "mismatched_filter.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_matched_channel_symmetry(str(sch_path))
+        warnings = [
+            i for i in issues
+            if i.category == "matched_channel_symmetry"
+            and "shunt caps" in i.message
+        ]
+        assert len(warnings) == 1
+        assert "1 vs 2" in warnings[0].message or "2 vs 1" in warnings[0].message
+
+    def test_dc_blocking_cap_not_counted_as_shunt(self, tmp_path: Path):
+        """A DC-blocking cap (both pins on signal nets) should be classified as series."""
+        components = [
+            {
+                "ref": "U1",
+                "lib_id": "IC:DAC",
+                "pins": [
+                    ("1", "OUTL", "output"),
+                    ("2", "OUTR", "output"),
+                ],
+                "pin_nets": {
+                    "1": "AUDIO_L",
+                    "2": "AUDIO_R",
+                },
+            },
+            # DC-blocking cap on AUDIO_R (series between AUDIO_R and AUDIO_R_OUT)
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "pins": [("1", "~", "passive"), ("2", "~", "passive")],
+                "pin_nets": {"1": "AUDIO_R", "2": "AUDIO_R_OUT"},
+                "value": "10uF",
+            },
+        ]
+        sch_text = _build_schematic(components)
+        sch_path = tmp_path / "dc_blocking.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_matched_channel_symmetry(str(sch_path))
+        # Should classify as series, not shunt
+        shunt_warnings = [
+            i for i in issues
+            if i.category == "matched_channel_symmetry"
+            and "shunt caps" in i.message
+        ]
+        assert shunt_warnings == []
+        # Should report series asymmetry
+        series_warnings = [
+            i for i in issues
+            if i.category == "matched_channel_symmetry"
+            and "series" in i.message
+        ]
+        assert len(series_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for capacitance parsing and bypass detection
+# ---------------------------------------------------------------------------
+
+
+class TestCapacitanceParsing:
+    """Test _parse_capacitance_farads and _is_bypass_cap."""
+
+    def test_parse_100nf(self):
+        assert _parse_capacitance_farads("100nF") == pytest.approx(100e-9)
+
+    def test_parse_10uf(self):
+        assert _parse_capacitance_farads("10uF") == pytest.approx(10e-6)
+
+    def test_parse_1uf(self):
+        assert _parse_capacitance_farads("1uF") == pytest.approx(1e-6)
+
+    def test_parse_22pf(self):
+        assert _parse_capacitance_farads("22pF") == pytest.approx(22e-12)
+
+    def test_parse_empty(self):
+        assert _parse_capacitance_farads("") is None
+
+    def test_parse_garbage(self):
+        assert _parse_capacitance_farads("hello") is None
+
+    def test_is_bypass_10uf(self):
+        assert _is_bypass_cap("10uF") is True
+
+    def test_is_bypass_1uf(self):
+        assert _is_bypass_cap("1uF") is True
+
+    def test_is_not_bypass_100nf(self):
+        assert _is_bypass_cap("100nF") is False
+
+    def test_is_not_bypass_empty(self):
+        assert _is_bypass_cap("") is False
+
+    def test_is_not_bypass_unknown(self):
+        # Unknown value -- cannot determine, so not treated as bypass
+        assert _is_bypass_cap("C") is False
