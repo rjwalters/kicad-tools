@@ -651,6 +651,115 @@ class TestFullyUnconnectedComponent:
         assert "R1" in errors[0].message
         assert "floating" in errors[0].message
 
+    def test_wires_at_pins_but_no_label_not_flagged(self, tmp_path: Path):
+        """A component with wires at every pin but no reachable net label
+        should NOT be flagged as fully unconnected.
+
+        This is the core false-positive from issue #2146: resolve_pin_map
+        returns net=None for every pin because the BFS cannot reach a named
+        net (barrier-pin blocking), but wires physically touch all pins.
+        The wire-proximity fallback should suppress the error.
+        """
+        lib_sym = _make_lib_symbol(
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+        )
+        sym_inst = _make_symbol_instance(
+            "R1",
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+            x=100.0,
+            y=50.0,
+        )
+        # Wires at pin positions but NO labels -- BFS will report net=None.
+        # Pin 1 at (100, 50), Pin 2 at (100, 47.46).
+        sch_text = f"""(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "test-wire-no-label-uuid")
+    (paper "A4")
+    (lib_symbols
+        {lib_sym}
+    )
+    {sym_inst}
+    (wire
+        (pts (xy 100.00 50.00) (xy 110.00 50.00))
+        (stroke (width 0) (type default))
+        (uuid "wire-r1-1")
+    )
+    (wire
+        (pts (xy 100.00 47.46) (xy 110.00 47.46))
+        (stroke (width 0) (type default))
+        (uuid "wire-r1-2")
+    )
+)
+"""
+        sch_path = tmp_path / "wire_no_label.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component" and i.severity == "error"
+        ]
+        assert errors == [], (
+            f"Component R1 with wires at pins should not be flagged; "
+            f"got: {[e.message for e in errors]}"
+        )
+
+    def test_wire_beyond_snap_tolerance_still_flagged(self, tmp_path: Path):
+        """A component with wires beyond snap tolerance (>0.1mm) from all
+        pins should still be flagged as unconnected."""
+        lib_sym = _make_lib_symbol(
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+        )
+        sym_inst = _make_symbol_instance(
+            "R1",
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+            x=100.0,
+            y=50.0,
+        )
+        # Wires placed 0.5mm away from pin positions -- beyond the 0.1mm
+        # snap tolerance.  Pin 1 at (100, 50), wire starts at (100.5, 50).
+        # _to_coord(100, 50)=(1000, 500), _to_coord(100.5, 50)=(1005, 500)
+        # Difference of 5 units >> tolerance of 1.
+        sch_text = f"""(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "test-wire-far-uuid")
+    (paper "A4")
+    (lib_symbols
+        {lib_sym}
+    )
+    {sym_inst}
+    (wire
+        (pts (xy 100.50 50.00) (xy 110.00 50.00))
+        (stroke (width 0) (type default))
+        (uuid "wire-r1-far-1")
+    )
+    (wire
+        (pts (xy 100.50 47.46) (xy 110.00 47.46))
+        (stroke (width 0) (type default))
+        (uuid "wire-r1-far-2")
+    )
+)
+"""
+        sch_path = tmp_path / "wire_far.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component" and i.severity == "error"
+        ]
+        assert len(errors) == 1, (
+            f"Component R1 with wires 0.5mm away should be flagged; "
+            f"got {len(errors)} errors"
+        )
+        assert "R1" in errors[0].message
+
     def test_near_miss_distance_in_diagnostic(self, tmp_path: Path):
         """When a component IS flagged, the message should include near-miss
         wire distances for diagnostic purposes."""

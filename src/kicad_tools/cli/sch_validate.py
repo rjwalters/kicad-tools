@@ -2159,7 +2159,11 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
     issues: list[ValidationIssue] = []
 
     try:
-        from kicad_tools.cli.sch_pin_map import _to_coord, resolve_pin_map
+        from kicad_tools.cli.sch_pin_map import (
+            _snap_coord,
+            _to_coord,
+            resolve_pin_map,
+        )
 
         hierarchy = build_hierarchy(schematic_path)
 
@@ -2169,11 +2173,26 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                 pin_map = resolve_pin_map(sch)
                 sheet_path = node.get_path_string()
 
-                # Collect wire endpoints for near-miss distance reporting.
+                # Collect wire endpoints (plus junctions and label positions)
+                # for connectivity proximity checks and near-miss reporting.
                 wire_endpoints: set[tuple[int, int]] = set()
                 for wire in sch.wires:
                     wire_endpoints.add(_to_coord(*wire.start))
                     wire_endpoints.add(_to_coord(*wire.end))
+                for junc_sexp in sch.sexp.find_children("junction"):
+                    jat = junc_sexp.find("at")
+                    if jat:
+                        jx = jat.get_float(0)
+                        jy = jat.get_float(1)
+                        if jx is not None and jy is not None:
+                            wire_endpoints.add(_to_coord(jx, jy))
+                for lbl_sexp in sch.sexp.find_children("label"):
+                    lat = lbl_sexp.find("at")
+                    if lat:
+                        lx = lat.get_float(0)
+                        ly = lat.get_float(1)
+                        if lx is not None and ly is not None:
+                            wire_endpoints.add(_to_coord(lx, ly))
 
                 # Collect no-connect marker positions from the raw S-expression.
                 nc_points: set[tuple[float, float]] = set()
@@ -2235,6 +2254,30 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                         continue
                     if has_any_nc_marker:
                         continue
+
+                    # Secondary check: BFS reported net=None for every pin,
+                    # but a wire endpoint (or junction/label) may still
+                    # physically touch the pin.  This happens when all paths
+                    # from the pin to a named net pass through another
+                    # component's pin (barrier-pin blocking in the BFS).
+                    # If *any* pin has a wire at or within snap tolerance,
+                    # the component is wired and should not be flagged.
+                    if wire_endpoints:
+                        has_wire_at_pin = False
+                        for _pn, _pi in pins_data.items():
+                            _pos = _pi.get("position")
+                            if not _pos:
+                                continue
+                            pc = _to_coord(_pos[0], _pos[1])
+                            if pc in wire_endpoints:
+                                has_wire_at_pin = True
+                                break
+                            snapped = _snap_coord(pc, wire_endpoints)
+                            if snapped != pc:
+                                has_wire_at_pin = True
+                                break
+                        if has_wire_at_pin:
+                            continue
 
                     # All pins are floating with no no-connect markers.
                     # Compute near-miss distances for diagnostics.
