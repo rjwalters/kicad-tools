@@ -69,6 +69,7 @@ class ManufacturingResult:
     output_dir: Path
     assembly_result: AssemblyPackageResult | None = None
     report_path: Path | None = None
+    report_md_path: Path | None = None
     project_zip_path: Path | None = None
     manifest_path: Path | None = None
     readme_path: Path | None = None
@@ -94,6 +95,8 @@ class ManufacturingResult:
                 files.append(self.assembly_result.gerber_path)
         if self.report_path:
             files.append(self.report_path)
+        if self.report_md_path:
+            files.append(self.report_md_path)
         if self.project_zip_path:
             files.append(self.project_zip_path)
         if self.readme_path:
@@ -638,6 +641,11 @@ class ManufacturingPackage:
             promoted = out_dir / "report.pdf"
             shutil.copy2(staged_pdf, promoted)
             result.report_path = promoted
+            # Also preserve the markdown source alongside the PDF
+            if staged_md.exists():
+                promoted_md = out_dir / "report.md"
+                shutil.copy2(staged_md, promoted_md)
+                result.report_md_path = promoted_md
         elif staged_md.exists():
             promoted = out_dir / "report.md"
             shutil.copy2(staged_md, promoted)

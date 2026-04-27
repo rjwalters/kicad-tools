@@ -788,6 +788,10 @@ class TestLatestReportOnly:
         assert (out_dir / "report.pdf").exists()
         assert result.report_path == out_dir / "report.pdf"
 
+        # Markdown source should also be preserved alongside PDF
+        assert (out_dir / "report.md").exists()
+        assert result.report_md_path == out_dir / "report.md"
+
         # No report/ subdirectory
         assert not (out_dir / "report").exists()
 
@@ -901,6 +905,60 @@ class TestLatestReportOnly:
         # Manifest should have "report.md" key (at root), not "report/report.md"
         assert "report.md" in manifest["files"]
         assert "report/report.md" not in manifest.get("files", {})
+
+    def test_manifest_includes_both_pdf_and_md(self, tmp_path, monkeypatch):
+        """Manifest should include checksums for both report.pdf and report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            # Create both MD and PDF in v1/
+            report_path = self._fake_report_generate(od, 1)
+            pdf_path = report_path.with_suffix(".pdf")
+            pdf_path.write_bytes(b"%PDF-1.4 fake pdf content")
+            result.report_path = pdf_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=True,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Both files should exist at root
+        assert (out_dir / "report.pdf").exists()
+        assert (out_dir / "report.md").exists()
+
+        # result should track both paths
+        assert result.report_path == out_dir / "report.pdf"
+        assert result.report_md_path == out_dir / "report.md"
+
+        # Both should appear in all_files
+        all_file_names = [f.name for f in result.all_files]
+        assert "report.pdf" in all_file_names
+        assert "report.md" in all_file_names
+
+        # Parse manifest -- both should have checksums
+        import json
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        assert "report.pdf" in manifest["files"]
+        assert "report.md" in manifest["files"]
 
     def test_cli_keep_build_artifacts_flag(self):
         """CLI --keep-build-artifacts flag parses correctly."""
