@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
+from kicad_tools.schema.hierarchy import build_hierarchy
 from kicad_tools.schema.label import PowerSymbol
 
 # Use integer-scaled coordinates for fast set lookup (matches sch_check_connections.py)
@@ -430,20 +432,46 @@ def main(argv=None):
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
     parser.add_argument(
+        "--sheet", help="Restrict to a specific sheet (name or path substring)"
+    )
+    parser.add_argument(
         "--format", choices=["table", "json"], default="json", help="Output format (default: json)"
     )
 
     args = parser.parse_args(argv)
 
-    # Load schematic
-    try:
-        sch = Schematic.load(args.schematic)
-    except (FileNotFoundError, KiCadFileNotFoundError):
+    # Verify root schematic exists before building hierarchy
+    if not os.path.isfile(args.schematic):
         print(f"Error: Schematic not found: {args.schematic}", file=sys.stderr)
         return 1
 
-    # Resolve pin map
-    pin_map = resolve_pin_map(sch, ref_filter=args.ref)
+    # Build hierarchy to iterate all sheets (root + children)
+    hierarchy = build_hierarchy(args.schematic)
+
+    # Iterate all sheets, merging pin maps
+    pin_map: dict[str, dict] = {}
+    for node in hierarchy.all_nodes():
+        # Apply --sheet filter: skip nodes whose name or path don't match
+        if args.sheet:
+            sheet_filter = args.sheet.lower()
+            node_name = (node.name or "").lower()
+            node_path = (node.path or "").lower()
+            if sheet_filter not in node_name and sheet_filter not in node_path:
+                continue
+
+        try:
+            sch = Schematic.load(node.path)
+        except (FileNotFoundError, KiCadFileNotFoundError):
+            continue
+
+        sheet_map = resolve_pin_map(sch, ref_filter=args.ref)
+
+        # Merge results -- multi-unit symbols may span sheets
+        for ref, entry in sheet_map.items():
+            if ref in pin_map:
+                pin_map[ref]["pins"].update(entry["pins"])
+            else:
+                pin_map[ref] = entry
 
     if args.format == "json":
         output_json(pin_map)
