@@ -12,7 +12,7 @@ def run_sch_command(args) -> int:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,")
         print(
-            "          connections, unconnected, set-footprint, set-value, replace,"
+            "          connections, unconnected, set-footprint, set-value, set-reference, replace,"
             " sync-hierarchy, rename-signal,"
         )
         print(
@@ -180,6 +180,19 @@ def run_sch_command(args) -> int:
             schematic_path=schematic_path,
             ref=getattr(args, "ref", None),
             value=getattr(args, "value", None),
+            map_path=map_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", True),
+        )
+
+    elif args.sch_command == "set-reference":
+        from ..sch_set_reference import run_set_reference
+
+        map_path = Path(args.map_file) if getattr(args, "map_file", None) else None
+        return run_set_reference(
+            schematic_path=schematic_path,
+            ref=getattr(args, "ref", None),
+            new_ref=getattr(args, "new_ref", None),
             map_path=map_path,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
