@@ -957,6 +957,178 @@ class TestSchSymbolInfo:
         captured = capsys.readouterr()
         assert "Properties:" in captured.out
 
+    def test_show_pins_json_includes_name_type_net(self, tmp_path, capsys, monkeypatch):
+        """Test that --show-pins --json includes name, type, net, position fields."""
+        from kicad_tools.cli.sch_symbol_info import main
+
+        # Schematic with lib_symbols so resolve_pin_map can enrich pin data
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (pin_numbers hide)
+      (pin_names (offset 0) hide)
+      (in_bom yes) (on_board yes)
+      (symbol "Device:R_0_1"
+        (rectangle (start -1.016 -2.54) (end 1.016 2.54)
+          (stroke (width 0.254) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (wire
+    (pts (xy 100 96.19) (xy 100 90))
+    (stroke (width 0) (type default))
+    (uuid "00000000-0000-0000-0000-000000000010")
+  )
+  (label "VIN"
+    (at 100 90 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "00000000-0000-0000-0000-000000000011")
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        sch_file = tmp_path / "test_enriched.kicad_sch"
+        sch_file.write_text(sch_content)
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["sch-symbol-info", str(sch_file), "R1", "--show-pins", "--json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "pins" in data
+        assert len(data["pins"]) == 2
+
+        # Verify enriched fields are present
+        pin1 = next(p for p in data["pins"] if p["number"] == "1")
+        assert "name" in pin1
+        assert "type" in pin1
+        assert "net" in pin1
+        assert "position" in pin1
+        assert pin1["type"] == "passive"
+        assert pin1["net"] == "VIN"
+
+    def test_show_pins_text_includes_name_type_net(self, tmp_path, capsys, monkeypatch):
+        """Test that --show-pins table output includes name, type, net columns."""
+        from kicad_tools.cli.sch_symbol_info import main
+
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (pin_numbers hide)
+      (pin_names (offset 0) hide)
+      (in_bom yes) (on_board yes)
+      (symbol "Device:R_0_1"
+        (rectangle (start -1.016 -2.54) (end 1.016 2.54)
+          (stroke (width 0.254) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (wire
+    (pts (xy 100 96.19) (xy 100 90))
+    (stroke (width 0) (type default))
+    (uuid "00000000-0000-0000-0000-000000000010")
+  )
+  (label "VIN"
+    (at 100 90 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "00000000-0000-0000-0000-000000000011")
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        sch_file = tmp_path / "test_enriched.kicad_sch"
+        sch_file.write_text(sch_content)
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["sch-symbol-info", str(sch_file), "R1", "--show-pins"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        # Table output should include column headers
+        assert "Name" in captured.out
+        assert "Type" in captured.out
+        assert "Net" in captured.out
+        # Should show actual pin data
+        assert "passive" in captured.out
+        assert "VIN" in captured.out
+
+    def test_show_pins_graceful_without_lib_symbols(self, minimal_schematic, capsys, monkeypatch):
+        """Test that --show-pins degrades gracefully when lib_symbols is empty."""
+        from kicad_tools.cli.sch_symbol_info import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["sch-symbol-info", str(minimal_schematic), "R1", "--show-pins", "--json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "pins" in data
+        # Pins should still have number and uuid even without enrichment
+        for pin in data["pins"]:
+            assert "number" in pin
+            assert "uuid" in pin
+
 
 class TestSchValidate:
     """Tests for sch_validate.py CLI."""
