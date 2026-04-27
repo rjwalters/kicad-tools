@@ -546,22 +546,33 @@ def filter_cross_sheet_power_violations(
 # ---------------------------------------------------------------------------
 
 _WIRE_POSITION_TYPES: frozenset[str] = frozenset(
-    {"wire_dangling", "endpoint_off_grid"}
+    {
+        "wire_dangling",
+        "endpoint_off_grid",
+        "no_connect_dangling",
+        "label_dangling",
+        "global_label_dangling",
+    }
 )
 
 
 def _build_wire_endpoint_map(
     root_schematic: str,
-    tolerance: float = 0.01,
+    tolerance: float = 0.1,
 ) -> dict[tuple[float, float], str]:
-    """Build a mapping of wire endpoint coordinates to sheet paths.
+    """Build a mapping of wire endpoint and midpoint coordinates to sheet paths.
 
     Iterates every child sheet in the hierarchy, loads its wires, and
     records each wire start/end coordinate together with the sheet's
-    hierarchical path string (e.g. ``/DAC``).
+    hierarchical path string (e.g. ``/DAC``).  Wire midpoints are also
+    indexed so that T-junction violations (where KiCad reports a
+    coordinate on the interior of a wire segment rather than at an
+    endpoint) can be matched.
 
     Coordinates are rounded to *tolerance*-sized buckets so that
-    floating-point imprecision does not prevent matching.
+    floating-point imprecision does not prevent matching.  The default
+    tolerance of 0.1 mm accommodates coordinate rounding differences
+    between KiCad's ERC report and the ``.kicad_sch`` wire definitions.
 
     The root sheet's own wires are **not** included -- the purpose of
     this map is to find a *child* sheet that owns a position that KiCad
@@ -585,8 +596,14 @@ def _build_wire_endpoint_map(
             continue
         sheet_path = node.get_path_string()
         for wire in sch.wires:
-            inv[(_snap(wire.start[0]), _snap(wire.start[1]))] = sheet_path
-            inv[(_snap(wire.end[0]), _snap(wire.end[1]))] = sheet_path
+            sx, sy = wire.start[0], wire.start[1]
+            ex, ey = wire.end[0], wire.end[1]
+            inv[(_snap(sx), _snap(sy))] = sheet_path
+            inv[(_snap(ex), _snap(ey))] = sheet_path
+            # Index the midpoint so T-junction violations can be matched.
+            mx = (sx + ex) / 2.0
+            my = (sy + ey) / 2.0
+            inv[(_snap(mx), _snap(my))] = sheet_path
 
     return inv
 
@@ -595,17 +612,19 @@ def reattribute_wire_dangling_violations(
     violations: list[dict],
     root_schematic: str,
 ) -> list[dict]:
-    """Re-attribute ``wire_dangling`` and ``endpoint_off_grid`` violations
-    from the root sheet to the correct child sheet.
+    """Re-attribute wire-position-dependent violations from the root sheet
+    to the correct child sheet.
 
     KiCad's ERC JSON groups violations under a ``sheets`` array.  For
-    ``wire_dangling`` violations (and sometimes ``endpoint_off_grid``),
-    KiCad attributes them to the root sheet path (``/``) even when the
-    actual wire endpoint lives in a child sheet.
+    wire-position-dependent types (``wire_dangling``, ``endpoint_off_grid``,
+    ``no_connect_dangling``, ``label_dangling``, ``global_label_dangling``),
+    KiCad sometimes attributes them to the root sheet path (``/``) even
+    when the actual wire endpoint lives in a child sheet.
 
     This function matches each root-attributed violation's ``pos``
-    coordinates against wire endpoints across the hierarchy and updates
-    ``_sheet_path`` to the correct child sheet when a match is found.
+    coordinates against wire endpoints and midpoints across the hierarchy
+    and updates ``_sheet_path`` to the correct child sheet when a match
+    is found.
 
     Additionally the violation ``description`` is enriched with the
     position coordinates so the user can locate the offending wire.
@@ -634,7 +653,7 @@ def reattribute_wire_dangling_violations(
                 _enrich_description_with_pos(v)
         return violations
 
-    tolerance = 0.01
+    tolerance = 0.1
     endpoint_map = _build_wire_endpoint_map(root_schematic, tolerance=tolerance)
 
     def _snap(val: float) -> float:
