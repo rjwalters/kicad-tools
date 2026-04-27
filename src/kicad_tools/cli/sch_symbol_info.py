@@ -25,6 +25,7 @@ import argparse
 import json
 import sys
 
+from kicad_tools.cli.sch_pin_map import resolve_pin_map
 from kicad_tools.schema import Schematic
 
 
@@ -63,13 +64,20 @@ def main(argv=None):
                 print(f"  ... and {len(refs) - 20} more", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve enriched pin data (name, type, net, position) when requested
+    pin_map_data = None
+    if args.show_pins:
+        pin_map = resolve_pin_map(sch, ref_filter=args.reference)
+        if args.reference in pin_map:
+            pin_map_data = pin_map[args.reference]["pins"]
+
     if args.json:
-        output_json(symbol, args.show_pins, args.show_properties)
+        output_json(symbol, args.show_pins, args.show_properties, pin_map_data)
     else:
-        output_text(symbol, args.show_pins, args.show_properties)
+        output_text(symbol, args.show_pins, args.show_properties, pin_map_data)
 
 
-def output_json(symbol, show_pins, show_properties):
+def output_json(symbol, show_pins, show_properties, pin_map_data=None):
     """Output symbol info as JSON."""
     data = {
         "reference": symbol.reference,
@@ -91,12 +99,22 @@ def output_json(symbol, show_pins, show_properties):
         ]
 
     if show_pins:
-        data["pins"] = [{"number": p.number, "uuid": p.uuid} for p in symbol.pins]
+        pins = []
+        for p in symbol.pins:
+            pin_entry = {"number": p.number, "uuid": p.uuid}
+            if pin_map_data and p.number in pin_map_data:
+                enriched = pin_map_data[p.number]
+                pin_entry["name"] = enriched.get("name")
+                pin_entry["type"] = enriched.get("type")
+                pin_entry["net"] = enriched.get("net")
+                pin_entry["position"] = enriched.get("position")
+            pins.append(pin_entry)
+        data["pins"] = pins
 
     print(json.dumps(data, indent=2))
 
 
-def output_text(symbol, show_pins, show_properties):
+def output_text(symbol, show_pins, show_properties, pin_map_data=None):
     """Output symbol info as formatted text."""
     print(f"Symbol: {symbol.reference}")
     print("=" * 50)
@@ -120,9 +138,19 @@ def output_text(symbol, show_pins, show_properties):
 
     if show_pins:
         print(f"\nPins ({len(symbol.pins)} total):")
-        print("-" * 50)
-        for pin in symbol.pins:
-            print(f"  Pin {pin.number}: uuid={pin.uuid}")
+        if pin_map_data:
+            print(f"  {'Pin':<6} {'Name':<20} {'Type':<15} {'Net':<20} {'UUID'}")
+            print("  " + "-" * 80)
+            for pin in symbol.pins:
+                enriched = pin_map_data.get(pin.number, {})
+                name = enriched.get("name", "")
+                pin_type = enriched.get("type", "")
+                net = enriched.get("net") or "(unconnected)"
+                print(f"  {pin.number:<6} {name:<20} {pin_type:<15} {net:<20} {pin.uuid}")
+        else:
+            print("-" * 50)
+            for pin in symbol.pins:
+                print(f"  Pin {pin.number}: uuid={pin.uuid}")
 
 
 if __name__ == "__main__":
