@@ -997,24 +997,28 @@ class TestReconcilerApplyIntegration:
         Path(pcb_path).unlink()
 
     def test_compute_placement_with_board_outline(self):
-        """Test placement position is computed below the board outline."""
+        """Test placement position is computed below the board outline.
+
+        get_board_outline() now returns board-relative coordinates, so
+        the mock returns (0,0)-(100,80) instead of sheet-absolute coords.
+        """
         reconciler = Reconciler.__new__(Reconciler)
 
         mock_pcb = MagicMock()
-        # Board outline: a 100x80mm rectangle at sheet position (50, 50) to (150, 130)
+        # Board outline: a 100x80mm rectangle, already board-relative
         mock_pcb.get_board_outline.return_value = [
-            (50.0, 50.0),
-            (150.0, 50.0),
-            (150.0, 130.0),
-            (50.0, 130.0),
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 80.0),
+            (0.0, 80.0),
         ]
         mock_pcb.board_origin = (50.0, 50.0)
 
         x, y, col = reconciler._compute_placement_start(mock_pcb)
 
-        # min_x=50, origin_x=50 -> start_x = 0
+        # min_x=0 -> start_x = 0
         assert x == 0.0
-        # max_y=130, origin_y=50 -> start_y = 80 + 10 = 90
+        # max_y=80 -> start_y = 80 + 10 = 90
         assert y == 90.0
         assert col == 0
 
@@ -2110,3 +2114,51 @@ class TestSmartPlacement:
         assert "C1" in positions
         # C2 has no neighbors, so it should not appear (grid fallback in apply())
         assert "C2" not in positions
+
+
+class TestComputePlacementStart:
+    """Tests for Reconciler._compute_placement_start coordinate handling."""
+
+    def test_nonzero_origin_no_double_subtraction(self, tmp_path):
+        """Placement start must use board-relative coords directly.
+
+        get_board_outline() returns board-relative coordinates, so
+        _compute_placement_start must NOT subtract the origin again.
+        """
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = (100.0, 80.0)
+        # Board-relative outline (already transformed by get_board_outline)
+        mock_pcb.get_board_outline.return_value = [
+            (0, 0), (50, 0), (50, 30), (0, 30),
+        ]
+
+        # Create minimal files so Reconciler can be instantiated
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid x))")
+        pcb.write_text("(kicad_pcb (version 20240108) (generator test))")
+
+        reconciler = Reconciler(schematic=str(sch), pcb=str(pcb))
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        assert x == pytest.approx(0.0)
+        assert y == pytest.approx(40.0)
+        assert col == 0
+
+    def test_no_outline_returns_defaults(self, tmp_path):
+        """Without outline, placement defaults to (10, 10)."""
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = (0.0, 0.0)
+        mock_pcb.get_board_outline.return_value = []
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid x))")
+        pcb.write_text("(kicad_pcb (version 20240108) (generator test))")
+
+        reconciler = Reconciler(schematic=str(sch), pcb=str(pcb))
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        assert x == pytest.approx(10.0)
+        assert y == pytest.approx(10.0)
+        assert col == 0

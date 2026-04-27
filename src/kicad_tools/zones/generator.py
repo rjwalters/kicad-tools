@@ -154,14 +154,22 @@ class ZoneGenerator:
 
     @property
     def board_outline(self) -> list[tuple[float, float]]:
-        """Get board outline polygon.
+        """Get board outline polygon in sheet-absolute coordinates.
 
         Uses cached outline if available, otherwise extracts from PCB.
         Falls back to a default rectangle if no Edge.Cuts layer found.
+
+        Zone boundaries written to the PCB file must be in sheet-absolute
+        coordinates. ``get_board_outline()`` returns board-relative coords,
+        so we add the board origin back.
         """
         if self._board_outline is None:
             outline = self._pcb.get_board_outline()
             if outline:
+                # Convert board-relative back to sheet-absolute for PCB output
+                ox, oy = self._pcb.board_origin
+                if ox != 0.0 or oy != 0.0:
+                    outline = [(x + ox, y + oy) for x, y in outline]
                 self._board_outline = outline
             else:
                 # Fallback: create outline from board bounds

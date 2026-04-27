@@ -201,6 +201,40 @@ class TestFootprintOutsideBoardRule:
         assert v.actual_value == pytest.approx(5.0)
         assert "5.00mm" in v.message
 
+    def test_nonzero_origin_footprints_inside(self):
+        """With board-relative coordinates, footprints inside should pass.
+
+        Simulates the scenario where get_board_outline() returns
+        board-relative coordinates (0,0)-(10,10) and footprint positions
+        are also board-relative. This is the post-fix behaviour.
+        """
+        pcb = _FakePCB(
+            footprints=[
+                _FakeFootprint("U1", (5.0, 5.0)),
+                _FakeFootprint("J1", (1.5, 3.25)),
+            ],
+            outline_polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        )
+        rule = FootprintOutsideBoardRule()
+        results = rule.check(pcb, _DUMMY_RULES)
+
+        assert len(results.violations) == 0
+
+    def test_nonzero_origin_footprint_outside_detected(self):
+        """A footprint genuinely outside the board-relative outline is flagged."""
+        pcb = _FakePCB(
+            footprints=[
+                _FakeFootprint("U1", (5.0, 5.0)),   # inside
+                _FakeFootprint("R1", (-5.0, 5.0)),   # outside (negative x)
+            ],
+            outline_polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        )
+        rule = FootprintOutsideBoardRule()
+        results = rule.check(pcb, _DUMMY_RULES)
+
+        assert len(results.violations) == 1
+        assert results.violations[0].items == ("R1",)
+
     def test_no_footprints(self):
         """Empty footprint list produces no violations."""
         pcb = _FakePCB(

@@ -51,17 +51,23 @@ class EdgeClearanceRule(DRCRule):
         """
         results = DRCResults()
 
-        # Get board outline segments for distance calculations
+        # Get board outline segments for distance calculations.
+        # These are now in board-relative coordinates.
         outline_segments = pcb.get_board_outline_segments()
         if not outline_segments:
             # No board outline defined, can't check edge clearances
             return results
 
+        # Board origin needed to convert sheet-absolute element coordinates
+        # (segments, vias, zones) into board-relative space so they match
+        # the outline coordinate frame.
+        origin = pcb.board_origin
+
         # Check each type of copper element
-        self._check_segments(pcb, outline_segments, design_rules, results)
-        self._check_vias(pcb, outline_segments, design_rules, results)
+        self._check_segments(pcb, outline_segments, design_rules, results, origin)
+        self._check_vias(pcb, outline_segments, design_rules, results, origin)
         self._check_pads(pcb, outline_segments, design_rules, results)
-        self._check_zones(pcb, outline_segments, design_rules, results)
+        self._check_zones(pcb, outline_segments, design_rules, results, origin)
 
         return results
 
@@ -71,16 +77,20 @@ class EdgeClearanceRule(DRCRule):
         outline_segments: list[tuple[tuple[float, float], tuple[float, float]]],
         design_rules: DesignRules,
         results: DRCResults,
+        origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Check trace segment clearances to board edge."""
         min_clearance = design_rules.min_copper_to_edge_mm
+        ox, oy = origin
 
         for segment in pcb.segments:
             # Check both endpoints and consider trace width
             half_width = segment.width / 2
 
             for point in [segment.start, segment.end]:
-                distance = self._min_distance_to_outline(point, outline_segments)
+                # Convert from sheet-absolute to board-relative
+                board_point = (point[0] - ox, point[1] - oy)
+                distance = self._min_distance_to_outline(board_point, outline_segments)
                 # Actual clearance from trace edge (not centerline)
                 actual_clearance = distance - half_width
 
@@ -109,15 +119,19 @@ class EdgeClearanceRule(DRCRule):
         outline_segments: list[tuple[tuple[float, float], tuple[float, float]]],
         design_rules: DesignRules,
         results: DRCResults,
+        origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Check via clearances to board edge.
 
         Vias use min_hole_to_edge_mm which is typically stricter than copper clearance.
         """
         min_clearance = design_rules.min_hole_to_edge_mm
+        ox, oy = origin
 
         for via in pcb.vias:
-            distance = self._min_distance_to_outline(via.position, outline_segments)
+            # Convert from sheet-absolute to board-relative
+            board_pos = (via.position[0] - ox, via.position[1] - oy)
+            distance = self._min_distance_to_outline(board_pos, outline_segments)
             # Via edge is at position - size/2
             half_size = via.size / 2
             actual_clearance = distance - half_size
@@ -209,12 +223,14 @@ class EdgeClearanceRule(DRCRule):
         outline_segments: list[tuple[tuple[float, float], tuple[float, float]]],
         design_rules: DesignRules,
         results: DRCResults,
+        origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Check zone copper clearances to board edge.
 
         Checks the filled polygon vertices of each zone.
         """
         min_clearance = design_rules.min_copper_to_edge_mm
+        ox, oy = origin
 
         for zone in pcb.zones:
             # Check filled polygons (actual copper) rather than boundary
@@ -222,7 +238,9 @@ class EdgeClearanceRule(DRCRule):
 
             for polygon in polygons_to_check:
                 for point in polygon:
-                    distance = self._min_distance_to_outline(point, outline_segments)
+                    # Convert from sheet-absolute to board-relative
+                    board_point = (point[0] - ox, point[1] - oy)
+                    distance = self._min_distance_to_outline(board_point, outline_segments)
 
                     if distance < min_clearance:
                         results.add(

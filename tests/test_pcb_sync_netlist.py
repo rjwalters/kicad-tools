@@ -1437,3 +1437,44 @@ class TestAutoRenameFlag:
 
         assert rc == 0
         assert pcb.read_text() == original_content
+
+
+class TestGetBoardEdgePosition:
+    """Tests for _get_board_edge_position coordinate handling."""
+
+    def test_nonzero_origin_no_double_subtraction(self):
+        """Position must use board-relative outline directly.
+
+        get_board_outline() returns board-relative coords, so
+        _get_board_edge_position must NOT subtract the origin again.
+        """
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.pcb_sync_netlist import _get_board_edge_position
+
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = (100.0, 80.0)
+        # Board-relative outline: rect (0,0)-(50,30)
+        mock_pcb.get_board_outline.return_value = [
+            (0, 0), (50, 0), (50, 30), (0, 30),
+        ]
+
+        x, y = _get_board_edge_position(mock_pcb)
+
+        # 10mm to the right of max_x=50, at min_y=0
+        assert x == pytest.approx(60.0)
+        assert y == pytest.approx(0.0)
+
+    def test_no_outline_returns_origin(self):
+        """Without outline, falls back to (0, 0)."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.pcb_sync_netlist import _get_board_edge_position
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        x, y = _get_board_edge_position(mock_pcb)
+
+        assert x == pytest.approx(0.0)
+        assert y == pytest.approx(0.0)

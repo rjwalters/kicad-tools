@@ -1154,6 +1154,108 @@ class TestBoardOutline:
             assert len(seg_end) == 2
 
 
+    def test_get_board_outline_nonzero_origin_returns_board_relative(
+        self, tmp_path: Path
+    ):
+        """Outline coordinates must be board-relative when origin != (0,0).
+
+        When the Edge.Cuts rect starts at e.g. (100, 80), _detect_board_origin
+        sets _board_origin = (100, 80) and footprint positions are converted to
+        board-relative. get_board_outline() must apply the same transform so
+        that outline and footprint coordinates are in the same frame.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 100 80) (end 150 110)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "offset_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        # All outline points should be in board-relative coords:
+        # rect (100,80)-(150,110) with origin (100,80) -> (0,0)-(50,30)
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        assert min(xs) == pytest.approx(0.0, abs=0.01)
+        assert min(ys) == pytest.approx(0.0, abs=0.01)
+        assert max(xs) == pytest.approx(50.0, abs=0.01)
+        assert max(ys) == pytest.approx(30.0, abs=0.01)
+
+    def test_get_board_outline_segments_nonzero_origin_returns_board_relative(
+        self, tmp_path: Path
+    ):
+        """Outline segments must be board-relative when origin != (0,0)."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 100 80) (end 150 110)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "offset_segments.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        segments = pcb.get_board_outline_segments()
+
+        # Collect all unique coordinates from segments
+        all_coords = set()
+        for (x1, y1), (x2, y2) in segments:
+            all_coords.add((round(x1, 2), round(y1, 2)))
+            all_coords.add((round(x2, 2), round(y2, 2)))
+
+        # Should be board-relative: corners at (0,0), (50,0), (50,30), (0,30)
+        assert (0.0, 0.0) in all_coords
+        assert (50.0, 0.0) in all_coords
+        assert (50.0, 30.0) in all_coords
+        assert (0.0, 30.0) in all_coords
+
+    def test_get_board_outline_zero_origin_unchanged(self, tmp_path: Path):
+        """With origin (0,0), outline coordinates are unchanged."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 0 0) (end 50 30)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "zero_origin.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        assert min(xs) == pytest.approx(0.0, abs=0.01)
+        assert min(ys) == pytest.approx(0.0, abs=0.01)
+        assert max(xs) == pytest.approx(50.0, abs=0.01)
+        assert max(ys) == pytest.approx(30.0, abs=0.01)
+
+
 class TestEdgeClearanceRule:
     """Tests for EdgeClearanceRule."""
 
@@ -1286,6 +1388,73 @@ class TestEdgeClearanceRule:
             assert v.actual_value is not None
             assert v.required_value is not None
             assert v.actual_value < v.required_value
+
+
+    def test_nonzero_origin_trace_close_to_edge_detected(self, tmp_path: Path):
+        """Trace near edge is still detected when board origin is non-zero.
+
+        The board outline is at (100,100)-(150,150) in sheet-absolute space.
+        A trace at (100.1, 125) is 0.1mm from the left edge.  After the
+        origin transform the outline is (0,0)-(50,50) and the trace should
+        be at (0.1, 25) -- still close to the edge.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (gr_rect (start 100 100) (end 150 150)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "edge-rect"))
+          (segment (start 100.1 125) (end 110 125) (width 0.2) (layer "F.Cu") (net 1))
+        )"""
+        pcb_file = tmp_path / "offset_edge.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        trace_violations = [v for v in results if "edge_clearance_trace" in v.rule_id]
+        assert len(trace_violations) > 0
+
+    def test_nonzero_origin_centered_trace_no_violation(self, tmp_path: Path):
+        """Trace well inside board with non-zero origin should not violate.
+
+        Board outline (100,100)-(150,150), trace at (125,125) is
+        25mm from each edge -- well within limits.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (gr_rect (start 100 100) (end 150 150)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "edge-rect"))
+          (segment (start 125 125) (end 135 125) (width 0.2) (layer "F.Cu") (net 1))
+          (via (at 125 130) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
+        )"""
+        pcb_file = tmp_path / "offset_centered.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        assert len(results.errors) == 0
 
 
 class TestPointToSegmentDistance:

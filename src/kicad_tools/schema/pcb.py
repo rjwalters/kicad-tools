@@ -2073,6 +2073,13 @@ class PCB:
                 # No more connected segments found
                 break
 
+        # Transform from sheet-absolute to board-relative coordinates
+        # so that outline coordinates match footprint positions (which are
+        # converted to board-relative in _detect_board_origin).
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            polygon = [(x - ox, y - oy) for x, y in polygon]
+
         return polygon
 
     @staticmethod
@@ -2111,6 +2118,16 @@ class PCB:
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
                 segments.extend(self._rect_to_segments(graphic.start, graphic.end))
+
+        # Transform from sheet-absolute to board-relative coordinates
+        # so that outline segments match footprint positions (which are
+        # converted to board-relative in _detect_board_origin).
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            segments = [
+                ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy))
+                for (x1, y1), (x2, y2) in segments
+            ]
 
         return segments
 
