@@ -12,7 +12,8 @@ def run_sch_command(args) -> int:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,")
         print(
-            "          connections, unconnected, set-footprint, set-value, set-reference, replace,"
+            "          connections, unconnected, set-footprint, set-value, set-reference,"
+            " set-symbol-property, replace,"
             " sync-hierarchy, rename-signal,"
         )
         print(
@@ -194,6 +195,18 @@ def run_sch_command(args) -> int:
             ref=getattr(args, "ref", None),
             new_ref=getattr(args, "new_ref", None),
             map_path=map_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", True),
+        )
+
+    elif args.sch_command == "set-symbol-property":
+        from ..sch_set_symbol_property import run_set_symbol_property
+
+        return run_set_symbol_property(
+            schematic_path=schematic_path,
+            ref=args.ref,
+            property_name=args.property_name,
+            value=args.value,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
         )
