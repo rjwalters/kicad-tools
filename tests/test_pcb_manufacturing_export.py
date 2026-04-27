@@ -463,7 +463,12 @@ class TestFlattenLatestReportPdf:
 
             assert result.report_path is not None
             assert result.report_path.suffix == ".pdf"
-            assert "report" in result.report_path.parent.name
+            # After flattening, the PDF should be promoted to the output root
+            assert result.report_path == out_dir / "report.pdf"
+
+            # Markdown source should also be preserved alongside PDF
+            assert (out_dir / "report.md").exists(), "report.md should be preserved alongside report.pdf"
+            assert result.report_md_path == out_dir / "report.md"
 
     def test_flatten_falls_back_to_md(self, test_project_pcb):
         """_flatten_latest_report falls back to MD when no PDF exists."""
@@ -490,12 +495,17 @@ class TestFlattenLatestReportPdf:
             with patch(
                 "kicad_tools.report.renderers._weasyprint_available",
                 return_value=False,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
+                return_value=False,
             ):
                 pkg._generate_report(out_dir, result)
                 pkg._flatten_latest_report(out_dir, result)
 
             assert result.report_path is not None
             assert result.report_path.suffix == ".md"
+            # When only MD exists (no PDF), report_md_path should not be set
+            assert result.report_md_path is None
 
 
 # Fixtures
