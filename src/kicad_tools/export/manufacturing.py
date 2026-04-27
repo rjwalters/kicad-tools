@@ -574,6 +574,8 @@ class ManufacturingPackage:
             "net_status.json": "net_status",
             "cost.json": "cost",
             "analog_components.json": "analog_components",
+            "narrative.json": "_narrative",
+            "stackup.json": "stackup",
         }
 
         result: dict = {}
@@ -597,6 +599,23 @@ class ManufacturingPackage:
         # ReportData.analog_components expects a plain list[dict].
         if "analog_components" in result and isinstance(result["analog_components"], dict):
             result["analog_components"] = result["analog_components"].get("components", [])
+
+        # Narrative: the collector writes a single dict with sub-keys;
+        # unpack into individual ReportData fields.
+        if "_narrative" in result and isinstance(result["_narrative"], dict):
+            narrative = result.pop("_narrative")
+            for key in (
+                "design_narrative",
+                "functional_blocks",
+                "interfaces",
+                "power_architecture",
+                "assembly_notes",
+            ):
+                val = narrative.get(key)
+                if val is not None:
+                    result[key] = val
+        else:
+            result.pop("_narrative", None)
 
         return result
 

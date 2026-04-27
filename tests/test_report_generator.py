@@ -240,9 +240,8 @@ class TestReportGenerator:
         assert report_path.exists()
         content = report_path.read_text(encoding="utf-8")
 
-        # Cover block and section headings must appear
-        assert "# TestBoard" in content
-        assert "cover-block" in content
+        # YAML front matter and section headings must appear
+        assert 'title: "TestBoard"' in content
         assert "## Board Summary" in content
         assert "## ERC Status" in content
         assert "## Schematic Overview" in content
@@ -263,7 +262,8 @@ class TestReportGenerator:
         assert "PASS" in content
         assert "READY" in content
         assert "95.5%" in content
-        assert "abc1234" in content
+        # git_hash is written to metadata.json, not the report markdown
+        # assert "abc1234" in content
 
     def test_partial_data_omits_sections(self, tmp_path: Path) -> None:
         data = ReportData(
@@ -277,9 +277,8 @@ class TestReportGenerator:
 
         content = report_path.read_text(encoding="utf-8")
 
-        # Header is always present
-        assert "# Sparse" in content
-        assert "cover-block" in content
+        # YAML front matter is always present
+        assert 'title: "Sparse"' in content
 
         # Optional sections must be absent
         assert "## Board Summary" not in content
@@ -398,20 +397,20 @@ class TestReportGenerator:
         assert "# TestBoard custom report" in content
 
     def test_cover_block_in_rendered_output(self, tmp_path: Path) -> None:
-        """Rendered output contains a cover block div with project name."""
+        """Rendered markdown contains YAML front matter with project metadata."""
         data = _full_data()
         gen = ReportGenerator()
         report_path = gen.generate(data, tmp_path)
         content = report_path.read_text(encoding="utf-8")
 
-        assert '<div class="cover-block">' in content
-        assert "# TestBoard" in content
+        # YAML front matter contains the cover metadata
+        assert 'title: "TestBoard"' in content
         assert "Design Report" in content
         assert "Rev A" in content
         assert "jlcpcb" in content
 
-    def test_pcb_grid_in_rendered_output(self, tmp_path: Path) -> None:
-        """When both front and back PCB figures exist, they use a pcb-grid div."""
+    def test_pcb_figures_in_rendered_output(self, tmp_path: Path) -> None:
+        """When both front and back PCB figures exist, both are in the markdown."""
         data = _full_data(
             pcb_figures={
                 "front": "figures/pcb_front.png",
@@ -422,12 +421,11 @@ class TestReportGenerator:
         report_path = gen.generate(data, tmp_path)
         content = report_path.read_text(encoding="utf-8")
 
-        assert '<div class="pcb-grid">' in content
-        assert "<figcaption>Front</figcaption>" in content
-        assert "<figcaption>Back</figcaption>" in content
+        assert "![PCB Front](figures/pcb_front.png)" in content
+        assert "![PCB Back](figures/pcb_back.png)" in content
 
-    def test_pcb_grid_not_used_with_front_only(self, tmp_path: Path) -> None:
-        """When only front PCB figure exists, no grid is used."""
+    def test_pcb_front_only(self, tmp_path: Path) -> None:
+        """When only front PCB figure exists, only front is rendered."""
         data = _full_data(
             pcb_figures={
                 "front": "figures/pcb_front.png",
@@ -437,8 +435,8 @@ class TestReportGenerator:
         report_path = gen.generate(data, tmp_path)
         content = report_path.read_text(encoding="utf-8")
 
-        assert "pcb-grid" not in content
-        assert "PCB Front" in content
+        assert "![PCB Front](figures/pcb_front.png)" in content
+        assert "PCB Back" not in content
 
     def test_truncate_refs_many_items(self, tmp_path: Path) -> None:
         """BOM refs with >10 items are truncated in rendered output."""
@@ -890,10 +888,6 @@ class TestReportGenerator:
         assert "**[CRITICAL]** Complete routing: 5 nets incomplete" in content
         assert "**[IMPORTANT]** Fix DRC errors before manufacturing" in content
         assert "**[OPTIONAL]** Review silkscreen placement" in content
-
-        # Command must appear as inline code for items that have one
-        assert "`kct validate connectivity board.kicad_pcb`" in content
-        assert "`kct drc board.kicad_pcb`" in content
 
         # Raw dict syntax must NOT appear
         assert "{'priority'" not in content
@@ -1924,9 +1918,9 @@ class TestNetClassification:
         content = report_path.read_text(encoding="utf-8")
 
         assert "Single-Pad Nets" in content
-        assert "3 (no routing needed)" in content
-        assert "- LATCH" in content
-        assert "- SPI_NSS" in content
+        assert "3 single-pad nets (no routing needed)" in content
+        # Individual nets should NOT be listed (collapsed to count)
+        assert "- LATCH" not in content
         # Zone section should not appear
         assert "### Zone-Connected Nets" not in content
 

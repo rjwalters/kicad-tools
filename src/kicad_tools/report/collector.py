@@ -201,6 +201,14 @@ class ReportDataCollector:
             lambda: self.collect_analog_components(pcb),
         )
 
+        # Stackup
+        self._safe_collect(
+            "stackup",
+            output_dir,
+            files,
+            lambda: self.collect_stackup(pcb),
+        )
+
         return files
 
     # ------------------------------------------------------------------
@@ -548,6 +556,41 @@ class ReportDataCollector:
             "count": len(components),
             "components": [c.to_dict() for c in components],
         }
+
+    def collect_stackup(self, pcb: Any) -> list[dict[str, Any]] | None:
+        """Collect layer stackup from the PCB setup data.
+
+        Returns a list of layer dicts filtered to copper, dielectric, and
+        solder mask layers (silkscreen and paste layers are excluded to
+        reduce noise).  Returns ``None`` when no stackup data is available.
+
+        Args:
+            pcb: Loaded PCB object.
+
+        Returns:
+            List of layer dicts with name, type, thickness_mm, and material,
+            or None if no stackup is available.
+        """
+        setup = getattr(pcb, "setup", None)
+        if setup is None or not getattr(setup, "stackup", None):
+            return None
+
+        # Layer types worth showing in a manufacturing report
+        _INCLUDE_TYPES = {"copper", "prepreg", "core", "Top Solder Mask", "Bottom Solder Mask"}
+
+        layers = []
+        for layer in setup.stackup:
+            layer_type = getattr(layer, "type", "") or ""
+            if layer_type not in _INCLUDE_TYPES:
+                continue
+            layers.append({
+                "name": getattr(layer, "name", ""),
+                "type": layer_type,
+                "thickness_mm": getattr(layer, "thickness", 0.0),
+                "material": getattr(layer, "material", ""),
+            })
+
+        return layers if layers else None
 
     def collect_narrative(self, sch_path: Path, pcb: Any) -> dict[str, Any]:
         """Collect design narrative from schematic metadata.

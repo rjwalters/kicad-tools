@@ -84,6 +84,10 @@ class ReportData:
     """Assembly guidance: {fine_pitch_count, thermal_pad_count,
     polarized_count, summary}."""
 
+    stackup: list[dict] | None = None
+    """Layer stackup: [{name, type, thickness_mm, material}].
+    Filtered to copper, dielectric, and mask layers."""
+
     notes: str = ""
     """Free-form notes section content."""
 

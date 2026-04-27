@@ -355,6 +355,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "pcb_figures.json": "pcb_figures",
         "analog_components.json": "analog_components",
         "narrative.json": "_narrative",
+        "stackup.json": "stackup",
     }
 
     for filename, field_name in mappings.items():

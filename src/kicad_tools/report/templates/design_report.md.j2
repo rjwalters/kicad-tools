@@ -38,6 +38,16 @@ header-includes:
 {% endif %}
 
 {% endif %}
+{% if stackup %}
+## Stackup
+
+| Layer | Type | Thickness (mm) | Material |
+|-------|------|----------------|----------|
+{% for layer in stackup %}
+| {{ layer.name }} | {{ layer.type }} | {{ layer.thickness_mm }} | {{ layer.material | default("--", true) }} |
+{% endfor %}
+
+{% endif %}
 {% if design_narrative or functional_blocks or interfaces or power_architecture %}
 ## Design Overview
 
@@ -274,12 +284,10 @@ header-includes:
 {% endfor %}
 
 {% endif %}
-{% if net_status.single_pad_nets is defined and net_status.single_pad_nets %}
+{% if net_status.single_pad_count is defined and net_status.single_pad_count > 0 %}
 ### Single-Pad Nets
 
-{% for net in net_status.single_pad_nets %}
-- {{ net }}
-{% endfor %}
+{{ net_status.single_pad_count }} single-pad net{{ 's' if net_status.single_pad_count != 1 else '' }} (no routing needed) -- not listed individually.
 
 {% endif %}
 {% if net_status.signal_incomplete_named is defined and net_status.signal_incomplete_named %}
