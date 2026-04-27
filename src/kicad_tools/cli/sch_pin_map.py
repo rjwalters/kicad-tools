@@ -385,6 +385,7 @@ def resolve_pin_map(
         else:
             result[symbol.reference] = {
                 "lib_id": symbol.lib_id,
+                "value": symbol.value,
                 "pins": pins_data,
             }
 

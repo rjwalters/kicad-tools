@@ -2813,11 +2813,52 @@ def _classify_passive(lib_id: str) -> str | None:
     return None
 
 
+_BYPASS_CAP_THRESHOLD_FARADS = 1e-6  # 1uF -- caps >= this are bypass/decoupling
+
+
+def _parse_capacitance_farads(value: str) -> float | None:
+    """Parse a capacitance value string to Farads.
+
+    Returns None if the value cannot be parsed.
+    """
+    if not value:
+        return None
+    value = value.strip().upper()
+    # Normalize unicode micro
+    value = value.replace("\u039c", "U").replace("\u00b5", "U").replace("\u03bc", "U")
+    multipliers = {
+        "F": 1.0,
+        "MF": 1e-3,
+        "UF": 1e-6,
+        "NF": 1e-9,
+        "PF": 1e-12,
+    }
+    m = re.match(r"^([\d.]+)\s*([A-Z]+)?$", value)
+    if m:
+        try:
+            number = float(m.group(1))
+        except ValueError:
+            return None
+        unit = m.group(2) or "F"
+        if unit in multipliers:
+            return number * multipliers[unit]
+    return None
+
+
+def _is_bypass_cap(value: str) -> bool:
+    """Return True if *value* represents a bypass/decoupling cap (>= 1uF)."""
+    farads = _parse_capacitance_farads(value)
+    if farads is None:
+        return False
+    return farads >= _BYPASS_CAP_THRESHOLD_FARADS
+
+
 @dataclass
 class _ChannelFilterSignature:
     """Describes the passive filtering topology attached to a net."""
 
     shunt_caps: int = 0
+    bypass_caps: int = 0
     shunt_resistors: int = 0
     series_components: list[str] = field(default_factory=list)
     shunt_values: list[str] = field(default_factory=list)
@@ -2825,13 +2866,22 @@ class _ChannelFilterSignature:
 
     @property
     def total_passives(self) -> int:
-        return self.shunt_caps + self.shunt_resistors + len(self.series_components)
+        return (
+            self.shunt_caps
+            + self.bypass_caps
+            + self.shunt_resistors
+            + len(self.series_components)
+        )
 
     def describe_diff(self, other: "_ChannelFilterSignature") -> str | None:
         """Return a human-readable description of differences, or None if equal."""
         diffs: list[str] = []
         if self.shunt_caps != other.shunt_caps:
             diffs.append(f"shunt caps: {self.shunt_caps} vs {other.shunt_caps}")
+        if self.bypass_caps != other.bypass_caps:
+            diffs.append(
+                f"bypass caps: {self.bypass_caps} vs {other.bypass_caps}"
+            )
         if self.shunt_resistors != other.shunt_resistors:
             diffs.append(
                 f"shunt resistors: {self.shunt_resistors} vs {other.shunt_resistors}"
@@ -2875,21 +2925,32 @@ def _build_filter_signature(
         if net_name not in pin_nets:
             continue
 
-        # Determine the "other" nets (pins not on our target net)
-        other_nets = [n for n in pin_nets if n is not None and n != net_name]
+        # Determine the "other" nets (pins not on our target net).
+        # Keep None entries: a cap with one pin on the signal net and the
+        # other pin unresolved is likely a DC-blocking / AC-coupling cap
+        # (series component) rather than a shunt.
+        other_nets_raw = [n for n in pin_nets if n != net_name]
 
-        if not other_nets:
-            # Single-pin connection or both pins on same net -- skip
+        if not other_nets_raw:
+            # Both pins on same net -- skip
             continue
 
         # Get value for reporting
         value = entry.get("value", "")
 
-        for other_net in other_nets:
-            if _is_power_negative_net(other_net):
+        for other_net in other_nets_raw:
+            if other_net is None:
+                # Unresolved far-side pin -- treat as series (DC-blocking)
+                sig.series_components.append(ptype)
+                if value:
+                    sig.series_values.append(value)
+            elif _is_power_negative_net(other_net):
                 # Shunt to ground
                 if ptype == "C":
-                    sig.shunt_caps += 1
+                    if _is_bypass_cap(value):
+                        sig.bypass_caps += 1
+                    else:
+                        sig.shunt_caps += 1
                     if value:
                         sig.shunt_values.append(value)
                 elif ptype == "R":
