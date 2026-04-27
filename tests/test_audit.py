@@ -42,6 +42,31 @@ class TestERCStatusSkipped:
         assert d["skipped"] is False
 
 
+class TestDRCStatusViolationsByType:
+    """Tests for DRCStatus.violations_by_type field."""
+
+    def test_default_empty(self):
+        """DRCStatus defaults to empty violations_by_type."""
+        status = DRCStatus()
+        assert status.violations_by_type == {}
+
+    def test_to_dict_includes_violations_by_type_when_present(self):
+        """DRCStatus.to_dict() includes violations_by_type when non-empty."""
+        status = DRCStatus(
+            error_count=3,
+            violations_by_type={"clearance": 2, "edge_clearance": 1},
+        )
+        d = status.to_dict()
+        assert "violations_by_type" in d
+        assert d["violations_by_type"] == {"clearance": 2, "edge_clearance": 1}
+
+    def test_to_dict_omits_violations_by_type_when_empty(self):
+        """DRCStatus.to_dict() omits violations_by_type when empty."""
+        status = DRCStatus()
+        d = status.to_dict()
+        assert "violations_by_type" not in d
+
+
 class TestAuditResult:
     """Tests for AuditResult class."""
 

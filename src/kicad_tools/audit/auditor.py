@@ -61,15 +61,19 @@ class DRCStatus:
     passed: bool = True
     details: str = ""
     report_path: Path | None = None
+    violations_by_type: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "error_count": self.error_count,
             "warning_count": self.warning_count,
             "blocking_count": self.blocking_count,
             "passed": self.passed,
             "details": self.details,
         }
+        if self.violations_by_type:
+            result["violations_by_type"] = dict(self.violations_by_type)
+        return result
 
 
 @dataclass
@@ -643,13 +647,19 @@ class ManufacturingAudit:
             status.blocking_count = results.error_count  # Errors block manufacturing
             status.passed = results.error_count == 0
 
+            # Build per-type violation breakdown (all severities)
+            by_rule: dict[str, int] = {}
+            for v in results.violations:
+                by_rule[v.rule_id] = by_rule.get(v.rule_id, 0) + 1
+            status.violations_by_type = by_rule
+
             if results.error_count > 0:
-                # Get summary of errors
-                by_rule = {}
+                # Get summary of errors for the details string
+                error_rules: dict[str, int] = {}
                 for v in results.violations:
                     if v.is_error:
-                        by_rule[v.rule_id] = by_rule.get(v.rule_id, 0) + 1
-                top_rules = sorted(by_rule.items(), key=lambda x: -x[1])[:3]
+                        error_rules[v.rule_id] = error_rules.get(v.rule_id, 0) + 1
+                top_rules = sorted(error_rules.items(), key=lambda x: -x[1])[:3]
                 status.details = ", ".join(f"{r[0]} ({r[1]})" for r in top_rules)
 
         except Exception as e:
