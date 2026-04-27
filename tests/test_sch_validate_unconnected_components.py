@@ -809,6 +809,94 @@ class TestFullyUnconnectedComponent:
         assert "nearest wire" in errors[0].message
         assert "pin" in errors[0].message
         assert "mm" in errors[0].message
+        # The message should include pin coordinates for diagnostics
+        assert "at (" in errors[0].message
+        # R1 is at (100.0, 50.0) with pins at lib offsets (0,0) and (0,2.54),
+        # so pin 1 is at (100.00, 50.00) and pin 2 at (100.00, 47.46).
+        assert "at (100.00, 50.00)" in errors[0].message
+        assert "at (100.00, 47.46)" in errors[0].message
+
+
+    def test_near_miss_coordinates_rotated_component(self, tmp_path: Path):
+        """Pin coordinates in near-miss diagnostic should reflect rotation.
+
+        A 90-degree rotated component should show rotated pin positions,
+        not the raw library offsets.
+        """
+        # Build an unconnected rotated component with a nearby connected
+        # component so wires exist for near-miss calculation.
+        lib_sym = _make_lib_symbol(
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+        )
+        # Unconnected R1 at (100, 50) rotated 90 degrees.
+        # Pin 1 lib (0,0)    -> rotate 90 -> (0,0)      -> (100, 50)
+        # Pin 2 lib (0,2.54) -> rotate 90 -> (-2.54, 0) -> (97.46, 50)
+        sym_r1 = _make_symbol_instance(
+            "R1",
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+            x=100.0,
+            y=50.0,
+            rotation=90,
+        )
+        # Connected R2 nearby to provide wire endpoints.
+        sym_r2 = _make_symbol_instance(
+            "R2",
+            "Device:R_Small",
+            [("1", "~", "passive"), ("2", "~", "passive")],
+            x=102.0,
+            y=50.0,
+        )
+        sch_text = f"""(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "test-rotated-nearmiss-uuid")
+    (paper "A4")
+    (lib_symbols
+        {lib_sym}
+    )
+    {sym_r1}
+    {sym_r2}
+    (wire
+        (pts (xy 102.00 50.00) (xy 112.00 50.00))
+        (stroke (width 0) (type default))
+        (uuid "wire-r2-1")
+    )
+    (wire
+        (pts (xy 102.00 47.46) (xy 112.00 47.46))
+        (stroke (width 0) (type default))
+        (uuid "wire-r2-2")
+    )
+    (label "VCC"
+        (at 112.00 50.00 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "lbl-r2-1")
+    )
+    (label "GND"
+        (at 112.00 47.46 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "lbl-r2-2")
+    )
+)
+"""
+        sch_path = tmp_path / "rotated_nearmiss.kicad_sch"
+        sch_path.write_text(sch_text)
+
+        issues = check_fully_unconnected_components(str(sch_path))
+        errors = [
+            i for i in issues
+            if i.category == "unconnected_component"
+            and i.severity == "error"
+            and "R1" in i.message
+        ]
+        assert len(errors) == 1
+        msg = errors[0].message
+        # Rotated pin positions should appear in the diagnostic.
+        assert "at (" in msg
+        # Pin 1 at (100.00, 50.00), Pin 2 at (97.46, 50.00)
+        assert "at (100.00, 50.00)" in msg
+        assert "at (97.46, 50.00)" in msg
 
 
 class TestSnapCoord:
