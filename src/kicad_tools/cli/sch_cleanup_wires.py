@@ -31,15 +31,26 @@ from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibrarySymbol
 from kicad_tools.sexp import SExp
 
+# Quantization multiplier for coordinate hashing.  Using 1000 gives
+# micron-level (0.001mm) resolution, which prevents false "connected"
+# results from bucket collisions that occurred at the old 0.1mm (×10)
+# resolution.
+_QUANT = 1000
+
 
 @dataclass
 class WireIssue:
     """Describes a wire that should be cleaned up."""
 
-    reason: str  # "zero_length", "dangling", "duplicate", or "stub"
+    reason: str  # "zero_length", "dangling", "duplicate", "overlap", or "stub"
     wire_sexp: SExp
     start: tuple[float, float]
     end: tuple[float, float]
+
+
+def _quantize(coord: float) -> int:
+    """Quantize a coordinate to an integer bucket at micron resolution."""
+    return int(round(coord * _QUANT))
 
 
 def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -60,6 +71,97 @@ def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, 
     return (x1, y1), (x2, y2)
 
 
+def _point_on_segment(
+    point: tuple[float, float],
+    seg_start: tuple[float, float],
+    seg_end: tuple[float, float],
+    tolerance: float = 0.005,
+) -> bool:
+    """Return True if *point* lies within *tolerance* mm of the line segment.
+
+    Uses perpendicular distance plus a parametric bounds check so that
+    the test works for points anywhere along the segment body, not just
+    at the endpoints.
+
+    The endpoints themselves are *excluded* (returns False when the point
+    is within ``tolerance`` of either endpoint) because endpoint-to-endpoint
+    matching is already handled by the caller.
+    """
+    px, py = point
+    ax, ay = seg_start
+    bx, by = seg_end
+
+    dx = bx - ax
+    dy = by - ay
+    seg_len_sq = dx * dx + dy * dy
+
+    if seg_len_sq < tolerance * tolerance:
+        # Degenerate (zero-length) segment -- skip
+        return False
+
+    # Parametric projection of point onto the infinite line through A-B
+    t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
+
+    # Exclude the very ends (those are covered by endpoint matching)
+    if t <= 0.0 or t >= 1.0:
+        return False
+
+    # Closest point on the segment to *point*
+    cx = ax + t * dx
+    cy = ay + t * dy
+    dist_sq = (px - cx) ** 2 + (py - cy) ** 2
+
+    return dist_sq <= tolerance * tolerance
+
+
+def _is_collinear_overlap(
+    seg1_start: tuple[float, float],
+    seg1_end: tuple[float, float],
+    seg2_start: tuple[float, float],
+    seg2_end: tuple[float, float],
+    tolerance: float = 0.005,
+) -> bool:
+    """Return True if seg2 is fully enclosed within the collinear seg1.
+
+    Both segments must share the same direction vector (within *tolerance*)
+    and seg2's endpoints must both lie on seg1's body (not just touching
+    at a single endpoint).
+    """
+    ax, ay = seg1_start
+    bx, by = seg1_end
+
+    dx = bx - ax
+    dy = by - ay
+    seg1_len_sq = dx * dx + dy * dy
+
+    if seg1_len_sq < tolerance * tolerance:
+        return False
+
+    seg1_len = math.sqrt(seg1_len_sq)
+
+    # Check that both seg2 endpoints lie on the line through seg1
+    for pt in [seg2_start, seg2_end]:
+        px, py = pt
+        # Perpendicular distance to infinite line
+        cross = abs((px - ax) * dy - (py - ay) * dx)
+        if cross / seg1_len > tolerance:
+            return False
+
+    # Project seg2 endpoints onto seg1's parameterised line
+    t_vals = []
+    for pt in [seg2_start, seg2_end]:
+        px, py = pt
+        t = ((px - ax) * dx + (py - ay) * dy) / seg1_len_sq
+        t_vals.append(t)
+
+    t_min = min(t_vals)
+    t_max = max(t_vals)
+
+    # seg2 must be *strictly inside* seg1 (not just sharing an endpoint)
+    eps = tolerance / seg1_len
+    return t_min >= -eps and t_max <= 1.0 + eps and (t_max - t_min) > eps
+
+
 def _build_connection_map(
     schematic: Schematic,
     wire_sexps: list[SExp],
@@ -73,24 +175,24 @@ def _build_connection_map(
 
     # Junctions
     for junc in schematic.junctions:
-        points.add((int(junc.position[0] * 10), int(junc.position[1] * 10)))
+        points.add((_quantize(junc.position[0]), _quantize(junc.position[1])))
 
     # Labels
     for lbl in schematic.labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
+        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
 
     for lbl in schematic.global_labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
+        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
 
     for lbl in schematic.hierarchical_labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
+        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
 
     # No-connect markers count as connections for this purpose
     for nc_node in schematic.sexp.find_all("no_connect"):
         if at := nc_node.find("at"):
             x = at.get_float(0) or 0
             y = at.get_float(1) or 0
-            points.add((int(x * 10), int(y * 10)))
+            points.add((_quantize(x), _quantize(y)))
 
     # Symbol pin positions -- use library data for accurate pin locations
     for sym in schematic.symbols:
@@ -101,13 +203,13 @@ def _build_connection_map(
                 sym.position, sym.rotation, sym.mirror
             )
             for pos in pin_positions.values():
-                points.add((int(pos[0] * 10), int(pos[1] * 10)))
+                points.add((_quantize(pos[0]), _quantize(pos[1])))
         else:
             # Fallback to symbol center when library data is unavailable
-            points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
+            points.add((_quantize(sym.position[0]), _quantize(sym.position[1])))
         # Power symbols always connect via their position
         if sym.lib_id.startswith("power:"):
-            points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
+            points.add((_quantize(sym.position[0]), _quantize(sym.position[1])))
 
     return points
 
@@ -120,9 +222,55 @@ def _wire_endpoint_counts(
     for ws in wire_sexps:
         start, end = _wire_start_end(ws)
         for pt in [start, end]:
-            key = (int(pt[0] * 10), int(pt[1] * 10))
+            key = (_quantize(pt[0]), _quantize(pt[1]))
             counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _endpoint_touches_other_wire_body(
+    point: tuple[float, float],
+    wire_sexp: SExp,
+    all_wires: list[SExp],
+    tolerance: float = 0.005,
+) -> bool:
+    """Return True if *point* lies on the body of any wire other than *wire_sexp*.
+
+    This catches T-junction connections where a wire endpoint lands on the
+    midpoint of another wire segment, which endpoint-to-endpoint matching
+    alone would miss.
+    """
+    wire_id = id(wire_sexp)
+    for other_ws in all_wires:
+        if id(other_ws) == wire_id:
+            continue
+        other_start, other_end = _wire_start_end(other_ws)
+        if _point_on_segment(point, other_start, other_end, tolerance):
+            return True
+    return False
+
+
+def _is_endpoint_connected(
+    point: tuple[float, float],
+    wire_sexp: SExp,
+    connection_points: set[tuple[int, int]],
+    endpoint_counts: dict[tuple[int, int], int],
+    all_wires: list[SExp],
+) -> bool:
+    """Return True if *point* is electrically connected.
+
+    A point is connected if:
+    - it touches a label, junction, pin, or no-connect marker, OR
+    - multiple wires share this exact endpoint, OR
+    - it lies on the body (mid-segment) of another wire.
+    """
+    key = (_quantize(point[0]), _quantize(point[1]))
+    if key in connection_points:
+        return True
+    if endpoint_counts.get(key, 0) > 1:
+        return True
+    if _endpoint_touches_other_wire_body(point, wire_sexp, all_wires):
+        return True
+    return False
 
 
 def find_cleanup_candidates(
@@ -174,6 +322,50 @@ def find_cleanup_candidates(
             seen[key] = ws
             unique_wires.append(ws)
 
+    # Phase 2b: collinear overlap detection
+    # For each pair of unique wires, check if the shorter one is fully
+    # enclosed within the longer one.  Flag the shorter as "overlap".
+    overlap_ids: set[int] = set()
+    for i, ws_a in enumerate(unique_wires):
+        if id(ws_a) in overlap_ids:
+            continue
+        a_start, a_end = _wire_start_end(ws_a)
+        a_len_sq = (a_end[0] - a_start[0]) ** 2 + (a_end[1] - a_start[1]) ** 2
+        for j in range(i + 1, len(unique_wires)):
+            ws_b = unique_wires[j]
+            if id(ws_b) in overlap_ids:
+                continue
+            b_start, b_end = _wire_start_end(ws_b)
+            b_len_sq = (b_end[0] - b_start[0]) ** 2 + (b_end[1] - b_start[1]) ** 2
+
+            # Check if the shorter is enclosed in the longer
+            if a_len_sq >= b_len_sq:
+                if _is_collinear_overlap(a_start, a_end, b_start, b_end):
+                    overlap_ids.add(id(ws_b))
+                    issues.append(
+                        WireIssue(
+                            reason="overlap",
+                            wire_sexp=ws_b,
+                            start=b_start,
+                            end=b_end,
+                        )
+                    )
+            else:
+                if _is_collinear_overlap(b_start, b_end, a_start, a_end):
+                    overlap_ids.add(id(ws_a))
+                    issues.append(
+                        WireIssue(
+                            reason="overlap",
+                            wire_sexp=ws_a,
+                            start=a_start,
+                            end=a_end,
+                        )
+                    )
+                    break  # ws_a is flagged, move on
+
+    # Remove overlapping wires from the unique set for subsequent phases
+    unique_wires = [ws for ws in unique_wires if id(ws) not in overlap_ids]
+
     # Phase 3: dangling wires (endpoints not connected to anything else)
     connection_points = _build_connection_map(schematic, unique_wires)
     endpoint_counts = _wire_endpoint_counts(unique_wires)
@@ -183,13 +375,9 @@ def find_cleanup_candidates(
 
         dangling_ends = 0
         for pt in [start, end]:
-            key = (int(pt[0] * 10), int(pt[1] * 10))
-            # A point is "connected" if it touches a label/junction/pin
-            # or if multiple wires share this endpoint
-            has_connection = key in connection_points
-            has_other_wire = endpoint_counts.get(key, 0) > 1
-
-            if not has_connection and not has_other_wire:
+            if not _is_endpoint_connected(
+                pt, ws, connection_points, endpoint_counts, unique_wires
+            ):
                 dangling_ends += 1
 
         # Only flag wires where BOTH ends are dangling (fully isolated)
@@ -222,10 +410,9 @@ def find_cleanup_candidates(
 
             dangling_ends = 0
             for pt in [start, end]:
-                key = (int(pt[0] * 10), int(pt[1] * 10))
-                has_connection = key in connection_points
-                has_other_wire = endpoint_counts.get(key, 0) > 1
-                if not has_connection and not has_other_wire:
+                if not _is_endpoint_connected(
+                    pt, ws, connection_points, endpoint_counts, unique_wires
+                ):
                     dangling_ends += 1
 
             # Exactly one dangling end means it's a stub
@@ -280,6 +467,7 @@ def run_cleanup_wires(args) -> int:
     zero_count = sum(1 for i in issues if i.reason == "zero_length")
     dangling_count = sum(1 for i in issues if i.reason == "dangling")
     duplicate_count = sum(1 for i in issues if i.reason == "duplicate")
+    overlap_count = sum(1 for i in issues if i.reason == "overlap")
     stub_count = sum(1 for i in issues if i.reason == "stub")
 
     if args.format == "json":
@@ -289,6 +477,7 @@ def run_cleanup_wires(args) -> int:
             "zero_length": zero_count,
             "dangling": dangling_count,
             "duplicate": duplicate_count,
+            "overlap": overlap_count,
             "stub": stub_count,
             "issues": [
                 {
@@ -321,6 +510,8 @@ def run_cleanup_wires(args) -> int:
         print(f"  Zero-length: {zero_count}")
     if duplicate_count:
         print(f"  Duplicate: {duplicate_count}")
+    if overlap_count:
+        print(f"  Overlap: {overlap_count}")
     if dangling_count:
         print(f"  Dangling: {dangling_count}")
     if stub_count:
@@ -331,6 +522,7 @@ def run_cleanup_wires(args) -> int:
         "zero_length": "zero-length",
         "dangling": "dangling",
         "duplicate": "duplicate",
+        "overlap": "overlap",
         "stub": "stub",
     }
     for issue in issues:
