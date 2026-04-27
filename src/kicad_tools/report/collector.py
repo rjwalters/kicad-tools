@@ -418,6 +418,31 @@ class ReportDataCollector:
             and n.net_name not in single_set
         )[: self._INCOMPLETE_NET_NAMES_CAP]
 
+        # Split signal incomplete nets into named (human-assigned) vs
+        # auto-generated (KiCad default names like "Net-(...)" and
+        # "unconnected-(...)").  Named nets have higher information value
+        # and are listed individually; auto-generated nets are reduced to
+        # a count to avoid noise in the report.
+        _AUTO_NET_PREFIXES = ("Net-(", "unconnected-(")
+
+        signal_incomplete_named = sorted(
+            n.net_name
+            for n in result.nets
+            if n.status != "complete"
+            and n.net_name not in zone_set
+            and n.net_name not in single_set
+            and not n.net_name.startswith(_AUTO_NET_PREFIXES)
+        )[: self._INCOMPLETE_NET_NAMES_CAP]
+
+        signal_incomplete_auto_count = sum(
+            1
+            for n in result.nets
+            if n.status != "complete"
+            and n.net_name not in zone_set
+            and n.net_name not in single_set
+            and n.net_name.startswith(_AUTO_NET_PREFIXES)
+        )
+
         return {
             # Existing keys (backward compatible)
             "total_nets": result.total_nets,
@@ -432,6 +457,8 @@ class ReportDataCollector:
             "signal_complete_count": signal_complete_count,
             "signal_completion_percent": signal_completion_percent,
             "signal_incomplete_net_names": signal_incomplete_net_names,
+            "signal_incomplete_named": signal_incomplete_named,
+            "signal_incomplete_auto_count": signal_incomplete_auto_count,
             "zone_connected_count": len(all_zone_nets),
             "zone_connected_nets": all_zone_nets,
             "single_pad_count": len(single_pad_nets),

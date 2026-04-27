@@ -282,7 +282,19 @@ header-includes:
 {% endfor %}
 
 {% endif %}
-{% if net_status.signal_incomplete_net_names is defined and net_status.signal_incomplete_net_names %}
+{% if net_status.signal_incomplete_named is defined and net_status.signal_incomplete_named %}
+### Unrouted Signal Nets
+
+{% for net in net_status.signal_incomplete_named %}
+- {{ net }}
+{% endfor %}
+
+{% endif %}
+{% if net_status.signal_incomplete_auto_count is defined and net_status.signal_incomplete_auto_count > 0 %}
+{{ net_status.signal_incomplete_auto_count }} auto-generated component nets (`Net-(...)` / `unconnected-(...)`) not listed individually.
+
+{% elif net_status.signal_incomplete_net_names is defined and net_status.signal_incomplete_net_names %}
+{# Backward-compatible fallback for data generated before the named/auto split #}
 ### Unrouted Signal Nets
 
 {% for net in net_status.signal_incomplete_net_names %}

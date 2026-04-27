@@ -45,8 +45,14 @@ class ReportData:
     unrouted_count, total_unconnected_pads, completion_percent,
     incomplete_net_names, signal_net_count, signal_complete_count,
     signal_completion_percent, signal_incomplete_net_names,
+    signal_incomplete_named, signal_incomplete_auto_count,
     zone_connected_count, zone_connected_nets, single_pad_count,
-    single_pad_nets}."""
+    single_pad_nets}.
+
+    ``signal_incomplete_named`` contains only human-assigned net names
+    (excludes ``Net-(...)`` and ``unconnected-(...)`` auto-generated
+    names).  ``signal_incomplete_auto_count`` is the count of
+    auto-generated incomplete signal nets."""
 
     cost: dict | None = None
     """Cost estimate: {pcb_cost, component_cost (nullable),
