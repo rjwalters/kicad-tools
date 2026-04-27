@@ -1831,45 +1831,75 @@ class TestSchCheckConnections:
         from kicad_tools.cli.sch_check_connections import main
         from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
-        # Create a non-existent file path
+        # Create a non-existent file path -- no --lib-path needed
         missing_file = "/nonexistent_dir_12345/nonexistent.kicad_sch"
-        monkeypatch.setattr(
-            "sys.argv",
-            [
-                "sch-check-connections",
-                missing_file,
-                "--lib-path",
-                str(tmp_path),
-            ],
-        )
-        # The CLI catches builtin FileNotFoundError but the library raises
-        # kicad_tools.exceptions.FileNotFoundError which doesn't inherit from builtin.
-        # This is a known issue - the custom exception may escape.
         with pytest.raises((SystemExit, KiCadFileNotFoundError)):
-            main()
+            main([missing_file])
 
-    def test_no_library_warning(self, minimal_schematic: Path, capsys, monkeypatch, tmp_path):
-        """Test warning when no libraries are loaded."""
+    def test_no_lib_path_uses_embedded(self, capsys, tmp_path):
+        """Test that connections work without --lib-path using embedded lib_symbols."""
         from kicad_tools.cli.sch_check_connections import main
 
-        # Use an empty directory as lib path
-        empty_dir = tmp_path / "empty_lib"
-        empty_dir.mkdir()
-        monkeypatch.setattr(
-            "sys.argv",
-            [
-                "sch-check-connections",
-                str(minimal_schematic),
-                "--lib-path",
-                str(empty_dir),
-            ],
+        # Schematic with embedded symbol definitions
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
         )
-        with pytest.raises(SystemExit) as exc_info:
-            main()
+      )
+    )
+  )
+  (wire
+    (pts (xy 100 96.19) (xy 100 90))
+    (stroke (width 0) (type default))
+    (uuid "00000000-0000-0000-0000-000000000005")
+  )
+)
+"""
+        sch_file = tmp_path / "embedded.kicad_sch"
+        sch_file.write_text(sch_content)
 
-        assert exc_info.value.code == 1
+        # Should succeed without --lib-path
+        try:
+            main([str(sch_file), "--format", "json"])
+        except SystemExit as e:
+            assert e.code in (0, 1)
+
         captured = capsys.readouterr()
-        assert "No symbol libraries loaded" in captured.err
+        # Must NOT contain any library error
+        assert "No symbol libraries loaded" not in captured.err
+        # Should produce JSON output with pin data
+        if captured.out.strip():
+            data = json.loads(captured.out)
+            assert "pins" in data
+            assert "summary" in data
 
     def test_with_library(
         self, minimal_schematic: Path, minimal_symbol_library: Path, capsys, monkeypatch
@@ -1937,18 +1967,25 @@ class TestSchCheckConnections:
         captured = capsys.readouterr()
         assert len(captured.out) > 0
 
-    def test_argv_parameter_no_library(self, minimal_schematic: Path, capsys, tmp_path):
-        """Test calling main() with argv when no libraries are found."""
+    def test_no_embedded_no_lib_path(self, minimal_schematic: Path, capsys):
+        """Test that schematic with empty lib_symbols and no --lib-path produces LIBRARY_NOT_FOUND."""
         from kicad_tools.cli.sch_check_connections import main
 
-        empty_dir = tmp_path / "empty_lib"
-        empty_dir.mkdir()
-        with pytest.raises(SystemExit) as exc_info:
-            main([str(minimal_schematic), "--lib-path", str(empty_dir)])
+        # minimal_schematic has empty (lib_symbols) and no --lib-path
+        try:
+            main([str(minimal_schematic), "--format", "json", "--verbose"])
+        except SystemExit as e:
+            assert e.code in (0, 1)
 
-        assert exc_info.value.code == 1
         captured = capsys.readouterr()
-        assert "No symbol libraries loaded" in captured.err
+        if captured.out.strip():
+            data = json.loads(captured.out)
+            assert "pins" in data
+            # Should report LIBRARY_NOT_FOUND for symbols without embedded definitions
+            found_not_found = any(
+                p["pin_name"] == "LIBRARY_NOT_FOUND" for p in data["pins"]
+            )
+            assert found_not_found, "Expected LIBRARY_NOT_FOUND for symbol without embedded lib"
 
     def test_embedded_symbols_no_lib_path(self, capsys, tmp_path):
         """Test that connections work with embedded lib_symbols and no --lib-path."""
@@ -2014,6 +2051,112 @@ class TestSchCheckConnections:
             data = json.loads(captured.out)
             assert "pins" in data
             assert "summary" in data
+
+    def test_hierarchy_iterates_sub_sheets(self, capsys, tmp_path):
+        """Test that connections check iterates into sub-sheets."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        # Create a sub-sheet with its own symbol
+        sub_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000010")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:C"
+      (property "Reference" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "C" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:C_0_1"
+        (pin passive line (at 0 -2.54 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 2.54 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 150 150 0)
+    (uuid "00000000-0000-0000-0000-000000000011")
+    (property "Reference" "C1" (at 150 140 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100nF" (at 150 160 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 150 150 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 150 150 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000012"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000013"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000020"
+          (reference "C1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        sub_file = tmp_path / "sub.kicad_sch"
+        sub_file.write_text(sub_content)
+
+        # Create root schematic that references the sub-sheet
+        root_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (sheet
+    (at 200 100)
+    (size 50 25)
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (property "Sheetname" "SubSheet" (at 200 99 0) (effects (font (size 1.27 1.27))))
+    (property "Sheetfile" "sub.kicad_sch" (at 200 126 0) (effects (font (size 1.27 1.27))))
+  )
+)
+"""
+        root_file = tmp_path / "root.kicad_sch"
+        root_file.write_text(root_content)
+
+        try:
+            main([str(root_file), "--format", "json", "--verbose"])
+        except SystemExit as e:
+            assert e.code in (0, 1)
+
+        captured = capsys.readouterr()
+        if captured.out.strip():
+            data = json.loads(captured.out)
+            refs = {p["reference"] for p in data["pins"]}
+            # Should find symbols from both root and sub-sheet
+            assert "R1" in refs, "Expected R1 from root sheet"
+            assert "C1" in refs, "Expected C1 from sub-sheet"
 
 
 class TestSchFindUnconnected:
