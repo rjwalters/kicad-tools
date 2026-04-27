@@ -1102,6 +1102,38 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
 
+    # sch move-component
+    sch_move_component = sch_subparsers.add_parser(
+        "move-component", help="Move a symbol to a new position"
+    )
+    sch_move_component.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_move_component.add_argument(
+        "--ref", required=True, help="Symbol reference designator (e.g., U1)"
+    )
+    sch_move_component.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="New position coordinates",
+    )
+    sch_move_component.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_move_component.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_move_component.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_move_component.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_move_component.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
     # sch remove-component
     sch_remove_component = sch_subparsers.add_parser(
         "remove-component", help="Remove a symbol from a schematic"
