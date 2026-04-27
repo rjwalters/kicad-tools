@@ -380,6 +380,9 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
             print(f"{indent}    Actual: {v.actual_value:.3f}mm, Required: {v.required_value:.3f}mm")
         if v.items:
             print(f"{indent}    Items: {', '.join(v.items)}")
+        if v.nets:
+            net_labels = [n if n else "<no net>" for n in v.nets]
+            print(f"{indent}    Nets: {', '.join(net_labels)}")
 
 
 def output_json(

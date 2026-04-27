@@ -34,6 +34,7 @@ class DRCViolation:
     actual_value: float | None = None
     required_value: float | None = None
     items: tuple[str, ...] = ()
+    nets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate severity value."""
@@ -71,6 +72,7 @@ class DRCViolation:
             "actual_value": self.actual_value,
             "required_value": self.required_value,
             "items": list(self.items),
+            "nets": list(self.nets),
         }
 
 
