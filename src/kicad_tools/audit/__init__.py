@@ -22,9 +22,19 @@ from .auditor import (
     AuditVerdict,
     ManufacturingAudit,
 )
+from .net_audit import (
+    AffectedPad,
+    StaleNetGroup,
+    find_stale_nets,
+    fix_stale_nets,
+)
 
 __all__ = [
     "ManufacturingAudit",
     "AuditResult",
     "AuditVerdict",
+    "AffectedPad",
+    "StaleNetGroup",
+    "find_stale_nets",
+    "fix_stale_nets",
 ]

@@ -1,0 +1,61 @@
+(kicad_pcb
+	(version 20240108)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(general
+		(thickness 1.6)
+		(legacy_teardrops no)
+	)
+	(paper "A4")
+	(layers
+		(0 "F.Cu" signal)
+		(31 "B.Cu" signal)
+		(36 "B.SilkS" user "B.Silkscreen")
+		(37 "F.SilkS" user "F.Silkscreen")
+		(38 "B.Mask" user)
+		(39 "F.Mask" user)
+		(44 "Edge.Cuts" user)
+	)
+	(setup
+		(pad_to_mask_clearance 0.05)
+	)
+	(net 0 "")
+	(net 1 "GND")
+	(net 2 "+3.3V")
+	(net 3 "Net-(C11-Pad2)")
+	(net 4 "Net-(C11-2)")
+	(net 5 "Net-(R1-1)")
+
+	(gr_rect
+		(start 0 0)
+		(end 30 20)
+		(stroke (width 0.1) (type default))
+		(fill none)
+		(layer "Edge.Cuts")
+		(uuid "edge-cuts-uuid")
+	)
+
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "fp-c11-uuid")
+		(at 10 10)
+		(fp_text reference "C11" (at 0 -1.5) (layer "F.SilkS"))
+		(fp_text value "100nF" (at 0 1.5) (layer "F.Fab"))
+		(pad "1" smd roundrect (at -1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.2) (net 1 "GND"))
+		(pad "2" smd roundrect (at 1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.2) (net 3 "Net-(C11-Pad2)"))
+	)
+
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "fp-r1-uuid")
+		(at 20 10)
+		(fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+		(fp_text value "10k" (at 0 1.5) (layer "F.Fab"))
+		(pad "1" smd roundrect (at -1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.2) (net 5 "Net-(R1-1)"))
+		(pad "2" smd roundrect (at 1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.2) (net 2 "+3.3V"))
+	)
+
+	(segment (start 11 10) (end 19 10) (width 0.25) (layer "F.Cu") (net 4) (uuid "seg-1-uuid"))
+	(segment (start 19 10) (end 19 11) (width 0.25) (layer "F.Cu") (net 4) (uuid "seg-2-uuid"))
+	(via (at 19 11) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 4) (uuid "via-1-uuid"))
+)
