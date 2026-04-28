@@ -32,6 +32,7 @@ from kicad_tools.erc.cross_sheet import (
     filter_cross_sheet_global_labels,
     filter_cross_sheet_power_violations,
     filter_phantom_wire_violations,
+    reattribute_symbol_violations,
     reattribute_wire_dangling_violations,
 )
 from kicad_tools.schema import Schematic
@@ -162,6 +163,13 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                         # violations from root sheet to the correct child
                         # sheet based on position coordinates.
                         raw_violations = reattribute_wire_dangling_violations(
+                            raw_violations, schematic_path
+                        )
+
+                        # Re-attribute symbol-based and label-based
+                        # violations from root sheet to the correct child
+                        # sheet based on component UUID / reference lookup.
+                        raw_violations = reattribute_symbol_violations(
                             raw_violations, schematic_path
                         )
 
