@@ -28,9 +28,13 @@ import json
 import sys
 from dataclasses import dataclass
 
+from kicad_tools.cli.sch_connectivity import (
+    Coord,
+    build_wire_graph,
+    is_pin_connected,
+    to_coord,
+)
 from kicad_tools.schema import Schematic
-
-POINT_TOLERANCE = 0.5  # mm - slightly larger for pin matching
 
 
 @dataclass
@@ -39,6 +43,8 @@ class UnconnectedPin:
 
     reference: str
     pin_number: str
+    pin_name: str
+    pin_type: str
     symbol_value: str
     lib_id: str
     position: tuple[float, float]
@@ -53,43 +59,6 @@ class ConnectionIssue:
     position: tuple[float, float]
 
 
-def find_wire_endpoints(schematic: Schematic) -> set[tuple[float, float]]:
-    """Get all wire endpoints as a set of rounded positions."""
-    endpoints = set()
-    for wire in schematic.wires:
-        endpoints.add((round(wire.start[0], 1), round(wire.start[1], 1)))
-        endpoints.add((round(wire.end[0], 1), round(wire.end[1], 1)))
-    return endpoints
-
-
-def find_junction_positions(schematic: Schematic) -> set[tuple[float, float]]:
-    """Get all junction positions."""
-    return {(round(j.position[0], 1), round(j.position[1], 1)) for j in schematic.junctions}
-
-
-def find_label_positions(schematic: Schematic) -> set[tuple[float, float]]:
-    """Get all label positions."""
-    positions = set()
-    for lbl in schematic.labels:
-        positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
-    for lbl in schematic.global_labels:
-        positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
-    for lbl in schematic.hierarchical_labels:
-        positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
-    return positions
-
-
-def point_has_connection(
-    point: tuple[float, float],
-    wire_endpoints: set[tuple[float, float]],
-    junction_positions: set[tuple[float, float]],
-    label_positions: set[tuple[float, float]],
-) -> bool:
-    """Check if a point has any electrical connection."""
-    key = (round(point[0], 1), round(point[1], 1))
-    return key in wire_endpoints or key in junction_positions or key in label_positions
-
-
 def analyze_schematic(
     schematic: Schematic,
     include_power: bool = False,
@@ -99,31 +68,24 @@ def analyze_schematic(
     """
     Analyze schematic for unconnected pins and issues.
 
+    Uses the wire-graph BFS approach with per-pin position resolution
+    from embedded lib_symbols to accurately detect unconnected pins.
+
     Returns tuple of (unconnected_pins, connection_issues)
     """
     unconnected = []
     issues = []
 
-    wire_endpoints = find_wire_endpoints(schematic)
-    junction_positions = find_junction_positions(schematic)
-    label_positions = find_label_positions(schematic)
-
-    # Combine all connection points (reserved for future proximity checks)
-    _all_connections = wire_endpoints | junction_positions | label_positions  # noqa: F841
-
-    # Check each symbol
+    # First pass: collect all pin coordinates for wire-graph splitting
+    all_pin_coords: set[Coord] = set()
+    symbol_data: list[tuple] = []  # (symbol, lib_sym, pin_positions)
     symbol_positions: dict[tuple[float, float], list[str]] = {}
 
     for sym in schematic.symbols:
-        # Skip power symbols unless requested
         if sym.lib_id.startswith("power:") and not include_power:
             continue
-
-        # Skip DNP symbols unless requested
         if sym.dnp and not include_dnp:
             continue
-
-        # Apply reference filter
         if pattern and not fnmatch.fnmatch(sym.reference, pattern):
             continue
 
@@ -133,21 +95,57 @@ def analyze_schematic(
             symbol_positions[pos_key] = []
         symbol_positions[pos_key].append(sym.reference)
 
-        # Check symbol position (simplified - assumes pins are at symbol center)
-        # A more complete implementation would parse the symbol library for exact pin positions
-        if not point_has_connection(
-            sym.position, wire_endpoints, junction_positions, label_positions
-        ):
-            # Symbol center not connected - check if this is expected
-            # For multi-pin symbols, we'd need library info to know exact pin positions
+        # Resolve library symbol for per-pin positions
+        lib_sym = schematic.get_lib_symbol_resolved(sym.lib_id)
+        if not lib_sym:
+            # Cannot resolve pin positions -- report all pins as unconnected
             for pin in sym.pins:
                 unconnected.append(
                     UnconnectedPin(
                         reference=sym.reference,
                         pin_number=pin.number,
+                        pin_name="",
+                        pin_type="",
                         symbol_value=sym.value,
                         lib_id=sym.lib_id,
                         position=sym.position,
+                    )
+                )
+            continue
+
+        pin_positions = lib_sym.get_all_pin_positions(
+            instance_pos=sym.position,
+            instance_rot=sym.rotation,
+            mirror=sym.mirror,
+        )
+
+        for pos in pin_positions.values():
+            all_pin_coords.add(to_coord(*pos))
+
+        symbol_data.append((sym, lib_sym, pin_positions))
+
+    # Build wire graph with pin coordinates as split points
+    adjacency, _net_names = build_wire_graph(schematic, extra_points=all_pin_coords)
+
+    # Second pass: check each pin for connectivity
+    for sym, lib_sym, pin_positions in symbol_data:
+        for lib_pin in lib_sym.pins:
+            if lib_pin.number not in pin_positions:
+                continue
+
+            pos = pin_positions[lib_pin.number]
+            coord = to_coord(*pos)
+
+            if not is_pin_connected(coord, adjacency):
+                unconnected.append(
+                    UnconnectedPin(
+                        reference=sym.reference,
+                        pin_number=lib_pin.number,
+                        pin_name=lib_pin.name,
+                        pin_type=lib_pin.type,
+                        symbol_value=sym.value,
+                        lib_id=sym.lib_id,
+                        position=pos,
                     )
                 )
 
@@ -166,7 +164,6 @@ def analyze_schematic(
     for wire in schematic.wires:
         for point in [wire.start, wire.end]:
             key = (round(point[0], 1), round(point[1], 1))
-            # Count connections at this point
             connection_count = sum(
                 [
                     len(
@@ -179,13 +176,23 @@ def analyze_schematic(
                     ),
                 ]
             )
-            # If only one wire touches this point and no junction/label, it might be floating
+            junction_positions = {
+                (round(j.position[0], 1), round(j.position[1], 1))
+                for j in schematic.junctions
+            }
+            label_positions = set()
+            for lbl in schematic.labels:
+                label_positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
+            for lbl in schematic.global_labels:
+                label_positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
+            for lbl in schematic.hierarchical_labels:
+                label_positions.add((round(lbl.position[0], 1), round(lbl.position[1], 1)))
+
             if (
                 connection_count == 1
                 and key not in junction_positions
                 and key not in label_positions
             ):
-                # Check if it connects to a symbol (would need library info for exact check)
                 issues.append(
                     ConnectionIssue(
                         type="possible_floating_wire",
@@ -237,7 +244,6 @@ def main(argv=None):
 
 def output_table(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue]):
     """Output as formatted table."""
-    # Group unconnected pins by symbol
     by_symbol: dict[str, list[UnconnectedPin]] = {}
     for pin in unconnected:
         if pin.reference not in by_symbol:
@@ -245,7 +251,7 @@ def output_table(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue
         by_symbol[pin.reference].append(pin)
 
     if by_symbol:
-        print("Potentially Unconnected Pins")
+        print("Unconnected Pins")
         print("=" * 60)
         print(f"{'Reference':<10}  {'Value':<15}  {'Pins':<30}")
         print("-" * 60)
@@ -262,17 +268,14 @@ def output_table(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue
         total_pins = sum(len(pins) for pins in by_symbol.values())
         print(f"\nTotal: {len(by_symbol)} symbols, {total_pins} pins")
     else:
-        print("✓ No unconnected pins found")
+        print("All pins connected!")
 
     if issues:
         print("\nPotential Issues")
         print("=" * 60)
         for issue in issues:
-            print(f"⚠️  [{issue.type}] {issue.description}")
+            print(f"  [{issue.type}] {issue.description}")
             print(f"   Position: ({issue.position[0]:.1f}, {issue.position[1]:.1f})")
-
-    print("\n⚠️  Note: This analysis is approximate. Full pin position checking")
-    print("   requires parsing symbol libraries. Run KiCad's ERC for complete check.")
 
 
 def output_json(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue]):
@@ -282,6 +285,8 @@ def output_json(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue]
             {
                 "reference": p.reference,
                 "pin_number": p.pin_number,
+                "pin_name": p.pin_name,
+                "pin_type": p.pin_type,
                 "symbol_value": p.symbol_value,
                 "lib_id": p.lib_id,
                 "position": list(p.position),
