@@ -42,5 +42,9 @@ def run_sync_command(args) -> int:
     min_conf = getattr(args, "sync_min_confidence", "high")
     if min_conf != "high":
         sub_argv.extend(["--min-confidence", min_conf])
+    if getattr(args, "sync_remove_orphans", False):
+        sub_argv.append("--remove-orphans")
+    if getattr(args, "sync_force", False):
+        sub_argv.append("--force")
 
     return sync_main(sub_argv)

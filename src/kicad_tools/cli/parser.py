@@ -4832,6 +4832,18 @@ def _add_sync_parser(subparsers) -> None:
         default="high",
         help="Minimum confidence level to apply (default: high)",
     )
+    sync_parser.add_argument(
+        "--remove-orphans",
+        dest="sync_remove_orphans",
+        action="store_true",
+        help="Remove PCB footprints not present in schematic (with --apply)",
+    )
+    sync_parser.add_argument(
+        "--force",
+        dest="sync_force",
+        action="store_true",
+        help="Force removal of orphans even if they have routed traces",
+    )
 
 
 def _add_run_parser(subparsers) -> None:

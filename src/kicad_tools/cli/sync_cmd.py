@@ -96,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         default="high",
         help="Minimum confidence level to apply (default: high)",
     )
+    parser.add_argument(
+        "--remove-orphans",
+        action="store_true",
+        help="Remove PCB footprints not present in schematic (with --apply)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force removal of orphans even if they have routed traces",
+    )
 
     args = parser.parse_args(argv)
 
@@ -164,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 min_confidence=args.min_confidence,
                 output=args.output,
+                remove_orphans=args.remove_orphans,
+                force=args.force,
             )
         except Exception as e:
             print(f"Error applying changes: {e}", file=sys.stderr)
@@ -274,9 +286,18 @@ def _output_changes_table(changes, dry_run: bool) -> None:
                 status = "(placed)"
             else:
                 status = "(failed - library not found)"
+        elif change.change_type == "remove_orphan":
+            if dry_run:
+                status = "(would remove)"
+            elif change.applied:
+                status = "(removed)"
+            else:
+                status = "(skipped)"
 
         print(f"\n  {change.change_type}: {change.reference}")
         if change.change_type == "add_footprint":
+            print(f"    {change.new_value} {status}")
+        elif change.change_type == "remove_orphan":
             print(f"    {change.new_value} {status}")
         else:
             print(f"    {change.old_value} -> {change.new_value} {status}")

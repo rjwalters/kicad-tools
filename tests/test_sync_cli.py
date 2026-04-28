@@ -243,6 +243,94 @@ class TestOutputChangesTableFootprintStatus:
         assert "(failed - see error)" in captured.out
 
 
+class TestSyncCLIRemoveOrphans:
+    """Tests for --remove-orphans CLI flag."""
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_remove_orphans_flag_parsed(self, MockReconciler, capsys):
+        """Test that --remove-orphans flag is accepted and passed through."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis(pcb_orphans=["J5"])
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("J5", "remove_orphan", "J5", "removed", applied=True),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(
+            ["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"]
+        )
+        assert result == 0
+
+        # Verify remove_orphans was passed to apply()
+        call_kwargs = mock.apply.call_args
+        assert call_kwargs[1]["remove_orphans"] is True
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_force_flag_parsed(self, MockReconciler, capsys):
+        """Test that --force flag is accepted and passed through."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("R11", "remove_orphan", "R11", "removed (forced, had traces)", applied=True),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(
+            ["--apply", "--confirm", "--remove-orphans", "--force", "project.kicad_pro"]
+        )
+        assert result == 0
+
+        call_kwargs = mock.apply.call_args
+        assert call_kwargs[1]["force"] is True
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_remove_orphan_dry_run_output(self, MockReconciler, capsys):
+        """Test that remove_orphan dry-run shows '(would remove)'."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis()
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("J5", "remove_orphan", "J5", "removed", applied=False),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(
+            ["--apply", "--dry-run", "--remove-orphans", "project.kicad_pro"]
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(would remove)" in captured.out
+        assert "J5" in captured.out
+
+    @patch("kicad_tools.sync.reconciler.Reconciler")
+    def test_remove_orphan_applied_output(self, MockReconciler, capsys):
+        """Test that remove_orphan when applied shows '(removed)'."""
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncChange
+
+        analysis = SyncAnalysis()
+        mock = MagicMock()
+        mock.analyze.return_value = analysis
+        mock.apply.return_value = [
+            SyncChange("J5", "remove_orphan", "J5", "removed", applied=True),
+        ]
+        MockReconciler.return_value = mock
+
+        result = sync_main(
+            ["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"]
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(removed)" in captured.out
+
+
 class TestSyncCLIMapping:
     """Tests for --output-mapping flag."""
 
