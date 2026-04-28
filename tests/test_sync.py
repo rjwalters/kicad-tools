@@ -1758,6 +1758,324 @@ class TestUpdateFootprintSwapRegression:
         )
 
 
+class TestReconcilerApplyUpdateValueViaPCBAPI:
+    """Tests for update_value routing through PCB.update_footprint_value()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_update_value_calls_pcb_api(self):
+        """Test that update_value uses pcb.update_footprint_value() instead of raw sexp."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_value",
+                            "reference": "C1",
+                            "old_value": "2.2nF 50V",
+                            "new_value": "100nF 50V",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.update_footprint_value.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "update_value"
+        assert changes[0].applied is True
+        assert changes[0].old_value == "2.2nF 50V"
+        assert changes[0].new_value == "100nF 50V"
+        # Verify PCB API was called (not raw sexp manipulation)
+        mock_pcb.update_footprint_value.assert_called_once_with("C1", "100nF 50V")
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_update_value_dry_run(self):
+        """Test that update_value in dry-run does not call PCB API."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_value",
+                            "reference": "C1",
+                            "old_value": "2.2nF",
+                            "new_value": "100nF",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        mock_pcb.update_footprint_value.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_rename_calls_pcb_api(self):
+        """Test that rename uses pcb.update_footprint_reference() instead of raw sexp."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R99",
+                    confidence="high",
+                    match_type="value_footprint",
+                    actions=(
+                        {
+                            "type": "rename",
+                            "reference": "R99",
+                            "old_value": "R99",
+                            "new_value": "R1",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.update_footprint_reference.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "rename"
+        assert changes[0].applied is True
+        mock_pcb.update_footprint_reference.assert_called_once_with("R99", "R1")
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_update_value_footprint_not_found_returns_none(self):
+        """Test that update_value returns None when footprint is not found."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_value",
+            "reference": "MISSING",
+            "old_value": "10k",
+            "new_value": "4.7k",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.update_footprint_value.return_value = False
+
+        change = reconciler._apply_update_value(mock_pcb, action, dry_run=False)
+        assert change is None
+
+
+class TestReconcilerApplyRemoveOrphans:
+    """Tests for orphan removal in Reconciler.apply()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_remove_orphans_applied(self):
+        """Test that orphans are removed when remove_orphans=True."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5", "R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = False
+        mock_pcb.remove_footprint.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 2
+        assert all(c.change_type == "remove_orphan" for c in changes)
+        assert all(c.applied for c in changes)
+        assert changes[0].reference == "J5"
+        assert changes[1].reference == "R11"
+        assert mock_pcb.remove_footprint.call_count == 2
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_dry_run(self):
+        """Test that dry-run does not remove orphans."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = False
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert changes[0].change_type == "remove_orphan"
+        assert changes[0].new_value == "removed"
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_skips_traced_without_force(self):
+        """Test that orphans with traces are skipped without --force."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert "has traces" in changes[0].new_value
+        mock_pcb.remove_footprint.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_force_removes_traced(self):
+        """Test that --force removes orphans even with routed traces."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+        mock_pcb.remove_footprint.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(
+                analysis, dry_run=False, remove_orphans=True, force=True
+            )
+
+        assert len(changes) == 1
+        assert changes[0].applied is True
+        assert "forced" in changes[0].new_value
+        mock_pcb.remove_footprint.assert_called_once_with("R11")
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_not_enabled_by_default(self):
+        """Test that orphans are NOT removed without remove_orphans=True."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5", "R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 0
+        mock_pcb.remove_footprint.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_empty_list_no_error(self):
+        """Test that empty orphan list with remove_orphans=True produces no errors."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=[])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 0
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_dry_run_traced_shows_skip(self):
+        """Test dry-run with traced orphans shows skip message."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert "has traces" in changes[0].new_value
+        assert "--force" in changes[0].new_value
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
 class TestReconcilerSaveMapping:
     """Tests for Reconciler.save_mapping()."""
 

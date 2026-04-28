@@ -87,7 +87,7 @@ class SyncChange:
     """
 
     reference: str
-    change_type: str  # "rename", "update_value", "update_footprint", "add_footprint"
+    change_type: str  # "rename", "update_value", "update_footprint", "add_footprint", "remove_orphan"
     old_value: str
     new_value: str
     applied: bool = False
@@ -529,6 +529,8 @@ class Reconciler:
         dry_run: bool = True,
         min_confidence: str = "high",
         output: str | Path | None = None,
+        remove_orphans: bool = False,
+        force: bool = False,
     ) -> list[SyncChange]:
         """Apply proposed changes from an analysis to the PCB.
 
@@ -539,6 +541,8 @@ class Reconciler:
                 "high" = only high confidence, "medium" = high+medium,
                 "low" = all matches.
             output: Path to write the modified PCB (default: overwrite original).
+            remove_orphans: If True, remove PCB footprints not present in schematic.
+            force: If True, remove orphans even when they have routed traces.
 
         Returns:
             List of SyncChange records documenting what was (or would be) changed.
@@ -560,7 +564,9 @@ class Reconciler:
         # Include add_footprint actions from analysis
         actions_to_apply.extend(analysis.add_footprint_actions)
 
-        if not actions_to_apply:
+        has_orphans_to_remove = remove_orphans and bool(analysis.pcb_orphans)
+
+        if not actions_to_apply and not has_orphans_to_remove:
             return changes
 
         # Load PCB as a PCB object for full API access (add_footprint, add_net, etc.)
@@ -608,8 +614,19 @@ class Reconciler:
                 change = self._apply_update_footprint(pcb, action, dry_run)
                 if change:
                     changes.append(change)
-            else:
-                change = self._apply_action(pcb._sexp, action, dry_run)
+            elif action["type"] == "update_value":
+                change = self._apply_update_value(pcb, action, dry_run)
+                if change:
+                    changes.append(change)
+            elif action["type"] == "rename":
+                change = self._apply_rename(pcb, action, dry_run)
+                if change:
+                    changes.append(change)
+
+        # Remove PCB orphans if requested
+        if has_orphans_to_remove:
+            for ref in analysis.pcb_orphans:
+                change = self._apply_remove_orphan(pcb, ref, dry_run, force)
                 if change:
                     changes.append(change)
 
@@ -1046,6 +1063,152 @@ class Reconciler:
             # Net assignment is best-effort; failures are not fatal.
             # The user can run assign_nets_from_netlist() separately.
             pass
+
+    def _apply_update_value(
+        self,
+        pcb,
+        action: dict[str, Any],
+        dry_run: bool,
+    ) -> SyncChange | None:
+        """Apply an update_value action using the PCB API.
+
+        Uses pcb.update_footprint_value() which handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            pcb: The PCB object.
+            action: Action dict with update_value details.
+            dry_run: If True, don't modify the PCB.
+
+        Returns:
+            SyncChange record, or None if the footprint was not found.
+        """
+        ref = action["reference"]
+        old_val = action["old_value"]
+        new_val = action["new_value"]
+
+        if dry_run:
+            return SyncChange(
+                reference=ref,
+                change_type="update_value",
+                old_value=old_val,
+                new_value=new_val,
+                applied=False,
+            )
+
+        success = pcb.update_footprint_value(ref, new_val)
+        if not success:
+            return None
+
+        return SyncChange(
+            reference=ref,
+            change_type="update_value",
+            old_value=old_val,
+            new_value=new_val,
+            applied=True,
+        )
+
+    def _apply_rename(
+        self,
+        pcb,
+        action: dict[str, Any],
+        dry_run: bool,
+    ) -> SyncChange | None:
+        """Apply a rename action using the PCB API.
+
+        Uses pcb.update_footprint_reference() which handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            pcb: The PCB object.
+            action: Action dict with rename details.
+            dry_run: If True, don't modify the PCB.
+
+        Returns:
+            SyncChange record, or None if the footprint was not found.
+        """
+        old_ref = action["old_value"]
+        new_ref = action["new_value"]
+
+        if dry_run:
+            return SyncChange(
+                reference=old_ref,
+                change_type="rename",
+                old_value=old_ref,
+                new_value=new_ref,
+                applied=False,
+            )
+
+        success = pcb.update_footprint_reference(old_ref, new_ref)
+        if not success:
+            return None
+
+        return SyncChange(
+            reference=old_ref,
+            change_type="rename",
+            old_value=old_ref,
+            new_value=new_ref,
+            applied=True,
+        )
+
+    def _apply_remove_orphan(
+        self,
+        pcb,
+        ref: str,
+        dry_run: bool,
+        force: bool,
+    ) -> SyncChange:
+        """Remove an orphan footprint from the PCB.
+
+        Checks for routed traces before removal. If the footprint has traces
+        and force is False, the removal is skipped.
+
+        Args:
+            pcb: The PCB object.
+            ref: Reference designator of the orphan footprint.
+            dry_run: If True, don't modify the PCB.
+            force: If True, remove even if the footprint has routed traces.
+
+        Returns:
+            SyncChange record documenting the removal (or skip).
+        """
+        has_traces = pcb.footprint_has_traces(ref)
+
+        if dry_run:
+            new_value = "removed"
+            if has_traces and not force:
+                new_value = "skipped (has traces, use --force)"
+            elif has_traces and force:
+                new_value = "removed (forced, had traces)"
+            return SyncChange(
+                reference=ref,
+                change_type="remove_orphan",
+                old_value=ref,
+                new_value=new_value,
+                applied=False,
+            )
+
+        if has_traces and not force:
+            return SyncChange(
+                reference=ref,
+                change_type="remove_orphan",
+                old_value=ref,
+                new_value="skipped (has traces, use --force)",
+                applied=False,
+            )
+
+        success = pcb.remove_footprint(ref)
+        new_value = "removed"
+        if has_traces:
+            new_value = "removed (forced, had traces)"
+
+        return SyncChange(
+            reference=ref,
+            change_type="remove_orphan",
+            old_value=ref,
+            new_value=new_value,
+            applied=success,
+        )
 
     def _apply_action(self, sexp, action: dict[str, Any], dry_run: bool) -> SyncChange | None:
         """Apply a single action to the PCB s-expression.
