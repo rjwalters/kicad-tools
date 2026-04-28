@@ -3167,6 +3167,133 @@ def check_bom_variety(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Value consistency check (mixed voltage-rating formatting in capacitors)
+# ---------------------------------------------------------------------------
+
+_VALUE_VOLTAGE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?\s*(?:p|n|u|\xb5|m)?F)\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _split_cap_value(value: str) -> tuple[str, str | None]:
+    """Return (base_value, voltage_qualifier_or_None).
+
+    Examples:
+        "100nF 25V" -> ("100nF", "25V")
+        "10uF 16V"  -> ("10uF", "16V")
+        "100nF"     -> ("100nF", None)
+    """
+    m = _VALUE_VOLTAGE_RE.match(value.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return value.strip(), None
+
+
+def check_value_consistency(schematic_path: str) -> list[ValidationIssue]:
+    """Detect capacitors with the same base value but mixed voltage-rating formatting.
+
+    Groups capacitors by their base capacitance value (e.g. "100nF") and flags
+    groups where some components include a voltage qualifier (e.g. "100nF 25V")
+    and others do not.  This catches inconsistent BOM formatting that
+    check_bom_variety() cannot detect because it groups by full value string.
+
+    Only flags groups with a mix of qualified and unqualified values.  Groups
+    where ALL values include voltage qualifiers (even different ones) are not
+    flagged.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Mapping: base_value -> {"with_voltage": [(ref, full_value)], "without_voltage": [ref]}
+        groups: dict[str, dict[str, list]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Only capacitors (ref prefix C)
+                    if not _is_capacitor(sym.lib_id):
+                        continue
+
+                    # Must have a value
+                    if not sym.value or sym.value in ("~", "?"):
+                        continue
+
+                    # Must have a footprint (to be a real placed component)
+                    if not sym.footprint or sym.footprint == "~":
+                        continue
+
+                    ref = sym.reference or ""
+                    if not ref:
+                        continue
+
+                    base_value, voltage = _split_cap_value(sym.value)
+
+                    if base_value not in groups:
+                        groups[base_value] = {"with_voltage": [], "without_voltage": []}
+
+                    if voltage is not None:
+                        groups[base_value]["with_voltage"].append((ref, sym.value))
+                    else:
+                        groups[base_value]["without_voltage"].append(ref)
+
+            except Exception:
+                pass  # Skip sheets that fail to load
+
+        # Emit warnings for groups with mixed formatting
+        for base_value, subsets in sorted(groups.items()):
+            with_v = subsets["with_voltage"]
+            without_v = subsets["without_voltage"]
+
+            if not with_v or not without_v:
+                continue  # All consistent (all have or all lack voltage)
+
+            # Sort references for stable output
+            with_parts = sorted(with_v, key=lambda t: t[0])
+            without_parts = sorted(without_v)
+
+            with_str = ", ".join(f"{ref} ({val})" for ref, val in with_parts)
+            without_str = ", ".join(without_parts)
+
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="value_consistency",
+                    message=(
+                        f"Value consistency: capacitors with base value '{base_value}' "
+                        f"have mixed voltage-rating formatting -- "
+                        f"with voltage: {with_str}; "
+                        f"without voltage: {without_str} "
+                        f"-- consider standardizing all to include voltage or "
+                        f"moving voltage to a separate property"
+                    ),
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="value_consistency",
+                message=f"Value consistency check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(
     schematic_path: str,
     lib_paths: list[str] = None,
@@ -3200,6 +3327,9 @@ def validate_schematic(
 
     # BOM variety (same-value passives with different footprints)
     _run("bom_variety", check_bom_variety)
+
+    # Value consistency (mixed voltage-rating formatting in capacitors)
+    _run("value_consistency", check_value_consistency)
 
     # Hierarchy
     _run("hierarchy", check_hierarchy)
