@@ -5266,7 +5266,7 @@ def _add_export_parser(subparsers) -> None:
         "-m",
         dest="export_mfr",
         default="jlcpcb",
-        choices=["jlcpcb", "pcbway", "oshpark", "generic"],
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed", "generic"],
         help="Target manufacturer (default: jlcpcb)",
     )
     export_parser.add_argument(

@@ -113,10 +113,37 @@ OSHPARK_PRESET = ManufacturerPreset(
     ),
 )
 
+SEEED_PRESET = ManufacturerPreset(
+    name="Seeed Fusion",
+    config=GerberConfig(
+        use_protel_extensions=True,
+        use_aux_origin=True,
+        include_solderpaste=True,
+        generate_drill=True,
+        merge_pth_npth=False,
+        minimal_header=False,
+    ),
+    layer_rename={
+        # Seeed Fusion preferred naming (Protel extensions)
+        "F.Cu": "GTL",
+        "B.Cu": "GBL",
+        "In1.Cu": "G1",
+        "In2.Cu": "G2",
+        "F.SilkS": "GTO",
+        "B.SilkS": "GBO",
+        "F.Mask": "GTS",
+        "B.Mask": "GBS",
+        "F.Paste": "GTP",
+        "B.Paste": "GBP",
+        "Edge.Cuts": "GKO",
+    },
+)
+
 MANUFACTURER_PRESETS: dict[str, ManufacturerPreset] = {
     "jlcpcb": JLCPCB_PRESET,
     "pcbway": PCBWAY_PRESET,
     "oshpark": OSHPARK_PRESET,
+    "seeed": SEEED_PRESET,
 }
 
 

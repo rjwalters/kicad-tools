@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         "--mfr",
         "-m",
         default="jlcpcb",
-        choices=["jlcpcb", "pcbway", "oshpark", "generic"],
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed", "generic"],
         help="Target manufacturer (default: jlcpcb)",
     )
     parser.add_argument(
