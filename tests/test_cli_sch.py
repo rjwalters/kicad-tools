@@ -2331,6 +2331,182 @@ class TestSchCheckConnections:
             assert "C1" in refs, "Expected C1 from sub-sheet"
 
 
+class TestConnectionsSubGridTolerance:
+    """Regression tests for sub-grid pin placement tolerance (issue #2199).
+
+    When a component is placed at a non-grid-aligned position, the
+    computed pin position may differ from the wire endpoint by a fraction
+    of a unit.  The old set-based point_is_connected() missed these
+    connections, producing false-positive "unconnected" reports.
+    """
+
+    # Schematic with a resistor whose pin 1 is at (100, 96.19) and a wire
+    # endpoint at (100, 96.19) -- exact match.
+    _SCH_EXACT = """\
+(kicad_sch
+  (version 20231120) (generator "test") (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances (project "test" (path "/00000000-0000-0000-0000-000000000001" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 100 96.19) (xy 100 90)) (stroke (width 0) (type default)) (uuid "00000000-0000-0000-0000-000000000005"))
+  (wire (pts (xy 100 103.81) (xy 100 110)) (stroke (width 0) (type default)) (uuid "00000000-0000-0000-0000-000000000006"))
+)
+"""
+
+    # Schematic with a resistor at a sub-grid position (100.05, 100) so that
+    # pin positions differ from wire endpoints by ~0.05 mm (0.5 units in
+    # integer-scaled coordinates).  Wire endpoints are placed at the intended
+    # pin positions (rounded to grid).
+    _SCH_SUBGRID = """\
+(kicad_sch
+  (version 20231120) (generator "test") (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100.05 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances (project "test" (path "/00000000-0000-0000-0000-000000000001" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 100 96.19) (xy 100 90)) (stroke (width 0) (type default)) (uuid "00000000-0000-0000-0000-000000000005"))
+  (wire (pts (xy 100 103.81) (xy 100 110)) (stroke (width 0) (type default)) (uuid "00000000-0000-0000-0000-000000000006"))
+)
+"""
+
+    # Schematic with genuinely unconnected pins (no wires at all).
+    _SCH_UNCONNECTED = """\
+(kicad_sch
+  (version 20231120) (generator "test") (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances (project "test" (path "/00000000-0000-0000-0000-000000000001" (reference "R1") (unit 1))))
+  )
+)
+"""
+
+    def test_connections_exact_match(self, tmp_path, capsys):
+        """Pins exactly on wire endpoints are reported as connected."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        sch_file = tmp_path / "exact.kicad_sch"
+        sch_file.write_text(self._SCH_EXACT)
+
+        main([str(sch_file), "--format", "json", "--verbose"])
+        data = json.loads(capsys.readouterr().out)
+        pins = {p["pin_number"]: p for p in data["pins"]}
+        assert pins["1"]["connected"] is True, "Pin 1 should be connected (exact match)"
+        assert pins["2"]["connected"] is True, "Pin 2 should be connected (exact match)"
+
+    def test_connections_subgrid_tolerance(self, tmp_path, capsys):
+        """Pins offset by ~0.05 mm from wire endpoints are still connected."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        sch_file = tmp_path / "subgrid.kicad_sch"
+        sch_file.write_text(self._SCH_SUBGRID)
+
+        main([str(sch_file), "--format", "json", "--verbose"])
+        data = json.loads(capsys.readouterr().out)
+        pins = {p["pin_number"]: p for p in data["pins"]}
+        # With the old set-based approach, these would be falsely reported
+        # as unconnected due to the 0.05 mm offset.
+        assert pins["1"]["connected"] is True, "Pin 1 should be connected (sub-grid snap)"
+        assert pins["2"]["connected"] is True, "Pin 2 should be connected (sub-grid snap)"
+
+    def test_connections_genuinely_unconnected(self, tmp_path, capsys):
+        """Pins with no wires are correctly reported as unconnected."""
+        from kicad_tools.cli.sch_check_connections import main
+
+        sch_file = tmp_path / "unconnected.kicad_sch"
+        sch_file.write_text(self._SCH_UNCONNECTED)
+
+        main([str(sch_file), "--format", "json", "--verbose"])
+        data = json.loads(capsys.readouterr().out)
+        pins = {p["pin_number"]: p for p in data["pins"]}
+        assert pins["1"]["connected"] is False, "Pin 1 should be unconnected (no wires)"
+        assert pins["2"]["connected"] is False, "Pin 2 should be unconnected (no wires)"
+
+    def test_unconnected_exact_match(self, tmp_path, capsys):
+        """sch_find_unconnected: pins on wires are not reported as unconnected."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        sch_file = tmp_path / "exact.kicad_sch"
+        sch_file.write_text(self._SCH_EXACT)
+
+        main([str(sch_file), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["unconnected_pin_count"] == 0
+
+    def test_unconnected_subgrid_tolerance(self, tmp_path, capsys):
+        """sch_find_unconnected: sub-grid pins on wires are not false positives."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        sch_file = tmp_path / "subgrid.kicad_sch"
+        sch_file.write_text(self._SCH_SUBGRID)
+
+        main([str(sch_file), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["unconnected_pin_count"] == 0
+
+    def test_unconnected_genuinely_unconnected(self, tmp_path, capsys):
+        """sch_find_unconnected: pins with no wires are correctly detected."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        sch_file = tmp_path / "unconnected.kicad_sch"
+        sch_file.write_text(self._SCH_UNCONNECTED)
+
+        main([str(sch_file), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["unconnected_pin_count"] == 2
+
+
 class TestSchFindUnconnected:
     """Tests for sch_find_unconnected.py CLI."""
 

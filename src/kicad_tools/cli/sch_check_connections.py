@@ -34,10 +34,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.cli.sch_connectivity import (
+    Coord,
+    build_wire_graph,
+    is_pin_connected,
+    to_coord,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
-
-POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 
 
 @dataclass
@@ -52,56 +56,6 @@ class PinStatus:
     connected: bool
     connection_type: str = ""  # "wire", "label", "junction"
     sheet: str = ""  # sheet path for hierarchical schematics
-
-
-def find_all_connection_points(schematic: Schematic) -> set[tuple[int, int]]:
-    """
-    Get all points where connections exist.
-
-    Returns set of (x*10, y*10) integer tuples for fast lookup.
-    """
-    points = set()
-
-    # Wire endpoints
-    for wire in schematic.wires:
-        points.add((int(wire.start[0] * 10), int(wire.start[1] * 10)))
-        points.add((int(wire.end[0] * 10), int(wire.end[1] * 10)))
-
-    # Junctions
-    for junc in schematic.junctions:
-        points.add((int(junc.position[0] * 10), int(junc.position[1] * 10)))
-
-    # Labels
-    for lbl in schematic.labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
-
-    for lbl in schematic.global_labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
-
-    for lbl in schematic.hierarchical_labels:
-        points.add((int(lbl.position[0] * 10), int(lbl.position[1] * 10)))
-
-    return points
-
-
-def point_is_connected(
-    point: tuple[float, float],
-    connection_points: set[tuple[int, int]],
-    tolerance: float = POINT_TOLERANCE,
-) -> bool:
-    """Check if a point is connected to anything."""
-    # Check exact match first
-    key = (int(point[0] * 10), int(point[1] * 10))
-    if key in connection_points:
-        return True
-
-    # Check with tolerance (check grid-snapped neighbors)
-    for dx in [-1, 0, 1]:
-        for dy in [-1, 0, 1]:
-            if (key[0] + dx * 10, key[1] + dy * 10) in connection_points:
-                return True
-
-    return False
 
 
 def _resolve_lib_symbol(
@@ -141,29 +95,30 @@ def check_symbol_connections(
     """
     Check all symbol pins for connections.
 
-    Uses embedded lib_symbols from the schematic by default.  An optional
-    *lib_manager* is consulted as a fallback for backward compatibility.
+    Uses the wire-graph BFS approach (same algorithm as ``sch_pin_map``)
+    to correctly handle sub-grid pin positions.  Embedded lib_symbols from
+    the schematic are used by default; an optional *lib_manager* is
+    consulted as a fallback for backward compatibility.
 
     Returns list of PinStatus for all pins (or filtered pins).
     """
-    connection_points = find_all_connection_points(schematic)
     results = []
 
+    # First pass: collect all pin coordinates so the wire graph is split
+    # at pin positions (required for BFS reachability).
+    all_pin_coords: set[Coord] = set()
+    symbol_data: list[tuple] = []  # (symbol, lib_sym, pin_positions)
+
     for symbol in schematic.symbols:
-        # Skip power symbols
         if symbol.lib_id.startswith("power:"):
             continue
 
-        # Apply filter
         if pattern and not fnmatch.fnmatch(symbol.reference, pattern):
             continue
 
-        # Get library symbol (embedded first, then lib_manager fallback)
         lib_sym = _resolve_lib_symbol(schematic, symbol.lib_id, lib_manager)
 
         if not lib_sym:
-            # Can't check - library not found
-            # Add a result indicating library not found
             results.append(
                 PinStatus(
                     reference=symbol.reference,
@@ -177,20 +132,29 @@ def check_symbol_connections(
             )
             continue
 
-        # Get pin positions
         pin_positions = lib_sym.get_all_pin_positions(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
         )
 
-        # Check each pin
+        for pos in pin_positions.values():
+            all_pin_coords.add(to_coord(*pos))
+
+        symbol_data.append((symbol, lib_sym, pin_positions))
+
+    # Build wire graph with pin coordinates as split points
+    adjacency, _net_names = build_wire_graph(schematic, extra_points=all_pin_coords)
+
+    # Second pass: check each pin for connectivity via the wire graph
+    for symbol, lib_sym, pin_positions in symbol_data:
         for lib_pin in lib_sym.pins:
             if lib_pin.number not in pin_positions:
                 continue
 
             pos = pin_positions[lib_pin.number]
-            connected = point_is_connected(pos, connection_points)
+            coord = to_coord(*pos)
+            connected = is_pin_connected(coord, adjacency)
 
             results.append(
                 PinStatus(
