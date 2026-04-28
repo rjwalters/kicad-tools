@@ -308,6 +308,19 @@ def resolve_pin_map(
     ref_pin_coords: dict[str, set[Coord]] = defaultdict(set)
     # All non-power pin coordinates across the whole schematic
     all_pin_coords: set[Coord] = set()
+    # Pin coordinates belonging to net-tie symbols (Device:NetTie_2,
+    # Device:NetTie_3, etc.).  Net-ties are transparent wire bridges --
+    # their pins should NOT act as BFS barriers so that tracing can
+    # cross through them to reach the net label on the other side.
+    # NOTE: This covers the standard KiCad library net-ties whose lib_id
+    # starts with "Device:NetTie_".  Custom net-tie symbols in user
+    # libraries would need a different detection heuristic.
+    nettie_pin_coords: set[Coord] = set()
+    # Virtual edges to add between all pins of each net-tie symbol.
+    # A net-tie's body bridges its pins electrically, but there is no
+    # explicit wire segment between them in the schematic.  We add
+    # adjacency edges so BFS can traverse through the net-tie body.
+    nettie_edges: list[tuple[Coord, Coord]] = []
 
     # We also cache resolved LibrarySymbol + pin_positions per symbol
     # instance so we don't have to compute them twice.
@@ -331,10 +344,26 @@ def resolve_pin_map(
             coords.add(_to_coord(*pos))
         ref_pin_coords[symbol.reference].update(coords)
         all_pin_coords.update(coords)
+
+        # Detect net-tie symbols by lib_id prefix
+        if symbol.lib_id.startswith("Device:NetTie_"):
+            nettie_pin_coords.update(coords)
+            # Create virtual edges between all pin pairs of this net-tie
+            coord_list = list(coords)
+            for i in range(len(coord_list)):
+                for j in range(i + 1, len(coord_list)):
+                    nettie_edges.append((coord_list[i], coord_list[j]))
+
         _sym_cache.append((symbol, lib_sym, pin_positions))
 
     # --- Build wire graph with pin coordinates as split points ---
     adjacency, net_names = _build_wire_graph(schematic, extra_points=all_pin_coords)
+
+    # Inject virtual edges for net-tie pin pairs so BFS can traverse
+    # through the net-tie body (which has no explicit wire in the schematic).
+    for a, b in nettie_edges:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
 
     # ------------------------------------------------------------------
     # Pre-pass: propagate net names to all wire-connected nodes.
@@ -360,8 +389,10 @@ def resolve_pin_map(
         if ref_filter and symbol.reference != ref_filter:
             continue
 
-        # Barrier = all pin coords except this symbol's own pins
-        barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference]
+        # Barrier = all pin coords except this symbol's own pins and net-tie pins.
+        # Net-tie pins are excluded so BFS can traverse through net-tie bodies,
+        # which act as transparent wire bridges between nets/zones.
+        barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference] - nettie_pin_coords
 
         pins_data: dict[str, dict] = {}
         for lib_pin in lib_sym.pins:
