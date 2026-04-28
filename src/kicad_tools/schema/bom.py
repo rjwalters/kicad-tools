@@ -27,6 +27,7 @@ class BOMItem:
     lcsc: str = ""  # LCSC Part Number
     dnp: bool = False
     in_bom: bool = True
+    on_board: bool = True
 
     # Additional properties from schematic
     properties: dict[str, str] = field(default_factory=dict)
@@ -235,6 +236,7 @@ def extract_bom_from_schematic(schematic: Schematic) -> list[BOMItem]:
             datasheet=sym.datasheet,
             dnp=sym.dnp,
             in_bom=sym.in_bom,
+            on_board=sym.on_board,
         )
 
         # Extract additional properties

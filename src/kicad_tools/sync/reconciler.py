@@ -492,17 +492,19 @@ class Reconciler:
         mirroring the approach in SchematicPCBChecker.check_lvs(). This ensures
         components in hierarchical sub-sheets are included in the analysis.
 
-        Skips virtual components, power symbols, and DNP components, consistent
-        with the LVS checker's filtering logic.
+        Skips power symbols and components with on_board=False. Components
+        that are in_bom=False or dnp=True but have on_board=True (e.g., net
+        ties, optional/unpopulated parts) are included because they have
+        physical footprints on the PCB.
         """
         components: dict[str, dict[str, str]] = {}
         sch_path = str(self._schematic_path)
         bom = extract_bom(sch_path, hierarchical=True)
 
         for item in bom.items:
-            if item.is_virtual or item.is_power_symbol:
+            if item.is_power_symbol:
                 continue
-            if item.dnp:
+            if not item.on_board:
                 continue
             if item.reference and not item.reference.startswith("#"):
                 components[item.reference] = {
