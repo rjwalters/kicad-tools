@@ -3,18 +3,21 @@
 Show exact pin positions for a symbol instance in a schematic.
 
 Usage:
-    python3 sch-pin-positions.py <schematic.kicad_sch> <reference> --lib <library.kicad_sym>
+    python3 sch-pin-positions.py <schematic.kicad_sch> <reference> [--lib <library.kicad_sym>]
 
 Options:
-    --lib <path>           Path to symbol library file (required)
+    --lib <path>           Path to symbol library file (optional; uses embedded lib_symbols when omitted)
     --format {table,json}  Output format (default: table)
 
 Examples:
-    # Show pin positions for U1
+    # Show pin positions for U1 using embedded lib_symbols
+    python3 sch-pin-positions.py amplifier.kicad_sch U1
+
+    # Show pin positions for U1 with explicit library override
     python3 sch-pin-positions.py amplifier.kicad_sch U1 --lib lib/symbols/TPA3116D2.kicad_sym
 
     # Output as JSON
-    python3 sch-pin-positions.py amplifier.kicad_sch U1 --lib lib/TPA3116D2.kicad_sym --format json
+    python3 sch-pin-positions.py amplifier.kicad_sch U1 --format json
 """
 
 import argparse
@@ -32,7 +35,12 @@ def main(argv=None):
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("reference", help="Symbol reference (e.g., U1)")
-    parser.add_argument("--lib", required=True, help="Path to symbol library file")
+    parser.add_argument(
+        "--lib",
+        required=False,
+        default=None,
+        help="Path to symbol library file (uses embedded lib_symbols when omitted)",
+    )
     parser.add_argument(
         "--format", choices=["table", "json"], default="table", help="Output format"
     )
@@ -49,16 +57,6 @@ def main(argv=None):
         print(f"Error loading schematic: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Load library
-    try:
-        lib = SymbolLibrary.load(args.lib)
-    except FileNotFoundError:
-        print(f"Error: Library not found: {args.lib}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error loading library: {e}", file=sys.stderr)
-        sys.exit(1)
-
     # Find the symbol instance
     symbol = sch.get_symbol(args.reference)
     if not symbol:
@@ -68,22 +66,45 @@ def main(argv=None):
             print(f"Available symbols: {', '.join(refs[:20])}", file=sys.stderr)
         sys.exit(1)
 
-    # Find the library symbol
-    # Extract symbol name from lib_id (e.g., "chorus-revA:TPA3116D2" -> "TPA3116D2")
-    lib_id = symbol.lib_id
-    if ":" in lib_id:
-        sym_name = lib_id.split(":", 1)[1]
-    else:
-        sym_name = lib_id
+    # Resolve the library symbol
+    lib_sym = None
 
-    lib_sym = lib.get_symbol(sym_name)
-    if not lib_sym:
-        # Try all symbols in the library
-        if len(lib.symbols) == 1:
-            lib_sym = list(lib.symbols.values())[0]
+    if args.lib:
+        # Explicit library override: load from external file
+        try:
+            lib = SymbolLibrary.load(args.lib)
+        except FileNotFoundError:
+            print(f"Error: Library not found: {args.lib}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error loading library: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Extract symbol name from lib_id (e.g., "chorus-revA:TPA3116D2" -> "TPA3116D2")
+        lib_id = symbol.lib_id
+        if ":" in lib_id:
+            sym_name = lib_id.split(":", 1)[1]
         else:
-            print(f"Error: Symbol '{sym_name}' not found in library", file=sys.stderr)
-            print(f"Available: {', '.join(lib.symbols.keys())}", file=sys.stderr)
+            sym_name = lib_id
+
+        lib_sym = lib.get_symbol(sym_name)
+        if not lib_sym:
+            # Try all symbols in the library
+            if len(lib.symbols) == 1:
+                lib_sym = list(lib.symbols.values())[0]
+            else:
+                print(f"Error: Symbol '{sym_name}' not found in library", file=sys.stderr)
+                print(f"Available: {', '.join(lib.symbols.keys())}", file=sys.stderr)
+                sys.exit(1)
+    else:
+        # Use embedded lib_symbols from the schematic
+        lib_sym = sch.get_lib_symbol_resolved(symbol.lib_id)
+        if not lib_sym:
+            print(
+                f"Error: Symbol '{symbol.lib_id}' not found in schematic's embedded "
+                f"lib_symbols. Provide --lib to specify an external library file.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     # Calculate pin positions
@@ -104,7 +125,7 @@ def output_table(symbol, lib_sym, pin_positions):
     print(f"Symbol: {symbol.reference} ({symbol.value})")
     print(f"Library: {lib_sym.name}")
     print(f"Instance position: ({symbol.position[0]:.2f}, {symbol.position[1]:.2f})")
-    print(f"Rotation: {symbol.rotation}°")
+    print(f"Rotation: {symbol.rotation}")
     if symbol.mirror:
         print(f"Mirror: {symbol.mirror}")
     print("=" * 70)

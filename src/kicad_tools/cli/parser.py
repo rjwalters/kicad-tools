@@ -478,7 +478,12 @@ def _add_sch_parser(subparsers) -> None:
     sch_pins = sch_subparsers.add_parser("pins", help="Show symbol pin positions")
     sch_pins.add_argument("schematic", help="Path to .kicad_sch file")
     sch_pins.add_argument("reference", help="Symbol reference (e.g., U1)")
-    sch_pins.add_argument("--lib", required=True, help="Path to symbol library file")
+    sch_pins.add_argument(
+        "--lib",
+        required=False,
+        default=None,
+        help="Path to symbol library file (uses embedded lib_symbols when omitted)",
+    )
     sch_pins.add_argument("--format", choices=["table", "json"], default="table")
 
     # sch pin-map

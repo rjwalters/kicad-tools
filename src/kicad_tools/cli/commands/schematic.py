@@ -113,7 +113,9 @@ def run_sch_command(args) -> int:
     elif args.sch_command == "pins":
         from ..sch_pin_positions import main as pins_main
 
-        sub_argv = [str(schematic_path), args.reference, "--lib", args.lib]
+        sub_argv = [str(schematic_path), args.reference]
+        if args.lib:
+            sub_argv.extend(["--lib", args.lib])
         if args.format != "table":
             sub_argv.extend(["--format", args.format])
         return pins_main(sub_argv) or 0
