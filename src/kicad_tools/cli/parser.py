@@ -1392,6 +1392,11 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Apply reference renames without interactive confirmation",
     )
+    pcb_sync_netlist.add_argument(
+        "--remove-orphan-nets",
+        action="store_true",
+        help="Remove nets with no pad references after net assignment",
+    )
 
     # pcb zones
     pcb_zones = pcb_subparsers.add_parser("zones", help="List copper pour zones")

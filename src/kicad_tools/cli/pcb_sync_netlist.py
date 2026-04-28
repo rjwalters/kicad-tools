@@ -53,6 +53,7 @@ class SyncResult:
     orphaned: list[SyncAction] = field(default_factory=list)
     removed: list[SyncAction] = field(default_factory=list)
     pin_mismatches: list[PinMismatch] = field(default_factory=list)
+    net_updated: list[SyncAction] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -61,6 +62,7 @@ class SyncResult:
         return bool(
             self.added or self.renamed or self.orphaned
             or self.removed or self.pin_mismatches
+            or self.net_updated
         )
 
 
@@ -83,6 +85,7 @@ def sync_netlist(
     remove_orphans: bool = False,
     force: bool = False,
     auto_rename: bool = False,
+    remove_orphan_nets: bool = False,
 ) -> SyncResult:
     """Sync PCB footprints from schematic.
 
@@ -97,6 +100,8 @@ def sync_netlist(
             When False (default) and not dry_run, the caller is responsible
             for confirming renames before applying.  The ``run_sync_netlist``
             wrapper handles the interactive prompt.
+        remove_orphan_nets: If True, remove nets with no pad references after
+            net assignment.
 
     Returns:
         SyncResult describing all actions taken or planned.
@@ -306,69 +311,202 @@ def sync_netlist(
     # When auto_rename is False and there are renames, the caller must confirm
     # before calling with auto_rename=True.  dry_run always skips application.
     skip_apply = dry_run or (result.renamed and not auto_rename)
-    if not skip_apply and result.has_changes:
-        # Apply renames using collision-safe rename plan
-        if result.renamed:
-            _apply_renames_safe(pcb, rename_map, pcb_ref_set, result)
+    if not skip_apply:
+        # Apply footprint-level changes (renames, adds, removes)
+        if result.has_changes:
+            # Apply renames using collision-safe rename plan
+            if result.renamed:
+                _apply_renames_safe(pcb, rename_map, pcb_ref_set, result)
 
-        # Add missing footprints at board edge
-        placement_x, placement_y = _get_board_edge_position(pcb)
-        x_offset = 0.0
-        for action in result.added:
+            # Add missing footprints at board edge
+            placement_x, placement_y = _get_board_edge_position(pcb)
+            x_offset = 0.0
+            for action in result.added:
+                try:
+                    pcb.add_footprint(
+                        library_id=action.footprint,
+                        reference=action.reference,
+                        x=placement_x + x_offset,
+                        y=placement_y,
+                        value=action.value,
+                    )
+                    x_offset += 5.0  # Space footprints horizontally
+                except Exception as e:
+                    result.errors.append(
+                        f"Failed to add footprint for {action.reference}: {e}"
+                    )
+
+            # Remove orphaned footprints
+            for action in result.removed:
+                if not pcb.remove_footprint(action.reference):
+                    result.errors.append(
+                        f"Failed to remove footprint {action.reference}"
+                    )
+
+        # Update net assignments from schematic netlist unconditionally.
+        # This catches stale pad-net assignments even when no footprints are
+        # added or renamed (e.g. when pad nets drifted from the schematic).
+        net_actions, net_errors = _assign_nets_from_schematic(
+            pcb, schematic_path
+        )
+        result.net_updated.extend(net_actions)
+        result.errors.extend(net_errors)
+
+        # Optionally remove nets that have no pad references
+        if remove_orphan_nets:
+            _remove_unused_nets(pcb, result)
+
+        # Save if anything changed (footprints or nets)
+        if result.has_changes:
+            save_path = output_path or pcb_path
             try:
-                pcb.add_footprint(
-                    library_id=action.footprint,
-                    reference=action.reference,
-                    x=placement_x + x_offset,
-                    y=placement_y,
-                    value=action.value,
-                )
-                x_offset += 5.0  # Space footprints horizontally
+                pcb.save(save_path)
             except Exception as e:
-                result.errors.append(
-                    f"Failed to add footprint for {action.reference}: {e}"
-                )
+                result.errors.append(f"Failed to save PCB: {e}")
 
-        # Remove orphaned footprints
-        for action in result.removed:
-            if not pcb.remove_footprint(action.reference):
-                result.errors.append(
-                    f"Failed to remove footprint {action.reference}"
-                )
-
-        # Update net assignments from schematic netlist (covers renamed refs
-        # and newly added footprints)
-        if result.renamed or result.added:
-            _assign_nets_from_schematic(pcb, schematic_path)
-
-        # Save
-        save_path = output_path or pcb_path
-        try:
-            pcb.save(save_path)
-        except Exception as e:
-            result.errors.append(f"Failed to save PCB: {e}")
+    elif dry_run:
+        # Compute net diff for dry-run reporting (no PCB changes applied).
+        # Note: this mutates the in-memory PCB to compute the diff but
+        # never saves, so the file on disk is unchanged.
+        net_actions, net_errors = _assign_nets_from_schematic(
+            pcb, schematic_path
+        )
+        result.net_updated.extend(net_actions)
+        result.errors.extend(net_errors)
 
     return result
 
 
-def _assign_nets_from_schematic(pcb, schematic_path: Path) -> None:
+def _get_pad_net_snapshot(pcb) -> dict[tuple[str, str], str]:
+    """Snapshot current pad-to-net assignments from all footprints.
+
+    Returns a dict mapping ``(reference, pad_number)`` to ``net_name``.
+    """
+    snapshot: dict[tuple[str, str], str] = {}
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        for pad in fp.pads:
+            snapshot[(fp.reference, pad.number)] = pad.net_name
+    return snapshot
+
+
+def _assign_nets_from_schematic(
+    pcb, schematic_path: Path
+) -> tuple[list[SyncAction], list[str]]:
     """Export netlist from schematic and assign nets to PCB pads.
 
-    Updates pad-to-net mappings for all footprints, including renamed and
-    newly added ones. Failures are silently ignored since net assignment is
-    best-effort; the user can run KiCad's Update PCB from Schematic for a
-    full refresh.
+    Always applies net assignments to the in-memory *pcb* object.  The
+    caller is responsible for deciding whether to persist (save) the
+    result.
+
+    Returns:
+        A tuple of ``(net_actions, errors)`` where *net_actions* is a list
+        of :class:`SyncAction` items with ``action="net_updated"`` and
+        *errors* is a list of error strings.
     """
+    actions: list[SyncAction] = []
+    errors: list[str] = []
+
     try:
         from kicad_tools.operations.netlist import export_netlist
 
         netlist = export_netlist(str(schematic_path))
-        for net in netlist.nets:
-            if net.name:
-                pcb.add_net(net.name)
+    except Exception as exc:
+        errors.append(f"Failed to export netlist for net assignment: {exc}")
+        return actions, errors
+
+    # Snapshot before assignment
+    before = _get_pad_net_snapshot(pcb)
+
+    # Ensure all schematic nets exist in the PCB
+    for net in netlist.nets:
+        if net.name:
+            pcb.add_net(net.name)
+
+    # Apply net assignments
+    try:
         pcb.assign_nets_from_netlist(netlist)
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append(f"Failed to assign nets from netlist: {exc}")
+        return actions, errors
+
+    # Snapshot after assignment
+    after = _get_pad_net_snapshot(pcb)
+
+    # Compute diff
+    for key in sorted(set(before.keys()) | set(after.keys())):
+        old_net = before.get(key, "")
+        new_net = after.get(key, "")
+        if old_net != new_net:
+            ref, pad_num = key
+            actions.append(SyncAction(
+                action="net_updated",
+                reference=ref,
+                detail=f"{ref}.{pad_num}: \"{old_net}\" -> \"{new_net}\"",
+            ))
+
+    return actions, errors
+
+
+def _remove_unused_nets(pcb, result: SyncResult) -> None:
+    """Remove nets that have zero pad references from the PCB.
+
+    Skips the unconnected net (net 0 / empty name).  Removed net names
+    are appended as warnings on *result* for visibility.
+    """
+    # Collect nets referenced by at least one pad
+    referenced_nets: set[str] = set()
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name:
+                referenced_nets.add(pad.net_name)
+
+    # Also count nets used by segments, vias, and zones
+    for seg in pcb.segments:
+        if seg.net_name:
+            referenced_nets.add(seg.net_name)
+    for via in pcb.vias:
+        if via.net_name:
+            referenced_nets.add(via.net_name)
+    for zone in pcb.zones:
+        if zone.net_name:
+            referenced_nets.add(zone.net_name)
+
+    # Find unreferenced nets
+    orphan_net_names: list[str] = []
+    for net in pcb.nets.values():
+        if not net.name:
+            continue  # skip unconnected net
+        if net.name not in referenced_nets:
+            orphan_net_names.append(net.name)
+
+    if not orphan_net_names:
+        return
+
+    # Remove from S-expression tree and internal dict
+    removed: list[str] = []
+    for name in sorted(orphan_net_names):
+        net = pcb.get_net_by_name(name)
+        if net is None:
+            continue
+        # Remove from _nets dict
+        if net.number in pcb.nets:
+            del pcb.nets[net.number]
+        # Remove from S-expression
+        for net_sexp in pcb._sexp.find_all("net"):
+            sexp_name = net_sexp.get_string(1)
+            if sexp_name is None:
+                sexp_name = net_sexp.get_string(0)
+            if sexp_name == name:
+                pcb._sexp.remove(net_sexp)
+                break
+        removed.append(name)
+
+    if removed:
+        result.warnings.append(
+            f"Removed {len(removed)} orphan net(s): {', '.join(removed)}"
+        )
 
 
 def _apply_rename(pcb, old_ref: str, new_ref: str) -> bool:
@@ -447,6 +585,12 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
         lines.append(f"  Removed footprints ({len(result.removed)}):")
         for action in result.removed:
             lines.append(f"    {action.reference}: {action.value} ({action.footprint})")
+        lines.append("")
+
+    if result.net_updated:
+        lines.append(f"  Net updates ({len(result.net_updated)}):")
+        for action in result.net_updated:
+            lines.append(f"    {action.detail}")
         lines.append("")
 
     if result.orphaned:
@@ -530,6 +674,13 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             }
             for pm in result.pin_mismatches
         ],
+        "net_updated": [
+            {
+                "reference": a.reference,
+                "detail": a.detail,
+            }
+            for a in result.net_updated
+        ],
         "warnings": result.warnings,
         "errors": result.errors,
     }
@@ -545,6 +696,7 @@ def run_sync_netlist(
     remove_orphans: bool = False,
     force: bool = False,
     auto_rename: bool = False,
+    remove_orphan_nets: bool = False,
 ) -> int:
     """Run the sync-netlist command.
 
@@ -559,6 +711,8 @@ def run_sync_netlist(
         auto_rename: If True, apply renames without interactive confirmation.
             When False (default) and not dry_run, shows a confirmation prompt
             before applying renames.
+        remove_orphan_nets: If True, remove nets with no pad references after
+            net assignment.
 
     Returns:
         Exit code (0 for success, 1 for errors).
@@ -572,6 +726,7 @@ def run_sync_netlist(
         remove_orphans=remove_orphans,
         force=force,
         auto_rename=auto_rename,
+        remove_orphan_nets=remove_orphan_nets,
     )
 
     if output_format == "json":
@@ -600,6 +755,7 @@ def run_sync_netlist(
                 remove_orphans=remove_orphans,
                 force=force,
                 auto_rename=True,
+                remove_orphan_nets=remove_orphan_nets,
             )
             print("Renames applied.")
         else:

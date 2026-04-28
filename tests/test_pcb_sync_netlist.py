@@ -266,8 +266,8 @@ class TestSyncResult:
 class TestSyncNetlist:
     """Tests for the core sync_netlist function."""
 
-    def test_in_sync_returns_no_changes(self, tmp_path):
-        """Matching schematic and PCB produce no changes."""
+    def test_in_sync_returns_no_footprint_changes(self, tmp_path):
+        """Matching schematic and PCB produce no footprint-level changes."""
         from kicad_tools.cli.pcb_sync_netlist import sync_netlist
 
         sch = tmp_path / "test.kicad_sch"
@@ -281,7 +281,6 @@ class TestSyncNetlist:
         assert not result.renamed
         assert not result.orphaned
         assert not result.errors
-        assert not result.has_changes
 
     def test_detects_missing_footprint(self, tmp_path):
         """R1 missing from PCB is detected as needing to be added."""
@@ -1862,6 +1861,40 @@ PCB_PASSIVE_2PAD = """(kicad_pcb
 """
 
 
+# --- PCB with stale net assignments for net update tests ---
+
+# R1 pad 1 is assigned to "old_net" but schematic says GND.
+# R1 pad 2 has no net (empty) but schematic generates Net-(R1-2).
+PCB_STALE_NETS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "old_net")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "old_net"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
 class TestPinMismatch:
     """Tests for PinMismatch dataclass."""
 
@@ -2009,7 +2042,12 @@ class TestPinMismatchDetection:
         result = sync_netlist(sch, pcb, dry_run=True)
 
         assert len(result.pin_mismatches) == 0
-        assert not result.has_changes
+        # No footprint-level changes (net_updated may be non-empty because
+        # the unconditional net assignment pass assigns nets to bare pads).
+        assert not result.added
+        assert not result.renamed
+        assert not result.orphaned
+        assert not result.removed
 
     def test_dry_run_does_not_modify_pcb(self, tmp_path):
         """Dry run with mismatches does not modify the PCB file."""
@@ -2110,3 +2148,295 @@ class TestPinMismatchFormatJson:
         output = json.loads(format_json(result, dry_run=True, pcb_path=Path("test.kicad_pcb")))
 
         assert output["pin_mismatches"] == []
+
+
+# PCB with an orphan net that is not assigned to any pad
+PCB_WITH_ORPHAN_NET = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "stale_net")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestNetUpdates:
+    """Tests for unconditional pad net assignment updates."""
+
+    def test_stale_nets_detected_in_dry_run(self, tmp_path):
+        """Dry run detects stale pad-net assignments."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_R1_ONLY)
+        pcb.write_text(PCB_STALE_NETS)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        # R1 pad 1 was "old_net", should change
+        assert len(result.net_updated) > 0
+        details = [a.detail for a in result.net_updated]
+        assert any("R1" in d and "old_net" in d for d in details)
+
+    def test_stale_nets_corrected_on_apply(self, tmp_path):
+        """Non-dry-run corrects stale pad-net assignments in the PCB."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_R1_ONLY)
+        pcb.write_text(PCB_STALE_NETS)
+
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True)
+
+        assert len(result.net_updated) > 0
+        assert not result.errors
+
+        # Reload and verify R1 pad 1 no longer has "old_net"
+        board = PCB.load(pcb)
+        r1 = board.get_footprint("R1")
+        assert r1 is not None
+        pad1_nets = [p.net_name for p in r1.pads if p.number == "1"]
+        assert pad1_nets
+        assert pad1_nets[0] != "old_net"
+
+    def test_net_update_runs_even_without_footprint_changes(self, tmp_path):
+        """Net assignment runs even when no footprints are added/renamed/removed."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_STALE_NETS)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        # No footprint-level changes (both R1 and C1 exist)
+        assert not result.added
+        assert not result.renamed
+        # But net updates should be detected
+        assert len(result.net_updated) > 0
+
+    def test_correct_nets_produce_no_net_updates(self, tmp_path):
+        """PCB already matching schematic nets produces empty net_updated."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_R1_ONLY)
+
+        # First, sync to correct the nets
+        pcb.write_text(PCB_STALE_NETS)
+        sync_netlist(sch, pcb, dry_run=False, remove_orphans=True)
+
+        # Now sync again -- should produce no net updates
+        result = sync_netlist(sch, pcb, dry_run=True)
+        # Filter net_updated to only R1 (C1 was removed as orphan)
+        r1_updates = [a for a in result.net_updated if a.reference == "R1"]
+        assert not r1_updates
+
+    def test_dry_run_does_not_modify_pcb_with_net_updates(self, tmp_path):
+        """Dry run with net updates does not change the PCB file."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_STALE_NETS)
+        original = pcb.read_text()
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.net_updated) > 0
+        assert pcb.read_text() == original
+
+    def test_net_updated_in_text_output(self, tmp_path):
+        """Net updates appear in text format output."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
+
+        result = SyncResult(
+            net_updated=[SyncAction(
+                action="net_updated",
+                reference="R1",
+                detail='R1.1: "old_net" -> "GND"',
+            )]
+        )
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_text(result, dry_run=True, pcb_path=pcb)
+
+        assert "Net updates" in output
+        assert "R1.1" in output
+        assert "old_net" in output
+        assert "GND" in output
+
+    def test_net_updated_in_json_output(self, tmp_path):
+        """Net updates appear in JSON format output."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
+
+        result = SyncResult(
+            net_updated=[SyncAction(
+                action="net_updated",
+                reference="R1",
+                detail='R1.1: "old_net" -> "GND"',
+            )]
+        )
+        pcb = tmp_path / "test.kicad_pcb"
+        output = format_json(result, dry_run=False, pcb_path=pcb)
+
+        data = json.loads(output)
+        assert "net_updated" in data
+        assert len(data["net_updated"]) == 1
+        assert data["net_updated"][0]["reference"] == "R1"
+        assert "old_net" in data["net_updated"][0]["detail"]
+
+    def test_has_changes_with_net_updated(self):
+        """SyncResult.has_changes is True when only net_updated has entries."""
+        from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult
+
+        result = SyncResult(
+            net_updated=[SyncAction(action="net_updated", reference="R1")]
+        )
+        assert result.has_changes is True
+
+
+class TestNetAssignmentErrorSurfacing:
+    """Tests for error surfacing from _assign_nets_from_schematic."""
+
+    def test_export_netlist_error_surfaced(self, tmp_path, monkeypatch):
+        """Failure in export_netlist produces an error in result."""
+        from kicad_tools.cli.pcb_sync_netlist import _assign_nets_from_schematic
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(MINIMAL_PCB_MATCHING)
+        board = PCB.load(pcb_path)
+
+        # Mock export_netlist to raise
+        import kicad_tools.cli.pcb_sync_netlist as mod
+        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+
+        def mock_export_netlist(path):
+            raise RuntimeError("kicad-cli not found")
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.export_netlist",
+            mock_export_netlist,
+        )
+
+        actions, errors = _assign_nets_from_schematic(
+            board, tmp_path / "nonexistent.kicad_sch"
+        )
+
+        assert len(errors) > 0
+        assert "Failed to export netlist" in errors[0]
+        assert not actions
+
+
+class TestRemoveOrphanNets:
+    """Tests for --remove-orphan-nets functionality."""
+
+    def test_parser_accepts_remove_orphan_nets(self):
+        """Parser supports --remove-orphan-nets flag."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "--remove-orphan-nets",
+            "test.kicad_pcb",
+        ])
+        assert args.remove_orphan_nets is True
+
+    def test_parser_remove_orphan_nets_default_false(self):
+        """--remove-orphan-nets defaults to False."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args([
+            "pcb", "sync-netlist",
+            "--schematic", "test.kicad_sch",
+            "test.kicad_pcb",
+        ])
+        assert args.remove_orphan_nets is False
+
+    def test_orphan_net_removed(self, tmp_path):
+        """Net with no pad references is removed when flag is set."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN_NET)
+
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphan_nets=True)
+
+        # stale_net had no pad references and should be removed
+        board = PCB.load(pcb)
+        assert board.get_net_by_name("stale_net") is None
+        # Warning should mention removal
+        assert any("stale_net" in w for w in result.warnings)
+
+    def test_orphan_net_not_removed_without_flag(self, tmp_path):
+        """Net with no pad references is preserved when flag is not set."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_WITH_ORPHAN_NET)
+
+        sync_netlist(sch, pcb, dry_run=False, remove_orphan_nets=False)
+
+        board = PCB.load(pcb)
+        assert board.get_net_by_name("stale_net") is not None
+
+    def test_dispatcher_passes_remove_orphan_nets(self, tmp_path):
+        """Dispatcher passes remove_orphan_nets to run_sync_netlist."""
+        from kicad_tools.cli.commands.pcb import _run_sync_netlist_command
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        class Args:
+            schematic = str(sch)
+            output = None
+            dry_run = True
+            format = "text"
+            remove_orphans = False
+            force = False
+            auto_rename = False
+            remove_orphan_nets = False
+
+        rc = _run_sync_netlist_command(Args(), pcb)
+        assert rc == 0
