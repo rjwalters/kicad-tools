@@ -792,7 +792,6 @@ class TestSchPinPositions:
         from kicad_tools.cli.sch_pin_positions import main
 
         missing_file = tmp_path / "definitely_missing" / "nonexistent.kicad_sch"
-        # --lib is required, so we need to provide it
         monkeypatch.setattr(
             "sys.argv",
             ["sch-pin-positions", str(missing_file), "R1", "--lib", "fake.kicad_sym"],
@@ -874,6 +873,112 @@ class TestSchPinPositions:
         except SystemExit:
             # If the symbol isn't found, that's okay for this test
             pass
+
+    def test_embedded_lib_symbols_no_lib_flag(self, tmp_path, capsys):
+        """Test that pins command works without --lib using embedded lib_symbols."""
+        from kicad_tools.cli.sch_pin_positions import main
+
+        # Schematic with embedded lib_symbols (same pattern used by pin-map)
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (pin_numbers hide)
+      (pin_names (offset 0) hide)
+      (in_bom yes) (on_board yes)
+      (symbol "Device:R_0_1"
+        (rectangle (start -1.016 -2.54) (end 1.016 2.54)
+          (stroke (width 0.254) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        sch_file = tmp_path / "test_embedded.kicad_sch"
+        sch_file.write_text(sch_content)
+
+        # Call without --lib flag
+        main([str(sch_file), "R1", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["reference"] == "R1"
+        assert data["value"] == "10k"
+        assert len(data["pins"]) == 2
+        # Verify pin positions are computed (not None)
+        for pin in data["pins"]:
+            assert pin["schematic_position"] is not None
+
+    def test_embedded_lib_symbols_error_when_missing(self, tmp_path, capsys):
+        """Test helpful error when symbol not in embedded lib_symbols and no --lib."""
+        from kicad_tools.cli.sch_pin_positions import main
+
+        # Schematic with empty lib_symbols
+        sch_content = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        sch_file = tmp_path / "test_no_embedded.kicad_sch"
+        sch_file.write_text(sch_content)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([str(sch_file), "R1"])
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err
+        assert "--lib" in captured.err
 
 
 class TestSchSymbolInfo:
