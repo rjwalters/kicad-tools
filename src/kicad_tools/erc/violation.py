@@ -57,6 +57,7 @@ class ERCViolationType(Enum):
     UNANNOTATED = "unannotated"
     UNSPECIFIED = "unspecified"
     WIRE_DANGLING = "wire_dangling"
+    UNCONNECTED_WIRE_ENDPOINT = "unconnected_wire_endpoint"
 
     # Unknown
     UNKNOWN = "unknown"
@@ -117,6 +118,7 @@ ERC_TYPE_DESCRIPTIONS = {
     "unannotated": "Symbol not annotated",
     "unspecified": "Unspecified error",
     "wire_dangling": "Wire not connected at both ends",
+    "unconnected_wire_endpoint": "Unconnected wire endpoint",
     # Library/footprint checks (non-electrical)
     "lib_symbol_mismatch": "Library symbol does not match schematic symbol",
     "footprint_link_issues": "Footprint link issues",
@@ -160,6 +162,7 @@ ERC_CATEGORIES = {
         "endpoint_off_grid",
         "four_way_junction",
         "net_not_bus_member",
+        "unconnected_wire_endpoint",
         "wire_dangling",
     ],
     "Symbols": [

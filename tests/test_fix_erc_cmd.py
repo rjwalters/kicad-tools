@@ -652,3 +652,180 @@ class TestUnhandledTypes:
         assert result.skipped_unknown == 0
         assert result.no_connect_inserted == 1
         assert result.total_fixed == 1
+
+
+# ── Tests: unconnected_wire_endpoint and wire_dangling fixes ────────
+
+
+class TestUnconnectedWireEndpoint:
+    """unconnected_wire_endpoint violations should remove dangling wires."""
+
+    def test_unconnected_wire_endpoint_is_recognized(self):
+        """unconnected_wire_endpoint should parse to its own enum value, not UNKNOWN."""
+        vtype = ERCViolationType.from_string("unconnected_wire_endpoint")
+        assert vtype == ERCViolationType.UNCONNECTED_WIRE_ENDPOINT
+        assert vtype != ERCViolationType.UNKNOWN
+
+    def test_unconnected_wire_endpoint_dry_run(self):
+        """unconnected_wire_endpoint should be counted as fixable in dry-run."""
+        violations = [
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.wires_removed == 1
+        assert result.total_fixed == 1
+        assert result.skipped_unknown == 0
+        assert result.total_violations == 1
+        assert len(result.actions) == 1
+        action = result.actions[0]
+        assert action.action == "remove_wire"
+        assert action.violation_type == "unconnected_wire_endpoint"
+        assert action.x == 80.0
+        assert action.y == 40.0
+
+    def test_multiple_unconnected_wire_endpoints(self):
+        """Multiple unconnected_wire_endpoint violations at different positions."""
+        violations = [
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint",
+                pos_x=90.0,
+                pos_y=50.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.wires_removed == 2
+        assert result.total_fixed == 2
+
+    def test_duplicate_unconnected_wire_endpoints(self):
+        """Duplicate unconnected_wire_endpoint at same position should be deduplicated."""
+        violations = [
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint (1)",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint (2)",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.wires_removed == 1
+        assert result.skipped_duplicate == 1
+
+    def test_unconnected_wire_not_counted_as_unknown(self, capsys):
+        """unconnected_wire_endpoint should not produce UNKNOWN warning."""
+        violations = [
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=False)
+
+        captured = capsys.readouterr()
+        assert "UNKNOWN" not in captured.err
+
+
+class TestWireDangling:
+    """wire_dangling violations should also remove dangling wires."""
+
+    def test_wire_dangling_dry_run(self):
+        """wire_dangling should be counted as fixable in dry-run."""
+        violations = [
+            _make_violation(
+                ERCViolationType.WIRE_DANGLING,
+                "wire_dangling",
+                "Wire not connected at both ends",
+                pos_x=60.0,
+                pos_y=30.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.wires_removed == 1
+        assert result.total_fixed == 1
+        assert result.skipped_unknown == 0
+        assert result.total_violations == 1
+        action = result.actions[0]
+        assert action.action == "remove_wire"
+        assert action.violation_type == "wire_dangling"
+
+    def test_mixed_wire_and_pin_violations(self):
+        """Wire violations mixed with pin violations should all be fixed."""
+        violations = [
+            _make_violation(
+                ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+                "unconnected_wire_endpoint",
+                "Unconnected wire endpoint",
+                pos_x=80.0,
+                pos_y=40.0,
+            ),
+            _make_violation(
+                ERCViolationType.WIRE_DANGLING,
+                "wire_dangling",
+                "Wire not connected at both ends",
+                pos_x=60.0,
+                pos_y=30.0,
+            ),
+            _make_violation(
+                ERCViolationType.PIN_NOT_CONNECTED,
+                "pin_not_connected",
+                "Pin 1 not connected",
+                pos_x=100.0,
+                pos_y=50.0,
+            ),
+            _make_violation(
+                ERCViolationType.POWER_PIN_NOT_DRIVEN,
+                "power_pin_not_driven",
+                "VCC not driven",
+                pos_x=120.0,
+                pos_y=70.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.wires_removed == 2
+        assert result.no_connect_inserted == 1
+        assert result.pwr_flag_inserted == 1
+        assert result.total_fixed == 4
+        assert result.total_violations == 4
+        assert result.skipped_unknown == 0

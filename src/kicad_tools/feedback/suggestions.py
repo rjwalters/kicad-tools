@@ -95,6 +95,7 @@ class FixSuggestionGenerator:
             ERCViolationType.GLOBAL_LABEL_DANGLING: self._suggest_global_label_dangling,
             ERCViolationType.HIER_LABEL_MISMATCH: self._suggest_hier_label,
             ERCViolationType.WIRE_DANGLING: self._suggest_wire_dangling,
+            ERCViolationType.UNCONNECTED_WIRE_ENDPOINT: self._suggest_wire_dangling,
             ERCViolationType.MISSING_UNIT: self._suggest_missing_unit,
             ERCViolationType.UNANNOTATED: self._suggest_unannotated,
             ERCViolationType.SIMILAR_LABELS: self._suggest_similar_labels,
