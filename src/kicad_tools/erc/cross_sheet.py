@@ -857,3 +857,185 @@ def filter_phantom_wire_violations(
             )
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# Symbol-based violation sheet re-attribution
+# ---------------------------------------------------------------------------
+
+# Violation types that reference specific symbols (via UUID or reference
+# designator in the items array) and may be mis-attributed to the root
+# sheet in hierarchical designs.
+_SYMBOL_VIOLATION_TYPES: frozenset[str] = frozenset(
+    {
+        "pin_not_connected",
+        "pin_not_driven",
+        "power_pin_not_driven",
+        "different_unit_value",
+        "different_unit_footprint",
+        "unresolved_variable",
+        "extra_units",
+        "missing_units",
+    }
+)
+
+# Label-based violation types that can also be re-attributed using the
+# label's UUID from the items array.
+_LABEL_VIOLATION_TYPES: frozenset[str] = frozenset(
+    {
+        "global_label_dangling",
+        "label_dangling",
+        "single_global_label",
+        "isolated_pin_label",
+    }
+)
+
+
+def _build_symbol_sheet_map(root_schematic: str) -> dict[str, str]:
+    """Build a mapping of symbol UUID and reference to sheet path.
+
+    Traverses the full schematic hierarchy, collecting each symbol's
+    UUID and reference designator, and mapping them to the sheet path
+    string (e.g. ``"/DAC"``, ``"/Power"``).
+
+    Args:
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        A dict mapping UUID strings and reference designator strings
+        to their containing sheet path.  If a reference appears on
+        multiple sheets only the first occurrence is recorded (the
+        cross-sheet duplicate checker handles that separately).
+    """
+    from kicad_tools.schema.hierarchy import build_hierarchy
+    from kicad_tools.schema.schematic import Schematic
+
+    hierarchy = build_hierarchy(root_schematic)
+    mapping: dict[str, str] = {}
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+
+        sheet_path = node.get_path_string()
+
+        for sym in sch.symbols:
+            if sym.uuid:
+                mapping[sym.uuid] = sheet_path
+            ref = sym.reference
+            if ref and ref not in mapping:
+                mapping[ref] = sheet_path
+
+        # Also index labels by UUID for label-type violations.
+        for gl in sch.global_labels:
+            if hasattr(gl, "uuid") and gl.uuid:
+                mapping[gl.uuid] = sheet_path
+        for lbl in sch.labels:
+            if hasattr(lbl, "uuid") and lbl.uuid:
+                mapping[lbl.uuid] = sheet_path
+
+    return mapping
+
+
+def _extract_identifiers_from_items(items: list[dict]) -> list[str]:
+    """Extract UUIDs and component references from a violation's items array.
+
+    KiCad's ERC JSON ``items`` entries may contain:
+    - A ``"uuid"`` key with a UUID string
+    - A ``"description"`` containing a reference like ``"Pin VCC of U3"``
+
+    Args:
+        items: List of item dicts from a KiCad ERC violation.
+
+    Returns:
+        A list of identifier strings (UUIDs and/or references) that
+        can be looked up in the symbol-sheet mapping.
+    """
+    identifiers: list[str] = []
+
+    for item in items:
+        # Direct UUID field
+        uuid = item.get("uuid", "")
+        if uuid:
+            identifiers.append(uuid)
+
+        # Extract reference from description patterns like:
+        # "Pin VCC (power_in) of U3"
+        # "Symbol U3"
+        desc = item.get("description", "")
+        if desc:
+            # Match "of <reference>" at end of description
+            m = re.search(r"\bof\s+([A-Za-z]+\d+)\b", desc)
+            if m:
+                identifiers.append(m.group(1))
+            # Match "Symbol <reference>" at start
+            m = re.search(r"\bSymbol\s+([A-Za-z]+\d+)\b", desc)
+            if m:
+                identifiers.append(m.group(1))
+
+    return identifiers
+
+
+def reattribute_symbol_violations(
+    violations: list[dict],
+    root_schematic: str,
+) -> list[dict]:
+    """Re-attribute symbol-based ERC violations from the root sheet to the
+    correct child sheet based on component reference or UUID lookup.
+
+    KiCad's ERC JSON sometimes attributes violations to the root sheet
+    (``"/"``) even when the offending symbol lives in a child sheet.
+    This affects symbol-based violation types (``pin_not_connected``,
+    ``pin_not_driven``, etc.) and label-based types whose items contain
+    identifiable UUIDs or references.
+
+    This function builds a symbol-to-sheet mapping from the hierarchy
+    and updates ``_sheet_path`` for violations that can be matched to
+    a specific child sheet.
+
+    Args:
+        violations: List of raw violation dicts (must already have
+            ``_sheet_path`` injected by the caller).
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        The same list (mutated in place for efficiency) with updated
+        ``_sheet_path`` values where re-attribution was possible.
+    """
+    target_types = _SYMBOL_VIOLATION_TYPES | _LABEL_VIOLATION_TYPES
+
+    # Quick check: skip expensive hierarchy traversal when unnecessary.
+    has_target = any(
+        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/"
+        for v in violations
+    )
+    if not has_target:
+        return violations
+
+    symbol_map = _build_symbol_sheet_map(root_schematic)
+
+    for v in violations:
+        vtype = v.get("type", "")
+        if vtype not in target_types:
+            continue
+
+        if v.get("_sheet_path", "") != "/":
+            continue
+
+        items = v.get("items", [])
+        if not items:
+            continue
+
+        identifiers = _extract_identifiers_from_items(items)
+
+        # Try each identifier against the map; use the first match
+        # that points to a non-root sheet.
+        for ident in identifiers:
+            sheet_path = symbol_map.get(ident)
+            if sheet_path and sheet_path != "/":
+                v["_sheet_path"] = sheet_path
+                break
+
+    return violations
