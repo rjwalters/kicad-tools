@@ -1034,6 +1034,259 @@ class TestPinOnWireInterior:
 
 
 # ---------------------------------------------------------------------------
+# Net-tie traversal: BFS must cross through Device:NetTie_* symbols
+# ---------------------------------------------------------------------------
+
+# NetTie_2 bridging two wire segments.  Label "DAC_CLK" on the left side,
+# IC pin U1 on the right side.  Without net-tie awareness, BFS from U1 pin 1
+# stops at NT1 pin 1 (barrier) and the net resolves to None.
+#
+# Topology:
+#   Label "DAC_CLK" at (80, 50)
+#   Wire (80, 50) -> (100, 50)           -- left segment
+#   NT1 (Device:NetTie_2) at (105, 50):
+#     Pin 1 at (100, 50)                 -- connects to left wire
+#     Pin 2 at (110, 50)                 -- connects to right wire
+#   Wire (110, 50) -> (130, 50)          -- right segment
+#   U1 (MyLib:IC) at (133.81, 50):
+#     Pin 1 at (130, 50)                 -- connected via right wire
+#
+# With net-tie fix: NT1 pins are excluded from barriers, BFS crosses through
+# and U1 pin 1 resolves to "DAC_CLK".
+NET_TIE_2_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002211")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:NetTie_2"
+      (symbol "NetTie_2_1_1"
+        (pin passive line
+          (at -5.0 0 0) (length 2.54) (name "1") (number "1"))
+        (pin passive line
+          (at 5.0 0 180) (length 2.54) (name "2") (number "2"))
+      )
+    )
+    (symbol "MyLib:IC"
+      (symbol "IC_1_1"
+        (pin input line
+          (at -3.81 0 0) (length 1.27) (name "D") (number "1"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:NetTie_2") (at 105 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "nt1-uuid")
+    (property "Reference" "NT1" (at 105 48 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "NetTie_2" (at 105 52 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "nt1p1")) (pin "2" (uuid "nt1p2"))
+  )
+  (symbol
+    (lib_id "MyLib:IC") (at 133.81 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "u1-uuid")
+    (property "Reference" "U1" (at 136 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "TCXO" (at 136 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "u1p1"))
+  )
+  (wire (pts (xy 80 50) (xy 100 50))
+    (stroke (width 0) (type default)) (uuid "w-left"))
+  (wire (pts (xy 110 50) (xy 130 50))
+    (stroke (width 0) (type default)) (uuid "w-right"))
+  (label "DAC_CLK" (at 80 50 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-dac-clk"))
+)
+"""
+
+# NetTie_3 with 3 pads: pin 1 and pin 3 on separate wire segments, pin 2 at center.
+# Label "NET_A" on pin 1 side, label "NET_B" on pin 3 side.
+# A component U1 connected to pin 2 (center) should see a net name.
+#
+# Topology:
+#   Label "NET_A" at (70, 50)
+#   Wire (70, 50) -> (95, 50)
+#   NT1 (Device:NetTie_3) at (100, 50):
+#     Pin 1 at (95, 50)
+#     Pin 2 at (100, 50)
+#     Pin 3 at (105, 50)
+#   Wire (105, 50) -> (130, 50) -> label "NET_B" at (130, 50)
+#   Wire (100, 50) -> (100, 70)
+#   U1 at (103.81, 70): Pin 1 at (100, 70)
+NET_TIE_3_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002212")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:NetTie_3"
+      (symbol "NetTie_3_1_1"
+        (pin passive line
+          (at -5.0 0 0) (length 2.54) (name "1") (number "1"))
+        (pin passive line
+          (at 0 0 0) (length 0) (name "2") (number "2"))
+        (pin passive line
+          (at 5.0 0 180) (length 2.54) (name "3") (number "3"))
+      )
+    )
+    (symbol "MyLib:IC"
+      (symbol "IC_1_1"
+        (pin input line
+          (at -3.81 0 0) (length 1.27) (name "CLK") (number "1"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:NetTie_3") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "nt3-uuid")
+    (property "Reference" "NT1" (at 100 48 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "NetTie_3" (at 100 52 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "nt3p1")) (pin "2" (uuid "nt3p2")) (pin "3" (uuid "nt3p3"))
+  )
+  (symbol
+    (lib_id "MyLib:IC") (at 103.81 70 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "u1-nt3")
+    (property "Reference" "U1" (at 106 68 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "IC" (at 106 70 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "u1p1"))
+  )
+  (wire (pts (xy 70 50) (xy 95 50))
+    (stroke (width 0) (type default)) (uuid "w-left3"))
+  (wire (pts (xy 105 50) (xy 130 50))
+    (stroke (width 0) (type default)) (uuid "w-right3"))
+  (wire (pts (xy 100 50) (xy 100 70))
+    (stroke (width 0) (type default)) (uuid "w-center-down"))
+  (label "NET_A" (at 70 50 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-net-a"))
+  (label "NET_B" (at 130 50 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-net-b"))
+)
+"""
+
+# Net-tie with no labels on either side -- both pins should resolve to None.
+NET_TIE_NO_LABEL_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002213")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:NetTie_2"
+      (symbol "NetTie_2_1_1"
+        (pin passive line
+          (at -5.0 0 0) (length 2.54) (name "1") (number "1"))
+        (pin passive line
+          (at 5.0 0 180) (length 2.54) (name "2") (number "2"))
+      )
+    )
+    (symbol "MyLib:IC"
+      (symbol "IC_1_1"
+        (pin input line
+          (at -3.81 0 0) (length 1.27) (name "D") (number "1"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:NetTie_2") (at 105 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "nt-nolbl")
+    (property "Reference" "NT1" (at 105 48 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "NetTie_2" (at 105 52 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "ntnl-p1")) (pin "2" (uuid "ntnl-p2"))
+  )
+  (symbol
+    (lib_id "MyLib:IC") (at 133.81 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "u1-nolbl")
+    (property "Reference" "U1" (at 136 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "IC" (at 136 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "u1-nolbl-p1"))
+  )
+  (wire (pts (xy 80 50) (xy 100 50))
+    (stroke (width 0) (type default)) (uuid "w-nolbl-left"))
+  (wire (pts (xy 110 50) (xy 130 50))
+    (stroke (width 0) (type default)) (uuid "w-nolbl-right"))
+)
+"""
+
+
+class TestNetTieTraversal:
+    """BFS must traverse through Device:NetTie_* symbols transparently."""
+
+    def test_nettie2_resolves_through(self, tmp_path):
+        """Pin connected through a NetTie_2 resolves to the correct net."""
+        sch = Schematic.load(_write_sch(tmp_path, NET_TIE_2_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "U1" in pin_map
+        assert "NT1" in pin_map
+
+        # U1 pin 1 is on the far side of the net-tie from the label
+        u1_pin1_net = pin_map["U1"]["pins"]["1"]["net"]
+        assert u1_pin1_net == "DAC_CLK", (
+            f"U1 pin 1 should resolve to 'DAC_CLK' through NetTie_2, got {u1_pin1_net!r}"
+        )
+
+        # NT1 pins should also resolve to DAC_CLK
+        assert pin_map["NT1"]["pins"]["1"]["net"] == "DAC_CLK"
+        assert pin_map["NT1"]["pins"]["2"]["net"] == "DAC_CLK"
+
+    def test_nettie3_resolves_through(self, tmp_path):
+        """Pin connected through a NetTie_3 (center pad) resolves correctly."""
+        sch = Schematic.load(_write_sch(tmp_path, NET_TIE_3_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "U1" in pin_map
+        assert "NT1" in pin_map
+
+        # U1 pin 1 is connected to the center pad of a 3-pad net-tie
+        u1_pin1_net = pin_map["U1"]["pins"]["1"]["net"]
+        assert u1_pin1_net is not None, (
+            "U1 pin 1 should resolve to a net name through NetTie_3"
+        )
+        # It should pick up NET_A or NET_B -- both propagate through the wire graph
+        assert u1_pin1_net in ("NET_A", "NET_B"), (
+            f"U1 pin 1 should resolve to NET_A or NET_B, got {u1_pin1_net!r}"
+        )
+
+    def test_nettie_no_label_resolves_none(self, tmp_path):
+        """Net-tie with no labels on either side: pins resolve to None."""
+        sch = Schematic.load(_write_sch(tmp_path, NET_TIE_NO_LABEL_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "U1" in pin_map
+        assert pin_map["U1"]["pins"]["1"]["net"] is None
+
+    def test_barrier_still_blocks_non_nettie(self, tmp_path):
+        """Net-tie exemption must not weaken barriers for normal components.
+
+        The diode-resistor barrier test must still pass: D1 cathode must NOT
+        resolve to GND through R1's body."""
+        sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
+        assert d1_pin1_net is None, (
+            f"D1 cathode should still be None with net-tie support, got {d1_pin1_net!r}"
+        )
+        assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
+        assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: real fixture
 # ---------------------------------------------------------------------------
 
