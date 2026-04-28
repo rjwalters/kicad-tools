@@ -25,7 +25,7 @@ class FixAction:
     """A single fix action applied to the schematic."""
 
     violation_type: str
-    action: str  # "insert_pwr_flag" or "insert_no_connect"
+    action: str  # "insert_pwr_flag", "insert_no_connect", or "remove_wire"
     x: float
     y: float
     description: str
@@ -38,6 +38,7 @@ class FixERCResult:
     total_violations: int = 0
     pwr_flag_inserted: int = 0
     no_connect_inserted: int = 0
+    wires_removed: int = 0
     skipped_unknown: int = 0
     skipped_duplicate: int = 0
     actions: list[FixAction] = field(default_factory=list)
@@ -45,7 +46,7 @@ class FixERCResult:
     @property
     def total_fixed(self) -> int:
         """Total number of fixes applied."""
-        return self.pwr_flag_inserted + self.no_connect_inserted
+        return self.pwr_flag_inserted + self.no_connect_inserted + self.wires_removed
 
     @property
     def total_skipped(self) -> int:
@@ -184,14 +185,22 @@ def _apply_fixes(sch_path: Path, report, *, dry_run: bool, quiet: bool) -> FixER
     # Classify violations
     pwr_violations = report.by_type(ERCViolationType.POWER_PIN_NOT_DRIVEN)
     nc_violations = report.by_type(ERCViolationType.PIN_NOT_CONNECTED)
+    wire_dangling_violations = report.by_type(ERCViolationType.WIRE_DANGLING)
+    unconnected_wire_violations = report.by_type(ERCViolationType.UNCONNECTED_WIRE_ENDPOINT)
+    wire_violations = wire_dangling_violations + unconnected_wire_violations
 
     # Count unknown/unhandled types
-    handled_types = {ERCViolationType.POWER_PIN_NOT_DRIVEN, ERCViolationType.PIN_NOT_CONNECTED}
+    handled_types = {
+        ERCViolationType.POWER_PIN_NOT_DRIVEN,
+        ERCViolationType.PIN_NOT_CONNECTED,
+        ERCViolationType.WIRE_DANGLING,
+        ERCViolationType.UNCONNECTED_WIRE_ENDPOINT,
+    }
     all_violations = [v for v in report.violations if not v.excluded]
     unhandled = [v for v in all_violations if v.type not in handled_types]
     unknown_violations = [v for v in unhandled if v.type == ERCViolationType.UNKNOWN]
 
-    result.total_violations = len(pwr_violations) + len(nc_violations)
+    result.total_violations = len(pwr_violations) + len(nc_violations) + len(wire_violations)
     result.skipped_unknown = len(unknown_violations)
 
     if result.total_violations == 0:
@@ -276,6 +285,36 @@ def _apply_fixes(sch_path: Path, report, *, dry_run: bool, quiet: bool) -> FixER
             )
         )
 
+    # Fix wire_dangling / unconnected_wire_endpoint: remove dangling wire at violation pos
+    wire_remove_positions: set[tuple[float, float]] = set()
+    for v in wire_violations:
+        wx = v.pos_x
+        wy = v.pos_y
+        pos_key = (round(wx, 2), round(wy, 2))
+
+        if pos_key in wire_remove_positions:
+            result.skipped_duplicate += 1
+            continue
+
+        wire_remove_positions.add(pos_key)
+
+        if not dry_run and sch is not None:
+            removed = sch.remove_wires_at((wx, wy))
+            if removed == 0:
+                # No wire found at exact position; skip silently
+                continue
+
+        result.wires_removed += 1
+        result.actions.append(
+            FixAction(
+                violation_type=v.type_str,
+                action="remove_wire",
+                x=wx,
+                y=wy,
+                description=v.description,
+            )
+        )
+
     # Save modified schematic
     if not dry_run and sch is not None and result.total_fixed > 0:
         sch.write(sch_path)
@@ -301,6 +340,7 @@ def _print_json(result: FixERCResult, dry_run: bool) -> None:
         "total_fixed": result.total_fixed,
         "pwr_flag_inserted": result.pwr_flag_inserted,
         "no_connect_inserted": result.no_connect_inserted,
+        "wires_removed": result.wires_removed,
         "skipped_unknown": result.skipped_unknown,
         "skipped_duplicate": result.skipped_duplicate,
         "actions": [
@@ -325,6 +365,8 @@ def _print_summary(result: FixERCResult, dry_run: bool) -> None:
         print(f"  PWR_FLAG inserted: {result.pwr_flag_inserted}")
     if result.no_connect_inserted > 0:
         print(f"  No-connect markers: {result.no_connect_inserted}")
+    if result.wires_removed > 0:
+        print(f"  Dangling wires removed: {result.wires_removed}")
     if result.skipped_unknown > 0:
         print(f"  Skipped (unknown type): {result.skipped_unknown}")
     if result.skipped_duplicate > 0:
@@ -354,6 +396,13 @@ def _print_text(result: FixERCResult, dry_run: bool) -> None:
         print(f"NO-CONNECT MARKERS: {result.no_connect_inserted}")
         for a in result.actions:
             if a.action == "insert_no_connect":
+                print(f"  at ({a.x:.2f}, {a.y:.2f}): {a.description}")
+
+    if result.wires_removed > 0:
+        print(f"\n{'-' * 60}")
+        print(f"DANGLING WIRES REMOVED: {result.wires_removed}")
+        for a in result.actions:
+            if a.action == "remove_wire":
                 print(f"  at ({a.x:.2f}, {a.y:.2f}): {a.description}")
 
     if result.skipped_unknown > 0:
