@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
 from .report import DRCReport
-from .violation import DRCViolation, ViolationType
+from .violation import DRCViolation, ViolationType, _extract_component_refs
 
 if TYPE_CHECKING:
     from .local_rerouter import LocalRerouter
@@ -59,6 +59,28 @@ class NudgeResult:
 
 
 @dataclass
+class FootprintNudgeResult:
+    """Record of a footprint nudge applied to fix a pad-pad clearance violation."""
+
+    reference: str
+    x: float
+    y: float
+    displacement_x: float
+    displacement_y: float
+    displacement_mm: float
+    old_clearance_mm: float
+    new_clearance_mm: float
+    other_reference: str
+
+    def __str__(self) -> str:
+        return (
+            f"footprint [{self.reference}] at ({self.x:.4f}, {self.y:.4f}): "
+            f"nudged {self.displacement_mm:.4f}mm away from {self.other_reference} "
+            f"(clearance {self.old_clearance_mm:.4f} -> {self.new_clearance_mm:.4f}mm)"
+        )
+
+
+@dataclass
 class RepairResult:
     """Summary of a clearance repair operation."""
 
@@ -74,7 +96,13 @@ class RepairResult:
     local_rerouted: int = 0
     cluster_rerouted: int = 0
     skipped_no_local_route: int = 0
+    footprint_nudges: int = 0
+    footprint_skipped_locked: int = 0
+    footprint_skipped_connector: int = 0
+    footprint_skipped_same_component: int = 0
+    footprint_skipped_exceeds_max: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
+    footprint_nudge_results: list[FootprintNudgeResult] = field(default_factory=list)
 
     @property
     def success_rate(self) -> float:
@@ -96,6 +124,14 @@ class RepairResult:
             lines.append(f"  Local reroutes: {self.local_rerouted}")
         if self.cluster_rerouted > 0:
             lines.append(f"  Cluster reroutes: {self.cluster_rerouted}")
+        if self.footprint_nudges > 0:
+            lines.append(f"  Footprint nudges (pad-pad): {self.footprint_nudges}")
+        if self.footprint_skipped_locked > 0:
+            lines.append(f"  Skipped (footprint locked): {self.footprint_skipped_locked}")
+        if self.footprint_skipped_connector > 0:
+            lines.append(f"  Skipped (connector footprint): {self.footprint_skipped_connector}")
+        if self.footprint_skipped_same_component > 0:
+            lines.append(f"  Skipped (same component pads): {self.footprint_skipped_same_component}")
         if self.skipped_exceeds_max > 0:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
@@ -166,6 +202,7 @@ class ClearanceRepairer:
         dry_run: bool = False,
         local_reroute: bool = False,
         local_grid_padding: float = 0.5,
+        nudge_footprints: bool = False,
     ) -> RepairResult:
         """Repair clearance violations using a DRC report.
 
@@ -180,6 +217,8 @@ class ClearanceRepairer:
                           infeasible violations after nudge phase
             local_grid_padding: Padding around segment bounding box for
                                local reroute grid (mm, default: 0.5)
+            nudge_footprints: If True, attempt footprint nudges for
+                             pad-pad clearance violations (Phase 3)
 
         Returns:
             RepairResult with details of all repairs
@@ -266,6 +305,12 @@ class ClearanceRepairer:
                 self._run_local_reroute_phase(
                     all_reroute_candidates, result, margin, dry_run, local_grid_padding
                 )
+
+        # Phase 3: Footprint nudging for pad-pad violations
+        if nudge_footprints:
+            self._repair_pad_pad_violations(
+                report, result, max_displacement, margin, dry_run
+            )
 
         return result
 
@@ -1553,6 +1598,296 @@ class ClearanceRepairer:
             if item_lower.startswith("zone") or "zone " in item_lower:
                 return True
         return False
+
+    def _repair_pad_pad_violations(
+        self,
+        report: DRCReport,
+        result: RepairResult,
+        max_displacement: float,
+        margin: float,
+        dry_run: bool,
+    ) -> None:
+        """Phase 3: Repair pad-pad clearance violations by nudging footprints.
+
+        For each CLEARANCE_PAD_PAD violation between different components,
+        selects the smaller/less-connected footprint and nudges it away
+        from the other to resolve the clearance deficit.
+
+        Skips:
+        - Same-component violations (inherent to footprint geometry)
+        - Locked footprints (both locked -> skip entirely)
+        - Connector footprints (J-prefix references)
+        - Violations exceeding max_displacement
+        """
+        pad_pad_violations = [
+            v for v in report.by_type(ViolationType.CLEARANCE_PAD_PAD)
+            if not self._is_zone_fill_violation(v)
+        ]
+
+        for violation in pad_pad_violations:
+            # Skip same-component violations
+            if violation.is_same_component_pad_clearance():
+                result.footprint_skipped_same_component += 1
+                continue
+
+            delta = violation.delta_mm
+            if delta is None:
+                result.skipped_no_delta += 1
+                result.total_violations += 1
+                continue
+
+            required_displacement = delta + margin
+            result.total_violations += 1
+
+            if required_displacement > max_displacement:
+                result.footprint_skipped_exceeds_max += 1
+                continue
+
+            if len(violation.locations) < 2:
+                result.skipped_no_location += 1
+                continue
+
+            # Extract component references from the violation
+            refs = _extract_component_refs(violation.items)
+            if len(refs) < 2:
+                result.skipped_infeasible += 1
+                continue
+
+            ref_list = sorted(refs)
+
+            # Find the footprint nodes for each reference
+            fp1_info = self._find_footprint_by_ref(ref_list[0])
+            fp2_info = self._find_footprint_by_ref(ref_list[1])
+
+            if fp1_info is None or fp2_info is None:
+                result.skipped_infeasible += 1
+                continue
+
+            fp1_node, fp1_ref, fp1_x, fp1_y, fp1_locked, fp1_pad_count, fp1_is_connector = fp1_info
+            fp2_node, fp2_ref, fp2_x, fp2_y, fp2_locked, fp2_pad_count, fp2_is_connector = fp2_info
+
+            # Skip if both are locked
+            if fp1_locked and fp2_locked:
+                result.footprint_skipped_locked += 1
+                continue
+
+            # Select nudge target: prefer smaller/less-connected, skip locked/connectors
+            target, other = self._select_nudge_target(
+                fp1_info, fp2_info, result
+            )
+            if target is None:
+                continue
+
+            t_node, t_ref, t_x, t_y, _, _, _ = target
+            o_node, o_ref, o_x, o_y, _, _, _ = other
+
+            # Use pad locations from the violation for displacement direction
+            loc1 = violation.locations[0]
+            loc2 = violation.locations[1]
+
+            # Determine which location belongs to the target footprint
+            refs_from_items = []
+            for item in violation.items:
+                item_refs = _extract_component_refs([item])
+                refs_from_items.append(item_refs)
+
+            # Use violation locations for direction computation
+            # First item/location corresponds to first pad, second to second
+            if refs_from_items and any(t_ref.upper() in r for r in refs_from_items[:1]):
+                pad_x, pad_y = loc1.x_mm, loc1.y_mm
+                other_pad_x, other_pad_y = loc2.x_mm, loc2.y_mm
+            else:
+                pad_x, pad_y = loc2.x_mm, loc2.y_mm
+                other_pad_x, other_pad_y = loc1.x_mm, loc1.y_mm
+
+            # Compute displacement vector (move target footprint away from other)
+            nudge = self._compute_nudge(
+                pad_x, pad_y, other_pad_x, other_pad_y, required_displacement
+            )
+            if nudge is None:
+                result.skipped_infeasible += 1
+                continue
+
+            dx, dy, dist = nudge
+
+            actual_clearance = violation.actual_value_mm or 0.0
+
+            fp_nudge_result = FootprintNudgeResult(
+                reference=t_ref,
+                x=t_x,
+                y=t_y,
+                displacement_x=dx,
+                displacement_y=dy,
+                displacement_mm=dist,
+                old_clearance_mm=actual_clearance,
+                new_clearance_mm=actual_clearance + dist,
+                other_reference=o_ref,
+            )
+            result.footprint_nudge_results.append(fp_nudge_result)
+
+            if not dry_run:
+                self._nudge_footprint(t_node, dx, dy)
+                self.modified = True
+
+            result.footprint_nudges += 1
+            result.repaired += 1
+
+    def _find_footprint_by_ref(
+        self,
+        reference: str,
+    ) -> tuple[SExp, str, float, float, bool, int, bool] | None:
+        """Find a footprint node by reference designator.
+
+        Returns: (fp_node, reference, x, y, locked, pad_count, is_connector) or None.
+        """
+        ref_upper = reference.upper()
+
+        for fp_node in self.doc.find_all("footprint"):
+            # Check reference in property nodes (KiCad 8+)
+            fp_ref = ""
+            for prop in fp_node.find_all("property"):
+                prop_name = prop.get_string(0)
+                if prop_name == "Reference":
+                    fp_ref = prop.get_string(1) or ""
+                    break
+
+            # Fall back to fp_text (KiCad 7)
+            if not fp_ref:
+                for fp_text in fp_node.find_all("fp_text"):
+                    text_type = fp_text.get_string(0)
+                    if text_type == "reference":
+                        fp_ref = fp_text.get_string(1) or ""
+                        break
+
+            if fp_ref.upper() != ref_upper:
+                continue
+
+            # Get position
+            at_node = fp_node.find("at")
+            if not at_node:
+                continue
+            at_atoms = at_node.get_atoms()
+            fp_x = float(at_atoms[0]) if at_atoms else 0.0
+            fp_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0.0
+
+            # Check locked status from attr
+            locked = False
+            attr_node = fp_node.find("attr")
+            if attr_node:
+                for i in range(len(attr_node.children)):
+                    token = attr_node.get_string(i)
+                    if token == "locked":
+                        locked = True
+                        break
+
+            # Count pads
+            pad_count = len(list(fp_node.find_all("pad")))
+
+            # Check if connector (J-prefix)
+            is_connector = fp_ref.upper().startswith("J")
+
+            return (fp_node, fp_ref, fp_x, fp_y, locked, pad_count, is_connector)
+
+        return None
+
+    def _select_nudge_target(
+        self,
+        fp1_info: tuple[SExp, str, float, float, bool, int, bool],
+        fp2_info: tuple[SExp, str, float, float, bool, int, bool],
+        result: RepairResult,
+    ) -> tuple[
+        tuple[SExp, str, float, float, bool, int, bool] | None,
+        tuple[SExp, str, float, float, bool, int, bool] | None,
+    ]:
+        """Select which footprint to nudge for a pad-pad violation.
+
+        Prefers the smaller (fewer pads) footprint. Skips locked footprints
+        and connectors (J-prefix), falling back to the other when possible.
+
+        Returns: (target, other) or (None, None) if neither can be nudged.
+        """
+        _, _, _, _, fp1_locked, fp1_pads, fp1_conn = fp1_info
+        _, _, _, _, fp2_locked, fp2_pads, fp2_conn = fp2_info
+
+        # Build candidates: (info, movable)
+        fp1_movable = not fp1_locked and not fp1_conn
+        fp2_movable = not fp2_locked and not fp2_conn
+
+        # If neither is movable, check why and report
+        if not fp1_movable and not fp2_movable:
+            if fp1_locked or fp2_locked:
+                result.footprint_skipped_locked += 1
+            elif fp1_conn or fp2_conn:
+                result.footprint_skipped_connector += 1
+            return (None, None)
+
+        # If only one is movable, use it
+        if fp1_movable and not fp2_movable:
+            return (fp1_info, fp2_info)
+        if fp2_movable and not fp1_movable:
+            return (fp2_info, fp1_info)
+
+        # Both movable: prefer the one with fewer pads (smaller/less connected)
+        if fp1_pads <= fp2_pads:
+            return (fp1_info, fp2_info)
+        return (fp2_info, fp1_info)
+
+    def _nudge_footprint(
+        self,
+        fp_node: SExp,
+        dx: float,
+        dy: float,
+    ) -> None:
+        """Apply a displacement to a footprint's position in the S-expression tree.
+
+        Also updates the endpoints of any trace segments connected to the
+        footprint's pads, so that net connectivity is preserved.
+        """
+        at_node = fp_node.find("at")
+        if not at_node:
+            return
+
+        at_atoms = at_node.get_atoms()
+        old_x = float(at_atoms[0]) if at_atoms else 0.0
+        old_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0.0
+        fp_rot = float(at_atoms[2]) if len(at_atoms) > 2 else 0.0
+
+        new_x = round(old_x + dx, 4)
+        new_y = round(old_y + dy, 4)
+
+        # Compute absolute pad positions before the move
+        angle_rad = math.radians(fp_rot)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+
+        pad_positions: list[tuple[float, float]] = []
+        for pad_node in fp_node.find_all("pad"):
+            pad_at = pad_node.find("at")
+            if not pad_at:
+                continue
+            pad_atoms = pad_at.get_atoms()
+            local_x = float(pad_atoms[0]) if pad_atoms else 0.0
+            local_y = float(pad_atoms[1]) if len(pad_atoms) > 1 else 0.0
+
+            abs_x = old_x + local_x * cos_a - local_y * sin_a
+            abs_y = old_y + local_x * sin_a + local_y * cos_a
+            pad_positions.append((abs_x, abs_y))
+
+        # Move the footprint
+        at_node.set_value(0, new_x)
+        at_node.set_value(1, new_y)
+
+        # Update connected trace segment endpoints
+        for old_pad_x, old_pad_y in pad_positions:
+            new_pad_x = round(old_pad_x + dx, 4)
+            new_pad_y = round(old_pad_y + dy, 4)
+
+            connected = self._find_connected_segments(old_pad_x, old_pad_y)
+            for seg_node, endpoint in connected:
+                ep_node = seg_node.find(endpoint)
+                if ep_node:
+                    ep_node.set_value(0, new_pad_x)
+                    ep_node.set_value(1, new_pad_y)
 
     def save(self, output_path: str | Path | None = None) -> None:
         """Save the modified PCB.

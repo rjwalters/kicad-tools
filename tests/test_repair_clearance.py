@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.repair_clearance_cmd import main
-from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
+from kicad_tools.drc.repair_clearance import ClearanceRepairer, FootprintNudgeResult, RepairResult
 from kicad_tools.drc.report import DRCReport, parse_text_report
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
@@ -2419,3 +2419,420 @@ class TestWidthAwareDisplacement:
                 assert repairer._get_node_width(seg_node) == 0.5
             elif uuid_node and uuid_node.get_first_atom() == "narrow-seg":
                 assert repairer._get_node_width(seg_node) == 0.2
+
+
+class TestFootprintNudge:
+    """Tests for Phase 3: footprint nudge for pad-pad violations."""
+
+    # PCB with two small footprints whose pads violate clearance
+    PCB_PAD_PAD_VIOLATION = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 100 100)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r1-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r1-2"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 101.1 100)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r2-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r2-2"))
+  )
+  (segment (start 99.5 100) (end 98 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-r1"))
+)
+"""
+
+    # DRC report with pad-pad clearance violation
+    DRC_REPORT_PAD_PAD = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_pad_pad]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(100.5000 mm, 100.0000 mm): Pad 2 of R1 on F.Cu
+    @(100.6000 mm, 100.0000 mm): Pad 1 of R2 on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+    # PCB with a locked footprint
+    PCB_LOCKED_FOOTPRINT = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 100 100)
+    (attr smd locked)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r1-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r1-2"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 101.1 100)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r2-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r2-2"))
+  )
+)
+"""
+
+    # PCB with both footprints locked
+    PCB_BOTH_LOCKED = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 100 100)
+    (attr smd locked)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r1-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r1-2"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 101.1 100)
+    (attr smd locked)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r2-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r2-2"))
+  )
+)
+"""
+
+    # PCB with a connector footprint
+    PCB_CONNECTOR = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02"
+    (layer "F.Cu")
+    (at 100 100)
+    (attr through_hole)
+    (property "Reference" "J1")
+    (property "Value" "Conn")
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1) (uuid "pad-j1-1"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2) (uuid "pad-j1-2"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 101.1 100)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2) (uuid "pad-r1-1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1) (uuid "pad-r1-2"))
+  )
+)
+"""
+
+    DRC_REPORT_CONNECTOR = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_pad_pad]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(100.0000 mm, 100.0000 mm): Pad 1 of J1 on F.Cu
+    @(100.6000 mm, 100.0000 mm): Pad 1 of R1 on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+    # Same-component violation
+    DRC_REPORT_SAME_COMPONENT = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_pad_pad]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(99.5000 mm, 100.0000 mm): Pad 1 of R1 on F.Cu
+    @(100.5000 mm, 100.0000 mm): Pad 2 of R1 on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+    def test_basic_pad_pad_nudge_dry_run(self, tmp_path: Path):
+        """Dry run should report planned footprint nudge without modifying PCB."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=True
+        )
+
+        assert result.footprint_nudges == 1
+        assert result.repaired == 1
+        assert not repairer.modified
+        assert len(result.footprint_nudge_results) == 1
+
+        fn = result.footprint_nudge_results[0]
+        assert fn.displacement_mm > 0
+        assert fn.reference in ("R1", "R2")
+        assert fn.other_reference in ("R1", "R2")
+        assert fn.reference != fn.other_reference
+
+    def test_basic_pad_pad_nudge_apply(self, tmp_path: Path):
+        """Apply should modify the PCB footprint position."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Record original positions
+        fp_positions_before = {}
+        for fp_node in repairer.doc.find_all("footprint"):
+            for prop in fp_node.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    ref = prop.get_string(1)
+                    at = fp_node.find("at")
+                    x = float(at.get_atoms()[0])
+                    y = float(at.get_atoms()[1])
+                    fp_positions_before[ref] = (x, y)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=False, nudge_footprints=True
+        )
+
+        assert result.footprint_nudges == 1
+        assert result.repaired == 1
+        assert repairer.modified
+
+        # Verify position changed for the nudged footprint
+        fn = result.footprint_nudge_results[0]
+        nudged_ref = fn.reference
+        for fp_node in repairer.doc.find_all("footprint"):
+            for prop in fp_node.find_all("property"):
+                if prop.get_string(0) == "Reference" and prop.get_string(1) == nudged_ref:
+                    at = fp_node.find("at")
+                    new_x = float(at.get_atoms()[0])
+                    new_y = float(at.get_atoms()[1])
+                    old_x, old_y = fp_positions_before[nudged_ref]
+                    assert (new_x, new_y) != (old_x, old_y), "Footprint should have moved"
+
+    def test_locked_footprint_skip(self, tmp_path: Path):
+        """When smaller footprint is locked, nudge the other one instead."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_LOCKED_FOOTPRINT)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=True
+        )
+
+        # R1 is locked, so R2 should be nudged
+        assert result.footprint_nudges == 1
+        assert result.footprint_nudge_results[0].reference == "R2"
+
+    def test_both_locked_skip(self, tmp_path: Path):
+        """When both footprints are locked, skip the violation."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_BOTH_LOCKED)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=True
+        )
+
+        assert result.footprint_nudges == 0
+        assert result.footprint_skipped_locked == 1
+
+    def test_connector_skip(self, tmp_path: Path):
+        """When one footprint is a connector (J-prefix), nudge the other."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_CONNECTOR)
+
+        report = parse_text_report(self.DRC_REPORT_CONNECTOR, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=True
+        )
+
+        # J1 is a connector, R1 should be nudged
+        assert result.footprint_nudges == 1
+        assert result.footprint_nudge_results[0].reference == "R1"
+
+    def test_max_displacement_gate(self, tmp_path: Path):
+        """Violations requiring displacement beyond max should be skipped."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Very small max displacement
+        result = repairer.repair_from_report(
+            report, max_displacement=0.001, dry_run=True, nudge_footprints=True
+        )
+
+        assert result.footprint_nudges == 0
+        assert result.footprint_skipped_exceeds_max == 1
+
+    def test_same_component_excluded(self, tmp_path: Path):
+        """Same-component pad-pad violations should be skipped."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_SAME_COMPONENT, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=True
+        )
+
+        assert result.footprint_nudges == 0
+        assert result.footprint_skipped_same_component == 1
+
+    def test_nudge_footprints_off_by_default(self, tmp_path: Path):
+        """Without --nudge-footprints, pad-pad violations are not processed."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=True, nudge_footprints=False
+        )
+
+        assert result.footprint_nudges == 0
+        assert len(result.footprint_nudge_results) == 0
+
+    def test_connected_segments_updated(self, tmp_path: Path):
+        """Trace segments connected to nudged footprint pads should move too."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report = parse_text_report(self.DRC_REPORT_PAD_PAD, "test-drc.rpt")
+        repairer = ClearanceRepairer(pcb_file)
+
+        # The PCB has a segment at (99.5, 100) connected to R1 pad 1 at (99.5, 100)
+        # If R1 is nudged, that segment endpoint should update
+
+        result = repairer.repair_from_report(
+            report, max_displacement=0.2, dry_run=False, nudge_footprints=True
+        )
+
+        if result.footprint_nudge_results and result.footprint_nudge_results[0].reference == "R1":
+            fn = result.footprint_nudge_results[0]
+            # Check that the segment start was updated
+            for seg_node in repairer.doc.find_all("segment"):
+                start_node = seg_node.find("start")
+                if start_node:
+                    sx = float(start_node.get_atoms()[0])
+                    sy = float(start_node.get_atoms()[1])
+                    # Original was (99.5, 100), should have moved by dx, dy
+                    if abs(sx - (99.5 + fn.displacement_x)) < 0.01:
+                        assert abs(sy - (100 + fn.displacement_y)) < 0.01
+
+    def test_cli_nudge_footprints_flag(self, tmp_path: Path):
+        """CLI should accept --nudge-footprints flag."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(self.PCB_PAD_PAD_VIOLATION)
+
+        report_file = tmp_path / "test-drc.rpt"
+        report_file.write_text(self.DRC_REPORT_PAD_PAD)
+
+        result = main([
+            str(pcb_file),
+            "--drc-report", str(report_file),
+            "--nudge-footprints",
+            "--max-displacement", "0.2",
+            "--dry-run",
+            "--format", "json",
+        ])
+
+        # Should not error -- exit code 0 means all violations repaired
+        assert result == 0
+
+    def test_footprint_nudge_result_str(self):
+        """FootprintNudgeResult should have a readable string representation."""
+        fn = FootprintNudgeResult(
+            reference="R1",
+            x=100.0,
+            y=100.0,
+            displacement_x=0.05,
+            displacement_y=0.0,
+            displacement_mm=0.05,
+            old_clearance_mm=0.1,
+            new_clearance_mm=0.15,
+            other_reference="R2",
+        )
+        s = str(fn)
+        assert "R1" in s
+        assert "R2" in s
+        assert "0.0500" in s

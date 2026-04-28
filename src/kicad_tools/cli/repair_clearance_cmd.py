@@ -36,7 +36,12 @@ import json
 import sys
 from pathlib import Path
 
-from kicad_tools.drc.repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
+from kicad_tools.drc.repair_clearance import (
+    ClearanceRepairer,
+    FootprintNudgeResult,
+    NudgeResult,
+    RepairResult,
+)
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.manufacturers import get_manufacturer_ids
 
@@ -92,6 +97,11 @@ Examples:
         help="Which object to move when both are movable (default: move-trace)",
     )
     parser.add_argument(
+        "--nudge-footprints",
+        action="store_true",
+        help="Enable footprint nudging for pad-pad clearance violations",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         help="Output file path (default: overwrite input)",
@@ -135,13 +145,18 @@ Examples:
     from kicad_tools.drc.violation import ViolationType
 
     clearance_count = len(report.by_type(ViolationType.CLEARANCE))
-    if clearance_count == 0:
+    pad_pad_count = len(report.by_type(ViolationType.CLEARANCE_PAD_PAD)) if args.nudge_footprints else 0
+    total_count = clearance_count + pad_pad_count
+    if total_count == 0:
         if not args.quiet:
             print("No clearance violations found. Nothing to repair.")
         return 0
 
     if not args.quiet and args.format == "text":
-        print(f"Found {clearance_count} clearance violation(s) to repair")
+        msg = f"Found {clearance_count} clearance violation(s) to repair"
+        if pad_pad_count > 0:
+            msg += f" + {pad_pad_count} pad-pad violation(s)"
+        print(msg)
 
     # Create repairer and run
     try:
@@ -156,6 +171,7 @@ Examples:
         margin=args.margin,
         prefer=args.prefer,
         dry_run=args.dry_run,
+        nudge_footprints=args.nudge_footprints,
     )
 
     # Print results
@@ -281,6 +297,20 @@ def _print_json(
             }
             for n in result.nudges
         ],
+        "footprint_nudges": [
+            {
+                "reference": fn.reference,
+                "other_reference": fn.other_reference,
+                "x": fn.x,
+                "y": fn.y,
+                "displacement_x_mm": round(fn.displacement_x, 4),
+                "displacement_y_mm": round(fn.displacement_y, 4),
+                "displacement_mm": round(fn.displacement_mm, 4),
+                "old_clearance_mm": round(fn.old_clearance_mm, 4),
+                "new_clearance_mm": round(fn.new_clearance_mm, 4),
+            }
+            for fn in result.footprint_nudge_results
+        ],
     }
     print(json.dumps(data, indent=2))
 
@@ -323,12 +353,31 @@ def _print_text(
         if len(result.nudges) > 5:
             print(f"\n  ... and {len(result.nudges) - 3} more")
 
+    if result.footprint_nudge_results:
+        print(f"\n{'-' * 60}")
+        print("FOOTPRINT NUDGES:")
+
+        display_fp_nudges = (
+            result.footprint_nudge_results
+            if len(result.footprint_nudge_results) <= 5
+            else result.footprint_nudge_results[:3]
+        )
+        for fn in display_fp_nudges:
+            _print_footprint_nudge(fn)
+
+        if len(result.footprint_nudge_results) > 5:
+            print(f"\n  ... and {len(result.footprint_nudge_results) - 3} more")
+
     # Show skipped details
     skipped_total = (
         result.skipped_exceeds_max
         + result.skipped_infeasible
         + result.skipped_no_location
         + result.skipped_no_delta
+        + result.footprint_skipped_locked
+        + result.footprint_skipped_connector
+        + result.footprint_skipped_same_component
+        + result.footprint_skipped_exceeds_max
     )
     if skipped_total > 0:
         print(f"\n{'-' * 60}")
@@ -341,6 +390,14 @@ def _print_text(
             print(f"  No location info: {result.skipped_no_location}")
         if result.skipped_no_delta > 0:
             print(f"  No clearance delta info: {result.skipped_no_delta}")
+        if result.footprint_skipped_locked > 0:
+            print(f"  Footprint locked: {result.footprint_skipped_locked}")
+        if result.footprint_skipped_connector > 0:
+            print(f"  Connector footprint: {result.footprint_skipped_connector}")
+        if result.footprint_skipped_same_component > 0:
+            print(f"  Same-component pads: {result.footprint_skipped_same_component}")
+        if result.footprint_skipped_exceeds_max > 0:
+            print(f"  Footprint exceeds max displacement: {result.footprint_skipped_exceeds_max}")
 
     print(f"\n{'=' * 60}")
 
@@ -363,6 +420,19 @@ def _print_nudge(nudge: NudgeResult) -> None:
     )
     print(
         f"    Clearance: {nudge.old_clearance_mm:.4f} -> {nudge.new_clearance_mm:.4f} mm"
+    )
+
+
+def _print_footprint_nudge(fn: FootprintNudgeResult) -> None:
+    """Print a single footprint nudge result."""
+    print(f"\n  [{fn.reference}] away from [{fn.other_reference}]")
+    print(f"    Position: ({fn.x:.4f}, {fn.y:.4f})")
+    print(
+        f"    Displacement: ({fn.displacement_x:+.4f}, {fn.displacement_y:+.4f}) mm "
+        f"= {fn.displacement_mm:.4f} mm"
+    )
+    print(
+        f"    Clearance: {fn.old_clearance_mm:.4f} -> {fn.new_clearance_mm:.4f} mm"
     )
 
 
