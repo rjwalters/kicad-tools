@@ -483,8 +483,8 @@ class TestReconcilerAnalyze:
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
 
-    def test_analyze_skips_virtual_and_power(self):
-        """Test that virtual/power symbols and DNP components are skipped."""
+    def test_analyze_skips_power_and_off_board(self):
+        """Test that power symbols and on_board=False components are skipped."""
         bom_items = [
             self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
             BOMItem(
@@ -493,13 +493,15 @@ class TestReconcilerAnalyze:
                 footprint="",
                 lib_id="power:+3V3",
                 in_bom=False,
+                on_board=False,
             ),
             BOMItem(
-                reference="R2",
-                value="100",
-                footprint="R_0402",
-                lib_id="Device:R",
-                dnp=True,
+                reference="SIM1",
+                value="TestPoint",
+                footprint="",
+                lib_id="Simulation:VSIN",
+                in_bom=False,
+                on_board=False,
             ),
         ]
         footprints = [
@@ -514,9 +516,109 @@ class TestReconcilerAnalyze:
 
         assert analysis.is_in_sync
         assert len(analysis.matches) == 1
-        # PWR1 and R2 (DNP) should not appear anywhere
+        # PWR1 and SIM1 (on_board=False) should not appear anywhere
         assert "PWR1" not in analysis.schematic_orphans
-        assert "R2" not in analysis.schematic_orphans
+        assert "SIM1" not in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_includes_net_tie_in_bom_no(self):
+        """Test that net ties (in_bom=no, on_board=yes) are included in sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="NT2",
+                value="NetTie_2",
+                footprint="NetTie:NetTie-2_SMD_Pad0.5mm",
+                lib_id="Device:NetTie_2",
+                in_bom=False,
+                on_board=True,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint(
+                "NT2", "NetTie_2", "NetTie:NetTie-2_SMD_Pad0.5mm"
+            ),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 2
+        matched_refs = {m.schematic_ref for m in analysis.matches}
+        assert "NT2" in matched_refs
+        assert "NT2" not in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_includes_dnp_on_board(self):
+        """Test that DNP components with on_board=yes are included in sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="J5",
+                value="Conn_01x03_Pin",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x03",
+                lib_id="Connector:Conn_01x03_Pin",
+                dnp=True,
+                on_board=True,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint(
+                "J5", "Conn_01x03_Pin", "Connector_PinHeader_2.54mm:PinHeader_1x03"
+            ),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 2
+        matched_refs = {m.schematic_ref for m in analysis.matches}
+        assert "J5" in matched_refs
+        assert "J5" not in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_excludes_on_board_no(self):
+        """Test that components with on_board=no are excluded from sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="SIM1",
+                value="VSIN",
+                footprint="",
+                lib_id="Simulation:VSIN",
+                in_bom=False,
+                on_board=False,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 1
+        assert "SIM1" not in analysis.schematic_orphans
 
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
