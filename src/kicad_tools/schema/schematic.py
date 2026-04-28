@@ -19,7 +19,7 @@ from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .library import LibrarySymbol, resolve_extends
 from .symbol import SymbolInstance, SymbolPin, SymbolProperty
-from .wire import Junction, Wire
+from .wire import Junction, NoConnect, Wire
 
 if TYPE_CHECKING:
     from ..erc import ERCReport
@@ -122,6 +122,7 @@ class Schematic:
         self._symbols: list[SymbolInstance] | None = None
         self._wires: list[Wire] | None = None
         self._junctions: list[Junction] | None = None
+        self._no_connects: list[NoConnect] | None = None
         self._labels: list[Label] | None = None
         self._hierarchical_labels: list[HierarchicalLabel] | None = None
         self._sheets: list[SheetInstance] | None = None
@@ -237,6 +238,15 @@ class Schematic:
         if self._junctions is None:
             self._junctions = [Junction.from_sexp(j) for j in self._sexp.find_all("junction")]
         return self._junctions
+
+    @property
+    def no_connects(self) -> list[NoConnect]:
+        """Get all no-connect markers in the schematic."""
+        if self._no_connects is None:
+            self._no_connects = [
+                NoConnect.from_sexp(nc) for nc in self._sexp.find_all("no_connect")
+            ]
+        return self._no_connects
 
     # Label operations
 
@@ -889,6 +899,7 @@ class Schematic:
         self._symbols = None
         self._wires = None
         self._junctions = None
+        self._no_connects = None
         self._labels = None
         self._hierarchical_labels = None
         self._sheets = None

@@ -29,7 +29,7 @@ from .pcb import (
 )
 from .schematic import Schematic
 from .symbol import SymbolInstance, SymbolPin
-from .wire import Junction, Wire
+from .wire import Junction, NoConnect, Wire
 
 __all__ = [
     "Schematic",
@@ -37,6 +37,7 @@ __all__ = [
     "SymbolPin",
     "Wire",
     "Junction",
+    "NoConnect",
     "Label",
     "HierarchicalLabel",
     "GlobalLabel",
