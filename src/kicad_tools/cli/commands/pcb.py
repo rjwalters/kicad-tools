@@ -617,6 +617,7 @@ def _run_sync_netlist_command(args, pcb_path: Path) -> int:
     remove_orphans = getattr(args, "remove_orphans", False)
     force = getattr(args, "force", False)
     auto_rename = getattr(args, "auto_rename", False)
+    remove_orphan_nets = getattr(args, "remove_orphan_nets", False)
 
     return run_sync_netlist(
         schematic_path=schematic_path,
@@ -627,6 +628,7 @@ def _run_sync_netlist_command(args, pcb_path: Path) -> int:
         remove_orphans=remove_orphans,
         force=force,
         auto_rename=auto_rename,
+        remove_orphan_nets=remove_orphan_nets,
     )
 
 
