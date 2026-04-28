@@ -107,6 +107,7 @@ def output_json(symbol, show_pins, show_properties, pin_map_data=None):
                 pin_entry["name"] = enriched.get("name")
                 pin_entry["type"] = enriched.get("type")
                 pin_entry["net"] = enriched.get("net")
+                pin_entry["connected"] = enriched.get("connected")
                 pin_entry["position"] = enriched.get("position")
             pins.append(pin_entry)
         data["pins"] = pins
@@ -145,7 +146,12 @@ def output_text(symbol, show_pins, show_properties, pin_map_data=None):
                 enriched = pin_map_data.get(pin.number, {})
                 name = enriched.get("name", "")
                 pin_type = enriched.get("type", "")
-                net = enriched.get("net") or "(unconnected)"
+                if enriched.get("net"):
+                    net = enriched["net"]
+                elif enriched.get("connected"):
+                    net = "(unnamed)"
+                else:
+                    net = "(floating)"
                 print(f"  {pin.number:<6} {name:<20} {pin_type:<15} {net:<20} {pin.uuid}")
         else:
             print("-" * 50)

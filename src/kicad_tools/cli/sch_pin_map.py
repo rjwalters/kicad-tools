@@ -50,7 +50,14 @@ def resolve_pin_map(
         ref_filter: If provided, only include this reference designator
 
     Returns:
-        Dict mapping reference -> {"lib_id": str, "pins": {pin_num: {name, net, type, position}}}
+        Dict mapping reference -> {"lib_id": str, "pins": {pin_num: {name, net, connected, type, position}}}
+
+        The ``connected`` field is True when the pin touches at least one wire
+        in the schematic, False when the pin is truly floating (no wire at all).
+
+        Pins on unnamed local nets (wired together but no label) receive a
+        synthetic net name like ``_local_1``, ``_local_2``, etc.  Pins that are
+        truly floating have ``net: None`` and ``connected: False``.
     """
     result: dict[str, dict] = {}
 
@@ -166,9 +173,16 @@ def resolve_pin_map(
             # Trace from pin position to find net name
             net = _flood_fill_net(coord, adjacency, net_names, barrier_pins)
 
+            # Determine connectivity: a pin is "connected" if it has any
+            # neighbors in the wire adjacency graph (i.e., a wire touches it).
+            snapped = _snap_coord(coord, set(adjacency.keys()))
+            has_neighbors = bool(adjacency.get(snapped, set()))
+            connected = net is not None or has_neighbors
+
             pins_data[lib_pin.number] = {
                 "name": lib_pin.name,
                 "net": net,
+                "connected": connected,
                 "type": lib_pin.type,
                 "position": [round(pos[0], 4), round(pos[1], 4)],
             }
@@ -182,6 +196,53 @@ def resolve_pin_map(
                 "value": symbol.value,
                 "pins": pins_data,
             }
+
+    # ------------------------------------------------------------------
+    # Post-pass: assign synthetic net names to unnamed local nets.
+    #
+    # Pins with net=None but connected=True are on unnamed local nets.
+    # Group them by connected component using BFS on the adjacency graph,
+    # then assign _local_1, _local_2, etc. to each group.
+    # ------------------------------------------------------------------
+    # Collect all (ref, pin_num, coord) tuples for unresolved-but-connected pins
+    unresolved_coords: dict[Coord, list[tuple[str, str]]] = defaultdict(list)
+    for ref, entry in result.items():
+        for pin_num, pin_data in entry["pins"].items():
+            if pin_data["net"] is None and pin_data["connected"]:
+                pos = pin_data["position"]
+                coord = _to_coord(pos[0], pos[1])
+                snapped = _snap_coord(coord, set(adjacency.keys()))
+                unresolved_coords[snapped].append((ref, pin_num))
+
+    # BFS to find connected components among unresolved pin coordinates
+    visited: set[Coord] = set()
+    local_counter = 0
+
+    for start_coord in unresolved_coords:
+        if start_coord in visited:
+            continue
+
+        # BFS from this coordinate through the wire graph
+        component_coords: set[Coord] = set()
+        queue = [start_coord]
+        visited.add(start_coord)
+
+        while queue:
+            current = queue.pop(0)
+            if current in unresolved_coords:
+                component_coords.add(current)
+            for neighbor in adjacency.get(current, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        # Only assign a synthetic name if there are pins in this component
+        if component_coords:
+            local_counter += 1
+            synthetic_name = f"_local_{local_counter}"
+            for coord in component_coords:
+                for ref, pin_num in unresolved_coords[coord]:
+                    result[ref]["pins"][pin_num]["net"] = synthetic_name
 
     return result
 
@@ -209,7 +270,12 @@ def output_table(pin_map: dict[str, dict]) -> None:
             key=lambda p: (not p.isdigit(), int(p) if p.isdigit() else 0, p),
         ):
             pin = pins[pin_num]
-            net_str = pin["net"] if pin["net"] else "(unconnected)"
+            if pin["net"]:
+                net_str = pin["net"]
+            elif pin.get("connected"):
+                net_str = "(unnamed)"
+            else:
+                net_str = "(floating)"
             pos = pin.get("position")
             pos_str = f"({pos[0]:.2f}, {pos[1]:.2f})" if pos else ""
             print(f"  {pin_num:<6} {pin['name']:<20} {pin['type']:<15} {pos_str:<22} {net_str}")

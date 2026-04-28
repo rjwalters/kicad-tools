@@ -687,6 +687,10 @@ class TestResolvePinMap:
         assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
         assert pin_map["R1"]["lib_id"] == "Device:R"
 
+        # All pins on named nets should be connected
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+        assert pin_map["R1"]["pins"]["2"]["connected"] is True
+
         # Verify absolute pin positions (R1 at (100, 50), pin offsets +-3.81)
         assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 46.19]
         assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 53.81]
@@ -694,6 +698,8 @@ class TestResolvePinMap:
         # C1 follows the same pin layout (at (120, 50))
         assert pin_map["C1"]["pins"]["1"]["net"] == "VIN"
         assert pin_map["C1"]["pins"]["2"]["net"] == "GND"
+        assert pin_map["C1"]["pins"]["1"]["connected"] is True
+        assert pin_map["C1"]["pins"]["2"]["connected"] is True
         assert pin_map["C1"]["pins"]["1"]["position"] == [120.0, 46.19]
         assert pin_map["C1"]["pins"]["2"]["position"] == [120.0, 53.81]
 
@@ -723,8 +729,10 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         # R1 pin 1 at (100, 46.19) connected via wire to +3.3V power symbol at (100, 40)
         assert pin_map["R1"]["pins"]["1"]["net"] == "+3.3V"
-        # R1 pin 2 at (100, 53.81) is unconnected (no wire)
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+        # R1 pin 2 at (100, 53.81) is floating (no wire)
         assert pin_map["R1"]["pins"]["2"]["net"] is None
+        assert pin_map["R1"]["pins"]["2"]["connected"] is False
 
     def test_power_symbols_excluded(self, tmp_path):
         sch = Schematic.load(_write_sch(tmp_path, POWER_SYMBOL_SCHEMATIC))
@@ -735,12 +743,15 @@ class TestResolvePinMap:
             assert not ref.startswith("#PWR")
 
     def test_unconnected_pin(self, tmp_path):
+        """Truly floating pins (no wires) should have net=None and connected=False."""
         sch = Schematic.load(_write_sch(tmp_path, UNCONNECTED_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
         assert "R1" in pin_map
         assert pin_map["R1"]["pins"]["1"]["net"] is None
         assert pin_map["R1"]["pins"]["2"]["net"] is None
+        assert pin_map["R1"]["pins"]["1"]["connected"] is False
+        assert pin_map["R1"]["pins"]["2"]["connected"] is False
         # Position should still be present even for unconnected pins
         assert pin_map["R1"]["pins"]["1"]["position"] == [100.0, 46.19]
         assert pin_map["R1"]["pins"]["2"]["position"] == [100.0, 53.81]
@@ -798,7 +809,7 @@ class TestBFSBarrier:
 
         Without BFS barriers, D1 cathode would incorrectly resolve to GND by
         traversing through R1's body.  With barriers, the BFS stops at R1 pin 1
-        and D1 cathode resolves to None (unnamed net at the junction).
+        and D1 cathode gets a synthetic _local_N net name (unnamed local net).
         """
         sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
@@ -806,20 +817,35 @@ class TestBFSBarrier:
         assert "D1" in pin_map
         assert "R1" in pin_map
 
-        # D1 cathode (pin 1) must NOT resolve to GND
+        # D1 cathode (pin 1) must NOT resolve to GND -- it should get a
+        # synthetic _local_N name since it is wired to R1 pin 1 (unnamed net)
         d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
-        assert d1_pin1_net is None, (
-            f"D1 cathode should be None (unnamed net), got {d1_pin1_net!r}"
+        assert d1_pin1_net is not None, (
+            "D1 cathode should have a synthetic net name (unnamed local net)"
         )
+        assert d1_pin1_net.startswith("_local_"), (
+            f"D1 cathode should have _local_N net name, got {d1_pin1_net!r}"
+        )
+        assert d1_pin1_net != "GND", (
+            "D1 cathode must NOT resolve to GND through R1's body"
+        )
+        assert pin_map["D1"]["pins"]["1"]["connected"] is True
 
         # D1 anode (pin 2) should resolve to VBUS
         assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
+        assert pin_map["D1"]["pins"]["2"]["connected"] is True
 
-        # R1 should still resolve correctly
-        # R1 pin 1 shares junction with D1 cathode -- unnamed net
-        assert pin_map["R1"]["pins"]["1"]["net"] is None
+        # R1 pin 1 shares junction with D1 cathode -- same unnamed local net
+        r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_pin1_net == d1_pin1_net, (
+            f"R1 pin 1 and D1 cathode should share the same local net, "
+            f"got R1={r1_pin1_net!r} vs D1={d1_pin1_net!r}"
+        )
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+
         # R1 pin 2 connects to GND
         assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
+        assert pin_map["R1"]["pins"]["2"]["connected"] is True
 
     def test_shared_junction_still_resolves(self, tmp_path):
         """Components sharing a junction (same coordinate) should both see the
@@ -873,13 +899,17 @@ class TestPullupBarrierNetPropagation:
         """Even with net propagation, BFS must not cross through a component.
 
         The diode-resistor test (DIODE_RESISTOR_SCHEMATIC) must still pass:
-        D1 cathode must NOT resolve to GND through R1's body."""
+        D1 cathode must NOT resolve to GND through R1's body. It gets a
+        synthetic _local_N name instead."""
         sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
         d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
-        assert d1_pin1_net is None, (
-            f"D1 cathode should still be None, got {d1_pin1_net!r}"
+        assert d1_pin1_net != "GND", (
+            f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
+        )
+        assert d1_pin1_net is not None and d1_pin1_net.startswith("_local_"), (
+            f"D1 cathode should have _local_N synthetic net, got {d1_pin1_net!r}"
         )
         assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
         assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
@@ -1000,9 +1030,13 @@ class TestRCFilterChain:
 
         assert pin_map["R1"]["pins"]["1"]["net"] == "AUDIO_L"
         assert pin_map["C1"]["pins"]["1"]["net"] == "AUDIO_L"
-        # Pin 2 of both components has no wire -- should be None
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+        assert pin_map["C1"]["pins"]["1"]["connected"] is True
+        # Pin 2 of both components has no wire -- should be floating
         assert pin_map["R1"]["pins"]["2"]["net"] is None
         assert pin_map["C1"]["pins"]["2"]["net"] is None
+        assert pin_map["R1"]["pins"]["2"]["connected"] is False
+        assert pin_map["C1"]["pins"]["2"]["connected"] is False
 
     def test_ref_filter_with_chain(self, tmp_path):
         """Filtering by ref still resolves nets correctly in a chain."""
@@ -1262,28 +1296,230 @@ class TestNetTieTraversal:
             f"U1 pin 1 should resolve to NET_A or NET_B, got {u1_pin1_net!r}"
         )
 
-    def test_nettie_no_label_resolves_none(self, tmp_path):
-        """Net-tie with no labels on either side: pins resolve to None."""
+    def test_nettie_no_label_resolves_local(self, tmp_path):
+        """Net-tie with no labels on either side: pins get synthetic _local_N names."""
         sch = Schematic.load(_write_sch(tmp_path, NET_TIE_NO_LABEL_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
         assert "U1" in pin_map
-        assert pin_map["U1"]["pins"]["1"]["net"] is None
+        # U1 pin 1 is wired (through net-tie) but has no label
+        u1_net = pin_map["U1"]["pins"]["1"]["net"]
+        assert u1_net is not None and u1_net.startswith("_local_"), (
+            f"U1 pin 1 should have _local_N synthetic net, got {u1_net!r}"
+        )
+        assert pin_map["U1"]["pins"]["1"]["connected"] is True
 
     def test_barrier_still_blocks_non_nettie(self, tmp_path):
         """Net-tie exemption must not weaken barriers for normal components.
 
         The diode-resistor barrier test must still pass: D1 cathode must NOT
-        resolve to GND through R1's body."""
+        resolve to GND through R1's body. It gets a _local_N name instead."""
         sch = Schematic.load(_write_sch(tmp_path, DIODE_RESISTOR_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
         d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
-        assert d1_pin1_net is None, (
-            f"D1 cathode should still be None with net-tie support, got {d1_pin1_net!r}"
+        assert d1_pin1_net != "GND", (
+            f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
+        )
+        assert d1_pin1_net is not None and d1_pin1_net.startswith("_local_"), (
+            f"D1 cathode should have _local_N synthetic net, got {d1_pin1_net!r}"
         )
         assert pin_map["D1"]["pins"]["2"]["net"] == "VBUS"
         assert pin_map["R1"]["pins"]["2"]["net"] == "GND"
+
+
+# ---------------------------------------------------------------------------
+# Unnamed local net detection and connected field
+# ---------------------------------------------------------------------------
+
+# Two resistors wired together with NO label -- unnamed local net.
+# R1 pin 1 at (100, 46.19) wired to R2 pin 1 at (120, 46.19) via horizontal wire.
+# R1 pin 2 and R2 pin 2 are both floating (no wires).
+UNNAMED_LOCAL_NET_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002219")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "uln-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "Device:R") (at 120 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "uln-r2")
+    (property "Reference" "R2" (at 122 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 122 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p3")) (pin "2" (uuid "p4"))
+  )
+  (wire (pts (xy 100 46.19) (xy 120 46.19))
+    (stroke (width 0) (type default)) (uuid "w-r1r2"))
+)
+"""
+
+# Mixed: some pins on named nets, some on unnamed local nets, some floating.
+# R1 pin 1 -> wire -> label "SIG"
+# R1 pin 2 -> wire -> R2 pin 1 (no label = unnamed local net)
+# R2 pin 2 -> floating (no wire)
+MIXED_CONNECTIVITY_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000002220")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "mix-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 70 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "mix-r2")
+    (property "Reference" "R2" (at 102 68 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 70 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p3")) (pin "2" (uuid "p4"))
+  )
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-sig"))
+  (wire (pts (xy 100 53.81) (xy 100 66.19))
+    (stroke (width 0) (type default)) (uuid "w-r1r2"))
+  (label "SIG" (at 100 40 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-sig"))
+)
+"""
+
+
+class TestUnnamedLocalNets:
+    """Verify that pins on unnamed local nets get synthetic _local_N names."""
+
+    def test_two_resistors_unnamed_net(self, tmp_path):
+        """R1 pin 1 and R2 pin 1 wired together with no label."""
+        sch = Schematic.load(_write_sch(tmp_path, UNNAMED_LOCAL_NET_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "R1" in pin_map
+        assert "R2" in pin_map
+
+        # Both pin 1s should share the same _local_N net name
+        r1_net = pin_map["R1"]["pins"]["1"]["net"]
+        r2_net = pin_map["R2"]["pins"]["1"]["net"]
+        assert r1_net is not None, "R1 pin 1 should not be None (it is wired)"
+        assert r1_net.startswith("_local_"), (
+            f"R1 pin 1 should get _local_N, got {r1_net!r}"
+        )
+        assert r1_net == r2_net, (
+            f"R1 and R2 pin 1 should share the same local net, "
+            f"got R1={r1_net!r} vs R2={r2_net!r}"
+        )
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+        assert pin_map["R2"]["pins"]["1"]["connected"] is True
+
+        # Both pin 2s are floating
+        assert pin_map["R1"]["pins"]["2"]["net"] is None
+        assert pin_map["R2"]["pins"]["2"]["net"] is None
+        assert pin_map["R1"]["pins"]["2"]["connected"] is False
+        assert pin_map["R2"]["pins"]["2"]["connected"] is False
+
+    def test_mixed_connectivity(self, tmp_path):
+        """Mixed: named net, unnamed local net, and floating pin."""
+        sch = Schematic.load(_write_sch(tmp_path, MIXED_CONNECTIVITY_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        # R1 pin 1 -> named net "SIG"
+        assert pin_map["R1"]["pins"]["1"]["net"] == "SIG"
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+
+        # R1 pin 2 and R2 pin 1 share an unnamed local net
+        r1p2_net = pin_map["R1"]["pins"]["2"]["net"]
+        r2p1_net = pin_map["R2"]["pins"]["1"]["net"]
+        assert r1p2_net is not None
+        assert r1p2_net.startswith("_local_")
+        assert r1p2_net == r2p1_net
+        assert pin_map["R1"]["pins"]["2"]["connected"] is True
+        assert pin_map["R2"]["pins"]["1"]["connected"] is True
+
+        # R2 pin 2 is floating
+        assert pin_map["R2"]["pins"]["2"]["net"] is None
+        assert pin_map["R2"]["pins"]["2"]["connected"] is False
+
+    def test_synthetic_net_counter_resets_per_call(self, tmp_path):
+        """Each call to resolve_pin_map should reset the _local_N counter."""
+        sch = Schematic.load(_write_sch(tmp_path, UNNAMED_LOCAL_NET_SCHEMATIC))
+        pin_map1 = resolve_pin_map(sch)
+        pin_map2 = resolve_pin_map(sch)
+
+        # Both calls should produce the same synthetic net name
+        assert pin_map1["R1"]["pins"]["1"]["net"] == pin_map2["R1"]["pins"]["1"]["net"]
+
+
+class TestConnectedFieldInJSON:
+    """Verify the connected field appears in JSON output."""
+
+    def test_connected_in_json(self, tmp_path, capsys):
+        path = _write_sch(tmp_path, MIXED_CONNECTIVITY_SCHEMATIC)
+        rc = pin_map_main([str(path), "--format", "json"])
+
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        # Named net pin: connected=True
+        assert data["R1"]["pins"]["1"]["connected"] is True
+        # Unnamed local net pin: connected=True
+        assert data["R1"]["pins"]["2"]["connected"] is True
+        # Floating pin: connected=False
+        assert data["R2"]["pins"]["2"]["connected"] is False
+
+    def test_table_shows_floating(self, tmp_path, capsys):
+        """Table output should show (floating) for truly unconnected pins."""
+        path = _write_sch(tmp_path, UNCONNECTED_SCHEMATIC)
+        rc = pin_map_main([str(path), "--format", "table"])
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "(floating)" in captured.out
+
+    def test_table_shows_local_net(self, tmp_path, capsys):
+        """Table output should show _local_N for unnamed local nets."""
+        path = _write_sch(tmp_path, UNNAMED_LOCAL_NET_SCHEMATIC)
+        rc = pin_map_main([str(path), "--format", "table"])
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "_local_" in captured.out
 
 
 # ---------------------------------------------------------------------------
