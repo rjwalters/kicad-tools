@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 from kicad_tools.cli.sch_validate import ValidationIssue, run_erc
 from kicad_tools.erc.cross_sheet import (
     _enrich_description_with_pos,
+    filter_phantom_wire_violations,
     reattribute_wire_dangling_violations,
 )
 
@@ -354,6 +355,10 @@ class TestRunERCWireDanglingIntegration:
                 "kicad_tools.cli.sch_validate.reattribute_wire_dangling_violations",
                 side_effect=lambda v, p: v,
             ),
+            patch(
+                "kicad_tools.cli.sch_validate.filter_phantom_wire_violations",
+                side_effect=lambda v, p: v,
+            ),
             patch("tempfile.NamedTemporaryFile", return_value=_FakeTmp()),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -665,3 +670,509 @@ class TestWireMidpointMatching:
             result = reattribute_wire_dangling_violations(violations, "test.kicad_sch")
 
         assert result[0]["_sheet_path"] == "/Power/Regulator"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for phantom filtering tests
+# ---------------------------------------------------------------------------
+
+
+def _make_full_hierarchy_mocks(
+    sheets: list[dict],
+):
+    """Build fake hierarchy and schematics for phantom filtering tests.
+
+    Each entry in *sheets* is a dict with:
+      - ``path``: sheet path string (e.g. ``"/"``, ``"/DAC"``)
+      - ``is_root``: bool
+      - ``file``: fake file path
+      - ``wires``: list of ``(start, end)`` tuples
+      - ``junctions``: list of ``(x, y)`` tuples  (optional)
+      - ``labels``: list of ``(x, y)`` tuples  (optional)
+      - ``global_labels``: list of ``(x, y)`` tuples  (optional)
+      - ``hierarchical_labels``: list of ``(x, y)`` tuples  (optional)
+    """
+    nodes = []
+    sch_by_file: dict[str, MagicMock] = {}
+
+    for s in sheets:
+        node = MagicMock()
+        node.is_root = s.get("is_root", False)
+        node.path = s["file"]
+        node.get_path_string.return_value = s["path"]
+        nodes.append(node)
+
+        sch = MagicMock()
+
+        wires = []
+        for start, end in s.get("wires", []):
+            w = MagicMock()
+            w.start = start
+            w.end = end
+            wires.append(w)
+        sch.wires = wires
+
+        juncs = []
+        for pos in s.get("junctions", []):
+            j = MagicMock()
+            j.position = pos
+            juncs.append(j)
+        sch.junctions = juncs
+
+        labels = []
+        for pos in s.get("labels", []):
+            lbl = MagicMock()
+            lbl.position = pos
+            labels.append(lbl)
+        sch.labels = labels
+
+        gls = []
+        for pos in s.get("global_labels", []):
+            gl = MagicMock()
+            gl.position = pos
+            gls.append(gl)
+        sch.global_labels = gls
+
+        hls = []
+        for pos in s.get("hierarchical_labels", []):
+            hl = MagicMock()
+            hl.position = pos
+            hls.append(hl)
+        sch.hierarchical_labels = hls
+
+        sch_by_file[s["file"]] = sch
+
+    fake_hierarchy = MagicMock()
+    fake_hierarchy.all_nodes.return_value = nodes
+
+    def load_side_effect(path):
+        return sch_by_file[path]
+
+    return fake_hierarchy, load_side_effect
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: filter_phantom_wire_violations
+# ---------------------------------------------------------------------------
+
+
+class TestFilterPhantomWireViolations:
+    """Test phantom wire_dangling violation filtering."""
+
+    def test_phantom_violation_filtered(self):
+        """A wire_dangling at coordinates not matching any wire is removed."""
+        violations = [_wire_dangling(999.0, 888.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+            {
+                "path": "/DAC",
+                "is_root": False,
+                "file": "/tmp/dac.kicad_sch",
+                "wires": [((200.0, 30.0), (200.0, 60.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 0
+
+    def test_real_violation_at_wire_endpoint_preserved(self):
+        """A wire_dangling at a real wire endpoint is kept."""
+        violations = [_wire_dangling(100.0, 50.0)]
+        violations[0]["_sheet_path"] = "/DAC"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [],
+            },
+            {
+                "path": "/DAC",
+                "is_root": False,
+                "file": "/tmp/dac.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_real_violation_at_root_wire_preserved(self):
+        """A wire_dangling at a root-sheet wire endpoint is preserved."""
+        violations = [_wire_dangling(50.0, 25.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((50.0, 25.0), (50.0, 75.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+        assert result[0]["_sheet_path"] == "/"
+
+    def test_violation_at_junction_preserved(self):
+        """A wire_dangling at a junction position is preserved."""
+        violations = [_wire_dangling(75.0, 40.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [],
+                "junctions": [(75.0, 40.0)],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_violation_at_label_preserved(self):
+        """A wire_dangling at a label position is preserved."""
+        violations = [_wire_dangling(60.0, 30.0)]
+        violations[0]["_sheet_path"] = "/DAC"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [],
+            },
+            {
+                "path": "/DAC",
+                "is_root": False,
+                "file": "/tmp/dac.kicad_sch",
+                "wires": [],
+                "labels": [(60.0, 30.0)],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_non_wire_dangling_types_pass_through(self):
+        """Non-wire_dangling violations (e.g. endpoint_off_grid) pass through even at phantom coords."""
+        violations = [_endpoint_off_grid(999.0, 888.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_no_wire_dangling_skips_hierarchy(self):
+        """When no wire_dangling violations exist, hierarchy is not built."""
+        violations = [
+            {
+                "type": "pin_not_connected",
+                "severity": "error",
+                "description": "Pin not connected",
+                "_sheet_path": "/",
+                "items": [],
+            }
+        ]
+        with patch(
+            "kicad_tools.schema.hierarchy.build_hierarchy"
+        ) as mock_build:
+            filter_phantom_wire_violations(violations, "test.kicad_sch")
+            mock_build.assert_not_called()
+
+    def test_tolerance_matching_for_phantom_detection(self):
+        """Coordinates within tolerance (0.1mm) of a real wire match and are kept."""
+        violations = [_wire_dangling(100.04, 50.03)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_flat_schematic_no_filtering(self):
+        """In a flat schematic (no hierarchy), real violations are preserved."""
+        violations = [_wire_dangling(100.0, 50.0)]
+        violations[0]["_sheet_path"] = "/"
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_missing_pos_data_kept(self):
+        """A wire_dangling violation with no pos data is kept (safety fallback)."""
+        violations = [
+            {
+                "type": "wire_dangling",
+                "severity": "warning",
+                "description": "Wire not connected",
+                "_sheet_path": "/",
+                "items": [],
+            }
+        ]
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 1
+
+    def test_mixed_real_and_phantom_violations(self):
+        """Real and phantom wire_dangling violations are correctly separated."""
+        v_real = _wire_dangling(100.0, 50.0)
+        v_real["_sheet_path"] = "/"
+        v_phantom = _wire_dangling(777.0, 666.0)
+        v_phantom["_sheet_path"] = "/"
+        v_other = {
+            "type": "pin_not_connected",
+            "severity": "error",
+            "description": "Pin not connected",
+            "_sheet_path": "/",
+            "items": [],
+        }
+        violations = [v_real, v_phantom, v_other]
+
+        sheets = [
+            {
+                "path": "/",
+                "is_root": True,
+                "file": "/tmp/root.kicad_sch",
+                "wires": [((100.0, 50.0), (100.0, 80.0))],
+            },
+        ]
+        fake_hierarchy, load_fn = _make_full_hierarchy_mocks(sheets)
+
+        with (
+            patch(
+                "kicad_tools.schema.hierarchy.build_hierarchy",
+                return_value=fake_hierarchy,
+            ),
+            patch(
+                "kicad_tools.schema.Schematic.load",
+                side_effect=load_fn,
+            ),
+        ):
+            result = filter_phantom_wire_violations(violations, "root.kicad_sch")
+
+        assert len(result) == 2
+        types = [v.get("type") for v in result]
+        assert "wire_dangling" in types
+        assert "pin_not_connected" in types
+        # The phantom one should be gone
+        positions = [
+            (v["pos"]["x"], v["pos"]["y"])
+            for v in result
+            if v.get("type") == "wire_dangling"
+        ]
+        assert (100.0, 50.0) in positions
+        assert (777.0, 666.0) not in positions
+
+
+# ---------------------------------------------------------------------------
+# Integration test: run_erc with phantom filtering in pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestRunERCPhantomFilterIntegration:
+    """Verify that filter_phantom_wire_violations is called in run_erc pipeline."""
+
+    def test_phantom_filter_called_in_pipeline(self):
+        """Verify that filter_phantom_wire_violations is invoked during run_erc."""
+        erc_json = _make_erc_json(
+            [_make_sheet("/", [_wire_dangling(100.0, 50.0)])]
+        )
+
+        tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
+        tmp.write(erc_json)
+        tmp.close()
+
+        class _FakeTmp:
+            name = tmp.name
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        with (
+            patch(
+                "kicad_tools.cli.sch_validate.find_kicad_cli",
+                return_value="/usr/bin/kicad-cli",
+            ),
+            patch("kicad_tools.cli.sch_validate.subprocess.run") as mock_run,
+            patch(
+                "kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels",
+                side_effect=lambda v, p: v,
+            ),
+            patch(
+                "kicad_tools.cli.sch_validate.filter_cross_sheet_power_violations",
+                side_effect=lambda v, p: v,
+            ),
+            patch(
+                "kicad_tools.cli.sch_validate.reattribute_wire_dangling_violations",
+                side_effect=lambda v, p: v,
+            ),
+            patch(
+                "kicad_tools.cli.sch_validate.filter_phantom_wire_violations",
+                side_effect=lambda v, p: v,
+            ) as mock_phantom,
+            patch("tempfile.NamedTemporaryFile", return_value=_FakeTmp()),
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            run_erc("test.kicad_sch")
+
+        mock_phantom.assert_called_once()
+        args = mock_phantom.call_args[0]
+        assert args[1] == "test.kicad_sch"
+
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
