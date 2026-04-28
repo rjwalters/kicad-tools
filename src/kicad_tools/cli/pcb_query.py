@@ -34,6 +34,7 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.analysis.net_status import build_zone_net_map
 from kicad_tools.schema import PCB
 
 
@@ -190,29 +191,39 @@ def cmd_nets(pcb: PCB, args):
     if args.sorted:
         nets = sorted(nets, key=lambda n: n.name)
 
+    # Build zone-to-net lookup once for all nets
+    zone_net_map = build_zone_net_map(pcb)
+
     if args.format == "json":
         net_stats = []
         for net in nets:
             segments = list(pcb.segments_in_net(net.number))
             vias = list(pcb.vias_in_net(net.number))
+            zone_layers = zone_net_map.get(net.number, [])
             net_stats.append(
                 {
                     "number": net.number,
                     "name": net.name,
                     "segments": len(segments),
                     "vias": len(vias),
+                    "zone_connected": bool(zone_layers),
+                    "zone_layers": zone_layers,
                 }
             )
         print(json.dumps(net_stats, indent=2))
         return
 
-    print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias'}")
-    print("-" * 50)
+    print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone'}")
+    print("-" * 60)
 
     for net in nets:
         segments = list(pcb.segments_in_net(net.number))
         vias = list(pcb.vias_in_net(net.number))
-        print(f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias)}")
+        zone_layers = zone_net_map.get(net.number, [])
+        zone_col = ", ".join(zone_layers) if zone_layers else "-"
+        print(
+            f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias):<6} {zone_col}"
+        )
 
     print(f"\nTotal: {len(nets)} nets")
 
@@ -252,6 +263,10 @@ def cmd_net(pcb: PCB, args):
     # Get layers used
     layers = sorted({s.layer for s in segments})
 
+    # Zone connectivity
+    zone_net_map = build_zone_net_map(pcb)
+    zone_layers = zone_net_map.get(net.number, [])
+
     if args.format == "json":
         print(
             json.dumps(
@@ -262,6 +277,8 @@ def cmd_net(pcb: PCB, args):
                     "vias": len(vias),
                     "trace_length_mm": round(trace_length, 2),
                     "layers": layers,
+                    "zone_connected": bool(zone_layers),
+                    "zone_layers": zone_layers,
                     "pads": [{"ref": ref, "pad": pad} for ref, pad in pads],
                 },
                 indent=2,
@@ -275,6 +292,10 @@ def cmd_net(pcb: PCB, args):
     print(f"Total length: {trace_length:.2f} mm")
     print(f"Vias: {len(vias)}")
     print(f"Layers: {', '.join(layers)}")
+    if zone_layers:
+        print(f"Zone layers: {', '.join(zone_layers)}")
+    else:
+        print("Zone layers: (none)")
 
     print(f"\nConnected pads ({len(pads)}):")
     for ref, pad_num in sorted(pads):

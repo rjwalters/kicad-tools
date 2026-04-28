@@ -28,6 +28,7 @@ from .net_status import (
     NetStatusAnalyzer,
     NetStatusResult,
     PadInfo,
+    build_zone_net_map,
 )
 from .signal_integrity import (
     CrosstalkRisk,

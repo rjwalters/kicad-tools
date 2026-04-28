@@ -128,6 +128,74 @@ class TestPcbQuery:
         data = json.loads(captured.out)
         assert isinstance(data, list)
 
+    def test_nets_json_zone_fields_present(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output includes zone_connected and zone_layers fields."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        for net_entry in data:
+            assert "zone_connected" in net_entry
+            assert "zone_layers" in net_entry
+            assert isinstance(net_entry["zone_connected"], bool)
+            assert isinstance(net_entry["zone_layers"], list)
+
+    def test_nets_json_no_zones(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output on board with no zones shows zone_connected: false."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # minimal_pcb has no zones, so all nets should be zone_connected: false
+        for net_entry in data:
+            assert net_entry["zone_connected"] is False
+            assert net_entry["zone_layers"] == []
+
+    def test_nets_json_with_zones(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output on board with zones shows zone connectivity."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(zone_test_pcb), "nets", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Build lookup by net name
+        by_name = {entry["name"]: entry for entry in data}
+
+        # GND has zones on F.Cu and B.Cu
+        assert by_name["GND"]["zone_connected"] is True
+        assert "F.Cu" in by_name["GND"]["zone_layers"]
+        assert "B.Cu" in by_name["GND"]["zone_layers"]
+
+        # +3.3V has a zone on B.Cu
+        assert by_name["+3.3V"]["zone_connected"] is True
+        assert "B.Cu" in by_name["+3.3V"]["zone_layers"]
+
+    def test_nets_text_zone_column(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test nets text output includes Zone column header and zone layers."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(zone_test_pcb), "nets"])
+        main()
+
+        captured = capsys.readouterr()
+        # Check header includes Zone column
+        assert "Zone" in captured.out
+        # GND should show its zone layers
+        assert "F.Cu" in captured.out or "B.Cu" in captured.out
+
     def test_nets_sorted(self, minimal_pcb: Path, capsys, monkeypatch):
         """Test nets command with sorting."""
         from kicad_tools.cli.pcb_query import main
@@ -148,6 +216,42 @@ class TestPcbQuery:
 
         captured = capsys.readouterr()
         assert "GND" in captured.out
+
+    def test_net_detail_json_zone_fields(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test net detail JSON output includes zone fields."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(zone_test_pcb), "net", "GND", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["zone_connected"] is True
+        assert "F.Cu" in data["zone_layers"]
+        assert "B.Cu" in data["zone_layers"]
+
+    def test_net_detail_text_zone_layers(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test net detail text output shows zone layers."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(zone_test_pcb), "net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "Zone layers:" in captured.out
+        assert "F.Cu" in captured.out
+
+    def test_net_detail_text_no_zones(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test net detail text output shows (none) when no zones."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "Zone layers: (none)" in captured.out
 
     def test_traces_command(self, minimal_pcb: Path, capsys, monkeypatch):
         """Test traces command."""
