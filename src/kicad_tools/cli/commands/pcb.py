@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline")
+        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline, net-audit")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -54,6 +54,10 @@ def run_pcb_command(args) -> int:
     # Handle edit-outline command
     if args.pcb_command == "edit-outline":
         return _run_edit_outline_command(args, pcb_path)
+
+    # Handle net-audit command
+    if args.pcb_command == "net-audit":
+        return _run_net_audit_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -1113,3 +1117,110 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
 
     print("Error: No action specified. Use --list, --remove-outline, --keep-only, or --set-outline.", file=sys.stderr)
     return 1
+
+
+def _run_net_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb net-audit' command."""
+    from kicad_tools.audit.net_audit import find_stale_nets, fix_stale_nets
+    from kicad_tools.schema.pcb import PCB
+
+    output_format = getattr(args, "format", "text")
+    fix = getattr(args, "fix", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    # --dry-run implies --fix (shows what would be fixed)
+    if dry_run:
+        fix = True
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    groups = find_stale_nets(pcb)
+
+    # Build result data
+    result = {
+        "input": str(pcb_path),
+        "stale_nets": len(groups),
+        "findings": [],
+    }
+
+    for group in groups:
+        finding = {
+            "stale_net": group.stale_net_name,
+            "stale_net_number": group.stale_net_number,
+            "active_net": group.active_net_name,
+            "active_net_number": group.active_net_number,
+            "active_segments": group.active_segment_count,
+            "active_vias": group.active_via_count,
+            "affected_pads": [
+                {
+                    "footprint": pad.footprint_ref,
+                    "pad": pad.pad_number,
+                    "current_net": pad.current_net,
+                }
+                for pad in group.affected_pads
+            ],
+        }
+        result["findings"].append(finding)
+
+    # Apply fix if requested
+    fixed_count = 0
+    if fix and groups:
+        if not dry_run:
+            fixed_count = fix_stale_nets(pcb, groups)
+            result["fixed_pads"] = fixed_count
+
+            # Save
+            output = getattr(args, "output", None)
+            output_path = Path(output) if output else pcb_path
+            result["output"] = str(output_path)
+            try:
+                pcb.save(output_path)
+            except Exception as e:
+                print(f"Error saving PCB: {e}", file=sys.stderr)
+                return 1
+        else:
+            # Dry-run: count what would be fixed
+            total_pads = sum(len(g.affected_pads) for g in groups)
+            result["dry_run"] = True
+            result["would_fix_pads"] = total_pads
+
+    # Output
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        if not groups:
+            print("No stale or duplicate nets found.")
+            return 0
+
+        label = " (dry run)" if dry_run else ""
+        print(f"PCB Net Audit{label}")
+        print(f"  Input: {pcb_path}")
+        print(f"  Found {len(groups)} stale net(s):\n")
+
+        for group in groups:
+            print(f"  Stale:  {group.stale_net_name} (net {group.stale_net_number})")
+            print(f"  Active: {group.active_net_name} (net {group.active_net_number})")
+            print(f"    Segments: {group.active_segment_count}, Vias: {group.active_via_count}")
+            if group.affected_pads:
+                print(f"    Affected pads ({len(group.affected_pads)}):")
+                for pad in group.affected_pads:
+                    print(f"      {pad.footprint_ref} pad {pad.pad_number}")
+            print()
+
+        if fix and not dry_run:
+            print(f"  Fixed {fixed_count} pad(s).")
+            output = getattr(args, "output", None)
+            output_path = Path(output) if output else pcb_path
+            print(f"  Saved to: {output_path}")
+        elif dry_run:
+            total_pads = sum(len(g.affected_pads) for g in groups)
+            print(f"  Would fix {total_pads} pad(s).")
+
+    # Return non-zero if stale nets found and --fix was not used
+    if groups and not fix:
+        return 1
+    return 0

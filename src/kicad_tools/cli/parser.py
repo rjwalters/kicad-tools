@@ -1694,6 +1694,39 @@ def _add_pcb_parser(subparsers) -> None:
         help="Preview changes without modifying the PCB file",
     )
 
+    # pcb net-audit
+    pcb_net_audit = pcb_subparsers.add_parser(
+        "net-audit",
+        help="Detect stale/duplicate net names from KiCad version changes",
+        description="Detect and optionally fix stale net names that arise when "
+        "a PCB is round-tripped through different KiCad versions. "
+        "Old-style Net-(REF-PadN) and new-style Net-(REF-N) names "
+        "for the same logical net are detected as duplicates.",
+    )
+    pcb_net_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_net_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_net_audit.add_argument(
+        "--fix",
+        action="store_true",
+        help="Reassign pads from stale nets to active nets",
+    )
+    pcb_net_audit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview fixes without modifying the PCB file (implies --fix)",
+    )
+    pcb_net_audit.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
