@@ -37,6 +37,11 @@ from kicad_tools.sexp import SExp
 # resolution.
 _QUANT = 1000
 
+# Any wire shorter than this (mm) is unconditionally flagged as a stub,
+# regardless of how many endpoints appear connected.  No intentional
+# schematic wire is ever this short.
+_MICRO_STUB_FLOOR = 0.05
+
 
 @dataclass
 class WireIssue:
@@ -431,6 +436,14 @@ def find_cleanup_candidates(
     # a junction marker) is NOT considered connected, because KiCad's ERC
     # treats it the same way.  This ensures that sub-mm stubs whose only
     # "anchor" is a wire-body overlap are correctly detected.
+    #
+    # Sub-mm stubs where *both* endpoints appear electrically connected are
+    # also caught in two ways:
+    #   (a) Micro-stubs (length < _MICRO_STUB_FLOOR) are unconditionally
+    #       flagged -- no intentional wire is ever that short.
+    #   (b) Short wires where both endpoints are connected only through
+    #       shared wire endpoints (no pin, label, or junction at either
+    #       end) are likely repair artifacts and are flagged as stubs.
     if stub_threshold > 0:
         # Build a set of wires already flagged so we don't double-count
         flagged_ids = {id(issue.wire_sexp) for issue in issues}
@@ -442,6 +455,19 @@ def find_cleanup_candidates(
             start, end = _wire_start_end(ws)
             length = math.hypot(end[0] - start[0], end[1] - start[1])
             if length >= stub_threshold:
+                continue
+
+            # (a) Micro-stubs: unconditionally flag wires shorter than the
+            # floor -- no real schematic wire is ever this short.
+            if length < _MICRO_STUB_FLOOR:
+                issues.append(
+                    WireIssue(
+                        reason="stub",
+                        wire_sexp=ws,
+                        start=start,
+                        end=end,
+                    )
+                )
                 continue
 
             electrically_dangling = 0
@@ -458,6 +484,32 @@ def find_cleanup_candidates(
             # the free end dangling will show electrically_dangling == 1.
             # Both cases should be flagged.
             if electrically_dangling >= 1:
+                issues.append(
+                    WireIssue(
+                        reason="stub",
+                        wire_sexp=ws,
+                        start=start,
+                        end=end,
+                    )
+                )
+                continue
+
+            # (b) Both endpoints are electrically connected.  Check if
+            # neither endpoint touches a "strong" connection (pin, label,
+            # junction, no-connect).  A short wire that merely bridges two
+            # other wire endpoints without any component-level anchor is
+            # very likely a repair artifact (the typical chorus-test-revA
+            # pattern: 0.05-0.43mm fragments left between wire endpoints).
+            start_key = (_quantize(start[0]), _quantize(start[1]))
+            end_key = (_quantize(end[0]), _quantize(end[1]))
+
+            start_at_connection_point = start_key in connection_points
+            end_at_connection_point = end_key in connection_points
+
+            if not start_at_connection_point and not end_at_connection_point:
+                # Neither end touches a pin, label, junction, or no-connect.
+                # Both ends are connected only via shared wire endpoints.
+                # Flag as a stub -- it is a redundant bridge fragment.
                 issues.append(
                     WireIssue(
                         reason="stub",
