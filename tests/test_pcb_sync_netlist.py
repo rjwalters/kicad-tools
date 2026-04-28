@@ -1439,6 +1439,236 @@ class TestAutoRenameFlag:
         assert pcb.read_text() == original_content
 
 
+# --- Hierarchical schematic fixtures ---
+
+# Root schematic with only sheet references (no direct symbols)
+HIERARCHICAL_ROOT = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "root-uuid")
+  (paper "A4")
+  (sheet
+    (at 50 50)
+    (size 30 20)
+    (uuid "sheet1-uuid")
+    (property "Sheetname" "Clock" (at 50 49 0) (effects (font (size 1.27 1.27))))
+    (property "Sheetfile" "clock.kicad_sch" (at 50 72 0) (effects (font (size 1.27 1.27))))
+  )
+  (sheet
+    (at 100 50)
+    (size 30 20)
+    (uuid "sheet2-uuid")
+    (property "Sheetname" "MCU" (at 100 49 0) (effects (font (size 1.27 1.27))))
+    (property "Sheetfile" "mcu.kicad_sch" (at 100 72 0) (effects (font (size 1.27 1.27))))
+  )
+)
+"""
+
+HIERARCHICAL_CLOCK_SHEET = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "clock-uuid")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "r1-uuid")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+HIERARCHICAL_MCU_SHEET = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "mcu-uuid")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "c1-uuid")
+    (property "Reference" "C1" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100n" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# Schematic with a net tie (in_bom=False, on_board=True)
+SCHEMATIC_WITH_NET_TIE = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:NetTie_2")
+    (at 140 100 0)
+    (in_bom no)
+    (on_board yes)
+    (uuid "00000000-0000-0000-0000-000000000004")
+    (property "Reference" "NT1" (at 140 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "NetTie_2" (at 140 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "NetTie:NetTie-2_SMD_Pad0.5mm" (at 140 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with R1 and NT1
+PCB_WITH_R1_AND_NT1 = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "NetTie:NetTie-2_SMD_Pad0.5mm"
+    (layer "F.Cu")
+    (uuid "fp-nt1")
+    (at 140 100)
+    (property "Reference" "NT1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "NetTie_2" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.25 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.25 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestHierarchicalSync:
+    """Tests for sync-netlist with hierarchical schematics."""
+
+    def test_finds_components_in_sub_sheets(self, tmp_path):
+        """Components in sub-sheets are found and not reported as orphaned."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        root = tmp_path / "root.kicad_sch"
+        clock = tmp_path / "clock.kicad_sch"
+        mcu = tmp_path / "mcu.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+
+        root.write_text(HIERARCHICAL_ROOT)
+        clock.write_text(HIERARCHICAL_CLOCK_SHEET)
+        mcu.write_text(HIERARCHICAL_MCU_SHEET)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(root, pcb, dry_run=True)
+
+        assert not result.orphaned, f"Unexpected orphans: {[o.reference for o in result.orphaned]}"
+        assert not result.added
+        assert not result.errors
+
+    def test_root_only_symbols_flagged_as_orphaned(self, tmp_path):
+        """Without sub-sheet traversal, all PCB footprints would be orphaned."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        # Use root schematic that has NO symbols and NO sheet references
+        root = tmp_path / "empty.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        root.write_text(
+            "(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))"
+        )
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(root, pcb, dry_run=True)
+
+        # Both R1 and C1 should be orphaned since empty schematic
+        assert len(result.orphaned) == 2
+
+    def test_detects_missing_sub_sheet_component(self, tmp_path):
+        """Component in sub-sheet but missing from PCB is detected."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        root = tmp_path / "root.kicad_sch"
+        clock = tmp_path / "clock.kicad_sch"
+        mcu = tmp_path / "mcu.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+
+        root.write_text(HIERARCHICAL_ROOT)
+        clock.write_text(HIERARCHICAL_CLOCK_SHEET)
+        mcu.write_text(HIERARCHICAL_MCU_SHEET)
+        # PCB only has C1, missing R1 from clock sub-sheet
+        pcb.write_text(PCB_MISSING_R1)
+
+        result = sync_netlist(root, pcb, dry_run=True)
+
+        assert len(result.added) == 1
+        assert result.added[0].reference == "R1"
+        assert not result.orphaned
+
+
+class TestNetTieSync:
+    """Tests for net tie components (in_bom=False, on_board=True)."""
+
+    def test_net_tie_not_orphaned(self, tmp_path):
+        """Net tie with in_bom=False on_board=True should not be orphaned."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_WITH_NET_TIE)
+        pcb.write_text(PCB_WITH_R1_AND_NT1)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert not result.orphaned, f"Unexpected orphans: {[o.reference for o in result.orphaned]}"
+        assert not result.added
+        assert not result.errors
+
+    def test_net_tie_missing_from_pcb_is_added(self, tmp_path):
+        """Net tie in schematic but missing from PCB is detected as needing addition."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_WITH_NET_TIE)
+        # PCB only has R1, no NT1
+        pcb.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)""")
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.added) == 1
+        assert result.added[0].reference == "NT1"
+        assert not result.orphaned
+
+
 class TestGetBoardEdgePosition:
     """Tests for _get_board_edge_position coordinate handling."""
 

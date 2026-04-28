@@ -93,10 +93,14 @@ def sync_netlist(
         return result
 
     # Build schematic component dict: ref -> BOMItem
-    # Skip virtual/power symbols but keep DNP (they still need footprints)
+    # Skip power symbols and components not placed on the board.
+    # Components with in_bom=False but on_board=True (e.g., net ties)
+    # are included because they have physical footprints on the PCB.
     sch_components: dict[str, BOMItem] = {}
     for item in bom.items:
-        if item.is_virtual or item.is_power_symbol:
+        if item.is_power_symbol:
+            continue
+        if not item.on_board:
             continue
         if item.reference and not item.reference.startswith("#"):
             sch_components[item.reference] = item
