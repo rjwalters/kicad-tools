@@ -4229,6 +4229,63 @@ class TestStitchStep:
         assert result.success is True
         assert result.skipped is True
 
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_stitch_passes_manufacturer_via_specs(self, mock_run, four_layer_pcb_with_zones: Path):
+        """Stitch step passes --via-size and --drill from manufacturer specs."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        console = MagicMock()
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", mfr="seeed", quiet=True
+        )
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert result.skipped is False
+        # Verify subprocess was called with via specs from manufacturer
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "--via-size" in cmd
+        assert "--drill" in cmd
+        # Seeed requires 0.3mm drill / 0.6mm diameter minimum
+        via_size_idx = cmd.index("--via-size")
+        drill_idx = cmd.index("--drill")
+        via_size_val = float(cmd[via_size_idx + 1])
+        drill_val = float(cmd[drill_idx + 1])
+        assert via_size_val >= 0.6, f"Via size {via_size_val} too small for seeed"
+        assert drill_val >= 0.3, f"Drill {drill_val} too small for seeed"
+
+    def test_stitch_dry_run_includes_via_specs(self, four_layer_pcb_with_zones: Path):
+        """Stitch dry-run message includes via size and drill from manufacturer."""
+        console = MagicMock()
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", mfr="seeed",
+            dry_run=True, quiet=True,
+        )
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        assert "--via-size" in result.message
+        assert "--drill" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_stitch_default_jlcpcb_via_specs(self, mock_run, four_layer_pcb_with_zones: Path):
+        """Stitch step uses JLCPCB via specs when mfr is jlcpcb (default)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        console = MagicMock()
+        ctx = PipelineContext(
+            pcb_file=four_layer_pcb_with_zones, layers="4", mfr="jlcpcb", quiet=True
+        )
+        result = _run_step_stitch(ctx, console)
+        assert result.success is True
+        cmd = mock_run.call_args[0][0]
+        assert "--via-size" in cmd
+        assert "--drill" in cmd
+        via_size_idx = cmd.index("--via-size")
+        drill_idx = cmd.index("--drill")
+        via_size_val = float(cmd[via_size_idx + 1])
+        drill_val = float(cmd[drill_idx + 1])
+        # JLCPCB minimum: 0.3mm drill / 0.6mm diameter
+        assert via_size_val >= 0.45, f"Via size {via_size_val} unexpectedly small for jlcpcb"
+        assert drill_val >= 0.2, f"Drill {drill_val} unexpectedly small for jlcpcb"
+
 
 class TestCacheFlagForwarding:
     """Tests for --no-cache and --clear-cache flag forwarding to route step."""

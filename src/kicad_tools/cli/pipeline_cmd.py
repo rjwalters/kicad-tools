@@ -676,6 +676,19 @@ def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
             skipped=True,
         )
 
+    # Look up manufacturer via specs so stitching vias meet DRC requirements.
+    try:
+        from ..manufacturers import get_profile
+
+        profile = get_profile(ctx.mfr)
+        rules = profile.get_design_rules(layers=ctx.layer_count)
+        via_size = rules.min_via_diameter_mm
+        via_drill = rules.min_via_drill_mm
+    except Exception:
+        # Fall back to conservative defaults if lookup fails
+        via_size = 0.6
+        via_drill = 0.3
+
     if ctx.dry_run:
         nets_str = ", ".join(sorted(plane_nets.keys()))
         return PipelineResult(
@@ -683,6 +696,7 @@ def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
             success=True,
             message=(
                 f"[dry-run] Would run: kct stitch {ctx.pcb_file.name} "
+                f"--via-size {via_size} --drill {via_drill} "
                 f"(auto-detected nets: {nets_str})"
             ),
         )
@@ -690,7 +704,8 @@ def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
     if not ctx.quiet:
         console.print(
             f"  Stitching vias on {ctx.pcb_file.name} "
-            f"({len(plane_nets)} plane net(s))..."
+            f"({len(plane_nets)} plane net(s), "
+            f"via {via_size}mm/{via_drill}mm drill for {ctx.mfr})..."
         )
 
     cmd = [
@@ -699,6 +714,10 @@ def _run_step_stitch(ctx: PipelineContext, console: Console) -> PipelineResult:
         "kicad_tools.cli",
         "stitch",
         str(ctx.pcb_file),
+        "--via-size",
+        str(via_size),
+        "--drill",
+        str(via_drill),
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
