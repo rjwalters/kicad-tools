@@ -166,6 +166,37 @@ class Junction:
 
 
 @dataclass
+class NoConnect:
+    """
+    A no-connect marker indicating a pin is intentionally unconnected.
+
+    Format in KiCad schematic::
+
+        (no_connect (at X Y) (uuid "..."))
+    """
+
+    position: tuple[float, float]
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> NoConnect:
+        """Parse from S-expression."""
+        pos = (0.0, 0.0)
+        uuid = ""
+
+        if at := sexp.find("at"):
+            pos = (at.get_float(0) or 0, at.get_float(1) or 0)
+
+        if uuid_node := sexp.find("uuid"):
+            uuid = uuid_node.get_string(0) or ""
+
+        return cls(position=pos, uuid=uuid)
+
+    def __repr__(self) -> str:
+        return f"NoConnect({self.position})"
+
+
+@dataclass
 class Bus:
     """
     A bus segment (multiple signals grouped together).

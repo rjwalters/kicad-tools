@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check pin connections using exact pin positions from symbol libraries.
+Check pin connections using wire-graph BFS for accurate connectivity.
 
 Usage:
     kicad-tools sch connections <schematic.kicad_sch> [options]
@@ -31,14 +31,16 @@ import argparse
 import fnmatch
 import json
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from kicad_tools.cli.sch_connectivity import (
-    Coord,
-    build_wire_graph,
-    is_pin_connected,
-    to_coord,
+from kicad_tools.cli.sch_pin_map import (
+    _build_wire_graph,
+    _flood_fill_net,
+    _propagate_net_names,
+    _snap_coord,
+    _to_coord,
 )
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
@@ -54,8 +56,11 @@ class PinStatus:
     pin_type: str
     position: tuple[float, float]
     connected: bool
-    connection_type: str = ""  # "wire", "label", "junction"
+    connection_type: str = ""  # "wire", "label", "power", "no_connect"
     sheet: str = ""  # sheet path for hierarchical schematics
+
+
+Coord = tuple[int, int]
 
 
 def _resolve_lib_symbol(
@@ -93,31 +98,46 @@ def check_symbol_connections(
     sheet_path: str = "",
 ) -> list[PinStatus]:
     """
-    Check all symbol pins for connections.
+    Check all symbol pins for connections using wire-graph BFS.
 
-    Uses the wire-graph BFS approach (same algorithm as ``sch_pin_map``)
-    to correctly handle sub-grid pin positions.  Embedded lib_symbols from
-    the schematic are used by default; an optional *lib_manager* is
-    consulted as a fallback for backward compatibility.
+    Uses the same BFS approach as the pin-map command to correctly trace
+    connectivity through wires, labels, power symbols, and junctions.
+
+    Pins at no-connect marker positions are reported as connected with
+    connection_type="no_connect".
 
     Returns list of PinStatus for all pins (or filtered pins).
     """
     results = []
 
-    # First pass: collect all pin coordinates so the wire graph is split
-    # at pin positions (required for BFS reachability).
+    # Build no-connect position set for quick lookup
+    nc_positions: set[Coord] = set()
+    for nc in schematic.no_connects:
+        nc_positions.add(_to_coord(*nc.position))
+
+    # ---------------------------------------------------------------
+    # First pass: collect all non-power symbol pin positions.
+    # We need these before building the wire graph so wire segments
+    # are split at pin coordinates, making them reachable by BFS.
+    # ---------------------------------------------------------------
+    ref_pin_coords: dict[str, set[Coord]] = defaultdict(set)
     all_pin_coords: set[Coord] = set()
-    symbol_data: list[tuple] = []  # (symbol, lib_sym, pin_positions)
+
+    # Cache resolved library symbols and pin positions per instance
+    _sym_cache: list[tuple] = []  # (symbol, lib_sym, pin_positions)
 
     for symbol in schematic.symbols:
+        # Skip power symbols -- they are handled as net-name sources
+        # inside the wire graph, not as components to check.
         if symbol.lib_id.startswith("power:"):
             continue
 
+        # Apply filter
         if pattern and not fnmatch.fnmatch(symbol.reference, pattern):
             continue
 
+        # Get library symbol (embedded first, then lib_manager fallback)
         lib_sym = _resolve_lib_symbol(schematic, symbol.lib_id, lib_manager)
-
         if not lib_sym:
             results.append(
                 PinStatus(
@@ -132,29 +152,88 @@ def check_symbol_connections(
             )
             continue
 
+        # Get pin positions
         pin_positions = lib_sym.get_all_pin_positions(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
         )
 
-        for pos in pin_positions.values():
-            all_pin_coords.add(to_coord(*pos))
+        coords: set[Coord] = set()
+        for pin_num, pos in pin_positions.items():
+            coords.add(_to_coord(*pos))
+        ref_pin_coords[symbol.reference].update(coords)
+        all_pin_coords.update(coords)
+        _sym_cache.append((symbol, lib_sym, pin_positions))
 
-        symbol_data.append((symbol, lib_sym, pin_positions))
+    # ---------------------------------------------------------------
+    # Build wire graph with pin coordinates as split points so that
+    # BFS can start from any pin position.
+    # ---------------------------------------------------------------
+    adjacency, net_names = _build_wire_graph(schematic, extra_points=all_pin_coords)
 
-    # Build wire graph with pin coordinates as split points
-    adjacency, _net_names = build_wire_graph(schematic, extra_points=all_pin_coords)
+    # Propagate net names through the wire graph so that barrier pins
+    # on the same wire as a label already have the net name recorded.
+    _propagate_net_names(adjacency, net_names)
 
-    # Second pass: check each pin for connectivity via the wire graph
-    for symbol, lib_sym, pin_positions in symbol_data:
+    graph_nodes = set(adjacency.keys())
+
+    # ---------------------------------------------------------------
+    # Second pass: check connectivity for each pin using BFS.
+    # ---------------------------------------------------------------
+    for symbol, lib_sym, pin_positions in _sym_cache:
+        # Barrier = all pin coords except this symbol's own pins
+        barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference]
+
         for lib_pin in lib_sym.pins:
             if lib_pin.number not in pin_positions:
                 continue
 
             pos = pin_positions[lib_pin.number]
-            coord = to_coord(*pos)
-            connected = is_pin_connected(coord, adjacency)
+            coord = _to_coord(*pos)
+            snapped = _snap_coord(coord, graph_nodes)
+
+            # Check for no-connect marker at this pin position
+            is_no_connect = coord in nc_positions
+            if not is_no_connect:
+                # Also check with snap tolerance
+                snapped_nc = _snap_coord(coord, nc_positions)
+                is_no_connect = snapped_nc in nc_positions and snapped_nc != coord
+
+            if is_no_connect:
+                results.append(
+                    PinStatus(
+                        reference=symbol.reference,
+                        pin_number=lib_pin.number,
+                        pin_name=lib_pin.name,
+                        pin_type=lib_pin.type,
+                        position=pos,
+                        connected=True,
+                        connection_type="no_connect",
+                        sheet=sheet_path,
+                    )
+                )
+                continue
+
+            # Use BFS to find if this pin connects to any net
+            net = _flood_fill_net(coord, adjacency, net_names, barrier_pins)
+
+            # A pin is connected if it is reachable in the wire graph
+            # (i.e., it touches a wire endpoint, junction, label, or
+            # power symbol).  Having a net name is sufficient, but even
+            # without a name the pin is connected if BFS can reach at
+            # least one other node through a wire.
+            connected = False
+            connection_type = ""
+
+            if net is not None:
+                connected = True
+                connection_type = "wire"
+            elif snapped in adjacency and adjacency[snapped]:
+                # Pin is on the wire graph (touches a wire) even though
+                # no net name was resolved.
+                connected = True
+                connection_type = "wire"
 
             results.append(
                 PinStatus(
@@ -164,6 +243,7 @@ def check_symbol_connections(
                     pin_type=lib_pin.type,
                     position=pos,
                     connected=connected,
+                    connection_type=connection_type,
                     sheet=sheet_path,
                 )
             )
@@ -314,7 +394,12 @@ def output_table(results: list[PinStatus], show_all: bool):
             ),
         ):
             pos_str = f"({pin.position[0]:.1f}, {pin.position[1]:.1f})"
-            status = "connected" if pin.connected else "UNCONNECTED"
+            if pin.connection_type == "no_connect":
+                status = "no_connect"
+            elif pin.connected:
+                status = "connected"
+            else:
+                status = "UNCONNECTED"
             print(
                 f"  {pin.pin_number:<5}  {pin.pin_name:<15}  {pin.pin_type:<12}  {pos_str:<20}  {status}"
             )
@@ -343,6 +428,7 @@ def output_json(results: list[PinStatus], show_all: bool):
                 "pin_type": p.pin_type,
                 "position": list(p.position),
                 "connected": p.connected,
+                "connection_type": p.connection_type,
                 **({"sheet": p.sheet} if p.sheet else {}),
             }
             for p in results
