@@ -5,6 +5,305 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-28
+
+### Added
+
+#### Schematic Editing
+
+New atomic schematic editing commands for fully programmatic circuit construction.
+
+- **`add-component`** (#1872) — Place symbols from library into schematics with junction and wire awareness
+- **`add-wire` / `remove-wire`** (#1883, #1881) — Place and delete wire segments by coordinate
+- **`add-label`** (#1885) — Place net labels on schematic wires
+- **`add-no-connect` / `disconnect`** (#1858) — Place no-connect flags and disconnect pins
+- **`add-bypass-cap`** (#1940) — Composite command to insert decoupling capacitors with automatic wire routing
+- **`add-pull-resistor`** (#1939) — Composite command to add pull-up/pull-down resistors with wire rerouting around crossings
+- **`insert-inline`** (#2111) — Break a wire and insert a component inline
+- **`remove-component`** (#2133) — Delete symbols with cleanup of exclusive wire segments
+- **`set-value`** (#1871) — Update symbol `Value` property
+- **`set-footprint`** (#1855) — Assign footprint to a schematic symbol
+- **`set-reference`** (#2180) — Rename reference designators
+- **`set-symbol-property`** (#2181) — Set boolean flags on symbols
+- **`move-component`** (#2186) — Reposition symbols on the schematic
+- **`reconnect-pin`** (#2183) — Atomic pin-to-net reassignment
+- **`set-label-direction`** (#1882) — Change global/hierarchical label shape/direction
+- **`re-annotate`** (#1897) — Batch reference designator annotation with `--unannotated-only` and `--include-power` flags
+- **`repair-instances`** (#1971) — Repair or create missing project instances blocks in symbol definitions
+- **`cleanup-wires`** (#2179, #1858) — Detect and remove sub-mm dangling wire stubs and duplicate wire segments
+
+#### Schematic Inspection
+
+- **`pin-map`** (#1903, #2201, #2237) — Resolved pin-to-net assignments with coordinates, traversal across full hierarchy, connected field, and synthetic `_local_N` nets for floating pins
+- **`show-pins`** (#2200) — Enriched pin output with name, type, net, and position fields
+- **`sch preflight`** (#1856) — Pre-layout schematic validation including pin/pad count checks and wire connectivity
+- **`sch summary`** — Connectivity counts now aggregated correctly across all sheets (#1895)
+- **`sch labels --type global`** (#1896) — Now scans all sheets in the hierarchy
+
+#### Schematic Validation (`sch validate`)
+
+- **I2C pull-up resistor check** (#2050) — Detect missing pull-ups on SDA/SCL nets
+- **Connector pinout verification** (#1936) — Validate connector pins against known interface standards
+- **Symbol-to-footprint pin/pad count mismatch** (#2113) — Check for footprint pad count mismatches
+- **BOOT0 pull-down detection** (#2107) — STM32 BOOT0 pin configuration check
+- **Missing NRST filter capacitor** (#2102) — STM32 NRST RC filter detection
+- **SWD debug pin routing check** (#2112) — STM32 SWD pin connectivity audit
+- **Matched channel symmetry check** (#2105) — Detect asymmetry in differential/parallel output filter channels
+- **Power pin polarity errors** (#2078) — Detect VDD/GND swap errors
+- **Unconnected component detection** (#2082) — Flag components with all pins floating
+- **Zone fill check** (#2109) — Detect unfilled copper zones
+- **Duplicate reference designator detection** (#1968, #1582) — Per-sheet and cross-sheet duplicate ref des checks
+- **Missing instances blocks check** (#1933) — Detect symbols without project instances
+- **Global label driver/receiver direction mismatch** (#1909) — Warn when label shapes are inconsistent
+- **No-connect on input pins warning** (#1912) — Flag `NC` flags placed on driven input pins
+- **Inconsistent global label shapes** (#2049) — Detect mismatched shapes across sheets
+- **Pin assignment audit and power-short detection** (#2031) — Validate pin assignments and flag power shorts
+- **`value_consistency` check** (#2234) — Flag mixed capacitor voltage rating formatting
+- **Unnecessary footprint variety warning** (#2185) — Flag same-value passives with mixed footprint sizes
+- **`net_undeclared` rule** (#2106) — Detect PCB pads referencing undeclared nets
+- **Solder mask clearance, pad size, and PTH annular ring checks** (#1690)
+- **Package-size constraint in LVS** (#1583) — Pass 3/4 LVS validation now checks package dimensions
+- **LVS with hierarchical schematic support** (#1568) — Multi-pass matching
+
+#### PCB Commands
+
+- **`pcb sync-netlist`** (#1973, #1983) — Netlist-driven PCB synchronization with collision-safe renames, ambiguous warnings, and `--auto-rename`; `--remove-orphans` flag and standalone `remove-footprint` command (#1982)
+- **`create-pcb`** (#1744) — New CLI command and MCP tool to create a PCB from a schematic
+- **`pcb move-footprint`** (#2076) — Relocate components on the PCB
+- **`pcb add-zone`** (#2079) — Create copper pours
+- **`pcb edit-outline`** (#2081) — Manage Edge.Cuts contour
+- **`pcb snap-rotation`** (#2080) — Normalize component rotation angles
+- **`pcb zones`** (#2077) — Inspect zones and copper pours
+- **`pcb reannotate`** (#1569) — Collision-safe batch reference renaming
+- **`kct sync`** (#1562) — Reconcile schematic/PCB reference designators
+- **`pcb summary`** — Board dimensions added to output (#2178); zone count always displayed (#2084)
+
+#### Routing
+
+- **AdaptiveGridRouter as default** (#1772) — Wired as default for `--grid auto`
+- **Sub-grid escape routing** (#1610, #1831) — Integrated into default `route_all` pipeline; fine-zone resolution for dense IC pads
+- **BlockRouter** (#1612) — Per-block detail routing with sub-Pathfinder
+- **Block-aware routing** (#1616, #1599) — Inter-block net classification; `register_block` for protected-zone routing
+- **GCD-based grid candidate generation** (#1762) — Off-grid pad alignment
+- **Edge clearance constraint** (#2140) — Avoid board-edge DRC violations
+- **Post-optimization DRC verify-and-nudge pass** (#1793)
+- **Per-net-class trace widths** (#1546, #1691) — Applied during segment creation and A* search
+- **Per-net-class clearance in pre-save validation** (#1664)
+- **`--best-effort` flag** (#1759) — Continue pipeline past routing failures
+- **`--no-cache` / `--clear-cache` flags** (#1826, #1630) — Route cache control exposed in CLI
+- **Seeed/Seeed Fusion manufacturer aliases** (#2027) — Closest-match suggestions for manufacturer names
+- **Exit code epilog and SIGINT disambiguation** (#2030)
+
+#### Via Stitching (`stitch`)
+
+- **Extended escape routing for dense IC power pins** (#1818)
+- **`--blanket` mode** (#1789) — Grid-based via stitching across zones
+- **Stitch step in build pipeline** (#1814) — Added between route and optimize
+- **Micro-via retry and structured skip diagnostics** (#2139)
+- **`fix-vias`** (#2134) — Detect and repair same-layer vias
+
+#### Placement
+
+- **`place-unplaced`** (#1994) — Grid placement for unplaced components
+- **Fast targeted pad clearance nudge** (#1974)
+- **Block-aware placement constraints** (#1598) — Reduced-dimensionality encoding for block placement
+- **C++ force-directed placement engine** (#1722) — Batch interface with Python fallback
+- **C++ AABB cost evaluator** (#1718) — With nanobind bindings
+- **C++ evolutionary fitness evaluator** (#1723)
+- **Auto-scale boundary forces by component density** (#2032)
+- **`place-route` DRC fix-retry loop** (#2002) — `ClearanceRepairer` wired in
+
+#### DRC & Validation
+
+- **`ViolationCategory` enum** (#1975) — Fine-pitch solder mask bridge filtering
+- **Footprint nudge for pad-pad clearance violations** (#2218)
+- **`repair-clearance`** — Improved post-route clearance repair (#1683)
+- **Net names in clearance violation output** (#2150)
+- **`--verify` flag in `fix-drc`** (#2083)
+- **C++ accelerated pad-to-pad clearance checking** (#1719)
+- **Footprint-outside-board placement rule** (#2104)
+- **Silkscreen text height auto-fix** (#1522)
+- **`--suppress-library` flag** (#1985) — Suppress silkscreen warnings for library components
+
+#### ERC
+
+- **Cross-sheet power pin driver suppression** (#2015) — No more false-positive `power_pin_not_driven` for cross-sheet drivers
+- **Re-attribution of violations to correct sheets** (#2236) — Hierarchical designs now show violations on the correct child sheet
+- **Label/net names in ERC warning messages** (#1934)
+- **`fix-erc`** (#2230) — Handle `unconnected_wire_endpoint` and `wire_dangling` violation types
+
+#### Export & Manufacturing
+
+- **Seeed manufacturer profile** (#2231) — Added to export command
+- **Pandoc+TeX PDF rendering** — Manufacturing packages now include PDF reports
+- **`--latest-only` flag** (#1679) — Flatten report into a single output directory
+- **`--bom-source` flag** (#1561) — PCB-only BOM generation
+- **`--keep-build-artifacts` flag** (#2022) — Preserve intermediate build files
+- **Spec-aware BOM enrichment** (#1510) — LCSC part numbers from `.kct` project files
+- **CPL output filters** (#1511) — Exclude THT and DNP components
+- **LCSC API 403 fallback** (#1760) — Fall back to cached enrichment when JLCPCB API is unavailable
+- **`-o/--output` flag** (#1632) — Output path for `kct build`
+- **Auto-discovery of PCB files** (#1551) — `export` accepts directory paths
+- **Design reports with narrative and assembly notes** (#1995)
+- **DRC violation-type breakdown table in reports** (#2163)
+- **Report stackup section and figure generation** (#1698)
+
+#### Build Pipeline
+
+- **`zones` step** (#1688) — Auto-create power/ground zones before routing
+- **Silkscreen step** (#1689) — Ref des visibility and board markings
+- **Export step** (#1686) — Added to `kct build` pipeline
+- **Placement optimization step** (#1687) — Added to `kct build` pipeline
+- **Edge.Cuts outline generation step** (#1505)
+- **Zone fill re-enabled as default step** (#1749)
+
+#### CLI & MCP
+
+- **`kct stitch` subcommand** (#1613)
+- **`kct check --output`** (#1537) — Persist DRC reports as JSON
+- **`/review-schematic` and `/repair-schematic` skills** (#1868)
+- **`/review-pcb` and `/repair-pcb` skills**
+- **`/export-manufacturing` skill**
+- **`report-review` and `report-revise` skills**
+- **Prominent C++ backend warnings and CLI hints** (#1970)
+
+### Changed
+
+#### Schematic Infrastructure
+
+- **Embedded `lib_symbols` used by default** (#2202, #2235) — `sch pins`, connection checks, and hierarchy traversal now use symbols embedded in the schematic file rather than requiring `--lib`
+- **Wire-graph BFS for pin connectivity** (#2238, #2216) — All pin connectivity checks now use BFS over the wire graph instead of coordinate proximity
+- **NetTie net-name tracing** (#2213) — `pin-map` traces net names through `Device:NetTie` symbols
+- **Hierarchical label net merging** (#2114) — Improved net merging and component-count validation in netlist builder
+- **S-expression tab indentation** (#2026) — `SExp.to_string()` now uses tab indentation for KiCad compatibility
+
+#### PCB / Schema
+
+- **`sync-netlist` uses PCB API for value updates** (#2215) — Routes changes through the API; orphan removal added
+- **Footprint position/rotation/layer setters** (#1998) — Synced to S-expression on write
+- **Board summary counts** (#1958) — Derived from S-expression tree instead of cache lists
+
+#### Routing
+
+- **`--grid` default changed from `0.25` to `auto`** (#1680) — Prevents DRC clearance violations on mixed-pitch boards
+- **KiCad 9 name-only net format** (#1821, #1779, #1780) — Supported throughout router, zones, and DRC repair modules
+
+#### Refactoring
+
+- **`optimize/` consolidated into `optim/`** (#1861)
+- **`find_kicad_cli()` consolidated** (#1743) — Single implementation in `cli/runner.py`
+- **`SessionManager` consolidated** (#1740) — Single implementation in `tools/session.py`
+- **`PatternAdapter` converted to module-level functions** (#1737)
+
+### Fixed
+
+#### Schematic
+
+- **`cleanup-wires`** — Mid-segment stub detection, collinear overlap detection (#2194); uses actual pin positions instead of symbol centers (#2014); strict electrical connectivity for stub detection (#2203)
+- **`add-component`** — Junction detection and standalone wire/junction commands (#1884); double-snap replaced with round and connection-aware targeting (#2052); emit `instances` block (#2061); snap rotated pin offsets to 1.27mm grid (#2062)
+- **`add-pull-resistor`** — Wire crossing detection and L-shape reroute (#2063)
+- **`add-bypass-cap` / `add-pull-resistor`** — Emit `instances` block (#2110)
+- **`re-annotate`** — Handles unannotated components and multi-project instances; supports space-indented files (#1920); detects and annotates symbols missing instances blocks (#1976)
+- **`sch-replace`** — Updates `lib_symbols` entry and instance pins on replacement (#2051); handles derived symbols with `extends` chains (#2154)
+- **`sch-preflight`** — Resolves `extends` chains in pin/pad count check (#2153)
+- **`set-label-direction`** — `--sheet` filter made case-insensitive (#1910)
+- **Pin position calculation** (#2016, #2129) — Negated Y offset and post-rotation Y in `get_pin_position()`
+- **Power symbol junction** (#2126) — Creates junction when power pin lands on wire midpoint
+- **`lib_symbols` embedding and lookup** — Fixed for `add-component`
+- **`LibraryManager.load_embedded`** (#1911) — Inline schematic symbol loading
+- **`repair-instances`** (#2132) — Detects and replaces wrong project names in existing instances blocks
+- **`sch connections`** (#2008) — Loads embedded `lib_symbols`
+- **Derived symbol pin resolution** (#2160) — Resolves inherited pins using `extends` chains
+
+#### ERC
+
+- **False-positive `power_pin_not_driven`** (#2015) — Suppressed for cross-sheet drivers
+- **False-positive `single_global_label`** (#1922) — Filtered for cross-sheet globals
+- **False-positive `isolated_pin_label`** (#1937) — Filtered on sheets with no labels
+- **Phantom `wire_dangling` violations** (#2217) — Filtered when no matching schematic coordinates
+- **KiCad 10 `items` array label extraction** (#1938)
+- **`wire_dangling` re-attribution coverage** (#2192, #2151) — Expanded to cover more hierarchy cases
+- **`pin_assignment` suppression for MCU GPIO pins** (#2149) — On protocol nets
+
+#### PCB / Schema
+
+- **`sync-netlist`** — Uses `on_board` flag (not `is_virtual`) to filter components (#2232, #2212)
+- **`create-pcb`** — Grid layout calculated from board dimensions to prevent overflow (#1996)
+- **Board outline detection** (#1509) — Extended to handle `gr_rect` on Edge.Cuts
+- **DRC board outline coordinates** (#2130) — Transformed to board-relative space
+- **Net name resolution in DRC** (#2193) — Net numbers resolved to names in violation output
+- **`fix-drc`** — All violation categories detected; non-repairable violations reported (#2059); aligned categories with `check` (#2083)
+- **Same-component pad-to-pad false positives** (#2075) — Suppressed in DRC
+- **`.kicad_pro` selection disambiguation** (#2127) — Auto-assigns power symbol references
+
+#### Router
+
+- **Sub-grid escape through neighbor clearance zones** (#1712)
+- **C++ backend clearance rules in A* pathfinding** (#1711)
+- **Inner-layer segment clearance violations** (#1801)
+- **Via-to-via, via-to-pad, via-to-segment clearance** (#1800, #1650, #1797)
+- **Segment-to-segment clearance from grid quantization** (#1682)
+- **Same-net via merging on save** (#1800)
+- **Net-0 orphan trace cleanup** (#1981)
+- **Oscillation detection relaxed; full-reorder escape strategy** (#1827)
+- **Origin-offset search in grid auto-selection** (#2038) — Mixed-pitch boards
+- **Pad approach radius derived from pad geometry** (#1622)
+- **Off-grid net skipping and per-net A* timeout** (#1609)
+- **Escape candidates that violate inter-pad clearance rejected** (#1836)
+- **SSOP odd-pad escape vias routed inward** (#1844)
+- **SSOP fine-pitch lateral fan-out offset** (#1791)
+- **Post-route clearance correction for all routing strategies** (#1790)
+
+#### Stitch / Zones
+
+- **`stitch`** — Infer inner plane layers from stackup when zones are missing (#2044); check zone fill polygons in via clearance (#1816); include through-hole pads (#1955); post-write verification (#1957); guard `shutil.copy` for same-file input/output (#1950)
+- **`zones`** — UUID-based net restore; proximity threshold widened to 0.5mm (#1857); overlap detection and 4-layer stackup-aware zone assignment (#2042); KiCad 9 name-only net format (#1780)
+- **Net-status zone fill connectivity accounting** (#2036)
+
+#### Placement
+
+- **Board origin subtracted from Edge.Cuts in optimize** (#2060)
+- **Post-convergence slide-off pass for residual overlaps** (#2103)
+- **Courtyard-aware clamping in placement optimizer** (#1956)
+- **Iterative multi-pass conflict resolution in `cmd_fix`** (#1953)
+- **Force-directed divergence prevention** (#1769) — 1/r² falloff and force clamping
+- **Intermediate placement state saved on SIGINT/SIGTERM** (#2037)
+- **Pad positions preserved when writing optimized placements** (#2207)
+
+#### Export / Report
+
+- **Markdown report preserved alongside PDF during flattening** (#2162)
+- **Blank schematic sheets excluded from report figures** (#1992)
+- **Blank schematic detection switched from PNG size to SVG size** (#2029)
+- **ERC rendered as SKIPPED when not run** (#1503)
+- **Routing status classifies zone-filled and single-pad nets separately** (#1838)
+- **Only exported PCB included in project ZIP**
+- **Report generator uses `ReportGenerator` class** (#1521)
+
+#### CLI / Misc
+
+- **`.kicad_pro` resolved to `.kicad_pcb`** (#1506) — In `validate --connectivity` and `report generate`
+- **Spec path resolution for subdirectory `.kct` files** (#1631)
+- **`--min-completion` controls exit code threshold** (#1951)
+- **BOM LCSC part numbers preserved across regeneration** (#1606)
+- **JLCPCB API 403 circuit breaker** (#1508)
+- **JLCPCB 2oz copper min trace/clearance corrected to 6mil** (#1502)
+- **`copper_weight` string values like `'2oz'` parsed correctly** (#1596)
+- **Progress output flushed during long routing runs** (#1662)
+- **`review-schematic` uses pre-computed pin-map data** (#2233) — Instead of LLM coordinate math
+
+### Removed
+
+- **atopile submodule** — No longer referenced by any source code
+- **Dead GPU signal integrity kernel** (#1873)
+- **Dead `layout/` module** (#1742)
+- **4 dead standalone CLI scripts** (#1904)
+- **6 dead GPU detection symbols** (#1721)
+- **Dead `optimize/` package** (#1861) — Consolidated into `optim/`
+- **4 dead functions** (#1741) — Zero callers
+- **Dead `SessionExpiredError` and error-mapping code** (#1725)
+- **Dead `detect_signal_type` and `assign_layer_preferences` router functions** (#1730)
+
 ## [0.11.0] - 2026-04-12
 
 ### Added
