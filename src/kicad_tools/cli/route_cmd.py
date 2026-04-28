@@ -199,6 +199,7 @@ def _export_failed_nets(
     net_map: dict[str, int],
     export_path: str,
     quiet: bool = False,
+    nets_to_route_ids: set[int] | None = None,
 ) -> bool:
     """Export the list of failed (unrouted) net names to a file.
 
@@ -209,14 +210,21 @@ def _export_failed_nets(
         net_map: Mapping of net names to net IDs.
         export_path: File path to write the failed net names.
         quiet: If True, suppress output messages.
+        nets_to_route_ids: Optional set of net IDs targeted for routing
+            (multi-pad signal nets).  When provided, only nets in this set
+            are considered candidates so single-pad and power nets are
+            excluded from the export.
 
     Returns:
         True if the file was written successfully, False otherwise.
     """
     reverse_net = {v: k for k, v in net_map.items() if v > 0}
     routed_net_ids = {route.net for route in router.routes}
-    all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - routed_net_ids
+    if nets_to_route_ids is not None:
+        unrouted_ids = nets_to_route_ids - routed_net_ids
+    else:
+        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - routed_net_ids
 
     if not unrouted_ids:
         if not quiet:
@@ -3643,7 +3651,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Export failed nets to file if requested
     if getattr(args, "export_failed_nets", None) and not all_nets_routed:
-        _export_failed_nets(router, net_map, args.export_failed_nets, quiet=quiet)
+        _export_failed_nets(
+            router,
+            net_map,
+            args.export_failed_nets,
+            quiet=quiet,
+            nets_to_route_ids=multi_pad_net_ids,
+        )
 
     # Exit codes:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)

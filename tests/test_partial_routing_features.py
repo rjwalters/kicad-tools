@@ -230,6 +230,59 @@ class TestExportFailedNets:
         # Verify trailing newline
         assert content.endswith("\n")
 
+    def test_export_failed_nets_filters_by_nets_to_route_ids(self, tmp_path):
+        """When nets_to_route_ids is provided, only those nets appear in export."""
+        from kicad_tools.cli.route_cmd import _export_failed_nets
+
+        # net_map includes single-pad nets (5, 6) and power nets that are
+        # NOT routing candidates, plus multi-pad signal nets (1-4).
+        net_map = {
+            "GND": 0,
+            "VCC": 1,
+            "SDA": 2,
+            "SCL": 3,
+            "NRST": 4,
+            "SINGLE_PAD_A": 5,
+            "SINGLE_PAD_B": 6,
+        }
+        # Only nets 1-4 are multi-pad signal nets targeted for routing
+        multi_pad_net_ids = {1, 2, 3, 4}
+        # Router successfully routed VCC(1) and SDA(2)
+        router = _make_mock_router(routed_nets=[1, 2])
+
+        export_file = tmp_path / "failed.txt"
+        result = _export_failed_nets(
+            router, net_map, str(export_file), quiet=True,
+            nets_to_route_ids=multi_pad_net_ids,
+        )
+
+        assert result is True
+        lines = export_file.read_text().strip().split("\n")
+        # Only SCL(3) and NRST(4) should appear -- NOT SINGLE_PAD_A/B
+        assert sorted(lines) == ["NRST", "SCL"]
+
+    def test_export_failed_nets_without_filter_includes_all(self, tmp_path):
+        """Without nets_to_route_ids, all non-GND unrouted nets appear (legacy)."""
+        from kicad_tools.cli.route_cmd import _export_failed_nets
+
+        net_map = {
+            "GND": 0,
+            "VCC": 1,
+            "SDA": 2,
+            "SINGLE_PAD": 3,
+        }
+        router = _make_mock_router(routed_nets=[1])
+
+        export_file = tmp_path / "failed.txt"
+        result = _export_failed_nets(
+            router, net_map, str(export_file), quiet=True,
+        )
+
+        assert result is True
+        lines = export_file.read_text().strip().split("\n")
+        # Without filter, both SDA and SINGLE_PAD appear
+        assert sorted(lines) == ["SDA", "SINGLE_PAD"]
+
     def test_export_failed_nets_cli_flag_in_help(self):
         """--export-failed-nets appears in help output."""
         from kicad_tools.cli.route_cmd import main as route_main
