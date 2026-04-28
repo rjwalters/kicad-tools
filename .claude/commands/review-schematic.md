@@ -82,6 +82,20 @@ For each sheet discovered in Phase 1, launch a subagent using the **Task** tool.
 - Limit subagent context by passing only the relevant CLI outputs and the sheet file path -- do NOT paste the entire project summary into every subagent.
 - Each subagent should return findings as a structured list with severity, category, and description.
 
+### 2.1 Pre-compute connectivity data per sheet
+
+Before dispatching subagents, run the following commands for each sheet to gather pre-computed connectivity data. These tools correctly handle rotation, mirroring, Y-axis inversion, and grid snapping -- operations that LLMs cannot reliably perform from raw S-expression coordinates.
+
+```bash
+# Per-sheet pin-to-net mapping (run once per sheet)
+kicad-tools sch pin-map "$ARGUMENTS" --sheet "[SHEET_NAME]" --format json
+
+# Project-wide unconnected pins (run once, then filter per sheet for each subagent)
+kicad-tools sch unconnected "$ARGUMENTS" --format json
+```
+
+Pass the relevant JSON output for each sheet into the subagent prompt below (in the `[PIN_MAP_JSON]` and `[UNCONNECTED_JSON]` placeholders).
+
 ### Subagent prompt template
 
 For each sheet, use the Task tool with a prompt based on this template (fill in the bracketed values):
@@ -90,35 +104,31 @@ For each sheet, use the Task tool with a prompt based on this template (fill in 
 
 You are reviewing the KiCad schematic sheet "[SHEET_NAME]" located at "[SHEET_FILE_PATH]".
 
-**Your task**: Read the raw `.kicad_sch` file and check the items in the per-sheet checklist below. Return your findings as a structured list.
+**Your task**: Review the schematic sheet using the pre-computed connectivity data and the raw `.kicad_sch` file. Check the items in the per-sheet checklist below. Return your findings as a structured list.
 
-### KiCad S-expression quick reference
+**IMPORTANT: Do NOT compute pin positions from raw S-expression coordinates.** KiCad pin position calculation requires applying mirror transforms, rotation matrices, Y-axis inversion, and grid snapping in a specific order. These computations are error-prone when done manually and produce false positives. Use ONLY the pin-map and unconnected tool outputs provided below for any connectivity or position-related checks.
 
-KiCad 9 schematic files use S-expressions. Key structures:
+### Pre-computed connectivity data for this sheet
 
-- **Symbols**: `(symbol (lib_id "Library:Part") (at X Y ROT) (mirror ...) (unit N) ...)` with child nodes:
-  - `(property "Reference" "U1" ...)` -- reference designator
-  - `(property "Value" "LM1117" ...)` -- component value
-  - `(property "Footprint" "Package_SO:SOIC-8" ...)` -- assigned footprint
-  - `(pin "1" ...)` -- pin connections (with UUID)
-- **Labels**: `(label "NET_NAME" (at X Y ROT) ...)` -- local net labels
-- **Global labels**: `(global_label "VCC" (at X Y ROT) (shape input) ...)` -- cross-sheet nets
-- **Hierarchical labels**: `(hierarchical_label "CLK" (at X Y ROT) (shape input) ...)` -- connect to parent sheet pins
-- **Power symbols**: Symbols with `(lib_id "power:GND")` or similar from the `power` library
-- **No-connect flags**: `(no_connect (at X Y) ...)` -- intentionally unconnected pins
-- **Wires**: `(wire (pts (xy X1 Y1) (xy X2 Y2)) ...)` -- electrical connections
-- **Junctions**: `(junction (at X Y) ...)` -- wire crossing connections
-- **Power flags**: `(symbol (lib_id "power:PWR_FLAG") ...)` -- required on power nets for ERC
+**Pin-to-net mapping** (from `kicad-tools sch pin-map`):
+```json
+[PIN_MAP_JSON]
+```
+
+**Unconnected pins** (from `kicad-tools sch unconnected`):
+```json
+[UNCONNECTED_JSON]
+```
 
 ### Per-sheet checklist
 
-Check the following items by reading the `.kicad_sch` file:
+Check the following items using the pre-computed data above and the raw `.kicad_sch` file (for non-geometric properties like values, footprints, and labels):
 
 1. **Missing values**: Components (R, C, L, D) with empty or generic `Value` property (e.g., Value is "R" instead of "10k").
 2. **Missing footprints**: Components with empty `Footprint` property.
-3. **Bypass capacitors**: For each IC (reference starting with U), check whether there are decoupling capacitors nearby. Look for capacitors (reference starting with C) that share a power net with the IC. Note: you cannot reliably compute exact pin positions from the schematic alone -- focus on whether bypass caps exist and are connected to the same power nets, not physical proximity.
+3. **Bypass capacitors**: Using the pin-map data, check whether each IC (reference starting with U) has decoupling capacitors connected to its power pins. Look for capacitors (reference starting with C) sharing the same power net as the IC's VCC/VDD pins. Do NOT attempt to determine this from wire coordinates or physical proximity in the schematic.
 4. **Power net sourcing**: If the sheet contains power symbols (from the `power` library), check for `PWR_FLAG` symbols on power nets. Missing PWR_FLAG causes ERC warnings.
-5. **Unconnected pins**: Look for symbol pins that are not connected to any wire, label, or no-connect flag. Note: precise pin-position math is error-prone. Flag only obvious cases (e.g., symbols with very few wire connections relative to their pin count). Prefer deferring to the automated `kicad-tools sch unconnected` output when available.
+5. **Unconnected pins**: Use the pre-computed unconnected pins list above. Report any pins flagged as unconnected that do not have a no-connect flag. Do NOT attempt to determine connectivity by reading wire coordinates or computing pin positions from the S-expression file.
 6. **Dangling wires**: Wires that end without connecting to a symbol pin, label, or junction.
 7. **Reference designator gaps**: Look for unusual gaps in reference designators (e.g., R1, R2, R5 -- missing R3, R4) within this sheet.
 8. **Component values sanity**: Check for unusual values (e.g., a 1-ohm resistor in a signal path, or a 1uF capacitor used as a timing component where pF is expected).
