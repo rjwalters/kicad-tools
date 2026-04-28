@@ -221,6 +221,47 @@ class PCBWayPnPFormatter(PnPFormatter):
         return output.getvalue()
 
 
+class SeeedPnPFormatter(PnPFormatter):
+    """Pick-and-place formatter for Seeed Fusion assembly service."""
+
+    manufacturer_id = "seeed"
+    manufacturer_name = "Seeed Fusion"
+
+    def get_headers(self) -> list[str]:
+        """Seeed Fusion CPL column headers."""
+        return ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def format(self, placements: list[PlacementData]) -> str:
+        """
+        Format CPL for Seeed Fusion.
+
+        Seeed Fusion accepts a standard CSV pick-and-place format
+        with millimetre coordinates and Top/Bottom layer designation.
+        """
+        filtered = self.filter_placements(placements)
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(self.get_headers())
+
+        for placement in sorted(filtered, key=lambda p: p.reference):
+            transformed = self.apply_transforms(placement)
+            layer = "Top" if transformed.layer == "F.Cu" else "Bottom"
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}mm",
+                    f"{transformed.y:.4f}mm",
+                    f"{transformed.rotation:.1f}",
+                    layer,
+                ]
+            )
+
+        return output.getvalue()
+
+
 class GenericPnPFormatter(PnPFormatter):
     """Generic pick-and-place formatter."""
 
@@ -261,6 +302,7 @@ class GenericPnPFormatter(PnPFormatter):
 PNP_FORMATTERS: dict[str, type[PnPFormatter]] = {
     "jlcpcb": JLCPCBPnPFormatter,
     "pcbway": PCBWayPnPFormatter,
+    "seeed": SeeedPnPFormatter,
     "generic": GenericPnPFormatter,
 }
 

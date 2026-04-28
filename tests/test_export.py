@@ -21,6 +21,7 @@ from kicad_tools.export.pnp import (
     GenericPnPFormatter,
     JLCPCBPnPFormatter,
     PCBWayPnPFormatter,
+    SeeedPnPFormatter,
     PlacementData,
     PnPExportConfig,
     export_pnp,
@@ -299,6 +300,42 @@ class TestJLCPCBPnPFormatter:
         assert "U1" not in output
 
 
+class TestSeeedPnPFormatter:
+    """Tests for Seeed Fusion pick-and-place formatter."""
+
+    @pytest.fixture
+    def placements(self) -> list[PlacementData]:
+        return [
+            PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu"),
+            PlacementData("U1", "STM32", "LQFP48", 50.0, 50.0, 45.0, "F.Cu"),
+            PlacementData("C1", "100nF", "0402", 15.0, 25.0, 180.0, "B.Cu"),
+        ]
+
+    def test_headers(self):
+        formatter = SeeedPnPFormatter()
+        headers = formatter.get_headers()
+        assert headers == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def test_format_includes_all(self, placements):
+        formatter = SeeedPnPFormatter()
+        output = formatter.format(placements)
+
+        assert "R1" in output
+        assert "U1" in output
+        assert "C1" in output
+
+    def test_layer_top_bottom(self, placements):
+        formatter = SeeedPnPFormatter()
+        output = formatter.format(placements)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        layer_values = [row[-1] for row in rows[1:]]
+        assert "Top" in layer_values
+        assert "Bottom" in layer_values
+
+
 class TestPnPTransforms:
     """Tests for coordinate transforms."""
 
@@ -351,6 +388,10 @@ class TestGetPnPFormatter:
     def test_get_pcbway(self):
         formatter = get_pnp_formatter("pcbway")
         assert isinstance(formatter, PCBWayPnPFormatter)
+
+    def test_get_seeed(self):
+        formatter = get_pnp_formatter("seeed")
+        assert isinstance(formatter, SeeedPnPFormatter)
 
     def test_get_generic(self):
         formatter = get_pnp_formatter("generic")
@@ -502,6 +543,7 @@ class TestGerberExporter:
         assert "jlcpcb" in MANUFACTURER_PRESETS
         assert "pcbway" in MANUFACTURER_PRESETS
         assert "oshpark" in MANUFACTURER_PRESETS
+        assert "seeed" in MANUFACTURER_PRESETS
 
 
 class TestAssemblyConfig:

@@ -75,6 +75,7 @@ class TestManufacturerPreset:
         assert "jlcpcb" in MANUFACTURER_PRESETS
         assert "pcbway" in MANUFACTURER_PRESETS
         assert "oshpark" in MANUFACTURER_PRESETS
+        assert "seeed" in MANUFACTURER_PRESETS
 
 
 class TestFindKicadCli:
