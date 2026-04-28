@@ -927,6 +927,227 @@ class TestReplaceDerivedSymbol:
             )
 
 
+# ---------------------------------------------------------------------------
+# Wire adjustment fixtures
+# ---------------------------------------------------------------------------
+
+# Schematic with a 3-pin regulator and wires connected to each pin.
+# Pin positions for AP2204K-3.3 at (120, 100, 0) with no mirror:
+#   Pin 1 (VIN)  local (-5.08, 2.54) -> schematic (114.92, 97.46)
+#   Pin 2 (GND)  local (0, -5.08) -> schematic (120, 105.08)
+#   Pin 3 (VOUT) local (5.08, 2.54) -> schematic (125.08, 97.46)
+REGULATOR_SCHEMATIC_WITH_WIRES = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Regulator_Linear:AP2204K-3.3"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "AP2204K-3.3" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "AP2204K-3.3_1_1"
+        (pin power_in line (at -5.08 2.54 0) (length 2.54) (name "VIN") (number "1"))
+        (pin power_in line (at 0 -5.08 90) (length 2.54) (name "GND") (number "2"))
+        (pin power_out line (at 5.08 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+      )
+    )
+  )
+  (wire (pts (xy 100 97.46) (xy 114.92 97.46))
+    (uuid "00000000-0000-0000-0000-000000000020"))
+  (wire (pts (xy 120 105.08) (xy 120 115))
+    (uuid "00000000-0000-0000-0000-000000000021"))
+  (wire (pts (xy 125.08 97.46) (xy 140 97.46))
+    (uuid "00000000-0000-0000-0000-000000000022"))
+  (symbol
+    (lib_id "Regulator_Linear:AP2204K-3.3")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "U1" (at 120 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "AP2204K-3.3" (at 120 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_TO_SOT_SMD:SOT-23-5" (at 120 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (pin "3" (uuid "00000000-0000-0000-0000-000000000013"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1")
+          (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+
+# Replacement library where pins have DIFFERENT offsets from AP2204K-3.3.
+# Pin 1 (VIN)  local offset (-2.54, 1.27)  -> schematic (117.46, 98.73)
+# Pin 2 (GND)  local offset (0, -2.54)     -> schematic (120, 102.54)
+# Pin 3 (VOUT) local offset (2.54, 1.27)   -> schematic (122.54, 98.73)
+SHIFTED_PIN_LIB = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "Regulator_Linear:SmallReg"
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "SmallReg" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "SmallReg_1_1"
+      (pin power_in line (at -2.54 1.27 0) (length 2.54) (name "VIN") (number "1"))
+      (pin power_in line (at 0 -2.54 90) (length 2.54) (name "GND") (number "2"))
+      (pin power_out line (at 2.54 1.27 180) (length 2.54) (name "VOUT") (number "3"))
+    )
+  )
+)
+"""
+
+# Replacement library with IDENTICAL pin positions to AP2204K-3.3.
+SAME_PIN_LIB = """(kicad_symbol_lib
+  (version 20231120)
+  (generator "test")
+  (symbol "Regulator_Linear:SameReg"
+    (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "SameReg" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "SameReg_1_1"
+      (pin power_in line (at -5.08 2.54 0) (length 2.54) (name "VIN") (number "1"))
+      (pin power_in line (at 0 -5.08 90) (length 2.54) (name "GND") (number "2"))
+      (pin power_out line (at 5.08 2.54 180) (length 2.54) (name "VOUT") (number "3"))
+    )
+  )
+)
+"""
+
+
+class TestWireAdjustmentOnReplace:
+    """Tests for wire endpoint adjustment when pin positions differ during symbol replace."""
+
+    def _write_schematic(self, tmp_path: Path, content: str = REGULATOR_SCHEMATIC_WITH_WIRES) -> Path:
+        sch_file = tmp_path / "regulator.kicad_sch"
+        sch_file.write_text(content)
+        return sch_file
+
+    def _write_lib(self, tmp_path: Path, content: str, name: str = "replacement.kicad_sym") -> Path:
+        lib_file = tmp_path / name
+        lib_file.write_text(content)
+        return lib_file
+
+    def test_wires_move_when_pins_shift(self, tmp_path: Path):
+        """Wire endpoints connected to old pin positions move to new positions."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, SHIFTED_PIN_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:SmallReg",
+            lib_path=str(lib_file),
+        )
+
+        assert result.wires_adjusted == 3
+        assert any("wire endpoint" in c.lower() for c in result.changes_made)
+
+        # Verify actual wire coordinates in the written file
+        sexp = parse_string(sch_file.read_text())
+        wires = sexp.find_all("wire")
+        assert len(wires) == 3
+
+        # Collect all xy endpoints
+        endpoints: list[tuple[float, float]] = []
+        for w in wires:
+            pts = w.find("pts")
+            for xy in pts.find_all("xy"):
+                endpoints.append((xy.get_float(0), xy.get_float(1)))
+
+        # The pin-connected endpoints should now match the new positions:
+        # Pin 1 -> (117.46, 98.73), Pin 2 -> (120, 102.54), Pin 3 -> (122.54, 98.73)
+        def has_point(x, y):
+            return any(abs(ex - x) < 0.01 and abs(ey - y) < 0.01 for ex, ey in endpoints)
+
+        assert has_point(117.46, 98.73), f"Pin 1 wire endpoint not found at (117.46, 98.73), got {endpoints}"
+        assert has_point(120.0, 102.54), f"Pin 2 wire endpoint not found at (120, 102.54), got {endpoints}"
+        assert has_point(122.54, 98.73), f"Pin 3 wire endpoint not found at (122.54, 98.73), got {endpoints}"
+
+        # The OTHER endpoint of each wire should be unchanged (not connected to pin)
+        assert has_point(100.0, 97.46), "Wire 1 far endpoint should not change"
+        assert has_point(120.0, 115.0), "Wire 2 far endpoint should not change"
+        assert has_point(140.0, 97.46), "Wire 3 far endpoint should not change"
+
+    def test_no_wires_adjusted_when_positions_identical(self, tmp_path: Path):
+        """No wire adjustment when old and new symbols have same pin positions."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, SAME_PIN_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:SameReg",
+            lib_path=str(lib_file),
+        )
+
+        assert result.wires_adjusted == 0
+
+    def test_dry_run_does_not_move_wires(self, tmp_path: Path):
+        """Dry run reports wire adjustments but does not modify the file."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, SHIFTED_PIN_LIB)
+        original_text = sch_file.read_text()
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:SmallReg",
+            lib_path=str(lib_file),
+            dry_run=True,
+        )
+
+        assert result.wires_adjusted == 3
+        assert sch_file.read_text() == original_text
+
+    def test_wire_adjustment_only_matching_pins(self, tmp_path: Path):
+        """Only wires connected to pins present in both symbols are adjusted."""
+        # Use the DIFFERENT_PIN_COUNT_LIB which has 4 pins (same positions as
+        # AP2204K-3.3 for pins 1-3, plus pin 4).  Pin positions for 1-3
+        # happen to be the same so no wires should be adjusted.
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, DIFFERENT_PIN_COUNT_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "AltReg:REG4PIN",
+            lib_path=str(lib_file),
+        )
+
+        # Pins 1-3 have same positions, pin 4 is new (no old wire to move)
+        assert result.wires_adjusted == 0
+
+    def test_result_dataclass_has_wires_adjusted_field(self, tmp_path: Path):
+        """SymbolReplacement result includes wires_adjusted even when 0."""
+        sch_file = self._write_schematic(tmp_path)
+        lib_file = self._write_lib(tmp_path, SAME_PIN_LIB)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:SameReg",
+            lib_path=str(lib_file),
+        )
+
+        assert hasattr(result, "wires_adjusted")
+        assert result.wires_adjusted == 0
+
+    def test_without_lib_path_no_wire_adjustment(self, tmp_path: Path):
+        """Soft replace (no --lib-path) does not attempt wire adjustment."""
+        sch_file = self._write_schematic(tmp_path)
+
+        result = replace_symbol_lib_id(
+            str(sch_file),
+            "U1",
+            "Regulator_Linear:NewReg",
+        )
+
+        assert result.wires_adjusted == 0
+
+
 class TestNetOpsHelpers:
     """Tests for net_ops helper functions."""
 

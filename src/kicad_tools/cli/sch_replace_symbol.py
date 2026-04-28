@@ -111,6 +111,10 @@ def main(argv=None):
         for ptc in result.pin_type_changes:
             print(f"  Pin {ptc.pin_number} ({ptc.pin_name}): {ptc.old_type} -> {ptc.new_type}")
 
+    if result.wires_adjusted > 0:
+        print()
+        print(f"Wire adjustments: {result.wires_adjusted} endpoint(s) moved to match new pin positions")
+
     if result.preserved_properties:
         print()
         print(f"Preserved properties: {', '.join(result.preserved_properties)}")

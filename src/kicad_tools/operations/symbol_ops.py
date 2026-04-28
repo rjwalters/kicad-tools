@@ -36,6 +36,7 @@ class SymbolReplacement:
     changes_made: list[str]  # List of changes made
     lib_symbol_updated: bool = False  # Whether the lib_symbols entry was updated
     pin_type_changes: list[PinTypeChange] = field(default_factory=list)
+    wires_adjusted: int = 0  # Number of wire endpoints moved to match new pin positions
 
 
 def find_symbol_by_reference(sexp: SExp, reference: str) -> SExp | None:
@@ -150,7 +151,21 @@ def replace_symbol_lib_id(
         else:
             preserved.append(name)
 
+    # Extract instance position, rotation, and mirror from the symbol
+    # S-expression for wire adjustment later.
+    instance_pos = (0.0, 0.0)
+    instance_rot = 0.0
+    instance_mirror = ""
+    at_node = symbol.find("at")
+    if at_node:
+        instance_pos = (at_node.get_float(0) or 0.0, at_node.get_float(1) or 0.0)
+        instance_rot = at_node.get_float(2) or 0.0
+    mirror_node = symbol.find("mirror")
+    if mirror_node:
+        instance_mirror = mirror_node.get_string(0) or ""
+
     # Update lib_symbols entry and reconcile instance pins
+    wires_adjusted = 0
     new_pin_count = len(old_pins)
     if lib_path:
         lib_file = Path(lib_path)
@@ -265,6 +280,73 @@ def replace_symbol_lib_id(
 
         new_pin_count = len(get_symbol_pins(symbol))
 
+        # --- Wire endpoint adjustment ---
+        # When pin positions differ between old and new symbols, move wire
+        # endpoints that were connected at the old pin positions to the new
+        # positions.  This mirrors the pattern in sch_move_component.py.
+        old_lib_sym_obj = None
+        if old_lib_sym_sexp is not None:
+            old_lib_sym_obj = LibrarySymbol.from_sexp(old_lib_sym_sexp)
+            # Resolve base for old derived symbols
+            if old_lib_sym_obj.extends is not None:
+                old_base_sexp2 = _find_lib_symbol_sexp(sexp, old_lib_sym_obj.extends)
+                if old_base_sexp2 is not None:
+                    old_lib_sym_obj = LibrarySymbol.from_sexp(old_base_sexp2)
+
+        # Build the new effective LibrarySymbol for pin position resolution
+        if new_lib_sym.extends is not None and base_sym is not None:
+            new_lib_sym_for_pins = base_sym
+        else:
+            new_lib_sym_for_pins = new_lib_sym
+
+        if old_lib_sym_obj is not None:
+            old_pin_positions = old_lib_sym_obj.get_all_pin_positions(
+                instance_pos=instance_pos,
+                instance_rot=instance_rot,
+                mirror=instance_mirror,
+            )
+            new_pin_positions = new_lib_sym_for_pins.get_all_pin_positions(
+                instance_pos=instance_pos,
+                instance_rot=instance_rot,
+                mirror=instance_mirror,
+            )
+
+            adjusted_wire_ids: set[int] = set()
+            for pin_num, old_pin_pos in old_pin_positions.items():
+                new_pin_pos = new_pin_positions.get(pin_num)
+                if new_pin_pos is None:
+                    continue
+                # Skip if position unchanged
+                if (
+                    abs(new_pin_pos[0] - old_pin_pos[0]) < 0.001
+                    and abs(new_pin_pos[1] - old_pin_pos[1]) < 0.001
+                ):
+                    continue
+
+                wire_hits = _find_wires_at_point(sexp, old_pin_pos)
+                for wire_sexp, endpoint_idx in wire_hits:
+                    wire_id = id(wire_sexp)
+                    if wire_id in adjusted_wire_ids:
+                        continue
+
+                    pts_node = wire_sexp.find("pts")
+                    if not pts_node:
+                        continue
+                    xy_nodes = pts_node.find_all("xy")
+                    if endpoint_idx >= len(xy_nodes):
+                        continue
+
+                    xy_node = xy_nodes[endpoint_idx]
+                    xy_node.set_value(0, new_pin_pos[0])
+                    xy_node.set_value(1, new_pin_pos[1])
+                    adjusted_wire_ids.add(wire_id)
+                    wires_adjusted += 1
+
+            if wires_adjusted > 0:
+                changes.append(
+                    f"Adjusted {wires_adjusted} wire endpoint(s) to match new pin positions"
+                )
+
     result = SymbolReplacement(
         reference=reference,
         old_lib_id=old_lib_id,
@@ -275,6 +357,7 @@ def replace_symbol_lib_id(
         changes_made=changes,
         lib_symbol_updated=lib_symbol_updated,
         pin_type_changes=pin_type_changes,
+        wires_adjusted=wires_adjusted,
     )
 
     # Write back if not dry run
@@ -283,6 +366,47 @@ def replace_symbol_lib_id(
         path.write_text(new_text)
 
     return result
+
+
+# Tolerance for matching wire endpoints to pin positions (1/10 of standard
+# KiCad schematic grid of 1.27 mm).  Matches sch_move_component.py.
+_POINT_TOLERANCE = 0.127
+
+
+def _find_wires_at_point(
+    sexp: SExp,
+    point: tuple[float, float],
+    tolerance: float = _POINT_TOLERANCE,
+) -> list[tuple[SExp, int]]:
+    """Find all wire S-expression nodes with an endpoint at or near *point*.
+
+    Works directly on the raw schematic ``SExp`` tree (unlike the
+    ``sch_move_component`` variant that takes a ``Schematic`` wrapper).
+
+    Returns a list of ``(wire_sexp, endpoint_index)`` tuples where
+    *endpoint_index* is 0 for the start or 1 for the end of the wire.
+    """
+    target_x, target_y = point
+    matching: list[tuple[SExp, int]] = []
+
+    for wire_sexp in sexp.find_all("wire"):
+        pts_node = wire_sexp.find("pts")
+        if not pts_node:
+            continue
+
+        xy_nodes = pts_node.find_all("xy")
+        if len(xy_nodes) < 2:
+            continue
+
+        for idx, xy in enumerate(xy_nodes):
+            x = xy.get_float(0) or 0.0
+            y = xy.get_float(1) or 0.0
+
+            if abs(x - target_x) <= tolerance and abs(y - target_y) <= tolerance:
+                matching.append((wire_sexp, idx))
+                break  # Don't add the same wire twice for both endpoints
+
+    return matching
 
 
 def _find_lib_symbol_sexp(sexp: SExp, lib_id: str) -> SExp | None:
