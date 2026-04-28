@@ -637,6 +637,148 @@ SCHEMATIC_WITH_BOTH_ENDS_ON_WIRE_BODY = """\
 """
 
 
+# Schematic with a micro-stub (0.025mm) shorter than _MICRO_STUB_FLOOR (0.05mm).
+# The micro-stub floor should catch it unconditionally regardless of
+# endpoint connectivity.
+#
+# Layout:
+#   Wire A: (100,50) -> (150,50)      label at (100,50)
+#   Wire B: (150,50) -> (150,100)     label at (150,100)
+#   Stub:   (150,50) -> (150.025,50)  0.025mm micro-stub
+SCHEMATIC_WITH_MICRO_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000060")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-a")
+  )
+  (wire (pts (xy 150 50) (xy 150 100))
+    (stroke (width 0) (type default))
+    (uuid "wire-b")
+  )
+  (wire (pts (xy 150 50) (xy 150.025 50))
+    (stroke (width 0) (type default))
+    (uuid "micro-stub")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 150 100 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a short 0.43mm stub where both endpoints are connected
+# only through shared wire endpoints (no pins, labels, or junctions at
+# either stub endpoint).  This is the chorus-test-revA pattern: a repair
+# operation left a tiny bridge between two wire endpoints.
+#
+# Layout:
+#   Wire A: (100,50) -> (150,50)        label at (100,50)
+#   Wire B: (150,50) -> (150.43,50)     the 0.43mm stub
+#   Wire C: (150.43,50) -> (200,50)     label at (200,50)
+#
+# The stub's start at (150,50) is shared with wire A (endpoint_counts > 1)
+# but (150,50) is NOT at any label, pin, or junction.  Likewise the
+# stub's end at (150.43,50) is shared with wire C but has no connection
+# point.  Both ends pass _is_endpoint_electrically_connected(), so the
+# old code had electrically_dangling == 0 and skipped it.
+# The new heuristic (b) detects that neither endpoint touches a strong
+# connection point and flags the wire as a stub.
+SCHEMATIC_WITH_BOTH_ENDS_CONNECTED_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000061")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-a")
+  )
+  (wire (pts (xy 150 50) (xy 150.43 50))
+    (stroke (width 0) (type default))
+    (uuid "both-ends-stub")
+  )
+  (wire (pts (xy 150.43 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-c")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# Schematic with a short 0.43mm wire where one endpoint IS at a label.
+# This is a legitimate short bridge -- it should NOT be flagged, because
+# the label anchors it to a meaningful connection point.
+#
+# Layout:
+#   Wire A: (100,50) -> (150,50)        label at (100,50) and (150,50)
+#   Bridge: (150,50) -> (150.43,50)     0.43mm, start at label
+#   Wire C: (150.43,50) -> (200,50)     label at (200,50)
+SCHEMATIC_WITH_SHORT_BRIDGE_AT_LABEL = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000063")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 100 50) (xy 150 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-a")
+  )
+  (wire (pts (xy 150 50) (xy 150.43 50))
+    (stroke (width 0) (type default))
+    (uuid "short-bridge")
+  )
+  (wire (pts (xy 150.43 50) (xy 200 50))
+    (stroke (width 0) (type default))
+    (uuid "wire-c")
+  )
+  (label "NET1" (at 100 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-1")
+  )
+  (label "NET2" (at 150 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-2")
+  )
+  (label "NET3" (at 200 50 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-3")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
 SCHEMATIC_WITH_NO_CONNECT = """\
 (kicad_sch
   (version 20231120)
@@ -1169,6 +1311,65 @@ class TestCleanupWires:
 
         assert removed == 1
         # 4 wires initially (wire-a, wire-b, wire-c, stub) -> 3 remaining
+        assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
+
+    # --- sub-mm dangling wire stub detection tests ---
+
+    def test_micro_stub_unconditionally_flagged(self, tmp_path):
+        """A wire shorter than _MICRO_STUB_FLOOR is always flagged as a stub."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_MICRO_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The micro-stub is (150,50) -> (150.025,50), length 0.025mm
+        assert stubs[0].start == (150.0, 50.0)
+        assert stubs[0].end == (150.025, 50.0)
+
+    def test_both_ends_connected_no_connection_point_flagged(self, tmp_path):
+        """A short wire with both ends at shared wire endpoints but no label/pin/junction is flagged."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_BOTH_ENDS_CONNECTED_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+        # The stub is the 0.43mm wire from (150,50) to (150.43,50)
+        assert stubs[0].start == (150.0, 50.0)
+        assert stubs[0].end == (150.43, 50.0)
+
+    def test_short_bridge_at_label_not_flagged(self, tmp_path):
+        """A short wire with one endpoint at a label is NOT flagged as a stub."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_SHORT_BRIDGE_AT_LABEL)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    def test_micro_stub_removal(self, tmp_path):
+        """Micro-stub-flagged wires are removed and wire count decreases."""
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates, remove_wires
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_MICRO_STUB)
+        sch = Schematic.load(path)
+
+        initial_wire_count = len(list(sch.sexp.find_all("wire")))
+        issues = find_cleanup_candidates(sch)
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 1
+
+        removed = remove_wires(sch, stubs)
+        assert removed == 1
         assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
 
 
