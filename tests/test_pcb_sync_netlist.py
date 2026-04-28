@@ -1708,3 +1708,405 @@ class TestGetBoardEdgePosition:
 
         assert x == pytest.approx(0.0)
         assert y == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Pin-count mismatch detection tests
+# ---------------------------------------------------------------------------
+
+# Schematic with a 5-pin connector (Conn_01x05)
+SCHEMATIC_CONN_5PIN = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Connector:Conn_01x05_Pin")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "J1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Conn_01x05" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical" (at 100 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with a 4-pad connector footprint (mismatched with 5-pin schematic)
+PCB_CONN_4PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "fp-j1")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "Conn_01x04" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" thru_hole oval (at 0 0) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "2" thru_hole oval (at 0 2.54) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "3" thru_hole oval (at 0 5.08) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "4" thru_hole oval (at 0 7.62) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB with a 5-pad connector footprint (matches 5-pin schematic)
+PCB_CONN_5PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "fp-j1")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "Conn_01x05" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" thru_hole oval (at 0 0) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "2" thru_hole oval (at 0 2.54) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "3" thru_hole oval (at 0 5.08) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "4" thru_hole oval (at 0 7.62) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+    (pad "5" thru_hole oval (at 0 10.16) (size 1.7 1.7) (drill 1) (layers "*.Cu") (net 0 ""))
+  )
+)
+"""
+
+# Schematic with an 8-pin SOIC IC
+SCHEMATIC_IC_8PIN = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Amplifier_Operational:LM358")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (property "Reference" "U1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "LM358" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm" (at 100 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with 9-pad SOIC (8 signal + 1 thermal/exposed pad)
+PCB_IC_9PAD_THERMAL = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "fp-u1")
+    (at 100 100)
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS"))
+    (property "Value" "LM358" (at 0 3 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -2.5 -1.905) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at -2.5 -0.635) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "3" smd roundrect (at -2.5 0.635) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "4" smd roundrect (at -2.5 1.905) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "5" smd roundrect (at 2.5 1.905) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "6" smd roundrect (at 2.5 0.635) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "7" smd roundrect (at 2.5 -0.635) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "8" smd roundrect (at 2.5 -1.905) (size 1.5 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "9" smd roundrect (at 0 0) (size 2.5 2.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# Schematic with R1 (2-pin passive) for no-false-positive check
+SCHEMATIC_PASSIVE_2PIN = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# PCB with R1 matching 2-pad resistor
+PCB_PASSIVE_2PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestPinMismatch:
+    """Tests for PinMismatch dataclass."""
+
+    def test_creation(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch
+
+        pm = PinMismatch(
+            reference="J1",
+            schematic_footprint="Connector:PinHeader_1x05",
+            pcb_footprint="Connector:PinHeader_1x04",
+            schematic_pins=5,
+            pcb_pads=4,
+        )
+        assert pm.reference == "J1"
+        assert pm.schematic_pins == 5
+        assert pm.pcb_pads == 4
+        assert pm.severity == "warning"
+
+    def test_delta_property(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch
+
+        pm = PinMismatch(
+            reference="U1",
+            schematic_footprint="Package_SO:SOIC-8",
+            pcb_footprint="Package_SO:SOIC-8-1EP",
+            schematic_pins=8,
+            pcb_pads=9,
+            severity="info",
+        )
+        assert pm.delta == 1
+
+    def test_negative_delta(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch
+
+        pm = PinMismatch(
+            reference="J1",
+            schematic_footprint="Connector:PinHeader_1x05",
+            pcb_footprint="Connector:PinHeader_1x04",
+            schematic_pins=5,
+            pcb_pads=4,
+        )
+        assert pm.delta == -1
+
+    def test_info_severity(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch
+
+        pm = PinMismatch(
+            reference="U1",
+            schematic_footprint="SOIC-8",
+            pcb_footprint="SOIC-8-1EP",
+            schematic_pins=8,
+            pcb_pads=9,
+            severity="info",
+        )
+        assert pm.severity == "info"
+
+
+class TestSyncResultPinMismatches:
+    """Tests for SyncResult.has_changes with pin_mismatches."""
+
+    def test_has_changes_with_pin_mismatches(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch, SyncResult
+
+        result = SyncResult(
+            pin_mismatches=[
+                PinMismatch(
+                    reference="J1",
+                    schematic_footprint="PinHeader_1x05",
+                    pcb_footprint="PinHeader_1x04",
+                    schematic_pins=5,
+                    pcb_pads=4,
+                )
+            ]
+        )
+        assert result.has_changes is True
+
+    def test_no_changes_without_pin_mismatches(self):
+        from kicad_tools.cli.pcb_sync_netlist import SyncResult
+
+        result = SyncResult()
+        assert result.has_changes is False
+
+
+class TestPinMismatchDetection:
+    """Tests for pin-count mismatch detection in sync_netlist."""
+
+    def test_detects_pin_pad_mismatch(self, tmp_path):
+        """5-pin schematic connector with 4-pad PCB footprint is detected."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_CONN_5PIN)
+        pcb.write_text(PCB_CONN_4PAD)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.pin_mismatches) == 1
+        pm = result.pin_mismatches[0]
+        assert pm.reference == "J1"
+        assert pm.schematic_pins == 5
+        assert pm.pcb_pads == 4
+        assert pm.severity == "warning"
+
+    def test_no_mismatch_when_counts_match(self, tmp_path):
+        """Same footprint on both sides produces no pin mismatch."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_CONN_5PIN)
+        pcb.write_text(PCB_CONN_5PAD)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.pin_mismatches) == 0
+
+    def test_thermal_pad_surplus_is_info(self, tmp_path):
+        """IC with +1 thermal pad gets info severity, not warning."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_IC_8PIN)
+        pcb.write_text(PCB_IC_9PAD_THERMAL)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.pin_mismatches) == 1
+        pm = result.pin_mismatches[0]
+        assert pm.reference == "U1"
+        assert pm.schematic_pins == 8
+        assert pm.pcb_pads == 9
+        assert pm.severity == "info"
+
+    def test_same_footprint_no_false_positive(self, tmp_path):
+        """Passive with identical footprint on both sides has no mismatch."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_PASSIVE_2PIN)
+        pcb.write_text(PCB_PASSIVE_2PAD)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.pin_mismatches) == 0
+        assert not result.has_changes
+
+    def test_dry_run_does_not_modify_pcb(self, tmp_path):
+        """Dry run with mismatches does not modify the PCB file."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_CONN_5PIN)
+        pcb.write_text(PCB_CONN_4PAD)
+
+        original_content = pcb.read_text()
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.pin_mismatches) == 1
+        assert pcb.read_text() == original_content
+
+
+class TestPinMismatchFormatText:
+    """Tests for pin mismatch output in format_text."""
+
+    def test_format_text_includes_pin_mismatches(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch, SyncResult, format_text
+
+        result = SyncResult(
+            pin_mismatches=[
+                PinMismatch(
+                    reference="J1",
+                    schematic_footprint="Connector:PinHeader_1x05",
+                    pcb_footprint="Connector:PinHeader_1x04",
+                    schematic_pins=5,
+                    pcb_pads=4,
+                    severity="warning",
+                )
+            ]
+        )
+        text = format_text(result, dry_run=True, pcb_path=Path("test.kicad_pcb"))
+
+        assert "Pin-count mismatches (1):" in text
+        assert "[warning] J1:" in text
+        assert "schematic expects 5 pins" in text
+        assert "PCB has 4 pads" in text
+
+    def test_format_text_info_severity(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch, SyncResult, format_text
+
+        result = SyncResult(
+            pin_mismatches=[
+                PinMismatch(
+                    reference="U1",
+                    schematic_footprint="Package_SO:SOIC-8",
+                    pcb_footprint="Package_SO:SOIC-8-1EP",
+                    schematic_pins=8,
+                    pcb_pads=9,
+                    severity="info",
+                )
+            ]
+        )
+        text = format_text(result, dry_run=True, pcb_path=Path("test.kicad_pcb"))
+
+        assert "[info] U1:" in text
+        assert "schematic expects 8 pins" in text
+        assert "PCB has 9 pads" in text
+
+
+class TestPinMismatchFormatJson:
+    """Tests for pin mismatch output in format_json."""
+
+    def test_format_json_includes_pin_mismatches(self):
+        from kicad_tools.cli.pcb_sync_netlist import PinMismatch, SyncResult, format_json
+
+        result = SyncResult(
+            pin_mismatches=[
+                PinMismatch(
+                    reference="J1",
+                    schematic_footprint="Connector:PinHeader_1x05",
+                    pcb_footprint="Connector:PinHeader_1x04",
+                    schematic_pins=5,
+                    pcb_pads=4,
+                    severity="warning",
+                )
+            ]
+        )
+        output = json.loads(format_json(result, dry_run=True, pcb_path=Path("test.kicad_pcb")))
+
+        assert len(output["pin_mismatches"]) == 1
+        pm = output["pin_mismatches"][0]
+        assert pm["reference"] == "J1"
+        assert pm["schematic_footprint"] == "Connector:PinHeader_1x05"
+        assert pm["pcb_footprint"] == "Connector:PinHeader_1x04"
+        assert pm["schematic_pins"] == 5
+        assert pm["pcb_pads"] == 4
+        assert pm["severity"] == "warning"
+
+    def test_format_json_empty_pin_mismatches(self):
+        from kicad_tools.cli.pcb_sync_netlist import SyncResult, format_json
+
+        result = SyncResult()
+        output = json.loads(format_json(result, dry_run=True, pcb_path=Path("test.kicad_pcb")))
+
+        assert output["pin_mismatches"] == []

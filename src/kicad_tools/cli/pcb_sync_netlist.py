@@ -28,6 +28,23 @@ class SyncAction:
 
 
 @dataclass
+class PinMismatch:
+    """A pin-count vs pad-count mismatch for a matched component."""
+
+    reference: str
+    schematic_footprint: str
+    pcb_footprint: str
+    schematic_pins: int
+    pcb_pads: int
+    severity: str = "warning"  # "warning" or "info"
+
+    @property
+    def delta(self) -> int:
+        """Difference: pcb_pads - schematic_pins."""
+        return self.pcb_pads - self.schematic_pins
+
+
+@dataclass
 class SyncResult:
     """Result of a netlist sync operation."""
 
@@ -35,12 +52,16 @@ class SyncResult:
     renamed: list[SyncAction] = field(default_factory=list)
     orphaned: list[SyncAction] = field(default_factory=list)
     removed: list[SyncAction] = field(default_factory=list)
+    pin_mismatches: list[PinMismatch] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.added or self.renamed or self.orphaned or self.removed)
+        return bool(
+            self.added or self.renamed or self.orphaned
+            or self.removed or self.pin_mismatches
+        )
 
 
 def _normalize_footprint(fp: str) -> str:
@@ -123,6 +144,55 @@ def sync_netlist(
 
     sch_ref_set = set(sch_components.keys())
     pcb_ref_set = set(pcb_refs.keys())
+
+    # --- Detect pin-count vs pad-count mismatches for matched components ---
+    common_refs = sch_ref_set & pcb_ref_set
+    if common_refs:
+        from kicad_tools.pcb.footprints import get_pad_count
+
+        for ref in sorted(common_refs):
+            item = sch_components[ref]
+            pcb_info = pcb_refs[ref]
+
+            # Skip when schematic and PCB use the same footprint -- identical
+            # footprints inherently have the same pad count, and comparing
+            # get_pad_count (which uses name-based heuristics) against the
+            # real pad list would produce false positives for names like
+            # R_0402 where the heuristic misinterprets the package size.
+            sch_fp_norm = _normalize_footprint(item.footprint)
+            pcb_fp_norm = _normalize_footprint(pcb_info["footprint"])
+            if sch_fp_norm == pcb_fp_norm:
+                continue
+
+            # Get expected pad count from schematic footprint assignment
+            sch_pad_count = get_pad_count(item.footprint)
+            if sch_pad_count is None:
+                continue
+
+            # Get actual pad count from the PCB footprint
+            pcb_fp = None
+            for fp in pcb.footprints:
+                if fp.reference == ref:
+                    pcb_fp = fp
+                    break
+            if pcb_fp is None:
+                continue
+
+            actual_pad_count = len(pcb_fp.pads)
+            if sch_pad_count != actual_pad_count:
+                # Thermal/exposed pad tolerance: +1 pad surplus is info, not warning
+                if actual_pad_count - sch_pad_count == 1:
+                    severity = "info"
+                else:
+                    severity = "warning"
+                result.pin_mismatches.append(PinMismatch(
+                    reference=ref,
+                    schematic_footprint=item.footprint,
+                    pcb_footprint=pcb_info["footprint"],
+                    schematic_pins=sch_pad_count,
+                    pcb_pads=actual_pad_count,
+                    severity=severity,
+                ))
 
     # --- Detect renames via value+footprint matching ---
     missing_refs = sch_ref_set - pcb_ref_set
@@ -385,6 +455,17 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             lines.append(f"    {action.reference}: {action.value} ({action.footprint})")
         lines.append("")
 
+    if result.pin_mismatches:
+        lines.append(f"  Pin-count mismatches ({len(result.pin_mismatches)}):")
+        for pm in result.pin_mismatches:
+            level = "info" if pm.severity == "info" else "warning"
+            lines.append(
+                f"    [{level}] {pm.reference}: schematic expects {pm.schematic_pins} pins "
+                f"({pm.schematic_footprint}), PCB has {pm.pcb_pads} pads "
+                f"({pm.pcb_footprint})"
+            )
+        lines.append("")
+
     if result.warnings:
         lines.append(f"  Warnings ({len(result.warnings)}):")
         for warn in result.warnings:
@@ -437,6 +518,17 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
                 "value": a.value,
             }
             for a in result.removed
+        ],
+        "pin_mismatches": [
+            {
+                "reference": pm.reference,
+                "schematic_footprint": pm.schematic_footprint,
+                "pcb_footprint": pm.pcb_footprint,
+                "schematic_pins": pm.schematic_pins,
+                "pcb_pads": pm.pcb_pads,
+                "severity": pm.severity,
+            }
+            for pm in result.pin_mismatches
         ],
         "warnings": result.warnings,
         "errors": result.errors,
