@@ -259,6 +259,27 @@ class NetStatusResult:
         return "\n".join(lines)
 
 
+def build_zone_net_map(pcb: PCB) -> dict[int, list[str]]:
+    """Build mapping of net numbers to zone layers.
+
+    This is a lightweight utility that scans all zones on a PCB and returns
+    which copper layers have zones assigned to each net.  It does NOT require
+    instantiating the full ``NetStatusAnalyzer``.
+
+    Args:
+        pcb: Loaded PCB object.
+
+    Returns:
+        Dict mapping net_number to list of zone layer names.  Nets without
+        zones are absent from the dict.
+    """
+    zone_nets: dict[int, list[str]] = defaultdict(list)
+    for zone in pcb.zones:
+        if zone.net_number > 0 and zone.layer not in zone_nets[zone.net_number]:
+            zone_nets[zone.net_number].append(zone.layer)
+    return dict(zone_nets)
+
+
 class NetStatusAnalyzer:
     """Analyzes net connectivity status on a PCB.
 
@@ -322,11 +343,7 @@ class NetStatusAnalyzer:
         Returns:
             Dict mapping net_number to list of zone layer names
         """
-        zone_nets: dict[int, list[str]] = defaultdict(list)
-        for zone in self.pcb.zones:
-            if zone.net_number > 0 and zone.layer not in zone_nets[zone.net_number]:
-                zone_nets[zone.net_number].append(zone.layer)
-        return dict(zone_nets)
+        return build_zone_net_map(self.pcb)
 
     def _analyze_net(
         self,
