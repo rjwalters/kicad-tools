@@ -696,3 +696,164 @@ def _enrich_description_with_pos(v: dict) -> None:
     desc = v.get("description", "")
     if coord_str not in desc:
         v["description"] = f"{desc} {coord_str}"
+
+
+# ---------------------------------------------------------------------------
+# Phantom wire-dangling violation filtering
+# ---------------------------------------------------------------------------
+
+
+def _build_full_wire_coordinate_set(
+    root_schematic: str,
+    tolerance: float = 0.1,
+) -> set[tuple[float, float]]:
+    """Build a set of all known wire-related coordinates across the full hierarchy.
+
+    Unlike :func:`_build_wire_endpoint_map`, this includes the **root sheet**
+    and indexes additional coordinate sources (junctions, labels, hierarchical
+    labels, global labels) that KiCad's connectivity engine may use as
+    sub-segment break-points.
+
+    The returned set can be used to distinguish *real* ``wire_dangling``
+    violations (whose positions correspond to actual schematic objects) from
+    *phantom* violations (whose positions are internal to KiCad's connectivity
+    analysis and do not correspond to any S-expression in the ``.kicad_sch``
+    files).
+
+    Args:
+        root_schematic: Path to the root ``.kicad_sch`` file.
+        tolerance: Coordinate snapping bucket size in mm.
+
+    Returns:
+        A set of snapped ``(x, y)`` coordinate tuples.
+    """
+    from kicad_tools.schema import Schematic
+    from kicad_tools.schema.hierarchy import build_hierarchy
+
+    hierarchy = build_hierarchy(root_schematic)
+    coords: set[tuple[float, float]] = set()
+
+    def _snap(v: float) -> float:
+        return round(v / tolerance) * tolerance
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception:
+            continue
+
+        # Wire endpoints and midpoints
+        for wire in sch.wires:
+            sx, sy = wire.start[0], wire.start[1]
+            ex, ey = wire.end[0], wire.end[1]
+            coords.add((_snap(sx), _snap(sy)))
+            coords.add((_snap(ex), _snap(ey)))
+            mx = (sx + ex) / 2.0
+            my = (sy + ey) / 2.0
+            coords.add((_snap(mx), _snap(my)))
+
+        # Junctions
+        for junc in sch.junctions:
+            jx, jy = junc.position[0], junc.position[1]
+            coords.add((_snap(jx), _snap(jy)))
+
+        # Local labels
+        for lbl in sch.labels:
+            lx, ly = lbl.position[0], lbl.position[1]
+            coords.add((_snap(lx), _snap(ly)))
+
+        # Global labels
+        for gl in sch.global_labels:
+            gx, gy = gl.position[0], gl.position[1]
+            coords.add((_snap(gx), _snap(gy)))
+
+        # Hierarchical labels
+        for hl in sch.hierarchical_labels:
+            hx, hy = hl.position[0], hl.position[1]
+            coords.add((_snap(hx), _snap(hy)))
+
+    return coords
+
+
+def filter_phantom_wire_violations(
+    violations: list[dict],
+    root_schematic: str,
+) -> list[dict]:
+    """Remove phantom ``wire_dangling`` violations whose position coordinates
+    do not correspond to any wire endpoint, midpoint, junction, or label
+    in any sheet of the hierarchy.
+
+    KiCad's connectivity engine internally splits wires into sub-segments
+    at pin connections, junctions, and other connection points.  It may
+    then report ``wire_dangling`` violations at the computed sub-segment
+    coordinates -- coordinates that do not appear in any ``.kicad_sch``
+    file.  These are false positives that cannot be resolved by editing
+    the schematic.
+
+    This function builds a comprehensive coordinate index of all wire
+    endpoints/midpoints, junctions, and labels across the full hierarchy
+    (including the root sheet) and suppresses any ``wire_dangling``
+    violation whose position does not match any indexed coordinate.
+
+    Only ``wire_dangling`` violations are filtered.  Other position-based
+    violation types (``endpoint_off_grid``, ``label_dangling``, etc.) are
+    passed through unchanged because they have different semantics.
+
+    Filtered violations are logged at debug level for diagnostics.
+
+    Args:
+        violations: List of raw violation dicts (must already have
+            ``_sheet_path`` injected and re-attribution applied).
+        root_schematic: Path to the root ``.kicad_sch`` file.
+
+    Returns:
+        A new list with phantom ``wire_dangling`` violations removed.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    target_type = "wire_dangling"
+
+    # Quick check: skip the expensive hierarchy traversal if there are
+    # no wire_dangling violations at all.
+    has_target = any(v.get("type", "") == target_type for v in violations)
+    if not has_target:
+        return violations
+
+    tolerance = 0.1
+    known_coords = _build_full_wire_coordinate_set(root_schematic, tolerance=tolerance)
+
+    def _snap(val: float) -> float:
+        return round(val / tolerance) * tolerance
+
+    filtered: list[dict] = []
+    for v in violations:
+        if v.get("type", "") != target_type:
+            filtered.append(v)
+            continue
+
+        pos = v.get("pos", {})
+        x = pos.get("x", None)
+        y = pos.get("y", None)
+
+        if x is None or y is None:
+            # No position data -- keep to be safe.
+            filtered.append(v)
+            continue
+
+        key = (_snap(float(x)), _snap(float(y)))
+        if key in known_coords:
+            # Position matches a real schematic object -- keep it.
+            filtered.append(v)
+        else:
+            # Phantom violation -- coordinates do not correspond to any
+            # wire, junction, or label in any sheet.
+            logger.debug(
+                "Filtered phantom wire_dangling at (%.1f, %.1f) on sheet %s",
+                float(x),
+                float(y),
+                v.get("_sheet_path", "?"),
+            )
+
+    return filtered

@@ -31,6 +31,7 @@ from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.erc.cross_sheet import (
     filter_cross_sheet_global_labels,
     filter_cross_sheet_power_violations,
+    filter_phantom_wire_violations,
     reattribute_wire_dangling_violations,
 )
 from kicad_tools.schema import Schematic
@@ -161,6 +162,13 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                         # violations from root sheet to the correct child
                         # sheet based on position coordinates.
                         raw_violations = reattribute_wire_dangling_violations(
+                            raw_violations, schematic_path
+                        )
+
+                        # Filter phantom wire_dangling violations whose
+                        # coordinates do not correspond to any wire,
+                        # junction, or label in the schematic files.
+                        raw_violations = filter_phantom_wire_violations(
                             raw_violations, schematic_path
                         )
 
