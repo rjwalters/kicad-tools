@@ -458,6 +458,7 @@ class Footprint:
     attr: str = ""  # smd, through_hole
     exclude_from_pos_files: bool = False
     exclude_from_bom: bool = False
+    locked: bool = False
     dnp: bool = False
     properties: dict[str, str] = field(default_factory=dict)
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
@@ -557,6 +558,8 @@ class Footprint:
                     fp.exclude_from_pos_files = True
                 elif token == "exclude_from_bom":
                     fp.exclude_from_bom = True
+                elif token == "locked":
+                    fp.locked = True
                 elif token == "dnp":
                     fp.dnp = True
 
