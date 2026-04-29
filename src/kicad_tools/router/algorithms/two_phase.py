@@ -10,6 +10,7 @@ GlobalRouter supporting per-layer capacity and negotiated congestion.
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import TYPE_CHECKING
 
@@ -329,6 +330,15 @@ class TwoPhaseRouter:
         overflow = self.grid.get_total_overflow()
         flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
 
+        # Issue #2305: Track best routing state across iterations.
+        # Overflow can oscillate during rip-up-and-reroute; if timeout or
+        # iteration limit is hit during a high-overflow iteration we want to
+        # return the best state observed, not the last one.
+        best_overflow = overflow
+        best_routes: list[Route] = copy.deepcopy(list(self.routes))
+        best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
+        best_iteration = 0  # 0 = initial pass
+
         # Rip-up and reroute iterations if needed
         if overflow > 0:
             max_iterations = 10
@@ -383,9 +393,37 @@ class TwoPhaseRouter:
                 overflow = self.grid.get_total_overflow()
                 flush_print(f"  Iteration {iteration} complete: overflow={overflow}")
 
+                # Issue #2305: Snapshot state when overflow improves
+                if overflow < best_overflow:
+                    best_overflow = overflow
+                    best_routes = copy.deepcopy(list(self.routes))
+                    best_net_routes = copy.deepcopy(net_routes)
+                    best_iteration = iteration
+
                 if overflow == 0:
                     flush_print(f"  Converged at iteration {iteration}!")
                     break
+
+        # Issue #2305: Restore best state if the final iteration is worse
+        final_overflow = self.grid.get_total_overflow()
+        if best_overflow < final_overflow:
+            flush_print(
+                f"  Restoring iteration {best_iteration} state "
+                f"(overflow={best_overflow}) instead of final "
+                f"(overflow={final_overflow})"
+            )
+            # Unmark all current routes from the grid
+            for route in list(self.routes):
+                self.grid.unmark_route_usage(route)
+            # Replace with best-state routes
+            self.routes.clear()
+            self.routes.extend(best_routes)
+            # Re-mark best routes on the grid
+            for route in self.routes:
+                self.grid.mark_route_usage(route)
+            # Update net_routes to best state
+            net_routes.clear()
+            net_routes.update(best_net_routes)
 
         return list(self.routes)
 
