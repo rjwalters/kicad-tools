@@ -4,7 +4,7 @@
     "total_nets": 2,
     "routed_nets": 0,
     "completion_rate": 0.0,
-    "routing_time": 0.036015987396240234,
+    "routing_time": 0.02786421775817871,
     "failures": 0,
     "segments": 0,
     "vias": 0
@@ -12,11 +12,11 @@
   {
     "board": "charlieplex-led",
     "total_nets": 8,
-    "routed_nets": 0,
-    "completion_rate": 0.0,
-    "routing_time": 0.0026760101318359375,
+    "routed_nets": 22,
+    "completion_rate": 2.75,
+    "routing_time": 0.04819607734680176,
     "failures": 0,
-    "segments": 0,
+    "segments": 22,
     "vias": 0
   },
   {
@@ -24,9 +24,40 @@
     "total_nets": 14,
     "routed_nets": 12,
     "completion_rate": 0.8571428571428571,
-    "routing_time": 0.028883934020996094,
+    "routing_time": 0.02779698371887207,
     "failures": 0,
     "segments": 12,
     "vias": 0
+  },
+  {
+    "board": "chorus-test-revA",
+    "total_nets": 54,
+    "routed_nets": 36,
+    "completion_rate": 0.6667,
+    "routing_time": 679.0,
+    "failures": 18,
+    "segments": 169,
+    "vias": 16,
+    "strategy": "negotiated",
+    "layers": "4-all",
+    "grid_resolution": 0.05,
+    "backend": "cpp",
+    "escape_packages": ["U8", "J2", "U5"],
+    "escape_segments": 88,
+    "drc_errors": 3,
+    "drc_notes": "3 pre-existing design errors (1 pad-pad clearance U3/J4, 2 edge clearance J2)",
+    "layer_usage": {
+      "F.Cu": true,
+      "In1.Cu": true,
+      "In2.Cu": true,
+      "B.Cu": true
+    },
+    "baseline_comparison": {
+      "baseline_nets_routed": 39,
+      "baseline_total_nets": 54,
+      "baseline_time_sec": 440,
+      "baseline_layers_used": 1,
+      "notes": "Baseline was pre-epic #2273 with single-layer bias. Current run uses 4-layer routing with escape generation."
+    }
   }
 ]
