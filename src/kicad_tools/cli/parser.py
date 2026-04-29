@@ -1738,6 +1738,37 @@ def _add_pcb_parser(subparsers) -> None:
         help="Output file path (default: overwrite input PCB)",
     )
 
+    # pcb export-dsn
+    pcb_export_dsn = pcb_subparsers.add_parser(
+        "export-dsn",
+        help="Export PCB to Specctra DSN format for Freerouting",
+        description="Export a .kicad_pcb file to Specctra DSN format, suitable "
+        "for routing with Freerouting or other DSN-compatible autorouters.",
+    )
+    pcb_export_dsn.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_export_dsn.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output DSN file path (default: <pcb-stem>.dsn next to input)",
+    )
+
+    # pcb import-ses
+    pcb_import_ses = pcb_subparsers.add_parser(
+        "import-ses",
+        help="Import Specctra SES routes into a PCB",
+        description="Import a Freerouting .ses session file and merge the "
+        "routed traces back into a KiCad .kicad_pcb file.",
+    )
+    pcb_import_ses.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_import_ses.add_argument("ses", help="Path to .ses file from Freerouting")
+    pcb_import_ses.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output PCB file path (default: overwrite input PCB)",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""

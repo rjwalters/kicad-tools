@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline, net-audit")
+        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -58,6 +58,14 @@ def run_pcb_command(args) -> int:
     # Handle net-audit command
     if args.pcb_command == "net-audit":
         return _run_net_audit_command(args, pcb_path)
+
+    # Handle export-dsn command
+    if args.pcb_command == "export-dsn":
+        return _run_export_dsn_command(args, pcb_path)
+
+    # Handle import-ses command
+    if args.pcb_command == "import-ses":
+        return _run_import_ses_command(args, pcb_path)
 
     from ..pcb_query import main as pcb_main
 
@@ -1227,4 +1235,56 @@ def _run_net_audit_command(args, pcb_path: Path) -> int:
     # Return non-zero if stale nets found and --fix was not used
     if groups and not fix:
         return 1
+    return 0
+
+
+def _run_export_dsn_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb export-dsn' command."""
+    from kicad_tools.export.dsn import KiCadToDSNExporter
+
+    output = getattr(args, "output", None)
+    if output is None:
+        output = pcb_path.with_suffix(".dsn")
+    else:
+        output = Path(output)
+
+    try:
+        exporter = KiCadToDSNExporter(str(pcb_path))
+        exporter.export(str(output))
+    except Exception as e:
+        print(f"Error exporting DSN: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Exported DSN to {output}")
+    print(f"  Layers: {len(exporter.layers)}")
+    print(f"  Nets: {len(exporter.nets)}")
+    print(f"  Components: {len(exporter.footprints)}")
+    return 0
+
+
+def _run_import_ses_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb import-ses' command."""
+    from kicad_tools.export.ses import SESToKiCadImporter
+
+    ses_path = Path(args.ses)
+    if not ses_path.exists():
+        print(f"Error: SES file not found: {ses_path}", file=sys.stderr)
+        return 1
+
+    output = getattr(args, "output", None)
+    if output is not None:
+        output = Path(output)
+
+    try:
+        importer = SESToKiCadImporter(str(ses_path))
+        importer.parse()
+        importer.merge_into(str(pcb_path), str(output) if output else None)
+    except Exception as e:
+        print(f"Error importing SES: {e}", file=sys.stderr)
+        return 1
+
+    dest = output or pcb_path
+    print(f"Imported SES routes into {dest}")
+    print(f"  Wires: {len(importer.wires)}")
+    print(f"  Vias: {len(importer.vias)}")
     return 0
