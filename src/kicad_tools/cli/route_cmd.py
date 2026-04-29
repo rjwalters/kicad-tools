@@ -1782,6 +1782,7 @@ def route_with_combined_escalation(
                         corridor_width_factor=2.0,
                         timeout=args.timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        max_iterations=getattr(args, "two_phase_iterations", 20),
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -3412,6 +3413,7 @@ def main(argv: list[str] | None = None) -> int:
                             corridor_width_factor=2.0,
                             timeout=args.timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                            max_iterations=getattr(args, "two_phase_iterations", 20),
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
@@ -3464,6 +3466,7 @@ def main(argv: list[str] | None = None) -> int:
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    max_iterations=getattr(args, "two_phase_iterations", 20),
                 )
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
