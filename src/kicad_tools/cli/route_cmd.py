@@ -1036,7 +1036,13 @@ def route_with_layer_escalation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        collision_checker = GridCollisionChecker(final_result.router.grid)
+        # Issue #2303: Use overflow-tolerant collision checking when
+        # the router finished with residual overflow.  This prevents the
+        # optimizer from fragmenting routes through overused cells.
+        has_overflow = final_result.router.grid.get_total_overflow() > 0
+        collision_checker = GridCollisionChecker(
+            final_result.router.grid, ignore_overflow=has_overflow
+        )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
@@ -1467,7 +1473,12 @@ def route_with_rule_relaxation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        collision_checker = GridCollisionChecker(final_result.router.grid)
+        # Issue #2303: Use overflow-tolerant collision checking when
+        # the router finished with residual overflow.
+        has_overflow = final_result.router.grid.get_total_overflow() > 0
+        collision_checker = GridCollisionChecker(
+            final_result.router.grid, ignore_overflow=has_overflow
+        )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
@@ -1916,7 +1927,12 @@ def route_with_combined_escalation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        collision_checker = GridCollisionChecker(final_result.router.grid)
+        # Issue #2303: Use overflow-tolerant collision checking when
+        # the router finished with residual overflow.
+        has_overflow = final_result.router.grid.get_total_overflow() > 0
+        collision_checker = GridCollisionChecker(
+            final_result.router.grid, ignore_overflow=has_overflow
+        )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
@@ -3545,7 +3561,12 @@ def main(argv: list[str] | None = None) -> int:
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        collision_checker = GridCollisionChecker(router.grid)
+        # Issue #2303: Use overflow-tolerant collision checking when
+        # the router finished with residual overflow.
+        has_overflow = router.grid.get_total_overflow() > 0
+        collision_checker = GridCollisionChecker(
+            router.grid, ignore_overflow=has_overflow
+        )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
