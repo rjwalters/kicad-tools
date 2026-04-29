@@ -360,8 +360,8 @@ class TestAutorouterNetPriority:
         pads = [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "RANDOM_NET"}]
         router.add_component("R1", pads)
 
-        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
-        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
         assert priority == 10  # Default priority
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -374,8 +374,8 @@ class TestAutorouterNetPriority:
         router.add_component("R1", pads1)
         router.add_component("R2", pads2)
 
-        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
-        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
         assert pad_count == 2
         # Distance should be sqrt(3^2 + 4^2) = 5.0
         assert abs(distance - 5.0) < 0.001
@@ -401,7 +401,7 @@ class TestAutorouterNetPriority:
         p1 = router._get_net_priority(1)
         p2 = router._get_net_priority(2)
 
-        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
         # Both have same class priority, but net 1 is shorter (simple tier) and net 2 is longer (complex tier)
         assert p1[0] == p2[0]  # Same class priority
         assert p1[1] <= p2[1]  # Net 1 is simple (tier 0), net 2 is complex (tier 1)
@@ -2868,8 +2868,8 @@ class TestComplexityTierOrdering:
         # Simple 2-pin should come before complex multi-pin (both default class)
         assert net_order.index(2) < net_order.index(3)
 
-    def test_5_tuple_return_type(self):
-        """Test that _get_net_priority returns a 5-tuple."""
+    def test_6_tuple_return_type(self):
+        """Test that _get_net_priority returns a 6-tuple (Issue #2278)."""
         router = Autorouter(width=50.0, height=50.0)
 
         router.add_component(
@@ -2878,7 +2878,7 @@ class TestComplexityTierOrdering:
         )
 
         result = router._get_net_priority(1)
-        assert len(result) == 5, f"Expected 5-tuple, got {len(result)}-tuple"
+        assert len(result) == 6, f"Expected 6-tuple, got {len(result)}-tuple"
 
     def test_no_pour_nets_unchanged_behavior(self):
         """Test that boards with no pour nets route identically to before."""

@@ -2589,6 +2589,15 @@ def main(argv: list[str] | None = None) -> int:
             "written output are reported as warnings but do not affect the exit code."
         ),
     )
+    parser.add_argument(
+        "--show-congestion",
+        action="store_true",
+        help=(
+            "Show pre-route RUDY congestion estimation before routing begins. "
+            "Displays an ASCII heatmap of predicted congestion per tile, useful "
+            "for diagnosing routing failures caused by congestion hotspots."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -3032,6 +3041,40 @@ def main(argv: list[str] | None = None) -> int:
         if fine_pitch_report.has_warnings:
             flush_print("\n--- Fine-Pitch Component Analysis ---")
             show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
+
+    # Show pre-route RUDY congestion estimation (Issue #2278)
+    if getattr(args, "show_congestion", False):
+        try:
+            estimator = router._ensure_congestion_estimator()
+            if not quiet:
+                flush_print("\n--- Pre-Route Congestion Estimation (RUDY) ---")
+            if args.format == "json":
+                import json as _json
+
+                print(_json.dumps(estimator.format_json(), indent=2))
+            else:
+                print(estimator.format_ascii_heatmap())
+                # Summary stats
+                max_demand = max(
+                    (estimator.demand[r][c]
+                     for r in range(estimator.grid.rows)
+                     for c in range(estimator.grid.cols)),
+                    default=0.0,
+                )
+                scored_nets = [
+                    (nid, s) for nid, s in estimator.net_scores.items() if s > 0
+                ]
+                scored_nets.sort(key=lambda x: -x[1])
+                print(f"\n  Peak tile demand: {max_demand:.2f}")
+                print(f"  Nets with congestion score: {len(scored_nets)}")
+                if scored_nets and not quiet:
+                    print("  Top congested nets:")
+                    for nid, score in scored_nets[:5]:
+                        name = router.net_names.get(nid, f"Net {nid}")
+                        print(f"    {name}: {score:.3f}")
+        except Exception as e:
+            if not quiet:
+                print(f"  Warning: Congestion estimation failed: {e}", file=sys.stderr)
 
     # Analyze routability if requested
     if args.analyze:
