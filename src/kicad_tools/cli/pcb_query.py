@@ -199,7 +199,6 @@ def cmd_nets(pcb: PCB, args):
     island_map: dict[int, list[list[str]]] = {}
     if check_connectivity:
         analyzer = NetStatusAnalyzer(pcb)
-        result = analyzer.analyze()
         # Build a lookup from net_number -> islands for quick access
         # We need to re-run island detection per net since NetStatusAnalyzer
         # only exposes connected/unconnected classification, not raw islands.
