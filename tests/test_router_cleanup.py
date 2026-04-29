@@ -705,6 +705,50 @@ class TestConnectivityAwareRestoration:
         assert len(router.routes[1].segments) == 1
         assert router.routes[1].segments[0].net == 7
 
+    def test_cleanup_before_stats_matches_output(self):
+        """Issue #2263: The route_cmd flow must call cleanup_artifacts()
+        before get_statistics() so that reported metrics match the data
+        written to file.  Simulate the fixed flow:
+          cleanup_artifacts() -> to_sexp(skip_cleanup=True) -> get_statistics()
+        """
+        router = _make_router()
+        router.routes = [
+            # Net-0 route that will be removed by cleanup
+            Route(net=0, net_name="", segments=[_seg(110, 90, 120, 90, net=0)]),
+            # Valid route that survives cleanup
+            Route(
+                net=1,
+                net_name="A",
+                segments=[
+                    _seg(110, 90, 115, 90, net=1),
+                    _seg(115, 90, 120, 90, net=1),
+                ],
+                vias=[_via(115, 90, net=1)],
+            ),
+        ]
+        # Pre-cleanup counts
+        pre_segments = sum(len(r.segments) for r in router.routes)
+        assert pre_segments == 3  # 1 net-0 + 2 valid
+
+        # Step 1: cleanup (the fix from #2263)
+        cleanup_stats = router.cleanup_artifacts()
+        assert cleanup_stats["net0_routes_removed"] == 1
+
+        # Step 2: to_sexp with skip_cleanup (no double cleanup)
+        sexp = router.to_sexp(skip_cleanup=True)
+        assert "(net 1)" in sexp
+        assert "(net 0)" not in sexp
+
+        # Step 3: get_statistics on cleaned routes
+        stats = router.get_statistics()
+        assert stats["routes"] == 1
+        assert stats["segments"] == 2
+        assert stats["vias"] == 1
+
+        # Post-cleanup segment count should match stats
+        post_segments = sum(len(r.segments) for r in router.routes)
+        assert post_segments == stats["segments"]
+
     def test_escape_near_board_edge_preserved(self):
         """Escape segments near board edge (both endpoints just outside
         tight margin) that are part of a connected chain should survive

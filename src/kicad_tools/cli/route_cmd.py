@@ -3344,6 +3344,36 @@ def main(argv: list[str] | None = None) -> int:
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
 
+    # Run connectivity-aware cleanup before computing statistics so that
+    # metrics reflect the segments actually written to the output file.
+    # The cleanup is safe (it restores segments whose removal would
+    # fragment a net).  See io.py for the canonical ordering.
+    pre_cleanup_segments = sum(len(r.segments) for r in router.routes)
+    pre_cleanup_vias = sum(len(r.vias) for r in router.routes)
+    cleanup_stats = router.cleanup_artifacts()
+    post_cleanup_segments = sum(len(r.segments) for r in router.routes)
+    post_cleanup_vias = sum(len(r.vias) for r in router.routes)
+
+    segments_removed = pre_cleanup_segments - post_cleanup_segments
+    vias_removed = pre_cleanup_vias - post_cleanup_vias
+
+    if not quiet and (segments_removed > 0 or vias_removed > 0):
+        flush_print("\n--- Cleanup ---")
+        flush_print(
+            f"  Segments: {pre_cleanup_segments} -> {post_cleanup_segments} "
+            f"({segments_removed} removed)"
+        )
+        if vias_removed > 0:
+            flush_print(
+                f"  Vias:     {pre_cleanup_vias} -> {post_cleanup_vias} "
+                f"({vias_removed} removed)"
+            )
+        if cleanup_stats.get("segments_restored", 0) > 0:
+            flush_print(
+                f"  Restored: {cleanup_stats['segments_restored']} segments, "
+                f"{cleanup_stats.get('vias_restored', 0)} vias (connectivity preservation)"
+            )
+
     # Get statistics — pass multi-pad net IDs so nets_routed only counts
     # signal nets, keeping numerator/denominator consistent (Issue #1643)
     multi_pad_net_ids = set(multi_pad_nets)
@@ -3458,8 +3488,8 @@ def main(argv: list[str] | None = None) -> int:
             # Read original PCB content
             original_content = pcb_path.read_text()
 
-            # Get route S-expressions (skip cleanup — it removes valid routes;
-            # statistics have already been computed from the full route set)
+            # Get route S-expressions (cleanup already ran before stats;
+            # skip_cleanup=True avoids a redundant second pass)
             route_sexp = router.to_sexp(skip_cleanup=True)
 
             # Insert routes and zones before final closing parenthesis
