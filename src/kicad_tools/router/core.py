@@ -2614,7 +2614,8 @@ class Autorouter:
                         break
 
                     # Adaptive oscillation detection for targeted mode (Issue #633)
-                    if adaptive and detect_oscillation(overflow_history):
+                    # Guard: skip escape strategies when overflow is already 0 (#2262)
+                    if adaptive and overflow > 0 and detect_oscillation(overflow_history):
                         print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
                         print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
@@ -2725,7 +2726,8 @@ class Autorouter:
                     break
 
                 # Adaptive oscillation detection and escape (Issue #633)
-                if adaptive and detect_oscillation(overflow_history):
+                # Guard: skip escape strategies when overflow is already 0 (#2262)
+                if adaptive and overflow > 0 and detect_oscillation(overflow_history):
                     print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
                     print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 

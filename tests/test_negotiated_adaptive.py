@@ -77,16 +77,13 @@ class TestDetectOscillation:
         assert detect_oscillation([20, 15, 10, 5], window=4) is False
 
     def test_no_oscillation_when_converged(self):
-        """Should not detect oscillation when at zero (converged)."""
-        # Stagnant at 0 is not oscillation, it's convergence
-        # The function checks if min(recent) > 0 for bounded oscillation
-        # But complete stagnation check happens first
-        # Actually, stagnation at 0 would trigger the len(set(recent)) == 1 check
-        # Let me verify the actual behavior
-        result = detect_oscillation([0, 0, 0, 0], window=4)
-        # This would return True for stagnation, but at 0 it's actually good
-        # The function doesn't distinguish - that's handled by the caller
-        assert result is True  # Technically stagnation, but caller handles this
+        """Should not detect oscillation when at zero (converged).
+
+        Issue #2262: Zero-overflow stagnation is convergence, not oscillation.
+        detect_oscillation must return False so that escape strategies are not
+        triggered on a fully-converged solution.
+        """
+        assert detect_oscillation([0, 0, 0, 0], window=4) is False
 
     def test_no_oscillation_when_window_has_new_minimum(self):
         """Issue #1823: Should NOT detect oscillation when window contains new best.
