@@ -352,10 +352,12 @@ class TwoPhaseRouter:
 
                 # Issue #2288: Relax corridor constraint as iterations progress
                 # so the detailed router can escape suboptimal global corridors.
-                # Floor of 0.2 keeps a mild preference even in late iterations.
+                # Issue #2308: Decay rate and floor are now configurable via
+                # DesignRules.corridor_decay_rate / corridor_decay_floor.
                 if corridors:
                     effective_penalty = corridor_penalty * max(
-                        0.2, 1.0 - 0.1 * iteration
+                        self.rules.corridor_decay_floor,
+                        1.0 - self.rules.corridor_decay_rate * iteration,
                     )
                     for net, corridor in corridors.items():
                         self.grid.set_corridor_preference(
