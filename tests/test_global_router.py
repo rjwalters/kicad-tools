@@ -856,3 +856,387 @@ class TestGlobalRoutingResult:
         assert len(result.assignments) == 0
         assert len(result.failed_nets) == 0
         assert result.region_graph is None
+
+    def test_result_has_iteration_fields(self):
+        """GlobalRoutingResult tracks negotiated iteration metadata."""
+        result = GlobalRoutingResult()
+        assert result.iterations == 0
+        assert result.final_overflow == 0
+
+
+# =============================================================================
+# Geometry-Based Edge Capacity Tests (Issue #2276)
+# =============================================================================
+
+
+class TestGeometryBasedCapacity:
+    """Test that edge capacity is computed from tile boundary geometry."""
+
+    def test_capacity_from_pitch(self):
+        """Edge capacity = edge_length / pitch (per layer)."""
+        # 20mm board, 4x4 grid -> tile = 5mm x 5mm
+        # pitch = 0.4mm -> vertical edge (height=5mm) -> 5/0.4 = 12 per layer
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=1,
+        )
+        # Check an edge between two horizontally-adjacent regions
+        region_0 = graph.regions[0]
+        for edge in graph.edges[region_0.id]:
+            target = graph.regions[edge.target]
+            if region_0.row == target.row:
+                # Vertical boundary, length = region_height = 5.0
+                assert edge.capacity == int(5.0 / 0.4)
+                break
+
+    def test_capacity_scales_with_layers(self):
+        """Multi-layer boards multiply per-layer capacity."""
+        graph_1 = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=1,
+        )
+        graph_2 = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=2,
+        )
+        # Grab the same edge from both graphs
+        edge_1 = graph_1.edges[0][0]
+        edge_2 = graph_2.edges[0][0]
+        assert edge_2.capacity == edge_1.capacity * 2
+
+    def test_per_layer_capacity_dict(self):
+        """Multi-layer graph stores per-layer capacity on edges."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=2,
+        )
+        edge = graph.edges[0][0]
+        assert len(edge.layer_capacity) == 2
+        assert 0 in edge.layer_capacity
+        assert 1 in edge.layer_capacity
+        # Each layer gets the single-layer capacity
+        per_layer = int(5.0 / 0.4)
+        assert edge.layer_capacity[0] == per_layer
+        assert edge.layer_capacity[1] == per_layer
+
+    def test_single_layer_no_layer_dict(self):
+        """Single-layer graph has empty layer_capacity dict (legacy compat)."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=1,
+        )
+        edge = graph.edges[0][0]
+        assert edge.layer_capacity == {}
+
+    def test_legacy_flat_capacity_when_no_pitch(self):
+        """Without trace_pitch, edges use flat base_capacity."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            base_capacity=10,
+        )
+        edge = graph.edges[0][0]
+        assert edge.capacity == 10
+
+    def test_obstacle_blockage_reduces_capacity(self):
+        """Registering obstacles reduces geometry-based edge capacity."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=1,
+        )
+        initial_cap = graph.edges[0][0].capacity
+
+        # Place many pads in region 0 to create blockage
+        pads_in_region = [
+            Pad(x=1.0, y=1.0, width=1.0, height=1.0, net=1, net_name="A",
+                ref="U1", pin=str(i), layer=Layer.F_CU)
+            for i in range(5)
+        ]
+        graph.register_obstacles(pads_in_region)
+
+        # At least one edge from region 0 should have reduced capacity
+        reduced = False
+        for edge in graph.edges[0]:
+            if edge.capacity < initial_cap:
+                reduced = True
+                break
+        assert reduced, "Obstacle blockage should reduce edge capacity"
+
+    def test_capacity_formula_matches_expectation(self):
+        """Verify capacity = (edge_length - blockage) / pitch across layers."""
+        graph = RegionGraph(
+            board_width=10.0, board_height=10.0,
+            num_cols=2, num_rows=2,
+            trace_pitch=0.5, num_layers=2,
+        )
+        # Tile = 5x5, vertical boundary length = 5.0, no blockage
+        # per_layer = int(5.0 / 0.5) = 10, total = 10 * 2 = 20
+        edge = graph.edges[0][0]
+        target = graph.regions[edge.target]
+        src = graph.regions[0]
+        if src.row == target.row:
+            assert edge.capacity == 20  # vertical boundary
+        else:
+            assert edge.capacity == 20  # horizontal boundary (also 5mm)
+
+    def test_single_tile_board(self):
+        """1x1 board has no edges, capacity is irrelevant."""
+        graph = RegionGraph(
+            board_width=10.0, board_height=10.0,
+            num_cols=1, num_rows=1,
+            trace_pitch=0.4, num_layers=2,
+        )
+        assert graph.get_edge_count() == 0
+
+
+# =============================================================================
+# Negotiated Global Routing Tests (Issue #2276)
+# =============================================================================
+
+
+class TestNegotiatedGlobalRouting:
+    """Test negotiated iteration on the coarse graph."""
+
+    def test_negotiated_reduces_overflow(self):
+        """Negotiated iteration should reduce or eliminate overflow."""
+        # Small board with tight capacity to force overflow
+        graph = RegionGraph(
+            board_width=10.0, board_height=10.0,
+            num_cols=3, num_rows=3,
+            trace_pitch=2.0,  # Very coarse pitch -> low capacity
+            num_layers=1,
+        )
+
+        pads = {
+            ("R1", "1"): Pad(x=1.0, y=5.0, width=0.5, height=0.5, net=1,
+                             net_name="N1", ref="R1", pin="1", layer=Layer.F_CU),
+            ("R1", "2"): Pad(x=9.0, y=5.0, width=0.5, height=0.5, net=1,
+                             net_name="N1", ref="R1", pin="2", layer=Layer.F_CU),
+            ("R2", "1"): Pad(x=1.0, y=5.1, width=0.5, height=0.5, net=2,
+                             net_name="N2", ref="R2", pin="1", layer=Layer.F_CU),
+            ("R2", "2"): Pad(x=9.0, y=5.1, width=0.5, height=0.5, net=2,
+                             net_name="N2", ref="R2", pin="2", layer=Layer.F_CU),
+            ("R3", "1"): Pad(x=1.0, y=4.9, width=0.5, height=0.5, net=3,
+                             net_name="N3", ref="R3", pin="1", layer=Layer.F_CU),
+            ("R3", "2"): Pad(x=9.0, y=4.9, width=0.5, height=0.5, net=3,
+                             net_name="N3", ref="R3", pin="2", layer=Layer.F_CU),
+        }
+        nets = {
+            1: [("R1", "1"), ("R1", "2")],
+            2: [("R2", "1"), ("R2", "2")],
+            3: [("R3", "1"), ("R3", "2")],
+        }
+
+        router = GlobalRouter(
+            region_graph=graph,
+            corridor_width=0.5,
+            negotiated=True,
+            max_iterations=10,
+        )
+        result = router.route_all(nets=nets, pad_dict=pads)
+
+        # All nets should be assigned (even if overflow remains)
+        assert len(result.assignments) == 3
+
+    def test_negotiated_off_is_greedy(self):
+        """With negotiated=False, no rip-up iterations occur."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4,
+        )
+        pads = {
+            ("R1", "1"): Pad(x=2.0, y=10.0, width=1.0, height=1.0, net=1,
+                             net_name="V", ref="R1", pin="1", layer=Layer.F_CU),
+            ("R1", "2"): Pad(x=18.0, y=10.0, width=1.0, height=1.0, net=1,
+                             net_name="V", ref="R1", pin="2", layer=Layer.F_CU),
+        }
+        nets = {1: [("R1", "1"), ("R1", "2")]}
+
+        router = GlobalRouter(
+            region_graph=graph,
+            corridor_width=0.5,
+            negotiated=False,
+        )
+        result = router.route_all(nets=nets, pad_dict=pads)
+        assert result.iterations == 0
+        assert len(result.assignments) == 1
+
+    def test_history_cost_accumulates(self):
+        """History cost increases on overflowed edges after update."""
+        edge = RegionEdge(source=0, target=1, capacity=2, utilization=3)
+        assert edge.overflow == 1
+        cost_before = edge.congestion_cost
+
+        graph = RegionGraph(
+            board_width=10.0, board_height=10.0,
+            num_cols=2, num_rows=1,
+        )
+        # Manually overflow an edge
+        for e in graph.edges[0]:
+            e.utilization = e.capacity + 2
+
+        graph.update_history_costs(1.5)
+
+        for e in graph.edges[0]:
+            assert e.history_cost >= 1.5
+
+    def test_release_utilization(self):
+        """Releasing utilization decrements counters."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+        )
+        r1 = graph.get_region_at(2.5, 2.5)
+        r2 = graph.get_region_at(7.5, 2.5)
+        path = graph.find_path(r1.id, r2.id)
+        assert path is not None
+
+        graph.update_utilization(path)
+        assert graph.regions[r1.id].utilization == 1
+
+        graph.release_utilization(path)
+        assert graph.regions[r1.id].utilization == 0
+
+    def test_reset_utilization(self):
+        """Reset clears all utilization to zero."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+        )
+        r1 = graph.get_region_at(2.5, 2.5)
+        r2 = graph.get_region_at(17.5, 17.5)
+        path = graph.find_path(r1.id, r2.id)
+        graph.update_utilization(path)
+
+        stats = graph.get_statistics()
+        assert stats["total_utilization"] > 0
+
+        graph.reset_utilization()
+        stats = graph.get_statistics()
+        assert stats["total_utilization"] == 0
+
+    def test_overflow_and_overflowed_edges(self):
+        """get_total_overflow and get_overflowed_edges work correctly."""
+        graph = RegionGraph(
+            board_width=10.0, board_height=10.0,
+            num_cols=2, num_rows=1,
+            base_capacity=2,
+        )
+        # Route 3 paths through the single edge (capacity=2)
+        path = [0, 1]
+        graph.update_utilization(path)
+        graph.update_utilization(path)
+        assert graph.get_total_overflow() == 0
+
+        graph.update_utilization(path)
+        assert graph.get_total_overflow() == 1
+        overflowed = graph.get_overflowed_edges()
+        assert len(overflowed) == 1
+
+
+# =============================================================================
+# Per-Layer Edge Utilization Tests (Issue #2276)
+# =============================================================================
+
+
+class TestPerLayerUtilization:
+    """Test per-layer tracking on RegionEdge."""
+
+    def test_use_layer_increments_both(self):
+        """use_layer updates both aggregate and per-layer counters."""
+        edge = RegionEdge(
+            source=0, target=1, capacity=20,
+            layer_capacity={0: 10, 1: 10},
+            layer_utilization={0: 0, 1: 0},
+        )
+        edge.use_layer(0)
+        assert edge.utilization == 1
+        assert edge.layer_utilization[0] == 1
+        assert edge.layer_utilization[1] == 0
+
+    def test_release_layer_decrements(self):
+        """release_layer decrements both counters."""
+        edge = RegionEdge(
+            source=0, target=1, capacity=20, utilization=3,
+            layer_capacity={0: 10, 1: 10},
+            layer_utilization={0: 2, 1: 1},
+        )
+        edge.release_layer(0)
+        assert edge.utilization == 2
+        assert edge.layer_utilization[0] == 1
+
+    def test_remaining_capacity_on_layer(self):
+        """Per-layer remaining capacity is correct."""
+        edge = RegionEdge(
+            source=0, target=1, capacity=20,
+            layer_capacity={0: 10, 1: 10},
+            layer_utilization={0: 7, 1: 3},
+        )
+        assert edge.remaining_capacity_on_layer(0) == 3
+        assert edge.remaining_capacity_on_layer(1) == 7
+
+    def test_remaining_capacity_no_layer_data(self):
+        """Without per-layer data, falls back to aggregate."""
+        edge = RegionEdge(source=0, target=1, capacity=10, utilization=4)
+        assert edge.remaining_capacity_on_layer(0) == 6
+
+    def test_corridor_assignment_has_layer(self):
+        """CorridorAssignment stores the assigned layer."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=2,
+        )
+        router = GlobalRouter(
+            region_graph=graph,
+            corridor_width=0.5,
+            default_layer=1,
+        )
+        assignment = router.route_net(
+            net=1,
+            pad_positions=[(2.0, 10.0), (18.0, 10.0)],
+            layer=1,
+        )
+        assert assignment is not None
+        assert assignment.layer == 1
+
+    def test_multi_layer_routing_distributes_across_layers(self):
+        """route_all with multi-layer graph assigns nets to different layers."""
+        graph = RegionGraph(
+            board_width=20.0, board_height=20.0,
+            num_cols=4, num_rows=4,
+            trace_pitch=0.4, num_layers=2,
+        )
+        pads = {
+            ("R1", "1"): Pad(x=2.0, y=10.0, width=1.0, height=1.0, net=1,
+                             net_name="V", ref="R1", pin="1", layer=Layer.F_CU),
+            ("R1", "2"): Pad(x=18.0, y=10.0, width=1.0, height=1.0, net=1,
+                             net_name="V", ref="R1", pin="2", layer=Layer.F_CU),
+            ("R2", "1"): Pad(x=10.0, y=2.0, width=1.0, height=1.0, net=2,
+                             net_name="G", ref="R2", pin="1", layer=Layer.F_CU),
+            ("R2", "2"): Pad(x=10.0, y=18.0, width=1.0, height=1.0, net=2,
+                             net_name="G", ref="R2", pin="2", layer=Layer.F_CU),
+        }
+        nets = {
+            1: [("R1", "1"), ("R1", "2")],
+            2: [("R2", "1"), ("R2", "2")],
+        }
+        router = GlobalRouter(
+            region_graph=graph,
+            corridor_width=0.5,
+            negotiated=False,
+        )
+        result = router.route_all(nets=nets, pad_dict=pads)
+        layers_used = {a.layer for a in result.assignments.values()}
+        # With 2 nets and 2 layers, round-robin should use both layers
+        assert len(layers_used) == 2

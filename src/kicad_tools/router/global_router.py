@@ -11,6 +11,7 @@ converting region-level paths into corridor assignments that guide the
 detailed router.
 
 Phase A of hierarchical routing (Issue #1095).
+Tile-based negotiated global routing (Issue #2276).
 """
 
 from __future__ import annotations
@@ -34,12 +35,14 @@ class CorridorAssignment:
         region_path: Sequence of region IDs the net traverses
         corridor: The Corridor object for detailed routing guidance
         waypoint_coords: Waypoint coordinates along the corridor centerline
+        layer: Routing layer assigned by the global router
     """
 
     net: int
     region_path: list[int]
     corridor: Corridor
     waypoint_coords: list[tuple[float, float]] = field(default_factory=list)
+    layer: int = 0
 
 
 @dataclass
@@ -50,11 +53,15 @@ class GlobalRoutingResult:
         assignments: Dictionary mapping net ID to CorridorAssignment
         failed_nets: List of net IDs that could not be globally routed
         region_graph: The RegionGraph used for planning
+        iterations: Number of negotiated iterations performed
+        final_overflow: Edge overflow after the last iteration
     """
 
     assignments: dict[int, CorridorAssignment] = field(default_factory=dict)
     failed_nets: list[int] = field(default_factory=list)
     region_graph: RegionGraph | None = None
+    iterations: int = 0
+    final_overflow: int = 0
 
 
 class GlobalRouter:
@@ -65,17 +72,20 @@ class GlobalRouter:
     guide the detailed router to stay within planned routing channels, reducing
     congestion and improving routability.
 
-    The router processes nets in the provided order, updating region/edge
-    utilization after each assignment so that later nets route around earlier
-    ones. This sequential greedy approach is simple and effective for Phase A;
-    min-cost flow optimization can be added in future phases.
+    When ``negotiated=True`` (the default), the router performs multiple
+    iterations of rip-up and reroute on the coarse graph until edge overflow
+    reaches zero or the maximum iteration count is exceeded. History costs
+    are accumulated on overflowed edges to progressively steer nets away
+    from congested tile boundaries.
 
     Usage:
-        region_graph = RegionGraph(board_width=65, board_height=56)
+        region_graph = RegionGraph(board_width=65, board_height=56,
+                                   trace_pitch=0.4, num_layers=2)
         region_graph.register_obstacles(all_pads)
         global_router = GlobalRouter(
             region_graph=region_graph,
             corridor_width=0.5,
+            negotiated=True,
         )
         result = global_router.route_all(nets, pads)
 
@@ -83,6 +93,9 @@ class GlobalRouter:
         region_graph: The coarse-grid board representation
         corridor_width: Half-width of corridors in mm (default: 2x clearance)
         default_layer: Default routing layer index (default: 0)
+        negotiated: Enable negotiated iteration (default: True)
+        max_iterations: Maximum negotiated iterations (default: 15)
+        history_increment: History cost added per overflowed edge per iteration
     """
 
     def __init__(
@@ -90,15 +103,22 @@ class GlobalRouter:
         region_graph: RegionGraph,
         corridor_width: float = 0.5,
         default_layer: int = 0,
+        negotiated: bool = True,
+        max_iterations: int = 15,
+        history_increment: float = 1.0,
     ):
         self.region_graph = region_graph
         self.corridor_width = corridor_width
         self.default_layer = default_layer
+        self.negotiated = negotiated
+        self.max_iterations = max_iterations
+        self.history_increment = history_increment
 
     def route_net(
         self,
         net: int,
         pad_positions: list[tuple[float, float]],
+        layer: int | None = None,
     ) -> CorridorAssignment | None:
         """Assign a corridor for a single net.
 
@@ -112,6 +132,7 @@ class GlobalRouter:
         Args:
             net: Net ID
             pad_positions: List of (x, y) coordinates for the net's pads
+            layer: Routing layer (default: ``self.default_layer``)
 
         Returns:
             CorridorAssignment if successful, None if routing fails
@@ -119,9 +140,10 @@ class GlobalRouter:
         if len(pad_positions) < 2:
             return None
 
+        if layer is None:
+            layer = self.default_layer
+
         # Find source and target regions
-        # For multi-pad nets, pick the two most distant pads to define
-        # the corridor spanning the full extent of the net.
         src_pos, tgt_pos = self._pick_endpoints(pad_positions)
 
         src_region = self.region_graph.get_region_at(src_pos[0], src_pos[1])
@@ -136,7 +158,7 @@ class GlobalRouter:
             return None
 
         # Update utilization
-        self.region_graph.update_utilization(region_path)
+        self.region_graph.update_utilization(region_path, layer=layer)
 
         # Convert region path to waypoints
         waypoint_coords = self._build_waypoint_coords(
@@ -145,7 +167,7 @@ class GlobalRouter:
 
         # Build Corridor from waypoints
         waypoints = [
-            Waypoint(x=x, y=y, layer=self.default_layer, waypoint_type="global")
+            Waypoint(x=x, y=y, layer=layer, waypoint_type="global")
             for x, y in waypoint_coords
         ]
 
@@ -160,6 +182,7 @@ class GlobalRouter:
             region_path=region_path,
             corridor=corridor,
             waypoint_coords=waypoint_coords,
+            layer=layer,
         )
 
     def route_all(
@@ -168,11 +191,16 @@ class GlobalRouter:
         pad_dict: dict[tuple[str, str], Pad],
         net_order: list[int] | None = None,
     ) -> GlobalRoutingResult:
-        """Assign corridors for all nets.
+        """Assign corridors for all nets, with optional negotiated iteration.
 
-        Processes nets in order, updating utilization after each assignment
-        so later nets avoid congested regions. Nets that cannot be globally
-        routed are recorded as failures but do not block other nets.
+        When ``self.negotiated`` is True, the router performs iterative
+        rip-up and reroute on the coarse graph:
+
+        1. Route all nets greedily (iteration 0).
+        2. Compute edge overflow.
+        3. If overflow > 0, add history costs to overflowed edges, rip up
+           all nets traversing those edges, and reroute them.
+        4. Repeat until overflow == 0 or max_iterations is reached.
 
         Args:
             nets: Dictionary mapping net ID to list of (ref, pin) tuples
@@ -189,29 +217,110 @@ class GlobalRouter:
         else:
             net_order = [n for n in net_order if n != 0]
 
-        for net in net_order:
-            if net not in nets:
+        # Collect pad positions for each net
+        net_pad_positions: dict[int, list[tuple[float, float]]] = {}
+        for net_id in net_order:
+            if net_id not in nets:
                 continue
-
-            pad_keys = nets[net]
+            pad_keys = nets[net_id]
             if len(pad_keys) < 2:
                 continue
-
-            # Collect pad positions
-            pad_positions: list[tuple[float, float]] = []
+            positions: list[tuple[float, float]] = []
             for key in pad_keys:
                 pad = pad_dict.get(key)
                 if pad is not None:
-                    pad_positions.append((pad.x, pad.y))
+                    positions.append((pad.x, pad.y))
+            if len(positions) >= 2:
+                net_pad_positions[net_id] = positions
 
-            if len(pad_positions) < 2:
+        # Choose layer for each net (simple round-robin across layers)
+        net_layers: dict[int, int] = {}
+        num_layers = self.region_graph.num_layers
+        for i, net_id in enumerate(net_order):
+            if net_id in net_pad_positions:
+                net_layers[net_id] = (
+                    i % num_layers if num_layers > 1 else self.default_layer
+                )
+
+        # --- Iteration 0: greedy routing ---
+        assignments: dict[int, CorridorAssignment] = {}
+        failed: list[int] = []
+
+        for net_id in net_order:
+            if net_id not in net_pad_positions:
                 continue
-
-            assignment = self.route_net(net, pad_positions)
+            layer = net_layers.get(net_id, self.default_layer)
+            assignment = self.route_net(
+                net_id, net_pad_positions[net_id], layer=layer
+            )
             if assignment is not None:
-                result.assignments[net] = assignment
+                assignments[net_id] = assignment
             else:
-                result.failed_nets.append(net)
+                failed.append(net_id)
+
+        overflow = self.region_graph.get_total_overflow()
+        iteration = 0
+
+        # --- Negotiated iterations ---
+        if self.negotiated and overflow > 0:
+            for iteration in range(1, self.max_iterations + 1):
+                # Add history cost to overflowed edges
+                self.region_graph.update_history_costs(self.history_increment)
+
+                # Find nets through overflowed edges
+                overflowed_edges = self.region_graph.get_overflowed_edges()
+                overflowed_pairs: set[tuple[int, int]] = set()
+                for edge in overflowed_edges:
+                    overflowed_pairs.add(
+                        (
+                            min(edge.source, edge.target),
+                            max(edge.source, edge.target),
+                        )
+                    )
+
+                nets_to_reroute: list[int] = []
+                for net_id, assign in assignments.items():
+                    path = assign.region_path
+                    for j in range(len(path) - 1):
+                        key = (
+                            min(path[j], path[j + 1]),
+                            max(path[j], path[j + 1]),
+                        )
+                        if key in overflowed_pairs:
+                            nets_to_reroute.append(net_id)
+                            break
+
+                if not nets_to_reroute:
+                    break
+
+                # Rip up affected nets
+                for net_id in nets_to_reroute:
+                    assign = assignments[net_id]
+                    layer = assign.layer
+                    self.region_graph.release_utilization(
+                        assign.region_path, layer=layer
+                    )
+                    del assignments[net_id]
+
+                # Reroute them
+                for net_id in nets_to_reroute:
+                    layer = net_layers.get(net_id, self.default_layer)
+                    assignment = self.route_net(
+                        net_id, net_pad_positions[net_id], layer=layer
+                    )
+                    if assignment is not None:
+                        assignments[net_id] = assignment
+                    elif net_id not in failed:
+                        failed.append(net_id)
+
+                overflow = self.region_graph.get_total_overflow()
+                if overflow == 0:
+                    break
+
+        result.assignments = assignments
+        result.failed_nets = failed
+        result.iterations = iteration
+        result.final_overflow = overflow
 
         return result
 
