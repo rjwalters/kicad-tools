@@ -22,6 +22,7 @@ from .negotiated import (
     detect_oscillation,
     should_terminate_early,
 )
+from .steiner import build_rsmt
 from .two_phase import TwoPhaseRouter
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "NegotiatedRouter",
     "MonteCarloRouter",
     "TwoPhaseRouter",
+    "build_rsmt",
     # Adaptive parameter functions (Issue #633)
     "calculate_history_increment",
     "calculate_present_cost",
