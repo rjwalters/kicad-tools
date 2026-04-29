@@ -77,6 +77,7 @@ class TwoPhaseRouter:
         corridor_penalty: float | None = None,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -87,6 +88,7 @@ class TwoPhaseRouter:
                 Defaults to ``self.rules.cost_corridor_deviation`` when *None*.
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
+            per_net_timeout: Optional wall-clock timeout per A* search
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -237,6 +239,7 @@ class TwoPhaseRouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
                 start_time=start_time,
+                per_net_timeout=per_net_timeout,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -281,6 +284,7 @@ class TwoPhaseRouter:
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
         start_time: float = 0.0,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing."""
         from ..algorithms import NegotiatedRouter
@@ -315,7 +319,7 @@ class TwoPhaseRouter:
             pct = (i / total_nets * 100) if total_nets > 0 else 0
             flush_print(f"  [{pct:5.1f}%] Routing {net_name}... ({elapsed_str()})")
 
-            routes = self._route_net_with_corridor(net, present_factor)
+            routes = self._route_net_with_corridor(net, present_factor, per_net_timeout=per_net_timeout)
             if routes:
                 net_routes[net] = routes
                 for route in routes:
@@ -369,7 +373,7 @@ class TwoPhaseRouter:
                 for net in nets_to_reroute:
                     if check_timeout():
                         break
-                    routes = self._route_net_with_corridor(net, present_factor)
+                    routes = self._route_net_with_corridor(net, present_factor, per_net_timeout=per_net_timeout)
                     if routes:
                         net_routes[net] = routes
                         for route in routes:
