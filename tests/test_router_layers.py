@@ -682,3 +682,111 @@ class TestFourLayerAllSignal:
         expected_names = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
         actual_names = [layer.name for layer in stack.layers]
         assert actual_names == expected_names
+
+
+# ==============================================================================
+# Inner Layer Utilization Cost Tests (Issue #2265)
+# ==============================================================================
+
+
+class TestCostLayerInnerDefault:
+    """Tests for cost_layer_inner default value in DesignRules."""
+
+    def test_default_inner_layer_cost_reasonable(self):
+        """Default cost_layer_inner must be low enough to allow inner layer use.
+
+        The pathfinder now applies cost_layer_inner on top of cost_via when
+        transitioning to an inner layer. The value must be small relative
+        to the base movement cost (1.0) so that the pathfinder considers
+        inner layers on 4-layer boards.
+        """
+        rules = DesignRules()
+        # Must be significantly less than cost_via
+        assert rules.cost_layer_inner <= rules.cost_via / 2
+        assert rules.cost_layer_inner > 0
+
+
+class TestQuickTuneLayerCosts:
+    """Tests for quick_tune inner-layer and via cost scaling (Issue #2265)."""
+
+    def test_4layer_inner_cost_lower_than_2layer(self):
+        """4-layer board should have lower inner-layer cost than 2-layer."""
+        from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
+
+        chars_2 = BoardCharacteristics(
+            total_pads=100, total_nets=50, board_area=4000,
+            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            layer_count=2,
+        )
+        chars_4 = BoardCharacteristics(
+            total_pads=100, total_nets=50, board_area=4000,
+            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            layer_count=4,
+        )
+
+        params_2 = quick_tune(chars_2)
+        params_4 = quick_tune(chars_4)
+
+        assert params_4.layer_inner < params_2.layer_inner
+
+    def test_4layer_via_cost_lower_than_2layer(self):
+        """4-layer board should have lower via cost since transitions are cheaper."""
+        from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
+
+        chars_2 = BoardCharacteristics(
+            total_pads=100, total_nets=50, board_area=4000,
+            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            layer_count=2,
+        )
+        chars_4 = BoardCharacteristics(
+            total_pads=100, total_nets=50, board_area=4000,
+            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            layer_count=4,
+        )
+
+        params_2 = quick_tune(chars_2)
+        params_4 = quick_tune(chars_4)
+
+        assert params_4.via < params_2.via
+
+    def test_4layer_inner_cost_below_three_times_base(self):
+        """Inner-layer cost for 4-layer boards must be below 3x base movement.
+
+        If layer_inner >= 3 * cost_straight, the router will almost never
+        choose to transition to an inner layer.
+        """
+        from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
+
+        chars = BoardCharacteristics(
+            total_pads=180, total_nets=54, board_area=3969,
+            pin_density=0.045, avg_net_size=2, avg_net_span=15,
+            layer_count=4,
+        )
+        params = quick_tune(chars)
+        assert params.layer_inner < params.straight * 3
+
+
+class TestCostProfileLayerInner:
+    """Tests for cost profile inner-layer values (Issue #2265)."""
+
+    def test_standard_profile_inner_cost_reasonable(self):
+        """STANDARD profile inner-layer cost must not exceed via cost."""
+        from kicad_tools.router.tuning import COST_PROFILES, CostProfile
+
+        params = COST_PROFILES[CostProfile.STANDARD]
+        assert params.layer_inner <= params.via
+
+    def test_dense_profile_inner_cost_reasonable(self):
+        """DENSE profile inner-layer cost must not exceed via cost."""
+        from kicad_tools.router.tuning import COST_PROFILES, CostProfile
+
+        params = COST_PROFILES[CostProfile.DENSE]
+        assert params.layer_inner <= params.via
+
+    def test_sparse_profile_inner_cost_lowest(self):
+        """SPARSE profile should have the lowest inner-layer cost."""
+        from kicad_tools.router.tuning import COST_PROFILES, CostProfile
+
+        sparse = COST_PROFILES[CostProfile.SPARSE]
+        standard = COST_PROFILES[CostProfile.STANDARD]
+        assert sparse.layer_inner <= standard.layer_inner

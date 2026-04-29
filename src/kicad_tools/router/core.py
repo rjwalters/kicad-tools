@@ -2716,6 +2716,57 @@ class Autorouter:
                         f"  Progress: {len(net_routes)}/{total_nets} nets routed total"
                     )
 
+                    # Issue #2265: When overflow is 0 but nets remain unrouted,
+                    # the standard rip-up path only re-attempts failed nets without
+                    # clearing the routed nets that block them. Fall back to
+                    # targeted rip-up to identify and displace blockers.
+                    still_failed = [
+                        n for n in net_order
+                        if n not in net_routes and n in pads_by_net and n not in off_grid_nets
+                    ]
+                    if overflow == 0 and still_failed and not timed_out:
+                        flush_print(
+                            f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
+                            f" - engaging targeted rip-up fallback ({elapsed_str()})"
+                        )
+                        targeted_fallback_count = 0
+                        for failed_net in still_failed:
+                            if check_timeout():
+                                timed_out = True
+                                break
+                            pads_for_net = pads_by_net.get(failed_net, [])
+                            if len(pads_for_net) < 2:
+                                continue
+                            blocking_nets: set[int] = set()
+                            for j in range(len(pads_for_net) - 1):
+                                blockers = neg_router.find_blocking_nets_for_connection(
+                                    pads_for_net[j], pads_for_net[j + 1]
+                                )
+                                blocking_nets.update(blockers)
+                            if blocking_nets:
+                                def _mark_route_fallback(route: Route) -> None:
+                                    self._mark_route(route)
+
+                                success = neg_router.targeted_ripup(
+                                    failed_net=failed_net,
+                                    blocking_nets=blocking_nets,
+                                    net_routes=net_routes,
+                                    routes_list=self.routes,
+                                    pads_by_net=pads_by_net,
+                                    present_cost_factor=present_factor,
+                                    mark_route_callback=_mark_route_fallback,
+                                    ripup_history=ripup_history,
+                                    max_ripups_per_net=max_ripups_per_net,
+                                    per_net_timeout=per_net_timeout,
+                                )
+                                if success:
+                                    targeted_fallback_count += 1
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        flush_print(
+                            f"  Targeted fallback resolved {targeted_fallback_count}/{len(still_failed)} nets ({elapsed_str()})"
+                        )
+
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
 

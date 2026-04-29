@@ -1214,3 +1214,163 @@ class TestInwardViaStrategy:
             )
         finally:
             escape_logger.removeHandler(handler)
+
+
+# ==============================================================================
+# Connector Escape Tests (Issue #2265)
+# ==============================================================================
+
+
+def create_connector_pads(
+    pins: int, pitch: float = 2.54, ref: str = "J1"
+) -> list[Pad]:
+    """Create pads simulating a dual-row through-hole connector (e.g., 2x20 header).
+
+    Args:
+        pins: Total pin count (must be even for dual-row).
+        pitch: Pin pitch in mm (default 2.54mm for standard headers).
+        ref: Component reference.
+
+    Returns:
+        List of through-hole Pad objects in dual-row arrangement.
+    """
+    pads = []
+    pins_per_side = pins // 2
+    half_length = (pins_per_side - 1) * pitch / 2
+    row_spacing = pitch  # Standard 2-row connector has row spacing == pitch
+
+    net = 1
+    # Row A (left / lower-X)
+    for i in range(pins_per_side):
+        pads.append(
+            Pad(
+                x=-row_spacing / 2,
+                y=-half_length + i * pitch,
+                width=1.6,
+                height=1.6,
+                net=net,
+                net_name=f"NET_{net}",
+                layer=Layer.F_CU,
+                ref=ref,
+                through_hole=True,
+            )
+        )
+        net += 1
+
+    # Row B (right / higher-X)
+    for i in range(pins_per_side):
+        pads.append(
+            Pad(
+                x=row_spacing / 2,
+                y=-half_length + i * pitch,
+                width=1.6,
+                height=1.6,
+                net=net,
+                net_name=f"NET_{net}",
+                layer=Layer.F_CU,
+                ref=ref,
+                through_hole=True,
+            )
+        )
+        net += 1
+
+    return pads
+
+
+class TestConnectorDetection:
+    """Tests for CONNECTOR package type detection (Issue #2265)."""
+
+    def test_40pin_connector_detected_as_connector(self):
+        """A 40-pin dual-row through-hole header must be detected as CONNECTOR."""
+        pads = create_connector_pads(40)
+        assert detect_package_type(pads) == PackageType.CONNECTOR
+
+    def test_20pin_connector_detected_as_connector(self):
+        """A 20-pin dual-row through-hole header must be CONNECTOR (boundary)."""
+        pads = create_connector_pads(20)
+        assert detect_package_type(pads) == PackageType.CONNECTOR
+
+    def test_small_dip_not_connector(self):
+        """A 16-pin DIP should remain classified as DIP, not CONNECTOR."""
+        pads = create_connector_pads(16)
+        assert detect_package_type(pads) == PackageType.DIP
+
+    def test_8pin_dip_not_connector(self):
+        """An 8-pin DIP should remain classified as DIP."""
+        pads = create_connector_pads(8)
+        assert detect_package_type(pads) == PackageType.DIP
+
+
+class TestConnectorEscapeRouting:
+    """Tests for connector escape routing strategy (Issue #2265)."""
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create grid and rules for testing."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(80, 80, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def test_connector_escapes_all_pins(self, grid_and_rules):
+        """Escape router must produce an escape for every connector pin."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        assert info.package_type == PackageType.CONNECTOR
+
+        escapes = router.generate_escapes(info)
+        assert len(escapes) == 40
+
+    def test_connector_inner_pins_use_via(self, grid_and_rules):
+        """Odd-indexed connector pins must escape via layer change."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        via_escapes = [e for e in escapes if e.via is not None]
+        surface_escapes = [e for e in escapes if e.via is None]
+
+        # Half of pins (odd-indexed) should have vias
+        assert len(via_escapes) == 20
+        assert len(surface_escapes) == 20
+
+    def test_connector_via_escapes_use_alternate_layer(self, grid_and_rules):
+        """Via escapes must route to an alternate layer (not F.Cu)."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                # Escape layer must differ from pad surface layer
+                assert escape.escape_layer != Layer.F_CU
+
+    def test_connector_escape_segments_valid(self, grid_and_rules):
+        """Every escape must have at least one segment with valid coordinates."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            assert len(escape.segments) >= 1
+            for seg in escape.segments:
+                assert seg.width > 0
+                assert seg.net > 0
