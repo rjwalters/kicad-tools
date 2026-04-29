@@ -34,7 +34,7 @@ import json
 import sys
 from pathlib import Path
 
-from kicad_tools.analysis.net_status import build_zone_net_map
+from kicad_tools.analysis.net_status import NetStatusAnalyzer, build_zone_net_map
 from kicad_tools.schema import PCB
 
 
@@ -194,36 +194,86 @@ def cmd_nets(pcb: PCB, args):
     # Build zone-to-net lookup once for all nets
     zone_net_map = build_zone_net_map(pcb)
 
+    # Run connectivity analysis if requested
+    check_connectivity = getattr(args, "check_connectivity", False)
+    island_map: dict[int, list[list[str]]] = {}
+    if check_connectivity:
+        analyzer = NetStatusAnalyzer(pcb)
+        # Build a lookup from net_number -> islands for quick access
+        # We need to re-run island detection per net since NetStatusAnalyzer
+        # only exposes connected/unconnected classification, not raw islands.
+        for net in nets:
+            pad_infos = analyzer._get_net_pads_with_positions(net.number)
+            if len(pad_infos) < 2:
+                # Single-pad or zero-pad nets: 1 island if pads exist, else 0
+                if pad_infos:
+                    island_map[net.number] = [[p.full_name for p in pad_infos]]
+                else:
+                    island_map[net.number] = []
+            else:
+                graph = analyzer._build_connectivity_graph(net.number, pad_infos)
+                islands = analyzer._find_islands(
+                    graph, [p.full_name for p in pad_infos]
+                )
+                island_map[net.number] = islands
+
     if args.format == "json":
         net_stats = []
         for net in nets:
             segments = list(pcb.segments_in_net(net.number))
             vias = list(pcb.vias_in_net(net.number))
             zone_layers = zone_net_map.get(net.number, [])
-            net_stats.append(
-                {
-                    "number": net.number,
-                    "name": net.name,
-                    "segments": len(segments),
-                    "vias": len(vias),
-                    "zone_connected": bool(zone_layers),
-                    "zone_layers": zone_layers,
-                }
-            )
+            entry = {
+                "number": net.number,
+                "name": net.name,
+                "segments": len(segments),
+                "vias": len(vias),
+                "zone_connected": bool(zone_layers),
+                "zone_layers": zone_layers,
+            }
+            if check_connectivity:
+                islands = island_map.get(net.number, [])
+                entry["island_count"] = len(islands)
+                entry["islands"] = islands
+                entry["is_complete"] = len(islands) <= 1
+            net_stats.append(entry)
         print(json.dumps(net_stats, indent=2))
         return
 
-    print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone'}")
-    print("-" * 60)
+    if check_connectivity:
+        print(
+            f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone':<12} {'Islands'}"
+        )
+        print("-" * 80)
+    else:
+        print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone'}")
+        print("-" * 60)
 
     for net in nets:
         segments = list(pcb.segments_in_net(net.number))
         vias = list(pcb.vias_in_net(net.number))
         zone_layers = zone_net_map.get(net.number, [])
         zone_col = ", ".join(zone_layers) if zone_layers else "-"
-        print(
-            f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias):<6} {zone_col}"
-        )
+
+        if check_connectivity:
+            islands = island_map.get(net.number, [])
+            island_count = len(islands)
+            if island_count <= 1:
+                island_str = str(island_count)
+            else:
+                # Show island membership for disconnected nets
+                island_parts = []
+                for island in islands:
+                    island_parts.append(", ".join(island))
+                island_str = f"{island_count} islands [{' | '.join(island_parts)}]"
+            print(
+                f"{net.name:<25} {net.number:<6} {len(segments):<8} "
+                f"{len(vias):<6} {zone_col:<12} {island_str}"
+            )
+        else:
+            print(
+                f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias):<6} {zone_col}"
+            )
 
     print(f"\nTotal: {len(nets)} nets")
 
@@ -480,6 +530,13 @@ def main(argv=None):
     parser.add_argument("--filter", help="Filter pattern (e.g., 'U*', 'C*')")
     parser.add_argument("--sorted", action="store_true", help="Sort output")
     parser.add_argument("--layer", help="Filter by layer (for traces)")
+    parser.add_argument(
+        "--check-connectivity",
+        action="store_true",
+        default=False,
+        dest="check_connectivity",
+        help="Run island detection to find disconnected segments within each net",
+    )
 
     args = parser.parse_args(argv)
 

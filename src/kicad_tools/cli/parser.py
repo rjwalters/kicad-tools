@@ -1241,6 +1241,12 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_nets.add_argument("--format", choices=["text", "json"], default="text")
     pcb_nets.add_argument("--filter", dest="pattern", help="Filter by net pattern")
     pcb_nets.add_argument("--sorted", action="store_true", help="Sort output")
+    pcb_nets.add_argument(
+        "--check-connectivity",
+        action="store_true",
+        default=False,
+        help="Run island detection to find disconnected segments within each net",
+    )
 
     # pcb traces
     pcb_traces = pcb_subparsers.add_parser("traces", help="Show trace statistics")

@@ -85,6 +85,8 @@ def run_pcb_command(args) -> int:
             sub_argv.extend(["--filter", args.pattern])
         if args.sorted:
             sub_argv.append("--sorted")
+        if getattr(args, "check_connectivity", False):
+            sub_argv.append("--check-connectivity")
         return pcb_main(sub_argv) or 0
 
     elif args.pcb_command == "traces":
