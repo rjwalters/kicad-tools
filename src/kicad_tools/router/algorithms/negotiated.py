@@ -16,6 +16,7 @@ import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ..congestion_estimator import CongestionEstimator
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route
@@ -292,6 +293,8 @@ class NegotiatedRouter:
         router: Router,
         rules: DesignRules,
         net_class_map: dict[str, NetClassRouting],
+        congestion_estimator: CongestionEstimator | None = None,
+        congestion_weight: float = 0.5,
     ):
         """Initialize the negotiated router.
 
@@ -300,11 +303,22 @@ class NegotiatedRouter:
             router: The pathfinding router
             rules: Design rules
             net_class_map: Net class routing rules
+            congestion_estimator: Optional RUDY congestion estimator.  When
+                provided, Steiner tree construction blends Manhattan distance
+                with tile demand so that multi-terminal nets prefer
+                less-congested paths.
+            congestion_weight: Multiplier applied to the tile demand when
+                computing the congestion-aware edge cost.  The weight is
+                scaled internally by tile area so that demand (mm) and
+                Manhattan distance (mm) are comparable.  A value of 0
+                disables congestion influence.  Default is 0.5.
         """
         self.grid = grid
         self.router = router
         self.rules = rules
         self.net_class_map = net_class_map
+        self.congestion_estimator = congestion_estimator
+        self.congestion_weight = congestion_weight
 
     def route_net_negotiated(
         self,
@@ -334,7 +348,32 @@ class NegotiatedRouter:
             # RSMT-based routing with negotiated mode
             from .steiner import build_rsmt
 
-            pad_objs, rsmt_edges = build_rsmt(pad_objs)
+            # Build congestion-aware cost function for Steiner tree
+            # construction when a RUDY estimator is available.
+            congestion_fn = None
+            if (
+                self.congestion_estimator is not None
+                and self.congestion_weight > 0
+            ):
+                est = self.congestion_estimator
+                tile_area = est.grid.tile_w * est.grid.tile_h
+                # Scale weight by tile area so demand and Manhattan
+                # distance are in comparable units (mm).
+                scaled_weight = self.congestion_weight * tile_area
+
+                def congestion_fn(
+                    x1: float, y1: float, x2: float, y2: float
+                ) -> float:
+                    manhattan = abs(x1 - x2) + abs(y1 - y2)
+                    mid_x = (x1 + x2) / 2
+                    mid_y = (y1 + y2) / 2
+                    col, row = est.grid.tile_at(mid_x, mid_y)
+                    demand = est.get_tile_demand(row, col)
+                    return manhattan + scaled_weight * demand
+
+            pad_objs, rsmt_edges = build_rsmt(
+                pad_objs, congestion_fn=congestion_fn
+            )
 
             for i, j in rsmt_edges:
                 source_pad = pad_objs[i]

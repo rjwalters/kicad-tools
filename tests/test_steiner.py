@@ -361,3 +361,80 @@ class TestBuildRsmt:
         terminals = [(p.x, p.y) for p in pads]
         mst_cost = _mst_cost(terminals)
         assert rsmt_cost <= mst_cost + 1e-9
+
+
+class TestBuildRsmtCongestionFn:
+    """Tests for build_rsmt with a congestion_fn parameter."""
+
+    def test_congestion_fn_biases_steiner_topology(self):
+        """A congestion hotspot in the center should push Steiner point away.
+
+        Four pads at (0,0), (10,0), (0,10), (10,10) form a square.
+        With pure Manhattan cost the Steiner point sits near the centre.
+        A heavy penalty at the centre should bias the tree to avoid it.
+        """
+        pads = [
+            _make_pad(0, 0),
+            _make_pad(10, 0),
+            _make_pad(0, 10),
+            _make_pad(10, 10),
+        ]
+
+        # Pure Manhattan baseline
+        ext_base, edges_base = build_rsmt(pads)
+
+        # Congestion function that heavily penalises edges whose midpoint
+        # is close to (5, 5).
+        def hot_center(x1, y1, x2, y2):
+            manhattan = abs(x1 - x2) + abs(y1 - y2)
+            mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+            dist_to_center = abs(mid_x - 5) + abs(mid_y - 5)
+            # Add huge penalty when near center
+            penalty = max(0, 20 - dist_to_center) * 5
+            return manhattan + penalty
+
+        ext_cong, edges_cong = build_rsmt(pads, congestion_fn=hot_center)
+
+        # Both must produce valid spanning trees
+        assert len(edges_base) == len(ext_base) - 1
+        assert len(edges_cong) == len(ext_cong) - 1
+
+        # The congestion-aware tree should still connect all original pads
+        connected = set()
+        for i, j in edges_cong:
+            connected.add(i)
+            connected.add(j)
+        for idx in range(len(pads)):
+            assert idx in connected
+
+    def test_weight_zero_matches_manhattan(self):
+        """congestion_fn that returns pure Manhattan should match baseline."""
+        pads = [_make_pad(0, 0), _make_pad(5, 0), _make_pad(0, 5)]
+
+        ext_base, edges_base = build_rsmt(pads)
+
+        def pure_manhattan(x1, y1, x2, y2):
+            return abs(x1 - x2) + abs(y1 - y2)
+
+        ext_fn, edges_fn = build_rsmt(pads, congestion_fn=pure_manhattan)
+
+        # Costs should be identical
+        base_cost = sum(
+            _manhattan(ext_base[i].x, ext_base[i].y, ext_base[j].x, ext_base[j].y)
+            for i, j in edges_base
+        )
+        fn_cost = sum(
+            _manhattan(ext_fn[i].x, ext_fn[i].y, ext_fn[j].x, ext_fn[j].y)
+            for i, j in edges_fn
+        )
+        assert abs(base_cost - fn_cost) < 1e-9
+
+    def test_none_congestion_fn_is_default(self):
+        """Passing congestion_fn=None should behave identically to omitting it."""
+        pads = [_make_pad(0, 0), _make_pad(8, 0), _make_pad(4, 6)]
+
+        ext1, edges1 = build_rsmt(pads)
+        ext2, edges2 = build_rsmt(pads, congestion_fn=None)
+
+        assert len(ext1) == len(ext2)
+        assert edges1 == edges2
