@@ -409,12 +409,29 @@ def _assign_nets_from_schematic(
     errors: list[str] = []
 
     try:
-        from kicad_tools.operations.netlist import export_netlist
+        from kicad_tools.operations.netlist import (
+            build_pin_to_pad_map,
+            export_netlist,
+        )
 
         netlist = export_netlist(str(schematic_path))
     except Exception as exc:
         errors.append(f"Failed to export netlist for net assignment: {exc}")
         return actions, errors
+
+    # Build pin-to-pad mapping when using the Python fallback path.
+    # The Python fallback produces NetNode.pin values that are schematic
+    # symbol pin numbers, which may differ from footprint pad numbers.
+    # The kicad-cli path already resolves this mapping internally, so
+    # the map is only needed for the fallback.
+    pin_to_pad_map = None
+    if netlist.tool and "Python fallback" in netlist.tool:
+        try:
+            pin_to_pad_map = build_pin_to_pad_map(schematic_path, pcb)
+        except Exception as exc:
+            errors.append(
+                f"Failed to build pin-to-pad map (proceeding without): {exc}"
+            )
 
     # Snapshot before assignment
     before = _get_pad_net_snapshot(pcb)
@@ -424,9 +441,9 @@ def _assign_nets_from_schematic(
         if net.name:
             pcb.add_net(net.name)
 
-    # Apply net assignments
+    # Apply net assignments with pin-to-pad resolution
     try:
-        pcb.assign_nets_from_netlist(netlist)
+        pcb.assign_nets_from_netlist(netlist, pin_to_pad_map=pin_to_pad_map)
     except Exception as exc:
         errors.append(f"Failed to assign nets from netlist: {exc}")
         return actions, errors
