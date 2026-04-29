@@ -110,6 +110,15 @@ class DesignRules:
     # to disable corridor guidance.
     cost_corridor_deviation: float = 5.0
 
+    # Corridor penalty decay parameters (Issue #2308)
+    # Controls how quickly the corridor penalty relaxes during negotiated
+    # rip-up iterations, allowing the detailed router to escape suboptimal
+    # global corridors over time.
+    #   effective_penalty = corridor_penalty * max(floor, 1.0 - rate * iteration)
+    # With defaults (rate=0.05, floor=0.3) the floor is reached at iteration 14.
+    corridor_decay_rate: float = 0.05   # per-iteration linear decay
+    corridor_decay_floor: float = 0.3   # minimum multiplier (never decays below this)
+
     # Crossing-aware routing (Issue #1250)
     # Penalizes candidate edges that cross already-routed segments on the same layer.
     # This steers A* toward non-crossing paths while still permitting crossings when
