@@ -539,6 +539,234 @@ class NegotiatedRouter:
         """
         return self.router.find_blocking_nets(source_pad, target_pad)
 
+    def find_blocking_nets_relaxed(
+        self,
+        failed_nets: list[int],
+        pads_by_net: dict[int, list[Pad]],
+        per_net_timeout: float | None = None,
+    ) -> dict[int, int]:
+        """Identify true blockers using relaxed A* (Issue #2274).
+
+        For each unrouted net, temporarily unblocks all routed-net cells
+        and runs A* to find a viable path.  Cells along that relaxed path
+        that were originally occupied by routed nets reveal the *true*
+        blockers.
+
+        Args:
+            failed_nets: List of net IDs that failed to route.
+            pads_by_net: Mapping of net ID to its pads.
+            per_net_timeout: Optional timeout per relaxed A* search.
+
+        Returns:
+            Dict mapping blocking net ID to the number of stuck nets it
+            blocks (score).  Higher score = blocks more stuck nets.
+        """
+        blocker_scores: dict[int, int] = {}
+
+        with self.grid.temporarily_unblock_routed_nets() as unblocker:
+            saved_blocked = unblocker._saved_blocked
+            saved_net = unblocker._saved_net
+
+            for net_id in failed_nets:
+                pads = pads_by_net.get(net_id, [])
+                if len(pads) < 2:
+                    continue
+
+                # Try finding a relaxed path for the first pair of pads
+                net_blockers: set[int] = set()
+                for j in range(len(pads) - 1):
+                    blockers = self.router.find_blocking_nets_relaxed(
+                        pads[j],
+                        pads[j + 1],
+                        saved_blocked,
+                        saved_net,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    net_blockers.update(blockers)
+
+                for blocker in net_blockers:
+                    blocker_scores[blocker] = blocker_scores.get(blocker, 0) + 1
+
+        return blocker_scores
+
+    def neighborhood_ripup(
+        self,
+        failed_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        stall_count: int = 0,
+        per_net_timeout: float | None = None,
+        max_attempts: int = 3,
+        initial_radius_factor: float = 1.0,
+        escalation_factor: float = 2.0,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 5,
+    ) -> tuple[bool, int]:
+        """Perform neighborhood rip-up for stuck nets (Issue #2274).
+
+        When negotiated routing stalls with 0 conflicts but unrouted nets
+        remain, this method:
+        1. Uses relaxed A* to identify true blocking nets
+        2. Scores blockers by how many stuck nets they block
+        3. Rips up highest-scoring blockers and their neighborhood
+        4. Routes the stuck net first, then re-routes displaced nets
+
+        The rip-up radius escalates on repeated stalls.
+
+        Args:
+            failed_nets: Nets that failed to route.
+            net_routes: Dict of net_id -> list of routes.
+            routes_list: Master route list.
+            pads_by_net: Dict of net_id -> list of pads.
+            present_cost_factor: Current congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            stall_count: How many consecutive stalls have occurred.
+            per_net_timeout: Optional per-net A* timeout.
+            max_attempts: Maximum rip-up attempts per call.
+            initial_radius_factor: Initial bounding-box expansion factor.
+            escalation_factor: Multiplier applied to radius on each stall.
+            ripup_history: Optional dict tracking per-net rip-up counts.
+            max_ripups_per_net: Maximum rip-ups per net to prevent loops.
+
+        Returns:
+            Tuple of (improved, new_routed_count) where improved is True if
+            more nets were routed than before.
+        """
+        if ripup_history is None:
+            ripup_history = {}
+
+        def _count_routed() -> int:
+            """Count nets that have at least one route."""
+            return sum(1 for routes in net_routes.values() if routes)
+
+        initial_routed = _count_routed()
+        radius_factor = initial_radius_factor * (escalation_factor ** stall_count)
+        attempts = 0
+
+        # Step 1: Find true blockers via relaxed A*
+        blocker_scores = self.find_blocking_nets_relaxed(
+            failed_nets, pads_by_net, per_net_timeout=per_net_timeout,
+        )
+
+        if not blocker_scores:
+            # No relaxed path found for any stuck net -- truly unroutable
+            return False, _count_routed()
+
+        # Sort blockers by score descending (block the most stuck nets first)
+        sorted_blockers = sorted(blocker_scores.items(), key=lambda x: -x[1])
+
+        for blocker_net, score in sorted_blockers:
+            if attempts >= max_attempts:
+                break
+
+            # Check ripup budget
+            if ripup_history.get(blocker_net, 0) >= max_ripups_per_net:
+                continue
+
+            attempts += 1
+            ripup_history[blocker_net] = ripup_history.get(blocker_net, 0) + 1
+
+            # Compute bounding box around the blocker's route and expand by radius
+            blocker_routes = net_routes.get(blocker_net, [])
+            if not blocker_routes:
+                continue
+
+            # Get bounding box of blocker net's routes
+            min_gx = float("inf")
+            min_gy = float("inf")
+            max_gx = float("-inf")
+            max_gy = float("-inf")
+            for route in blocker_routes:
+                for seg in route.segments:
+                    gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                    gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    min_gx = min(min_gx, gx1, gx2)
+                    min_gy = min(min_gy, gy1, gy2)
+                    max_gx = max(max_gx, gx1, gx2)
+                    max_gy = max(max_gy, gy1, gy2)
+
+            # Expand bounding box by radius
+            bbox_w = max_gx - min_gx + 1
+            bbox_h = max_gy - min_gy + 1
+            expand = int(max(bbox_w, bbox_h) * radius_factor)
+            bb_x1 = int(min_gx) - expand
+            bb_y1 = int(min_gy) - expand
+            bb_x2 = int(max_gx) + expand
+            bb_y2 = int(max_gy) + expand
+
+            # Find all routed nets passing through the expanded bounding box
+            neighborhood_nets: set[int] = {blocker_net}
+            for net_id, routes in net_routes.items():
+                if net_id in neighborhood_nets:
+                    continue
+                for route in routes:
+                    found = False
+                    for seg in route.segments:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                        # Check if segment intersects the bounding box
+                        if (
+                            max(gx1, gx2) >= bb_x1
+                            and min(gx1, gx2) <= bb_x2
+                            and max(gy1, gy2) >= bb_y1
+                            and min(gy1, gy2) <= bb_y2
+                        ):
+                            neighborhood_nets.add(net_id)
+                            found = True
+                            break
+                    if found:
+                        break
+
+            # Identify which failed nets could benefit from this rip-up
+            affected_failed = [
+                n for n in failed_nets
+                if n not in net_routes or not net_routes.get(n)
+            ]
+
+            # Rip up the neighborhood
+            self.rip_up_nets(list(neighborhood_nets), net_routes, routes_list)
+
+            # Route the failed nets first (priority)
+            for fn in affected_failed:
+                fn_pads = pads_by_net.get(fn, [])
+                if fn_pads and len(fn_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        fn_pads, present_cost_factor, mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[fn] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            # Re-route the displaced nets
+            for net_id in neighborhood_nets:
+                if net_id in net_routes and net_routes[net_id]:
+                    continue  # Already re-routed as a failed net
+                net_pads = pads_by_net.get(net_id, [])
+                if net_pads and len(net_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        net_pads, present_cost_factor, mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[net_id] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            # Check if we improved
+            current_routed = _count_routed()
+            if current_routed > initial_routed:
+                return True, current_routed
+
+        final_routed = _count_routed()
+        return final_routed > initial_routed, final_routed
+
     def escape_local_minimum(
         self,
         overflow_history: list[int],
