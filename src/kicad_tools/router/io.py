@@ -2101,11 +2101,12 @@ def route_pcb(
     print(f"Autorouting {len(nets_to_route)} nets...")
     router.route_all(nets_to_route, progress_callback=progress_callback)
 
-    # Generate S-expression output first -- to_sexp() runs
-    # cleanup_artifacts() which may remove net-0 orphans and OOB
-    # segments (Issue #2039).  Statistics must be computed AFTER
-    # cleanup so they reflect the data actually written to the file.
-    sexp = router.to_sexp()
+    # Run connectivity-aware cleanup before emitting S-expressions.
+    # The cleanup is safe (it restores segments when removal would
+    # fragment a net), but we still compute stats AFTER cleanup so
+    # they reflect the data actually written to the file.
+    router.cleanup_artifacts()
+    sexp = router.to_sexp(skip_cleanup=True)
     stats = router.get_statistics()
     print(
         f"  Completed: {stats['routes']} routes, {stats['segments']} segments, {stats['vias']} vias"
