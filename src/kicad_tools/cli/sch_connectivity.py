@@ -116,6 +116,13 @@ def build_wire_graph(
         if ps:
             coord = to_coord(*ps.position)
             net_name = ps.value or ps.lib_id.split(":", 1)[-1]
+            # PWR_FLAG is an ERC annotation, not a real net name.
+            # It must not contribute a net name, but its coordinate
+            # still needs to be a split point so wires are properly
+            # split at that location.
+            if net_name == "PWR_FLAG":
+                special_points.add(coord)
+                continue
             net_names[coord] = net_name
             special_points.add(coord)
 
