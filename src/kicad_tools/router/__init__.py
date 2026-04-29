@@ -24,6 +24,7 @@ Example::
 """
 
 from .block_router import BlockRouter, BlockRoutingResult
+from .congestion_estimator import CongestionEstimator, NetBBox, TileGrid
 from .cache import (
     CachedNetRoute,
     CachedRoutingResult,

@@ -75,6 +75,7 @@ from .tuning import (
     quick_tune,
     tune_parameters,
 )
+from .congestion_estimator import CongestionEstimator
 from .zones import ZoneManager
 
 
@@ -399,6 +400,11 @@ class Autorouter:
         # Constraint-aware net ordering (Issue #1020)
         # Cache for component pitches, computed lazily on first access
         self._component_pitches: dict[str, float] | None = None
+
+        # Pre-route congestion estimator (Issue #2278)
+        # Computed lazily before net ordering; provides RUDY-based
+        # congestion scores used as a 6th tiebreaker in _get_net_priority().
+        self._congestion_estimator: CongestionEstimator | None = None
 
         # Registered PCB blocks for protected-zone routing (Issue #1586)
         self.registered_blocks: dict[str, "PCBBlock"] = {}
@@ -1459,6 +1465,37 @@ class Autorouter:
         net_class = self.net_class_map.get(net_name)
         return bool(net_class and net_class.is_pour_net)
 
+    def _ensure_congestion_estimator(self) -> CongestionEstimator:
+        """Build the pre-route congestion estimator if not already computed.
+
+        Issue #2278: The estimator uses RUDY to distribute each net's HPWL
+        across a coarse tile grid, producing per-tile demand values.  The
+        per-net congestion score (average demand in bbox) is used as a
+        tiebreaker in :meth:`_get_net_priority`.
+
+        Returns:
+            The cached or newly built ``CongestionEstimator``.
+        """
+        if self._congestion_estimator is not None:
+            return self._congestion_estimator
+
+        # Collect pour-net IDs for exclusion
+        pour_ids: set[int] = set()
+        for net_id in self.nets:
+            if self._is_pour_net(net_id):
+                pour_ids.add(net_id)
+
+        self._congestion_estimator = CongestionEstimator.from_nets(
+            nets=self.nets,
+            pads=self.pads,
+            board_origin_x=self.grid.origin_x,
+            board_origin_y=self.grid.origin_y,
+            board_width=self.grid.width,
+            board_height=self.grid.height,
+            pour_net_ids=pour_ids,
+        )
+        return self._congestion_estimator
+
     def _filter_pour_nets(self, net_order: list[int]) -> list[int]:
         """Remove pour nets from a net ordering and log a warning.
 
@@ -1482,15 +1519,16 @@ class Autorouter:
         )
         return [n for n in net_order if not self._is_pour_net(n)]
 
-    def _get_net_priority(self, net_id: int) -> tuple[int, int, float, int, float]:
+    def _get_net_priority(self, net_id: int) -> tuple[int, int, float, int, float, float]:
         """Get routing priority for a net (lower = higher priority).
 
-        Returns a 5-tuple used for sorting:
+        Returns a 6-tuple used for sorting:
         1. Net class priority (1-10 for signal nets, 99 for pour nets)
         2. Complexity tier (0 = simple 2-pin short net, 1 = complex/multi-pin)
         3. Negative constraint score (higher constraint = route first, so negate)
         4. Pad count (fewer pads = higher priority, simpler nets first)
         5. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+        6. Negative congestion score (higher congestion = route first, so negate)
 
         Pour nets (``is_pour_net=True``) are assigned priority 99 so they sort
         to the very end.  They are additionally filtered out before the routing
@@ -1506,17 +1544,22 @@ class Autorouter:
         complex multi-pin or long-span nets.  Within each tier, more constrained
         (fine-pitch) nets still route first.
 
+        Issue #2278: Adds pre-route RUDY congestion score as a 6th tiebreaker.
+        Nets in congested regions are routed first (higher congestion = lower
+        sort value) to reserve resources while the grid is uncrowded.
+
         The resulting ordering for signal nets is:
         - Clock/diff-pair (class priority 2) > Digital (4) > Debug (5) > Default (10)
         - Within each class: simple 2-pin short > complex multi-pin/long-span
         - Within each tier: fine-pitch constrained > unconstrained
+        - Within same constraint: congested > uncongested
         """
         net_name = self.net_names.get(net_id, "")
         net_class = self.net_class_map.get(net_name)
 
         # Pour nets get pushed to the very back of the ordering.
         if net_class and net_class.is_pour_net:
-            return (99, 0, 0.0, 0, 0.0)
+            return (99, 0, 0.0, 0, 0.0, 0.0)
 
         priority = net_class.priority if net_class else 10
         pad_count = len(self.nets.get(net_id, []))
@@ -1529,7 +1572,11 @@ class Autorouter:
         # multi-pin or long-span nets (tier 1).
         complexity_tier = 0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
 
-        return (priority, complexity_tier, -constraint_score, pad_count, distance)
+        # Issue #2278: Pre-route RUDY congestion score (negated so higher = route first)
+        estimator = self._ensure_congestion_estimator()
+        congestion_score = estimator.get_net_congestion_score(net_id)
+
+        return (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
