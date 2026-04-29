@@ -94,6 +94,15 @@ class DesignRules:
     congestion_threshold: float = 0.3  # Density above which region is congested
     congestion_grid_size: int = 10  # Cells per congestion region
 
+    # Layer utilization balancing (Issue #2275)
+    # Penalizes routing on heavily-utilized layers to encourage spreading traces
+    # across all available layers.  The cost added per same-layer move or via
+    # transition equals ``fill_ratio * cost_layer_utilization``, where fill_ratio
+    # is the fraction of routable cells already occupied on the target layer.
+    # A value of 5.0 (half of cost_via) makes the router prefer an empty layer
+    # via when the current layer is mostly full.  Set to 0.0 to disable.
+    cost_layer_utilization: float = 5.0
+
     # Crossing-aware routing (Issue #1250)
     # Penalizes candidate edges that cross already-routed segments on the same layer.
     # This steers A* toward non-crossing paths while still permitting crossings when

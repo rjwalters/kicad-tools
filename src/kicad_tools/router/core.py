@@ -531,6 +531,9 @@ class Autorouter:
 
         Issue #1250: Also feeds committed segments to the pathfinder for
         crossing-aware cost computation in subsequent A* searches.
+
+        Issue #2275: Refreshes the pathfinder's cached layer fill ratios
+        so subsequent A* searches see updated utilization.
         """
         self.grid.mark_route(route)
         self._mark_route_on_cpp_grid(route)
@@ -538,6 +541,10 @@ class Autorouter:
         # Issue #1250: Feed committed segments to pathfinder for crossing detection
         if hasattr(self.router, "add_routed_segments"):
             self.router.add_routed_segments(route.segments)
+
+        # Issue #2275: Update layer fill ratios for utilization-aware routing
+        if hasattr(self.router, "update_layer_fill_ratios"):
+            self.router.update_layer_fill_ratios()
 
     @property
     def physics_available(self) -> bool:
@@ -2389,6 +2396,9 @@ class Autorouter:
                     for route in routes:
                         self.grid.mark_route_usage(route)
                         self.routes.append(route)
+                    # Issue #2275: Update layer fill ratios after each net
+                    if hasattr(self.router, "update_layer_fill_ratios"):
+                        self.router.update_layer_fill_ratios()
 
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
@@ -2568,6 +2578,9 @@ class Autorouter:
                                         self.grid.mark_route_usage(route)
                                         self.routes.append(route)
                                     targeted_ripup_count += 1
+                                    # Issue #2275: Update layer fill ratios
+                                    if hasattr(self.router, "update_layer_fill_ratios"):
+                                        self.router.update_layer_fill_ratios()
 
                                 # Always re-route the other nets (even if failed net didn't route)
                                 for other_net in routed_nets:
@@ -2581,6 +2594,9 @@ class Autorouter:
                                         for route in other_routes:
                                             self.grid.mark_route_usage(route)
                                             self.routes.append(route)
+                                        # Issue #2275: Update layer fill ratios
+                                        if hasattr(self.router, "update_layer_fill_ratios"):
+                                            self.router.update_layer_fill_ratios()
                             else:
                                 # Fallback: try regular reroute
                                 routes = self._route_net_negotiated(
@@ -2594,6 +2610,9 @@ class Autorouter:
                                     for route in routes:
                                         self.grid.mark_route_usage(route)
                                         self.routes.append(route)
+                                    # Issue #2275: Update layer fill ratios
+                                    if hasattr(self.router, "update_layer_fill_ratios"):
+                                        self.router.update_layer_fill_ratios()
 
                     if timed_out:
                         break
@@ -2704,6 +2723,9 @@ class Autorouter:
                                 for route in routes:
                                     self.grid.mark_route_usage(route)
                                     self.routes.append(route)
+                                # Issue #2275: Update layer fill ratios
+                                if hasattr(self.router, "update_layer_fill_ratios"):
+                                    self.router.update_layer_fill_ratios()
 
                         if timed_out:
                             break

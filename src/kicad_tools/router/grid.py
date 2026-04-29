@@ -1820,6 +1820,33 @@ class RoutingGrid:
 
         return present_cost + history_cost
 
+    def get_layer_fill_ratios(self) -> np.ndarray:
+        """Return per-layer fill ratios as an array of shape ``(num_layers,)``.
+
+        The fill ratio for each layer is the fraction of *routable* cells that
+        are currently occupied (``_usage_count > 0``).  Permanently blocked
+        cells (obstacles, pads of other nets) are excluded from the denominator
+        so that layers with large keep-out areas still report an accurate
+        utilization figure.
+
+        The computation is a single vectorized NumPy reduction and is cheap
+        enough to call after every net routes.
+
+        Issue #2275: Used by the A* pathfinder to penalize over-utilized
+        layers, encouraging the router to spread traces across all available
+        layers.
+        """
+        xp = self._backend
+        used_per_layer = xp.sum(self._usage_count > 0, axis=(1, 2))
+        blocked_per_layer = xp.sum(self._blocked, axis=(1, 2))
+        total_cells = self.rows * self.cols
+        routable_per_layer = total_cells - blocked_per_layer
+        # Avoid division by zero for fully-blocked layers
+        routable_per_layer = xp.maximum(routable_per_layer, 1)
+        ratios = used_per_layer.astype(np.float64) / routable_per_layer.astype(np.float64)
+        # Ensure we return a plain NumPy array regardless of backend
+        return to_numpy(ratios) if not isinstance(ratios, np.ndarray) else ratios
+
     def get_total_overflow(self) -> int:
         """Get total overflow (sum of usage_count - 1 for overused cells).
 
