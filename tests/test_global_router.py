@@ -1400,3 +1400,147 @@ class TestPerLayerUtilization:
         layers_used = {a.layer for a in result.assignments.values()}
         # With 2 nets and 2 layers, round-robin should use both layers
         assert len(layers_used) == 2
+
+
+# =============================================================================
+# Escape Route Rip-up Eligibility Tests (Issue #2294)
+# =============================================================================
+
+
+class TestEscapeRouteRipupEligibility:
+    """Verify that escape routes participate in rip-up/reroute.
+
+    Issue #2294: After epic #2273, escape routes were permanently reserved
+    on the grid because they were not seeded into the two-phase router's
+    net_routes tracking dict.  This prevented the rip-up loop from
+    displacing them when they blocked other nets.
+    """
+
+    @pytest.fixture
+    def rules(self):
+        return DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+        )
+
+    @pytest.fixture
+    def autorouter(self, rules):
+        """Create an Autorouter with a small board."""
+        return Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            force_python=True,
+        )
+
+    def test_route_with_escape_calls_subgrid_prepass(self, autorouter):
+        """route_with_escape invokes _run_subgrid_prepass for off-grid pads."""
+        from unittest.mock import patch
+
+        # Add a simple net so routing has something to do
+        autorouter.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+
+        with patch.object(autorouter, "_run_subgrid_prepass", return_value=[]) as mock_prepass:
+            autorouter.route_with_escape()
+            mock_prepass.assert_called_once()
+
+    def test_route_with_escape_passes_initial_routes_to_two_phase(self, autorouter):
+        """Escape routes are passed as initial_routes to route_all_two_phase."""
+        from unittest.mock import MagicMock, patch
+
+        autorouter.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+
+        fake_escape = MagicMock(net=1, segments=[], vias=[])
+
+        with (
+            patch.object(autorouter, "_run_subgrid_prepass", return_value=[]),
+            patch.object(
+                autorouter, "generate_escape_routes", return_value=[fake_escape]
+            ),
+            patch.object(
+                autorouter, "detect_dense_packages", return_value=[MagicMock()]
+            ),
+            patch.object(
+                autorouter, "route_all_two_phase", return_value=[]
+            ) as mock_two_phase,
+        ):
+            autorouter.route_with_escape()
+            mock_two_phase.assert_called_once()
+            call_kwargs = mock_two_phase.call_args[1]
+            assert "initial_routes" in call_kwargs
+            assert call_kwargs["initial_routes"] == [fake_escape]
+
+    def test_two_phase_initial_routes_seeded_into_net_routes(self, rules):
+        """Initial routes are seeded into the negotiated router's net_routes."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
+        from kicad_tools.router.primitives import Route, Segment
+
+        # Create minimal mocks for TwoPhaseRouter
+        grid = MagicMock()
+        grid.width = 20.0
+        grid.height = 20.0
+        grid.origin_x = 0.0
+        grid.origin_y = 0.0
+        grid.cols = 100
+        grid.rows = 100
+        grid.num_layers = 2
+        grid.get_total_overflow.return_value = 0
+
+        fake_segment = Segment(
+            x1=3.0, y1=10.0, x2=5.0, y2=10.0,
+            layer=Layer.F_CU, width=0.2, net=1,
+        )
+        escape_route = Route(net=1, net_name="VCC", segments=[fake_segment], vias=[])
+
+        router_mock = MagicMock()
+        nets = {1: [("R1", "1"), ("R1", "2")]}
+        pad1 = Pad(
+            x=3.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="VCC", ref="R1", pin="1", layer=Layer.F_CU,
+        )
+        pad2 = Pad(
+            x=17.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="VCC", ref="R1", pin="2", layer=Layer.F_CU,
+        )
+
+        tp_router = TwoPhaseRouter(
+            grid=grid,
+            router=router_mock,
+            rules=rules,
+            net_class_map=None,
+            nets=nets,
+            net_names={1: "VCC"},
+            pads={("R1", "1"): pad1, ("R1", "2"): pad2},
+            routes=[],
+            routing_failures=[],
+            get_net_priority=lambda n: (0, 0, 0, 0, 0),
+            route_net=MagicMock(return_value=[]),
+            route_net_with_corridor=MagicMock(return_value=[]),
+            mark_route=MagicMock(),
+        )
+
+        # Directly test _detailed_negotiated with initial_routes
+        # Use a very short timeout to prevent it from running too long
+        routes = tp_router._detailed_negotiated(
+            net_order=[1],
+            initial_routes=[escape_route],
+            timeout=0.001,
+            start_time=0.0,
+        )
+
+        # Verify mark_route_usage was called for the escape route
+        grid.mark_route_usage.assert_called_with(escape_route)

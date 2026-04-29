@@ -3311,6 +3311,7 @@ class Autorouter:
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
         per_net_timeout: float | None = None,
+        initial_routes: list[Route] | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -3327,6 +3328,10 @@ class Autorouter:
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
             per_net_timeout: Optional wall-clock timeout per A* search
+            initial_routes: Pre-existing routes (e.g. escape routes) to seed
+                into the negotiated router's tracking dict.  These routes
+                participate in rip-up/reroute so they are not permanently
+                reserved on the grid (Issue #2294).
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -3339,6 +3344,7 @@ class Autorouter:
             progress_callback=progress_callback,
             timeout=timeout,
             per_net_timeout=per_net_timeout,
+            initial_routes=initial_routes,
         )
 
     def _route_net_with_corridor(
@@ -4773,6 +4779,14 @@ class Autorouter:
         """
         print("\n=== Routing with Escape Pattern Generation ===")
 
+        # Issue #2294: Sub-grid escape pre-pass for off-grid pads.
+        # This must run before dense-package escape routing so that
+        # off-grid pads (e.g. J2 connector pads that don't snap to the
+        # routing grid) get escape segments that bridge them to the
+        # nearest on-grid cell.  Without this, off-grid pads are
+        # classified as PADS_OFF_GRID and excluded from rip-up recovery.
+        subgrid_escapes = self._run_subgrid_prepass()
+
         # Phase 1: Detect and route dense packages
         dense_packages = self.detect_dense_packages()
 
@@ -4791,19 +4805,26 @@ class Autorouter:
         print("\n--- Phase 2: Main Routing ---")
 
         if use_negotiated:
+            # Issue #2294: Pass escape routes as initial_routes so the
+            # two-phase router's rip-up loop can displace them when they
+            # block higher-priority nets.  Without this, escape routes
+            # are permanently reserved on the grid and cannot be rerouted.
             main_routes = self.route_all_two_phase(
                 use_negotiated=True,
                 corridor_width_factor=2.0,
                 progress_callback=progress_callback,
                 timeout=timeout,
+                initial_routes=escape_routes,
             )
         else:
             main_routes = self.route_all(
                 progress_callback=progress_callback,
             )
 
-        # Combine results
-        all_routes = escape_routes + main_routes
+        # Combine results -- escape routes that survived rip-up are
+        # already in main_routes (via self.routes), so only add
+        # sub-grid escapes which are infrastructure, not net routes.
+        all_routes = subgrid_escapes + main_routes
 
         # Summary
         stats = self.get_statistics()
