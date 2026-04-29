@@ -79,6 +79,7 @@ class TwoPhaseRouter:
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
         per_net_timeout: float | None = None,
+        initial_routes: list[Route] | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -90,6 +91,9 @@ class TwoPhaseRouter:
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
             per_net_timeout: Optional wall-clock timeout per A* search
+            initial_routes: Pre-existing routes (e.g. escape routes) that
+                should be seeded into the negotiated router's tracking dict
+                so they participate in rip-up/reroute (Issue #2294).
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -241,6 +245,7 @@ class TwoPhaseRouter:
                 timeout=timeout,
                 start_time=start_time,
                 per_net_timeout=per_net_timeout,
+                initial_routes=initial_routes,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -286,8 +291,15 @@ class TwoPhaseRouter:
         timeout: float | None = None,
         start_time: float = 0.0,
         per_net_timeout: float | None = None,
+        initial_routes: list[Route] | None = None,
     ) -> list[Route]:
-        """Detailed routing phase using negotiated congestion routing."""
+        """Detailed routing phase using negotiated congestion routing.
+
+        Args:
+            initial_routes: Pre-existing routes (e.g. escape routes) to seed
+                into ``net_routes`` so they participate in rip-up/reroute
+                instead of being permanently reserved (Issue #2294).
+        """
         from ..algorithms import NegotiatedRouter
 
         if corridor_penalty is None:
@@ -307,6 +319,18 @@ class TwoPhaseRouter:
         neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
         net_routes: dict[int, list[Route]] = {}
         present_factor = 0.5
+
+        # Issue #2294: Seed pre-existing routes (e.g. escape routes from
+        # Phase 1) into net_routes so the rip-up loop can displace them.
+        # Also register their usage counts so unmark_route_usage works
+        # correctly during rip-up.
+        if initial_routes:
+            for route in initial_routes:
+                net_id = route.net
+                if net_id not in net_routes:
+                    net_routes[net_id] = []
+                net_routes[net_id].append(route)
+                self.grid.mark_route_usage(route)
 
         # Initial routing pass
         for i, net in enumerate(net_order):
