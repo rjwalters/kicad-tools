@@ -2446,6 +2446,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show routing cache statistics and exit",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Fail with exit code 6 if output connectivity verification detects "
+            "any disconnected net. Without this flag, disconnected nets in the "
+            "written output are reported as warnings but do not affect the exit code."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -3447,6 +3456,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {format_clearance_violations(clearance_violations)}")
 
     # Save output
+    output_content = ""  # Tracks written content for output connectivity verification
     if args.dry_run:
         if not quiet:
             print("\n--- Dry run - not saving ---")
@@ -3491,6 +3501,60 @@ def main(argv: list[str] | None = None) -> int:
 
         if not quiet:
             print(f"  Saved to: {output_path}")
+
+    # Output connectivity verification (Issue #2264)
+    # Re-parse written S-expressions and verify pad-to-pad connectivity
+    output_has_disconnected = False
+    if not args.dry_run and router.pads and router.nets and output_content:
+        from kicad_tools.router.io import verify_output_connectivity
+
+        # Build net_pads mapping (same as get_statistics)
+        verify_net_pads: dict[int, list] = {}
+        for net_id, pad_keys in router.nets.items():
+            if net_id not in multi_pad_net_ids:
+                continue
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+            if len(pad_list) >= 2:
+                verify_net_pads[net_id] = pad_list
+
+        # Build net name lookup
+        reverse_net_map = {v: k for k, v in net_map.items()}
+
+        output_connectivity = verify_output_connectivity(
+            pcb_content=output_content,
+            net_pads=verify_net_pads,
+            net_names=reverse_net_map,
+        )
+
+        disconnected_nets = {
+            nid: info
+            for nid, info in output_connectivity.items()
+            if not info["connected"] and info["total_pads"] >= 2
+        }
+
+        if disconnected_nets:
+            output_has_disconnected = True
+            if not quiet:
+                print(f"\n--- Output Connectivity Verification ---")
+                print(
+                    f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
+                    f"pads in written output"
+                )
+                for nid, info in sorted(
+                    disconnected_nets.items(), key=lambda x: x[1]["net_name"]
+                ):
+                    disc_str = ", ".join(info["disconnected_pads"][:5])
+                    if len(info["disconnected_pads"]) > 5:
+                        disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"
+                    print(
+                        f"  {info['net_name']}: "
+                        f"{info['connected_pads']}/{info['total_pads']} pads connected"
+                        f" -- disconnected: {disc_str}"
+                    )
+        else:
+            if not quiet:
+                print("\n--- Output Connectivity Verification ---")
+                print("  All nets verified connected in written output")
 
     # Run power plane stitching if requested
     stitch_result = None
@@ -3666,11 +3730,16 @@ def main(argv: list[str] | None = None) -> int:
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations)
     # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
+    # 6 = Output connectivity verification failed (--strict mode only)
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
     completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
     meets_threshold = completion_ratio >= args.min_completion
+
+    # --strict: output connectivity verification failure is fatal
+    if getattr(args, "strict", False) and output_has_disconnected:
+        return 6
 
     if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure

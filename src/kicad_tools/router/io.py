@@ -2858,3 +2858,184 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
         result = result[:start] + result[trail:]
 
     return result
+
+
+# =============================================================================
+# OUTPUT CONNECTIVITY VERIFICATION (Issue #2264)
+# =============================================================================
+
+
+def verify_output_connectivity(
+    pcb_content: str,
+    net_pads: dict[int, list["Pad"]],
+    net_names: dict[int, str] | None = None,
+    tolerance: float = 0.01,
+) -> dict[int, dict]:
+    """Verify connectivity of routed nets in written PCB S-expression output.
+
+    Re-parses ``(segment ...)`` and ``(via ...)`` S-expressions from the PCB
+    content and runs union-find against known pad positions to check that all
+    pads in each net are connected by the written traces.  This catches bugs
+    in ``to_sexp()`` serialization, ``_insert_sexp_before_closing()`` merge,
+    and any other transformation that occurs between the internal Route objects
+    and the final file.
+
+    Args:
+        pcb_content: Full PCB file content (S-expression text).
+        net_pads: Mapping of net ID to the list of ``Pad`` objects belonging
+            to that net.  Only nets present here are validated.
+        net_names: Optional mapping of net ID to human-readable net name.
+            Used only for diagnostic messages in the returned report.
+        tolerance: Coordinate snapping tolerance in mm (default 0.01).
+
+    Returns:
+        Dict mapping net ID to a connectivity report dict with keys:
+
+        - ``net_name``: human-readable net name (or ``"Net <id>"`` fallback)
+        - ``total_pads``: number of pads in the net
+        - ``connected_pads``: pads in the largest connected component
+        - ``connected``: ``True`` when all pads are in one component
+        - ``disconnected_pads``: list of ``"<ref>:<pin>"`` strings for pads
+          not in the main component (empty when ``connected`` is True)
+    """
+    from .observability import _UnionFind, _pt
+
+    # Parse segments from PCB content: (segment (start X Y) (end X Y) ... (net N) ...)
+    seg_pattern = re.compile(
+        r"\(segment\s+"
+        r".*?\(start\s+([\d.+-]+)\s+([\d.+-]+)\)"
+        r".*?\(end\s+([\d.+-]+)\s+([\d.+-]+)\)"
+        r".*?\(net\s+(\d+)\)"
+        r".*?\)",
+        re.DOTALL,
+    )
+
+    # Parse vias: (via (at X Y) ... (net N) ...)
+    via_pattern = re.compile(
+        r"\(via\s+"
+        r".*?\(at\s+([\d.+-]+)\s+([\d.+-]+)\)"
+        r".*?\(net\s+(\d+)\)"
+        r".*?\)",
+        re.DOTALL,
+    )
+
+    # Group parsed segments by net
+    segments_by_net: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+    for m in seg_pattern.finditer(pcb_content):
+        x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+        net_id = int(m.group(5))
+        segments_by_net.setdefault(net_id, []).append(
+            (_pt(x1, y1, tolerance), _pt(x2, y2, tolerance))
+        )
+
+    # Group parsed vias by net
+    vias_by_net: dict[int, list[tuple[float, float]]] = {}
+    for m in via_pattern.finditer(pcb_content):
+        x, y = float(m.group(1)), float(m.group(2))
+        net_id = int(m.group(3))
+        vias_by_net.setdefault(net_id, []).append(_pt(x, y, tolerance))
+
+    result: dict[int, dict] = {}
+    net_names = net_names or {}
+
+    for net_id, pads in net_pads.items():
+        net_name = net_names.get(net_id, f"Net {net_id}")
+
+        if len(pads) < 2:
+            result[net_id] = {
+                "net_name": net_name,
+                "total_pads": len(pads),
+                "connected_pads": len(pads),
+                "connected": True,
+                "disconnected_pads": [],
+            }
+            continue
+
+        net_segs = segments_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+
+        if not net_segs and not net_vias:
+            disconnected = [
+                f"{p.ref}:{p.pin}" for p in pads
+            ]
+            result[net_id] = {
+                "net_name": net_name,
+                "total_pads": len(pads),
+                "connected_pads": 0,
+                "connected": False,
+                "disconnected_pads": disconnected,
+            }
+            continue
+
+        uf = _UnionFind()
+
+        # Union segment endpoints
+        for p1, p2 in net_segs:
+            uf.union(p1, p2)
+
+        # Ensure via points are in the union-find and union with co-located
+        # segment endpoints
+        for via_pt in net_vias:
+            uf._ensure(via_pt)
+            for p1, p2 in net_segs:
+                if p1 == via_pt:
+                    uf.union(via_pt, p1)
+                if p2 == via_pt:
+                    uf.union(via_pt, p2)
+
+        # Link pads to nearest segment endpoints (same logic as observability)
+        pad_points: list[tuple[tuple[float, float], "Pad"]] = []
+        for pad in pads:
+            pad_pt = _pt(pad.x, pad.y, tolerance)
+            best_dist = float("inf")
+            best_pt = pad_pt
+            for p1, p2 in net_segs:
+                for sp in (p1, p2):
+                    dx = sp[0] - pad_pt[0]
+                    dy = sp[1] - pad_pt[1]
+                    d = dx * dx + dy * dy
+                    if d < best_dist:
+                        best_dist = d
+                        best_pt = sp
+            # Also check vias
+            for vp in net_vias:
+                dx = vp[0] - pad_pt[0]
+                dy = vp[1] - pad_pt[1]
+                d = dx * dx + dy * dy
+                if d < best_dist:
+                    best_dist = d
+                    best_pt = vp
+
+            if best_dist <= 4.0:  # 2mm squared
+                uf.union(pad_pt, best_pt)
+            else:
+                uf._ensure(pad_pt)
+            pad_points.append((pad_pt, pad))
+
+        # Find largest component
+        component_pads: dict[tuple[float, float], int] = {}
+        for pp, _ in pad_points:
+            root = uf.find(pp)
+            component_pads[root] = component_pads.get(root, 0) + 1
+
+        max_component = max(component_pads.values()) if component_pads else 0
+        total = len(pads)
+
+        # Find the main root (largest component)
+        main_root = max(component_pads, key=component_pads.get) if component_pads else None
+
+        disconnected = []
+        if max_component < total:
+            for pp, pad in pad_points:
+                if main_root is None or uf.find(pp) != main_root:
+                    disconnected.append(f"{pad.ref}:{pad.pin}")
+
+        result[net_id] = {
+            "net_name": net_name,
+            "total_pads": total,
+            "connected_pads": max_component,
+            "connected": max_component == total,
+            "disconnected_pads": disconnected,
+        }
+
+    return result
