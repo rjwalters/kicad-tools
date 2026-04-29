@@ -101,6 +101,11 @@ def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
 
     recent = overflow_history[-window:]
 
+    # Issue #2262: If the most recent overflow is zero the router has
+    # converged -- never report oscillation in this state.
+    if recent[-1] == 0:
+        return False
+
     # Issue #1823: If the recent window contains a new global minimum,
     # the router is still making progress -- do not declare oscillation.
     # For example, [21, 21, 8, 21] has overflow 8 as a new best, which
@@ -119,7 +124,8 @@ def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
         return True
 
     # Check for complete stagnation (all same value)
-    if len(set(recent)) == 1:
+    # Zero-overflow stagnation is convergence, not oscillation (#2262)
+    if len(set(recent)) == 1 and recent[0] > 0:
         return True
 
     # Check for bounded oscillation (values stay within small range)
