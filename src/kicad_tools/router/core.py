@@ -2339,7 +2339,10 @@ class Autorouter:
         net_order = [n for n in net_order if n != 0]
         total_nets = len(net_order)
 
-        neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
+        neg_router = NegotiatedRouter(
+            self.grid, self.router, self.rules, self.net_class_map,
+            congestion_estimator=self._ensure_congestion_estimator(),
+        )
 
         # Initialize region-based parallel router if enabled (Issue #965)
         region_router: RegionBasedNegotiatedRouter | None = None
@@ -2372,7 +2375,8 @@ class Autorouter:
                 # Update router to use new grid
                 self.router.grid = self.grid
                 neg_router = NegotiatedRouter(
-                    self.grid, self.router, self.rules, self.net_class_map
+                    self.grid, self.router, self.rules, self.net_class_map,
+                    congestion_estimator=self._ensure_congestion_estimator(),
                 )
 
             region_router = RegionBasedNegotiatedRouter(
@@ -3042,7 +3046,10 @@ class Autorouter:
             return routes
 
         pad_objs = [self.pads[p] for p in pads_for_routing]
-        neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
+        neg_router = NegotiatedRouter(
+            self.grid, self.router, self.rules, self.net_class_map,
+            congestion_estimator=self._ensure_congestion_estimator(),
+        )
 
         def mark_route(route: Route):
             self._mark_route(route)
@@ -3138,7 +3145,8 @@ class Autorouter:
                 inner_violating_nets.add(v.obstacle_net)
 
             neg_router = NegotiatedRouter(
-                self.grid, self.router, self.rules, self.net_class_map
+                self.grid, self.router, self.rules, self.net_class_map,
+                congestion_estimator=self._ensure_congestion_estimator(),
             )
 
             # Rip up all violating nets
@@ -3295,7 +3303,10 @@ class Autorouter:
             return routes
 
         pad_objs = [self.pads[p] for p in pads_for_routing]
-        neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
+        neg_router = NegotiatedRouter(
+            self.grid, self.router, self.rules, self.net_class_map,
+            congestion_estimator=self._ensure_congestion_estimator(),
+        )
 
         def mark_route(route: Route):
             self._mark_route(route)
@@ -5480,7 +5491,8 @@ class Autorouter:
 
                 # Create negotiated router with relaxed rules
                 neg_router = NegotiatedRouter(
-                    self.grid, relaxed_router, relaxed_rules, self.net_class_map
+                    self.grid, relaxed_router, relaxed_rules, self.net_class_map,
+                    congestion_estimator=self._ensure_congestion_estimator(),
                 )
 
                 def mark_route(route: Route) -> None:

@@ -591,3 +591,168 @@ class TestCalculatePresentCost:
         result = calculate_present_cost(0, 0, 0.0, 0.5)
         # Should not raise, uses max(total_iterations, 1)
         assert result > 0
+
+
+class TestNegotiatedRouterCongestionEstimator:
+    """Tests for NegotiatedRouter passing congestion_fn to build_rsmt."""
+
+    def test_accepts_none_estimator(self):
+        """NegotiatedRouter with congestion_estimator=None should construct."""
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        # None is the default -- just verify no TypeError
+        router = NegotiatedRouter.__new__(NegotiatedRouter)
+        router.grid = None
+        router.router = None
+        router.rules = None
+        router.net_class_map = {}
+        router.congestion_estimator = None
+        router.congestion_weight = 0.5
+        assert router.congestion_estimator is None
+
+    def test_stores_estimator_and_weight(self):
+        """NegotiatedRouter should store congestion_estimator and weight."""
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        sentinel = object()
+        router = NegotiatedRouter.__new__(NegotiatedRouter)
+        router.grid = None
+        router.router = None
+        router.rules = None
+        router.net_class_map = {}
+        router.congestion_estimator = sentinel
+        router.congestion_weight = 1.25
+        assert router.congestion_estimator is sentinel
+        assert router.congestion_weight == 1.25
+
+    def test_congestion_fn_built_when_estimator_present(self):
+        """When estimator is provided, build_rsmt receives a congestion_fn.
+
+        We mock build_rsmt at the steiner module level to capture
+        the congestion_fn argument (the import is lazy inside
+        route_net_negotiated).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms import steiner as steiner_mod
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        # Create a mock estimator with grid attributes
+        mock_grid = MagicMock()
+        mock_grid.tile_w = 2.0
+        mock_grid.tile_h = 2.0
+        mock_grid.tile_at.return_value = (1, 1)
+
+        mock_est = MagicMock()
+        mock_est.grid = mock_grid
+        mock_est.get_tile_demand.return_value = 3.0
+
+        # Build a NegotiatedRouter with the mock estimator
+        nr = NegotiatedRouter.__new__(NegotiatedRouter)
+        nr.grid = None
+        nr.router = MagicMock()
+        nr.rules = None
+        nr.net_class_map = {}
+        nr.congestion_estimator = mock_est
+        nr.congestion_weight = 0.5
+
+        # Create 3 pads (triggers build_rsmt path)
+        pads = [
+            Pad(x=0, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=5, y=5, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+        ]
+
+        captured_fn = {}
+
+        def fake_build_rsmt(pad_objs, congestion_fn=None):
+            captured_fn["fn"] = congestion_fn
+            # Return minimal valid result: all pads, edges forming a chain
+            return list(pad_objs), [(0, 1), (1, 2)]
+
+        with patch.object(steiner_mod, "build_rsmt", side_effect=fake_build_rsmt):
+            nr.route_net_negotiated(pads, 1.0, lambda r: None)
+
+        # Verify build_rsmt was called with a congestion_fn
+        assert captured_fn.get("fn") is not None
+        fn = captured_fn["fn"]
+
+        # Verify the function computes correctly:
+        # Manhattan(0,0 -> 10,0) = 10
+        # tile_at(5, 0) -> (1,1), demand = 3.0
+        # scaled_weight = 0.5 * 2.0 * 2.0 = 2.0
+        # result = 10 + 2.0 * 3.0 = 16.0
+        result = fn(0, 0, 10, 0)
+        assert result == 16.0
+
+    def test_no_congestion_fn_when_estimator_none(self):
+        """When estimator is None, build_rsmt receives congestion_fn=None."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms import steiner as steiner_mod
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        nr = NegotiatedRouter.__new__(NegotiatedRouter)
+        nr.grid = None
+        nr.router = MagicMock()
+        nr.rules = None
+        nr.net_class_map = {}
+        nr.congestion_estimator = None
+        nr.congestion_weight = 0.5
+
+        pads = [
+            Pad(x=0, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=5, y=5, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+        ]
+
+        captured_fn = {}
+
+        def fake_build_rsmt(pad_objs, congestion_fn=None):
+            captured_fn["fn"] = congestion_fn
+            return list(pad_objs), [(0, 1), (1, 2)]
+
+        with patch.object(steiner_mod, "build_rsmt", side_effect=fake_build_rsmt):
+            nr.route_net_negotiated(pads, 1.0, lambda r: None)
+
+        assert captured_fn["fn"] is None
+
+    def test_no_congestion_fn_when_weight_zero(self):
+        """When congestion_weight=0, congestion_fn should be None."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms import steiner as steiner_mod
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        mock_est = MagicMock()
+
+        nr = NegotiatedRouter.__new__(NegotiatedRouter)
+        nr.grid = None
+        nr.router = MagicMock()
+        nr.rules = None
+        nr.net_class_map = {}
+        nr.congestion_estimator = mock_est
+        nr.congestion_weight = 0  # Disabled
+
+        pads = [
+            Pad(x=0, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+            Pad(x=5, y=5, width=0.5, height=0.5, net=1, net_name="n", layer=Layer.F_CU),
+        ]
+
+        captured_fn = {}
+
+        def fake_build_rsmt(pad_objs, congestion_fn=None):
+            captured_fn["fn"] = congestion_fn
+            return list(pad_objs), [(0, 1), (1, 2)]
+
+        with patch.object(steiner_mod, "build_rsmt", side_effect=fake_build_rsmt):
+            nr.route_net_negotiated(pads, 1.0, lambda r: None)
+
+        assert captured_fn["fn"] is None
