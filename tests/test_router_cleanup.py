@@ -773,3 +773,106 @@ class TestConnectivityAwareRestoration:
         # Removing it fragments the net, so it should be restored.
         assert len(router.routes[0].segments) == 3
         assert stats["segments_restored"] >= 1
+
+
+class TestFinalizeRoutes:
+    """Test that _finalize_routes() runs cleanup before stats and sexp.
+
+    This verifies the canonical cleanup -> sexp -> stats ordering that
+    prevents the metrics-before-cleanup bug (Issue #2263).
+    """
+
+    def test_stats_reflect_post_cleanup_state(self):
+        """Statistics should exclude net-0 segments removed by cleanup."""
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = _make_router()
+        # One valid route, one net-0 orphan that cleanup will remove
+        router.routes = [
+            Route(net=1, net_name="SIG", segments=[_seg(110, 90, 120, 90, net=1)]),
+            Route(net=0, net_name="", segments=[_seg(130, 90, 140, 90, net=0)]),
+        ]
+        # Register net 1 so get_statistics can count it
+        router.nets = {1: [("R1", "1"), ("R2", "1")]}
+
+        route_sexp, stats, cleanup_stats = _finalize_routes(
+            router,
+            multi_pad_net_ids={1},
+            nets_to_route=1,
+            quiet=True,
+        )
+
+        # Cleanup should have removed the net-0 route
+        assert cleanup_stats["net0_routes_removed"] == 1
+        # Stats should only reflect the surviving route
+        assert stats["routes"] == 1
+        assert stats["segments"] == 1
+        # sexp should not contain net-0 data
+        assert "net 0" not in route_sexp
+
+    def test_sexp_excludes_oob_segments(self):
+        """S-expressions should not contain out-of-bounds segments."""
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = _make_router()
+        # One in-bounds route, one completely out-of-bounds segment
+        router.routes = [
+            Route(
+                net=1,
+                net_name="SIG",
+                segments=[
+                    _seg(110, 90, 120, 90, net=1),      # in-bounds
+                    _seg(200, 200, 210, 210, net=1),     # out-of-bounds
+                ],
+            ),
+        ]
+        router.nets = {1: [("R1", "1"), ("R2", "1")]}
+
+        route_sexp, stats, cleanup_stats = _finalize_routes(
+            router,
+            multi_pad_net_ids={1},
+            nets_to_route=1,
+            quiet=True,
+        )
+
+        # OOB segment should be removed
+        assert cleanup_stats["oob_segments_removed"] >= 1
+        # Only 1 segment should remain
+        assert stats["segments"] == 1
+
+    def test_cleanup_runs_before_sexp_generation(self):
+        """Verify sexp is generated from cleaned routes, not pre-cleanup."""
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = _make_router()
+        # Route with both valid and net-0 segments
+        router.routes = [
+            Route(
+                net=1,
+                net_name="SIG",
+                segments=[_seg(110, 90, 120, 90, net=1)],
+            ),
+            Route(
+                net=0,
+                net_name="",
+                segments=[
+                    _seg(115, 95, 125, 95, net=0),
+                    _seg(125, 95, 135, 105, net=0),
+                ],
+            ),
+        ]
+        router.nets = {1: [("R1", "1"), ("R2", "1")]}
+
+        route_sexp, stats, cleanup_stats = _finalize_routes(
+            router,
+            multi_pad_net_ids={1},
+            nets_to_route=1,
+            quiet=True,
+        )
+
+        # Only 1 route should remain after cleanup
+        assert len(router.routes) == 1
+        # sexp segment count should match stats
+        assert stats["segments"] == 1
+        # The sexp should only contain 1 segment definition
+        assert route_sexp.count("(segment") == 1
