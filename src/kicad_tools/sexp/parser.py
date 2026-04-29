@@ -622,6 +622,13 @@ class SExp:
         if s.startswith("0x") or s.startswith("0X"):
             return False
 
+        # Don't quote numeric values (integers and floats including negatives)
+        try:
+            float(s)
+            return False
+        except ValueError:
+            pass
+
         # Quote everything else - KiCad uses quoted strings liberally
         return True
 
