@@ -74,7 +74,7 @@ class TwoPhaseRouter:
         self,
         use_negotiated: bool = True,
         corridor_width_factor: float = 2.0,
-        corridor_penalty: float = 5.0,
+        corridor_penalty: float | None = None,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
     ) -> list[Route]:
@@ -83,7 +83,8 @@ class TwoPhaseRouter:
         Args:
             use_negotiated: Use negotiated congestion routing in detailed phase
             corridor_width_factor: Corridor width as multiple of clearance (default: 2.0)
-            corridor_penalty: Cost penalty for routing outside corridor (default: 5.0)
+            corridor_penalty: Cost penalty for routing outside corridor.
+                Defaults to ``self.rules.cost_corridor_deviation`` when *None*.
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
 
@@ -94,6 +95,9 @@ class TwoPhaseRouter:
         from ..output import format_failed_nets_summary
         from ..region_graph import RegionGraph
         from ..sparse import Corridor
+
+        if corridor_penalty is None:
+            corridor_penalty = self.rules.cost_corridor_deviation
 
         start_time = time.time()
 
@@ -272,7 +276,7 @@ class TwoPhaseRouter:
     def _detailed_negotiated(
         self,
         net_order: list[int],
-        corridor_penalty: float = 5.0,
+        corridor_penalty: float | None = None,
         corridors: dict | None = None,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
@@ -280,6 +284,9 @@ class TwoPhaseRouter:
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing."""
         from ..algorithms import NegotiatedRouter
+
+        if corridor_penalty is None:
+            corridor_penalty = self.rules.cost_corridor_deviation
 
         def check_timeout() -> bool:
             if timeout is None:

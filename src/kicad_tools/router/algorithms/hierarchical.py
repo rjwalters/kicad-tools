@@ -203,7 +203,7 @@ class HierarchicalRouter:
                 return list(self.routes)
 
         # Set corridor preferences on the grid for nets with assignments
-        corridor_penalty = 5.0
+        corridor_penalty = self.rules.cost_corridor_deviation
         for net, assignment in global_result.assignments.items():
             self.grid.set_corridor_preference(
                 assignment.corridor, net, corridor_penalty

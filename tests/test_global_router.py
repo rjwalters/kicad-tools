@@ -735,6 +735,166 @@ class TestHierarchicalStrategyIntegration:
 
 
 # =============================================================================
+# Corridor Penalty Wiring Tests (Issue #2292)
+# =============================================================================
+
+
+class TestCorridorPenaltyWiring:
+    """Verify corridor_penalty reads from DesignRules.cost_corridor_deviation."""
+
+    @pytest.fixture
+    def custom_rules(self):
+        """Design rules with a non-default corridor deviation cost."""
+        return DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            grid_resolution=0.1,
+            cost_corridor_deviation=10.0,
+        )
+
+    @pytest.fixture
+    def autorouter_custom(self, custom_rules):
+        """Autorouter using custom corridor deviation cost."""
+        router = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=custom_rules,
+            force_python=True,
+        )
+        router.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+        router.add_component(
+            ref="R2",
+            pads=[
+                {"number": "1", "x": 10.0, "y": 3.0, "net": 2, "net_name": "GND"},
+                {"number": "2", "x": 10.0, "y": 17.0, "net": 2, "net_name": "GND"},
+            ],
+        )
+        return router
+
+    def test_two_phase_reads_rules_default(self, autorouter_custom, custom_rules):
+        """TwoPhaseRouter.route_all() uses rules.cost_corridor_deviation by default."""
+        from unittest.mock import patch
+
+        penalties = []
+        original = autorouter_custom.grid.set_corridor_preference
+
+        def spy(corridor, net, penalty=None):
+            penalties.append(penalty)
+            return original(corridor, net, penalty)
+
+        with patch.object(
+            autorouter_custom.grid, "set_corridor_preference", side_effect=spy
+        ):
+            autorouter_custom.route_all_two_phase(use_negotiated=False)
+
+        # Every call should use the custom rules value (10.0), not the old hardcode (5.0)
+        for p in penalties:
+            assert p == custom_rules.cost_corridor_deviation, (
+                f"Expected penalty {custom_rules.cost_corridor_deviation}, got {p}"
+            )
+
+    def test_two_phase_explicit_override(self, autorouter_custom):
+        """Explicit corridor_penalty overrides the rules default."""
+        from unittest.mock import patch
+
+        penalties = []
+        original = autorouter_custom.grid.set_corridor_preference
+
+        def spy(corridor, net, penalty=None):
+            penalties.append(penalty)
+            return original(corridor, net, penalty)
+
+        with patch.object(
+            autorouter_custom.grid, "set_corridor_preference", side_effect=spy
+        ):
+            autorouter_custom.route_all_two_phase(
+                corridor_penalty=3.0, use_negotiated=False
+            )
+
+        for p in penalties:
+            assert p == 3.0, f"Expected penalty 3.0, got {p}"
+
+    def test_route_all_hierarchical_reads_rules(self, autorouter_custom, custom_rules):
+        """route_all(hierarchical=True) propagates rules.cost_corridor_deviation."""
+        from unittest.mock import patch
+
+        penalties = []
+        original = autorouter_custom.grid.set_corridor_preference
+
+        def spy(corridor, net, penalty=None):
+            penalties.append(penalty)
+            return original(corridor, net, penalty)
+
+        with patch.object(
+            autorouter_custom.grid, "set_corridor_preference", side_effect=spy
+        ):
+            autorouter_custom.route_all_two_phase(use_negotiated=False)
+
+        for p in penalties:
+            assert p == custom_rules.cost_corridor_deviation
+
+    def test_zero_penalty_disables_corridor_guidance(self, rules):
+        """cost_corridor_deviation=0.0 effectively disables corridor penalty."""
+        zero_rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            grid_resolution=0.1,
+            cost_corridor_deviation=0.0,
+        )
+        router = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=zero_rules,
+            force_python=True,
+        )
+        router.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+
+        from unittest.mock import patch
+
+        penalties = []
+        original = router.grid.set_corridor_preference
+
+        def spy(corridor, net, penalty=None):
+            penalties.append(penalty)
+            return original(corridor, net, penalty)
+
+        with patch.object(
+            router.grid, "set_corridor_preference", side_effect=spy
+        ):
+            router.route_all_two_phase(use_negotiated=False)
+
+        for p in penalties:
+            assert p == 0.0, f"Expected penalty 0.0, got {p}"
+
+    def test_default_rules_preserve_five(self):
+        """Default DesignRules.cost_corridor_deviation is 5.0 (backward compat)."""
+        default_rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            grid_resolution=0.1,
+        )
+        assert default_rules.cost_corridor_deviation == 5.0
+
+
+# =============================================================================
 # Region Data Structure Tests
 # =============================================================================
 
