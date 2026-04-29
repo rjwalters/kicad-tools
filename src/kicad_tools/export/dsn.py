@@ -22,7 +22,6 @@ Usage::
 from __future__ import annotations
 
 import logging
-import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -499,14 +498,13 @@ class KiCadToDSNExporter:
     def _build_via_padstack(self) -> str:
         """Build the default via padstack."""
         size = mm_to_um(self._default_via_size)
-        drill = mm_to_um(self._default_via_drill)
         name = f"Via[0-{len(self._layers)-1}]_Pad{size:.0f}_um"
 
         lines: list[str] = []
         lines.append(f"    (padstack {_dsn_quote(name)}")
         for layer in self._layers:
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
-            r = size / 2
+
             lines.append(f"      (shape (circle {_dsn_quote(dsn_layer)} {size:.1f}))")
         lines.append("      (attach off)")
         lines.append("    )")
