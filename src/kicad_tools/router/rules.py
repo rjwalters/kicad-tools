@@ -87,7 +87,7 @@ class DesignRules:
     cost_diagonal: float = 1.414
     cost_turn: float = 5.0  # Penalty for changing direction (bends)
     cost_via: float = 10.0  # Penalty for layer change
-    cost_layer_inner: float = 5.0  # Penalty for using inner layers
+    cost_layer_inner: float = 2.0  # Penalty for using inner layers (applied by pathfinder)
 
     # Congestion-aware routing
     cost_congestion: float = 2.0  # Multiplier for congested regions

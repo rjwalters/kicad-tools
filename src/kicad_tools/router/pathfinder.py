@@ -1571,9 +1571,20 @@ class Router:
                 wx, wy = self.grid.grid_to_world(current.x, current.y)
                 via_impact_cost = self._get_via_impact_cost(wx, wy, start.net)
 
+                # Issue #2265: Apply cost_layer_inner when transitioning
+                # to an inner layer.  On boards with > 2 layers, indices
+                # between 0 (F.Cu) and num_layers-1 (B.Cu) are inner
+                # layers and should carry the additional penalty so the
+                # pathfinder actually considers them (previously the via
+                # cost alone discouraged all layer transitions equally).
+                inner_layer_cost = 0.0
+                if self.grid.num_layers > 2 and 0 < new_layer < self.grid.num_layers - 1:
+                    inner_layer_cost = self.rules.cost_layer_inner
+
                 new_g = (
                     current.g_score
                     + self.rules.cost_via * layer_pref_mult
+                    + inner_layer_cost
                     + congestion_cost
                     + negotiated_cost
                     + via_impact_cost

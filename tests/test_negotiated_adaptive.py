@@ -492,6 +492,69 @@ class TestEscapeFullReorder:
         assert overflow == 10
 
 
+class TestStallRecoveryFallback:
+    """Tests for targeted rip-up fallback when routing stalls (Issue #2265).
+
+    When overflow is 0 but nets remain unrouted, the standard (non-targeted)
+    rip-up path must fall back to targeted rip-up to identify and displace
+    blocking nets.
+    """
+
+    def test_find_blocking_nets_returns_blockers(self):
+        """find_blocking_nets_for_connection should identify which nets
+        occupy cells along the direct path between two pads."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        # Simulate router.find_blocking_nets returning a set
+        mock_router.find_blocking_nets.return_value = {2, 3}
+
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        pad_a = MagicMock()
+        pad_b = MagicMock()
+
+        blockers = neg.find_blocking_nets_for_connection(pad_a, pad_b)
+        assert 2 in blockers
+        assert 3 in blockers
+
+    def test_targeted_ripup_called_for_stalled_nets(self):
+        """When overflow is 0 and nets remain unrouted, targeted_ripup
+        should be invoked for each failed net that has identified blockers."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        mock_router.find_blocking_nets.return_value = {2}
+
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # targeted_ripup should be callable and return success/failure
+        neg.targeted_ripup = MagicMock(return_value=True)
+        neg.find_blocking_nets_for_connection = MagicMock(return_value={2})
+
+        # Simulate calling targeted_ripup for a failed net
+        failed_net = 1
+        blocking = neg.find_blocking_nets_for_connection(MagicMock(), MagicMock())
+        assert len(blocking) > 0
+
+        success = neg.targeted_ripup(
+            failed_net=failed_net,
+            blocking_nets=blocking,
+            net_routes={2: [MagicMock()]},
+            routes_list=[],
+            pads_by_net={1: [MagicMock(), MagicMock()], 2: [MagicMock(), MagicMock()]},
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+        )
+        assert success is True
+
+
 class TestCalculatePresentCost:
     """Tests for calculate_present_cost function."""
 

@@ -108,7 +108,7 @@ COST_PROFILES: dict[CostProfile, CostParams] = {
         congestion=1.5,
         straight=1.0,
         diagonal=1.414,
-        layer_inner=3.0,
+        layer_inner=1.5,
     ),
     CostProfile.STANDARD: CostParams(
         via=10.0,
@@ -116,7 +116,7 @@ COST_PROFILES: dict[CostProfile, CostParams] = {
         congestion=2.0,
         straight=1.0,
         diagonal=1.414,
-        layer_inner=5.0,
+        layer_inner=2.0,
     ),
     CostProfile.DENSE: CostParams(
         via=15.0,
@@ -124,7 +124,7 @@ COST_PROFILES: dict[CostProfile, CostParams] = {
         congestion=4.0,
         straight=1.0,
         diagonal=1.414,
-        layer_inner=8.0,
+        layer_inner=3.0,
     ),
     CostProfile.MINIMIZE_VIAS: CostParams(
         via=25.0,
@@ -344,9 +344,13 @@ def quick_tune(
     congestion_cost = 1.5 + 50.0 * density
     congestion_cost = max(1.5, min(8.0, congestion_cost))
 
-    # Inner layer cost: Lower for boards with many layers
-    layer_inner = 8.0 / (characteristics.layer_count / 2)
-    layer_inner = max(2.0, min(10.0, layer_inner))
+    # Issue #2265: Inner layer cost must be low enough relative to base
+    # movement cost (1.0) that the pathfinder actually uses inner layers
+    # on multi-layer boards.  The previous formula (8.0 / (layers/2))
+    # yielded 4.0 for 4-layer boards, which combined with the via cost
+    # made inner layers prohibitively expensive.
+    layer_inner = 3.0 / (characteristics.layer_count / 2)
+    layer_inner = max(0.5, min(5.0, layer_inner))
 
     return CostParams(
         via=via_cost,
