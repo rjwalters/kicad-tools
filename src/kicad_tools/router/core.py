@@ -2299,7 +2299,6 @@ class Autorouter:
             return self.route_all_two_phase(
                 use_negotiated=True,
                 corridor_width_factor=2.0,
-                corridor_penalty=5.0,
                 progress_callback=progress_callback,
                 timeout=timeout,
             )
@@ -3242,7 +3241,7 @@ class Autorouter:
         self,
         use_negotiated: bool = True,
         corridor_width_factor: float = 2.0,
-        corridor_penalty: float = 5.0,
+        corridor_penalty: float | None = None,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
     ) -> list[Route]:
@@ -3256,7 +3255,8 @@ class Autorouter:
         Args:
             use_negotiated: Use negotiated congestion routing in detailed phase
             corridor_width_factor: Corridor width as multiple of clearance (default: 2.0)
-            corridor_penalty: Cost penalty for routing outside corridor (default: 5.0)
+            corridor_penalty: Cost penalty for routing outside corridor.
+                Defaults to ``self.rules.cost_corridor_deviation`` when *None*.
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
 
@@ -3647,7 +3647,7 @@ class Autorouter:
             corridor_width=corridor_width,
             default_layer=0,
         )
-        corridor_penalty = 5.0
+        corridor_penalty = self.rules.cost_corridor_deviation
         corridor_assigned_nets: set[int] = set()
 
         inter_block_to_route = all_inter_block_nets & set(nets_to_route)
