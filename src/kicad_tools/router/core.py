@@ -2395,6 +2395,7 @@ class Autorouter:
         # Issue #2274: Track consecutive stalls for neighborhood rip-up escalation
         neighborhood_stall_count = 0
         prev_routed_count = 0
+        full_reorder_used_this_iter = False
         for net in net_order:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
@@ -2502,6 +2503,7 @@ class Autorouter:
         # Skip iteration loop if already timed out
         if not timed_out:
             for iteration in range(1, max_iterations + 1):
+                full_reorder_used_this_iter = False
                 if check_timeout():
                     print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
                     timed_out = True
@@ -2626,7 +2628,7 @@ class Autorouter:
                             # direct path but still prevent routing via clearance/congestion.
                             # Try ripping up ALL routed nets and re-routing failed net first.
                             routed_nets = list(net_routes.keys())
-                            if routed_nets and iteration <= 2:  # Try in first few iterations
+                            if routed_nets and iteration <= 2 and not full_reorder_used_this_iter:  # Try in first few iterations
                                 print(
                                     f"    No direct blockers found - trying full reorder for net {failed_net}"
                                 )
@@ -2664,6 +2666,7 @@ class Autorouter:
                                         # Issue #2275: Update layer fill ratios
                                         if hasattr(self.router, "update_layer_fill_ratios"):
                                             self.router.update_layer_fill_ratios()
+                                full_reorder_used_this_iter = True
                             else:
                                 # Fallback: try regular reroute
                                 routes = self._route_net_negotiated(
