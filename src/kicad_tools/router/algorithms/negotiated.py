@@ -189,7 +189,7 @@ def should_terminate_early(
         True if should terminate early, False otherwise
 
     Terminates when:
-    - No improvement in last 5 iterations
+    - No improvement in last 5 iterations (or 3 when overflow is low)
     - Monotonic divergence detected (overflow climbing away from best)
     - Oscillation detected
     - Overflow is getting worse over time
@@ -205,27 +205,38 @@ def should_terminate_early(
     if len(overflow_history) < 5:
         return False
 
-    recent = overflow_history[-5:]
+    # Issue #2295: Use a shorter stagnation window when overflow is low.
+    # When only a few nets cause all overflow (e.g., overflow < 5), the
+    # router often oscillates without resolving them.  A 3-iteration
+    # window saves 2 full iterations of pointless rip-up (~240s on
+    # high-pad-count boards like chorus-test-revA).
+    stagnation_window = 5
+    current_overflow = overflow_history[-1] if overflow_history else 0
+    if current_overflow > 0 and current_overflow < 5 and len(overflow_history) >= 3:
+        stagnation_window = 3
+
+    recent = overflow_history[-stagnation_window:]
 
     # Issue #1823: Check if the recent window contains a new global minimum.
     # If so, skip the "no improvement" stagnation check (but still allow
     # other termination checks like monotonic divergence).
     best_overall = min(overflow_history)
     recent_has_new_global_min = False
-    if min(recent) == best_overall and len(overflow_history) > 5:
-        best_before_recent = min(overflow_history[:-5])
+    if min(recent) == best_overall and len(overflow_history) > stagnation_window:
+        best_before_recent = min(overflow_history[:-stagnation_window])
         if min(recent) < best_before_recent:
             recent_has_new_global_min = True
 
-    # No improvement in last 5 iterations.
-    # When len(overflow_history) == 5 there is no earlier window; use the
-    # first recorded value as baseline instead of float('inf') which would
-    # make this check unreachable and mask stale-baseline divergence.
+    # No improvement in last N iterations (5 normally, 3 for low overflow).
+    # When len(overflow_history) == stagnation_window there is no earlier
+    # window; use the first recorded value as baseline instead of
+    # float('inf') which would make this check unreachable and mask
+    # stale-baseline divergence.
     # Issue #1823: Skip this check when recent window found a new global
     # minimum -- the router is still making progress.
     if not recent_has_new_global_min:
-        if len(overflow_history) > 5:
-            earlier = overflow_history[:-5]
+        if len(overflow_history) > stagnation_window:
+            earlier = overflow_history[:-stagnation_window]
         else:
             earlier = overflow_history[:1]
         if min(recent) >= min(earlier):
@@ -384,6 +395,13 @@ class NegotiatedRouter:
                 pad_objs, congestion_fn=congestion_fn
             )
 
+            # Issue #2306: Incremental Steiner target-set expansion.
+            # After routing each RSMT edge, collect the grid cells along
+            # the routed path.  Subsequent edges can terminate A* early
+            # when they reach any cell of the existing net tree, avoiding
+            # full-grid searches for high-fanout nets like GNDD.
+            routed_cells: set[tuple[int, int, int]] = set()
+
             for i, j in rsmt_edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
@@ -393,10 +411,14 @@ class NegotiatedRouter:
                     negotiated_mode=True,
                     present_cost_factor=present_cost_factor,
                     per_net_timeout=per_net_timeout,
+                    extra_goal_cells=routed_cells if routed_cells else None,
                 )
                 if route:
                     mark_route_callback(route)
                     routes.append(route)
+                    # Collect grid cells from the routed segments so later
+                    # edges can terminate early upon reaching this tree.
+                    self._collect_route_cells(route, routed_cells)
         else:
             # 2-pin net
             route = self.router.route(
@@ -411,6 +433,39 @@ class NegotiatedRouter:
                 routes.append(route)
 
         return routes
+
+    def _collect_route_cells(
+        self,
+        route: Route,
+        cell_set: set[tuple[int, int, int]],
+    ) -> None:
+        """Add grid cells covered by a route to *cell_set*.
+
+        For each segment, walk grid cells between the two endpoints and
+        insert ``(gx, gy, layer_index)`` tuples.  Via locations are added
+        on all routable layers so the A* can connect through them.
+
+        Issue #2306: Used by incremental Steiner routing to build the
+        target-set for subsequent RSMT-edge A* searches.
+        """
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+            steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+            for s in range(steps + 1):
+                t = s / steps
+                gx = int(gx1 + t * (gx2 - gx1))
+                gy = int(gy1 + t * (gy2 - gy1))
+                cell_set.add((gx, gy, layer_idx))
+
+        # Add via locations on all routable layers
+        routable = self.grid.get_routable_indices()
+        for via in route.vias:
+            gx, gy = self.grid.world_to_grid(via.x, via.y)
+            for li in routable:
+                cell_set.add((gx, gy, li))
 
     def find_nets_through_overused_cells(
         self,

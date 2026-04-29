@@ -97,6 +97,18 @@ BENCHMARK_CASES: list[BenchmarkCase] = [
         trace_width=0.2,
         trace_clearance=0.15,
     ),
+    # Hard complexity -- 4-layer RPi DAC hat with dense BGA escape and I2S routing
+    BenchmarkCase(
+        name="chorus_test_revA",
+        pcb_path="boards/external/chorus-test-revA/kicad/chorus-test-revA_v9_grid50.kicad_pcb",
+        expected_completion=1.0,
+        expected_max_vias=200,
+        difficulty=Difficulty.HARD,
+        skip_nets=["+3.3V", "+3.3VA", "+5V", "GNDA", "GNDD"],
+        grid_resolution=0.05,
+        trace_width=0.2,
+        trace_clearance=0.15,
+    ),
 ]
 
 

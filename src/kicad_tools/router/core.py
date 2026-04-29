@@ -2392,6 +2392,17 @@ class Autorouter:
         # (Issue #762: escape strategies need this even when use_targeted_ripup=False)
         pads_by_net: dict[int, list[Pad]] = {}
         ripup_history: dict[int, int] = {}
+        # Issue #2295: Per-net rip-up stall tracking.  For each net that
+        # passes through overused cells, count consecutive rip-up iterations
+        # where the net's overflow contribution did not improve.  Nets that
+        # stall for ``max_net_stall_iterations`` consecutive rip-ups are
+        # excluded from future rip-up sets to avoid wasting time on
+        # high-pad-count nets (e.g., 15-16 pad decoupling nets) that cannot
+        # resolve their overflow.
+        max_net_stall_iterations = 3
+        net_ripup_stall: dict[int, int] = {}  # net_id -> consecutive stall count
+        net_prev_overflow: dict[int, int] = {}  # net_id -> overflow last time it was ripped up
+        stalled_nets: set[int] = set()  # nets excluded from rip-up
         # Issue #2274: Track consecutive stalls for neighborhood rip-up escalation
         neighborhood_stall_count = 0
         prev_routed_count = 0
@@ -2565,6 +2576,59 @@ class Autorouter:
                         if failed_net not in nets_to_reroute:
                             nets_to_reroute.append(failed_net)
                     print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
+
+                # Issue #2295: Per-net rip-up stall filtering.
+                # Track each net's overflow contribution across rip-up
+                # iterations.  If a net has been ripped up N consecutive times
+                # without its overflow improving, exclude it from future
+                # rip-up sets.  This prevents high-pad-count decoupling nets
+                # (e.g., C11-2 with 16 pads) from consuming ~200s per
+                # iteration on fruitless A* searches.
+                current_overflow = self.grid.get_total_overflow()
+                for net in nets_to_reroute:
+                    prev = net_prev_overflow.get(net)
+                    if prev is not None:
+                        if current_overflow >= prev:
+                            # No improvement since last rip-up of this net
+                            net_ripup_stall[net] = net_ripup_stall.get(net, 0) + 1
+                        else:
+                            # Overflow improved -- reset stall counter
+                            net_ripup_stall[net] = 0
+                    net_prev_overflow[net] = current_overflow
+
+                # Filter out stalled nets
+                newly_stalled = [
+                    n for n in nets_to_reroute
+                    if net_ripup_stall.get(n, 0) >= max_net_stall_iterations
+                    and n not in stalled_nets
+                ]
+                if newly_stalled:
+                    stalled_nets.update(newly_stalled)
+                    stalled_names = [
+                        self.net_names.get(n, f"Net_{n}") for n in newly_stalled
+                    ]
+                    flush_print(
+                        f"  Excluding {len(newly_stalled)} stalled net(s) from rip-up: "
+                        f"{', '.join(stalled_names)}"
+                    )
+
+                if stalled_nets:
+                    nets_to_reroute = [
+                        n for n in nets_to_reroute if n not in stalled_nets
+                    ]
+
+                # If overflow improves globally, give stalled nets another
+                # chance -- their blockage may have cleared.
+                if (
+                    stalled_nets
+                    and len(overflow_history) >= 2
+                    and overflow_history[-1] < overflow_history[-2]
+                ):
+                    flush_print(
+                        f"  Re-enabling {len(stalled_nets)} stalled net(s) after overflow improvement"
+                    )
+                    stalled_nets.clear()
+                    net_ripup_stall.clear()
 
                 if use_targeted_ripup:
                     # Targeted rip-up: for each conflicting net, find its specific blockers

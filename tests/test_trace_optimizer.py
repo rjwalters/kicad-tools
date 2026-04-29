@@ -1474,3 +1474,127 @@ class TestPadEndpointPreservation:
         for seg in result:
             length = ((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2) ** 0.5
             assert length > 0, "Zero-length segment produced"
+
+
+class TestOverflowTolerantCollisionChecker:
+    """Tests for ignore_overflow mode in GridCollisionChecker (Issue #2303).
+
+    When the router finishes with residual overflow (overused cells where
+    multiple nets share the same cell), the optimizer's collision checker
+    should not treat these soft blocks as hard obstacles.  Otherwise the
+    optimizer fragments routes and destroys connectivity.
+    """
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create a small routing grid with two routes that overlap."""
+        rules = DesignRules(
+            grid_resolution=0.25,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+        return grid, rules
+
+    def _mark_blocking_route(self, grid, net_id=2):
+        """Place a vertical route for net_id crossing x=3."""
+        from kicad_tools.router import Route
+        from kicad_tools.router import Segment as RouteSegment
+
+        seg = RouteSegment(
+            x1=3.0, y1=0.0, x2=3.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=net_id, net_name=f"NET{net_id}",
+        )
+        route = Route(net=net_id, net_name=f"NET{net_id}", segments=[seg])
+        grid.mark_route(route)
+
+    def test_default_blocks_other_net(self, grid_and_rules):
+        """Without ignore_overflow, path crossing another net is blocked."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2)
+
+        checker = GridCollisionChecker(grid, ignore_overflow=False)
+        result = checker.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_allows_soft_block(self, grid_and_rules):
+        """With ignore_overflow=True, path crossing a soft block is allowed."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2)
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        assert result is True
+
+    def test_ignore_overflow_still_blocks_hard_obstacles(self, grid_and_rules):
+        """With ignore_overflow=True, hard obstacles (pads) still block."""
+        grid, _rules = grid_and_rules
+
+        # Mark a cell as a hard obstacle (pad)
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        gx, gy = grid.world_to_grid(3.0, 2.5)
+        cell = grid.grid[layer_idx][gy][gx]
+        cell.blocked = True
+        cell.is_obstacle = True
+        cell.net = 99
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_noop_when_no_overflow(self, grid_and_rules):
+        """When there is no overflow, ignore_overflow has no effect."""
+        grid, _rules = grid_and_rules
+        # No routes marked => no blocked cells => both modes agree
+        checker_normal = GridCollisionChecker(grid, ignore_overflow=False)
+        checker_overflow = GridCollisionChecker(grid, ignore_overflow=True)
+
+        result_normal = checker_normal.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        result_overflow = checker_overflow.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        assert result_normal == result_overflow == True  # noqa: E712
+
+    def test_optimizer_preserves_segments_with_overflow(self, grid_and_rules):
+        """End-to-end: optimizer with ignore_overflow preserves connectivity.
+
+        Creates a route with segments passing through an overused cell and
+        verifies that the optimizer does not strip them when
+        ignore_overflow=True.
+        """
+        grid, _rules = grid_and_rules
+
+        # Place a blocking route (net 2) through the area
+        self._mark_blocking_route(grid, net_id=2)
+
+        # Create segments for net 1 that cross through the blocked area
+        segments = [
+            Segment(x1=1.0, y1=2.5, x2=3.0, y2=2.5,
+                    width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"),
+            Segment(x1=3.0, y1=2.5, x2=5.0, y2=2.5,
+                    width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"),
+        ]
+
+        # With ignore_overflow=True, all segments should be preserved
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        optimizer = TraceOptimizer(collision_checker=checker)
+        result = optimizer.optimize_segments(segments)
+
+        # The two collinear segments should merge into one (not be stripped)
+        assert len(result) >= 1
+        # Verify connectivity: start of first == 1.0, end of last == 5.0
+        assert abs(result[0].x1 - 1.0) < 0.01
+        assert abs(result[-1].x2 - 5.0) < 0.01

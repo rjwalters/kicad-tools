@@ -234,12 +234,37 @@ class TestCorridorCostInAStar:
 class TestCorridorPenaltyDecay:
     """Verify penalty decay formula used in two_phase._detailed_negotiated."""
 
-    def test_decay_formula(self):
-        """Effective penalty decays by 10% per iteration, floor at 20%."""
+    def test_decay_formula_default(self):
+        """With default decay (rate=0.05, floor=0.3), floor is reached at iteration 14."""
+        rules = DesignRules()
+        base_penalty = 5.0
+        results = []
+        for iteration in range(1, 20):
+            effective = base_penalty * max(
+                rules.corridor_decay_floor,
+                1.0 - rules.corridor_decay_rate * iteration,
+            )
+            results.append(effective)
+
+        # Iteration 1: 5.0 * (1.0 - 0.05) = 5.0 * 0.95 = 4.75
+        assert abs(results[0] - 4.75) < 1e-6
+        # Iteration 7: 5.0 * (1.0 - 0.35) = 5.0 * 0.65 = 3.25 (still above floor)
+        assert abs(results[6] - 3.25) < 1e-6
+        # Iteration 14: 5.0 * max(0.3, 1.0 - 0.7) = 5.0 * 0.3 = 1.5 (at floor)
+        assert abs(results[13] - 1.5) < 1e-6
+        # Iteration 16: still at floor
+        assert abs(results[15] - 1.5) < 1e-6
+
+    def test_decay_formula_old_behaviour(self):
+        """Custom rate=0.1, floor=0.2 reproduces the old behaviour (floor at iteration 8)."""
+        rules = DesignRules(corridor_decay_rate=0.1, corridor_decay_floor=0.2)
         base_penalty = 5.0
         results = []
         for iteration in range(1, 12):
-            effective = base_penalty * max(0.2, 1.0 - 0.1 * iteration)
+            effective = base_penalty * max(
+                rules.corridor_decay_floor,
+                1.0 - rules.corridor_decay_rate * iteration,
+            )
             results.append(effective)
 
         # Iteration 1: 5.0 * 0.9 = 4.5
@@ -250,6 +275,40 @@ class TestCorridorPenaltyDecay:
         assert abs(results[7] - 1.0) < 1e-6
         # Iteration 10: 5.0 * 0.2 = 1.0 (still at floor)
         assert abs(results[9] - 1.0) < 1e-6
+
+    def test_zero_decay_rate_constant_penalty(self):
+        """corridor_decay_rate=0.0 means penalty never decays."""
+        rules = DesignRules(corridor_decay_rate=0.0, corridor_decay_floor=0.3)
+        base_penalty = 5.0
+        for iteration in range(1, 20):
+            effective = base_penalty * max(
+                rules.corridor_decay_floor,
+                1.0 - rules.corridor_decay_rate * iteration,
+            )
+            assert abs(effective - base_penalty) < 1e-6
+
+    def test_floor_one_constant_penalty(self):
+        """corridor_decay_floor=1.0 means penalty never decays (different parameterisation)."""
+        rules = DesignRules(corridor_decay_rate=0.05, corridor_decay_floor=1.0)
+        base_penalty = 5.0
+        for iteration in range(1, 20):
+            effective = base_penalty * max(
+                rules.corridor_decay_floor,
+                1.0 - rules.corridor_decay_rate * iteration,
+            )
+            assert abs(effective - base_penalty) < 1e-6
+
+    def test_design_rules_defaults(self):
+        """DesignRules exposes corridor_decay_rate and corridor_decay_floor with correct defaults."""
+        rules = DesignRules()
+        assert rules.corridor_decay_rate == 0.05
+        assert rules.corridor_decay_floor == 0.3
+
+    def test_design_rules_custom(self):
+        """DesignRules accepts custom corridor decay parameters."""
+        rules = DesignRules(corridor_decay_rate=0.08, corridor_decay_floor=0.15)
+        assert rules.corridor_decay_rate == 0.08
+        assert rules.corridor_decay_floor == 0.15
 
     def test_set_corridor_preference_updates_penalty(self, grid, horizontal_corridor):
         """Calling set_corridor_preference with new penalty updates it."""

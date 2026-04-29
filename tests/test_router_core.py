@@ -3417,3 +3417,98 @@ class TestPostRouteCorrectionAllStrategies:
             present_factor=0.5,
         )
         assert corrected == 0
+
+
+class TestIncrementalSteinerRouting:
+    """Tests for Issue #2306: incremental Steiner target-set expansion."""
+
+    def test_multi_terminal_net_routes_successfully(self):
+        """A multi-terminal net (>2 pads) should route via incremental Steiner."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        # Create a high-fanout net with 5 pads spread across the board.
+        # Use a signal net name to avoid pour-net skip logic.
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "COMMON"},
+            {"number": "2", "x": 30.0, "y": 10.0, "net": 1, "net_name": "COMMON"},
+            {"number": "3", "x": 10.0, "y": 30.0, "net": 1, "net_name": "COMMON"},
+            {"number": "4", "x": 30.0, "y": 30.0, "net": 1, "net_name": "COMMON"},
+            {"number": "5", "x": 20.0, "y": 20.0, "net": 1, "net_name": "COMMON"},
+        ]
+        # Add each pad as a separate component so they have different refs
+        for i, pad in enumerate(pads):
+            router.add_component(f"C{i + 1}", [pad])
+
+        routes = router.route_all_negotiated(max_iterations=1)
+        assert isinstance(routes, list)
+        assert len(routes) > 0, "Multi-terminal net should produce at least one route"
+
+    def test_collect_route_cells_populates_set(self):
+        """_collect_route_cells should add grid cells from routed segments."""
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.pathfinder import Router
+        from kicad_tools.router.primitives import Route, Segment
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(grid_resolution=0.5)
+        stack = LayerStack.two_layer()
+        grid = RoutingGrid(
+            width=20.0, height=20.0, rules=rules, layer_stack=stack,
+        )
+        pathfinder = Router(grid, rules)
+        neg_router = NegotiatedRouter(
+            grid=grid, router=pathfinder, rules=rules, net_class_map={},
+        )
+
+        # Create a simple route with one segment
+        layer_enum = stack.layers[0].layer_enum
+        route = Route(net=1, net_name="SIG")
+        route.segments.append(
+            Segment(x1=1.0, y1=1.0, x2=5.0, y2=1.0, width=0.25,
+                    layer=layer_enum, net=1, net_name="SIG")
+        )
+
+        cell_set: set[tuple[int, int, int]] = set()
+        neg_router._collect_route_cells(route, cell_set)
+
+        # Should have collected cells along the segment
+        assert len(cell_set) > 0, "Route cells should be collected"
+
+    def test_extra_goal_cells_accepted_by_route(self):
+        """Router.route should accept extra_goal_cells parameter."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.pathfinder import Router
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(grid_resolution=0.5)
+        stack = LayerStack.two_layer()
+        grid = RoutingGrid(
+            width=20.0, height=20.0, rules=rules, layer_stack=stack,
+        )
+        pathfinder = Router(grid, rules)
+
+        layer_enum = stack.layers[0].layer_enum
+        start = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
+                     net_name="SIG", layer=layer_enum)
+        end = Pad(x=18.0, y=18.0, width=1.0, height=1.0, net=1,
+                   net_name="SIG", layer=layer_enum)
+
+        # Place an extra goal cell close to the start to verify early
+        # termination. The midpoint (10, 10) at grid coords should be
+        # reachable and end the search before reaching the distant end pad.
+        mid_gx, mid_gy = grid.world_to_grid(10.0, 10.0)
+        layer_idx = grid.layer_to_index(layer_enum.value)
+        extra = {(mid_gx, mid_gy, layer_idx)}
+
+        route = pathfinder.route(
+            start, end,
+            negotiated_mode=True,
+            present_cost_factor=0.0,
+            extra_goal_cells=extra,
+        )
+        # Route should succeed (either to extra goal or end pad)
+        assert route is not None

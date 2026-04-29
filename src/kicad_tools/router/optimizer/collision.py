@@ -53,15 +53,28 @@ class GridCollisionChecker:
 
     Uses the RoutingGrid's obstacle data to check if paths are clear.
     This reuses the same collision detection logic as the autorouter.
+
+    When ``ignore_overflow=True``, cells that are blocked by route
+    occupation (another net passing through) but are *not* hard obstacles
+    (pads, keepouts) are treated as clear.  This prevents the trace
+    optimizer from fragmenting routes that pass through cells with minor
+    overflow from negotiated routing.  Hard obstacles are always respected
+    regardless of this flag.
     """
 
-    def __init__(self, grid: RoutingGrid):
+    def __init__(self, grid: RoutingGrid, ignore_overflow: bool = False):
         """Initialize with a routing grid.
 
         Args:
             grid: The routing grid with obstacle and net data.
+            ignore_overflow: When True, treat cells blocked by route
+                occupation (not hard obstacles) as clear.  This is used
+                after negotiated routing with residual overflow so that
+                the optimizer preserves connectivity instead of
+                destroying segments that pass through overused cells.
         """
         self.grid = grid
+        self.ignore_overflow = ignore_overflow
 
     def path_is_clear(
         self,
@@ -113,11 +126,15 @@ class GridCollisionChecker:
 
             # Check if blocked by another net
             if cell.blocked:
-                # Cell is blocked - check if it's our net or another net
-                if cell.net != 0 and cell.net != exclude_net:
-                    return False  # Blocked by another net
                 if cell.is_obstacle:
-                    return False  # Hard obstacle (pad, keepout)
+                    return False  # Hard obstacle (pad, keepout) -- always block
+
+                # Cell is occupied by another net's route (soft block).
+                # When ignore_overflow is set, skip this check so the
+                # optimizer does not fragment routes through overused cells.
+                if cell.net != 0 and cell.net != exclude_net:
+                    if not self.ignore_overflow:
+                        return False  # Blocked by another net
 
         return True
 
