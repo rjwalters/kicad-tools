@@ -221,6 +221,8 @@ def run_route_command(args) -> int:
         sub_argv.append("--no-cache")
     if getattr(args, "backend", "auto") != "auto":
         sub_argv.extend(["--backend", args.backend])
+    if getattr(args, "strict", False):
+        sub_argv.append("--strict")
     return route_main(sub_argv)
 
 

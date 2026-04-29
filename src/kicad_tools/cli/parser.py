@@ -2231,6 +2231,14 @@ def _add_route_parser(subparsers) -> None:
             "The C++ backend is 10-100x faster; build with 'kct build-native'."
         ),
     )
+    route_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Fail with non-zero exit code if output connectivity verification "
+            "detects any disconnected net in the written PCB file."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
