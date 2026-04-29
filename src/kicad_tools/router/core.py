@@ -3728,14 +3728,29 @@ class Autorouter:
             nets_to_route_ids: Optional set of net IDs that were targeted
                 for routing (multi-pad signal nets).  When provided,
                 ``nets_routed`` only counts nets in this set.
+
+        When pad information is available (``self.pads`` and ``self.nets``),
+        connectivity validation is performed so that ``nets_routed``
+        reflects actual pad-to-pad connectivity rather than mere segment
+        existence.
         """
         from .observability import compute_routing_statistics
+
+        # Build net_pads mapping when pad data is available
+        net_pads: dict[int, list] | None = None
+        if self.pads and self.nets:
+            net_pads = {}
+            for net_id, pad_keys in self.nets.items():
+                pad_list = [self.pads[k] for k in pad_keys if k in self.pads]
+                if pad_list:
+                    net_pads[net_id] = pad_list
 
         return compute_routing_statistics(
             routes=self.routes,
             grid=self.grid,
             layer_stats=self.get_layer_usage_statistics(),
             nets_to_route_ids=nets_to_route_ids,
+            net_pads=net_pads,
         )
 
     def get_layer_usage_statistics(self) -> dict:

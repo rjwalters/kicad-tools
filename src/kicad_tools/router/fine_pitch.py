@@ -129,6 +129,13 @@ class FinePitchReport:
     affected_net_count: int = 0
 
     @property
+    def off_grid_percentage(self) -> float:
+        """Percentage of all analyzed pads that are off-grid."""
+        if self.total_pads == 0:
+            return 0.0
+        return self.total_off_grid / self.total_pads * 100
+
+    @property
     def has_warnings(self) -> bool:
         """True if any components have routing concerns."""
         return any(c.has_issues for c in self.components)
@@ -224,6 +231,20 @@ class FinePitchReport:
                 )
             lines.append("    • Consider enabling sub-grid routing for pad connections")
             lines.append("    • Review affected nets for manual routing")
+
+        # Warn when >50% of pads are off-grid (Issue #2254)
+        pct = self.off_grid_percentage
+        if pct > 50:
+            lines.append("")
+            lines.append(
+                f"  WARNING: {pct:.0f}% of pads ({self.total_off_grid}/{self.total_pads})"
+                f" are off-grid at {self.grid_resolution}mm resolution."
+            )
+            suggested = self.grid_resolution / 2
+            lines.append(
+                f"  Routing quality will be degraded. Consider --grid {suggested}"
+                " for better pad alignment."
+            )
 
         return "\n".join(lines)
 

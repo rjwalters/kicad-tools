@@ -85,12 +85,55 @@ def show_routing_summary(
             failures_by_net[failure.net] = []
         failures_by_net[failure.net].append(failure)
 
+    # --- Connectivity validation (Issue #2254) ---
+    # When pad data is available, check actual pad-to-pad connectivity
+    # so we don't report SUCCESS for nets that only have escape stubs.
+    connectivity: dict[int, dict] | None = None
+    partially_connected_nets: dict[int, dict] = {}
+    has_disconnected_islands = False
+    if hasattr(router, "pads") and hasattr(router, "nets") and router.pads and router.nets:
+        from .observability import validate_net_connectivity
+
+        net_pads: dict[int, list] = {}
+        for net_id, pad_keys in router.nets.items():
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+            if pad_list:
+                net_pads[net_id] = pad_list
+        target_pads = (
+            {nid: pads for nid, pads in net_pads.items() if nid in nets_to_route_ids}
+            if nets_to_route_ids is not None
+            else net_pads
+        )
+        connectivity = validate_net_connectivity(router.routes, target_pads)
+        for net_id, info in connectivity.items():
+            if info["total_pads"] >= 2 and not info["connected"]:
+                has_disconnected_islands = True
+                # A net that has routes but is not fully connected
+                if net_id in routed_net_ids:
+                    partially_connected_nets[net_id] = info
+        # Adjust routed count: remove partially-connected nets
+        routed_net_ids = routed_net_ids - set(partially_connected_nets.keys())
+
     # Calculate success percentage
     success_rate = len(routed_net_ids) / nets_to_route * 100 if nets_to_route > 0 else 0
 
     print(f"\n{'=' * 60}")
-    print("Routing Complete!")
+    if has_disconnected_islands or unrouted_ids or partially_connected_nets:
+        connectivity_pct = f" ({success_rate:.0f}% connected)"
+        print(f"Routing Incomplete{connectivity_pct}")
+    else:
+        print("Routing Complete!")
     print(f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)")
+
+    # Show partially-connected nets (have segments but not all pads connected)
+    if partially_connected_nets:
+        print(f"\n  Partially connected nets ({len(partially_connected_nets)}):")
+        for net_id in sorted(partially_connected_nets):
+            info = partially_connected_nets[net_id]
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            print(
+                f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected"
+            )
 
     # Show cleanup statistics if any artifacts were removed
     cleanup_stats = getattr(router, "_cleanup_stats", None)
@@ -482,6 +525,36 @@ def get_routing_diagnostics_json(
         all_net_ids = {v for k, v in net_map.items() if v > 0}
         unrouted_ids = all_net_ids - all_routed_net_ids
 
+    # --- Connectivity validation (Issue #2254) ---
+    connectivity: dict[int, dict] | None = None
+    partially_connected: list[dict] = []
+    has_disconnected_islands = False
+    if hasattr(router, "pads") and hasattr(router, "nets") and router.pads and router.nets:
+        from .observability import validate_net_connectivity
+
+        net_pads_map: dict[int, list] = {}
+        for net_id_iter, pad_keys in router.nets.items():
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+            if pad_list:
+                net_pads_map[net_id_iter] = pad_list
+        target_pads = (
+            {nid: pads for nid, pads in net_pads_map.items() if nid in nets_to_route_ids}
+            if nets_to_route_ids is not None
+            else net_pads_map
+        )
+        connectivity = validate_net_connectivity(router.routes, target_pads)
+        for nid, info in connectivity.items():
+            if info["total_pads"] >= 2 and not info["connected"]:
+                has_disconnected_islands = True
+                if nid in routed_net_ids:
+                    partially_connected.append({
+                        "net_id": nid,
+                        "net_name": reverse_net.get(nid, f"Net_{nid}"),
+                        "connected_pads": info["connected_pads"],
+                        "total_pads": info["total_pads"],
+                    })
+                    routed_net_ids = routed_net_ids - {nid}
+
     # Build successful routes list
     successful_routes = []
     for net_id in sorted(routed_net_ids):
@@ -644,7 +717,7 @@ def get_routing_diagnostics_json(
             }
         )
 
-    return {
+    result_dict: dict = {
         "summary": {
             "nets_requested": nets_to_route,
             "nets_routed": len(routed_net_ids),
@@ -652,12 +725,16 @@ def get_routing_diagnostics_json(
             "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
             if nets_to_route > 0
             else 0,
+            "has_disconnected_islands": has_disconnected_islands,
         },
         "failure_breakdown": dict(failures_by_cause),
         "successful_routes": successful_routes,
         "failed_routes": failed_routes,
         "suggestions": suggestions,
     }
+    if partially_connected:
+        result_dict["partially_connected"] = partially_connected
+    return result_dict
 
 
 def print_routing_diagnostics_json(
