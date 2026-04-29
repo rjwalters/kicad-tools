@@ -341,6 +341,8 @@ class TwoPhaseRouter:
 
         # Rip-up and reroute iterations if needed
         if overflow > 0:
+            import copy
+
             max_iterations = 10
             history_increment = 1.0
             present_factor_increment = 0.5
