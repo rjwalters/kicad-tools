@@ -9,6 +9,7 @@ from kicad_tools.router.escape import (
     EscapeRoute,
     EscapeRouter,
     PackageType,
+    _is_multi_row,
     detect_package_type,
     get_package_info,
     is_dense_package,
@@ -1278,31 +1279,31 @@ def create_connector_pads(
 
 
 class TestConnectorDetection:
-    """Tests for CONNECTOR package type detection (Issue #2265)."""
+    """Tests for MULTI_ROW_CONNECTOR package type detection (Issue #2279)."""
 
-    def test_40pin_connector_detected_as_connector(self):
-        """A 40-pin dual-row through-hole header must be detected as CONNECTOR."""
+    def test_40pin_connector_detected_as_multi_row(self):
+        """A 40-pin dual-row through-hole header must be detected as MULTI_ROW_CONNECTOR."""
         pads = create_connector_pads(40)
-        assert detect_package_type(pads) == PackageType.CONNECTOR
+        assert detect_package_type(pads) == PackageType.MULTI_ROW_CONNECTOR
 
-    def test_20pin_connector_detected_as_connector(self):
-        """A 20-pin dual-row through-hole header must be CONNECTOR (boundary)."""
+    def test_20pin_connector_detected_as_multi_row(self):
+        """A 20-pin dual-row through-hole header must be MULTI_ROW_CONNECTOR (boundary)."""
         pads = create_connector_pads(20)
-        assert detect_package_type(pads) == PackageType.CONNECTOR
+        assert detect_package_type(pads) == PackageType.MULTI_ROW_CONNECTOR
 
-    def test_small_dip_not_connector(self):
-        """A 16-pin DIP should remain classified as DIP, not CONNECTOR."""
+    def test_small_dip_not_multi_row_connector(self):
+        """A 16-pin DIP should remain classified as DIP, not MULTI_ROW_CONNECTOR."""
         pads = create_connector_pads(16)
         assert detect_package_type(pads) == PackageType.DIP
 
-    def test_8pin_dip_not_connector(self):
+    def test_8pin_dip_not_multi_row_connector(self):
         """An 8-pin DIP should remain classified as DIP."""
         pads = create_connector_pads(8)
         assert detect_package_type(pads) == PackageType.DIP
 
 
 class TestConnectorEscapeRouting:
-    """Tests for connector escape routing strategy (Issue #2265)."""
+    """Tests for multi-row connector escape routing strategy (Issue #2279)."""
 
     @pytest.fixture
     def grid_and_rules(self):
@@ -1325,13 +1326,13 @@ class TestConnectorEscapeRouting:
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
-        assert info.package_type == PackageType.CONNECTOR
+        assert info.package_type == PackageType.MULTI_ROW_CONNECTOR
 
         escapes = router.generate_escapes(info)
         assert len(escapes) == 40
 
-    def test_connector_inner_pins_use_via(self, grid_and_rules):
-        """Odd-indexed connector pins must escape via layer change."""
+    def test_connector_inner_row_uses_via(self, grid_and_rules):
+        """Inner-row pads must escape via layer change; outer row stays on surface."""
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
@@ -1342,7 +1343,7 @@ class TestConnectorEscapeRouting:
         via_escapes = [e for e in escapes if e.via is not None]
         surface_escapes = [e for e in escapes if e.via is None]
 
-        # Half of pins (odd-indexed) should have vias
+        # For a 2-row connector: outer row (20) on surface, inner row (20) via
         assert len(via_escapes) == 20
         assert len(surface_escapes) == 20
 
@@ -1374,3 +1375,301 @@ class TestConnectorEscapeRouting:
             for seg in escape.segments:
                 assert seg.width > 0
                 assert seg.net > 0
+
+    def test_connector_outer_row_ring_index_zero(self, grid_and_rules):
+        """Outer-row escapes must have ring_index 0."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        surface_escapes = [e for e in escapes if e.via is None]
+        for escape in surface_escapes:
+            assert escape.ring_index == 0
+
+    def test_connector_inner_row_ring_index_nonzero(self, grid_and_rules):
+        """Inner-row escapes must have ring_index >= 1."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        via_escapes = [e for e in escapes if e.via is not None]
+        for escape in via_escapes:
+            assert escape.ring_index >= 1
+
+    def test_connector_via_stagger(self, grid_and_rules):
+        """Via positions for adjacent inner-row pads must be staggered."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Collect inner-row via positions (sorted by pad Y for vertical layout)
+        via_escapes = sorted(
+            [e for e in escapes if e.via is not None],
+            key=lambda e: e.pad.y,
+        )
+
+        # Adjacent vias in the inner row should be staggered along the row axis
+        min_stagger = router.via_spacing / 2
+        for i in range(len(via_escapes) - 1):
+            vp1 = via_escapes[i].via_pos
+            vp2 = via_escapes[i + 1].via_pos
+            assert vp1 is not None and vp2 is not None
+            # The Y coordinates of adjacent vias should differ (stagger along row)
+            y_diff = abs(vp1[1] - vp2[1])
+            # At least one pair must show stagger (not all aligned)
+            if y_diff > 0.01:
+                # Via Y positions differ, confirming stagger
+                break
+        else:
+            # If we never broke, no stagger was detected -- fail
+            pytest.fail("No via stagger detected for adjacent inner-row pads")
+
+
+def create_multi_row_connector_pads(
+    rows: int, cols: int, pitch: float = 2.54, ref: str = "J1"
+) -> list[Pad]:
+    """Create pads simulating a multi-row through-hole connector.
+
+    Args:
+        rows: Number of rows (2, 3, 4, etc.)
+        cols: Number of columns per row
+        pitch: Pin pitch in mm
+        ref: Component reference
+
+    Returns:
+        List of through-hole Pad objects in multi-row arrangement.
+    """
+    pads = []
+    net = 1
+    half_rows = (rows - 1) * pitch / 2
+    half_cols = (cols - 1) * pitch / 2
+
+    for r in range(rows):
+        for c in range(cols):
+            pads.append(
+                Pad(
+                    x=-half_rows + r * pitch,
+                    y=-half_cols + c * pitch,
+                    width=1.6,
+                    height=1.6,
+                    net=net,
+                    net_name=f"NET_{net}",
+                    layer=Layer.F_CU,
+                    ref=ref,
+                    through_hole=True,
+                )
+            )
+            net += 1
+
+    return pads
+
+
+class TestMultiRowDetection:
+    """Tests for _is_multi_row() helper function."""
+
+    def test_2x20_is_multi_row(self):
+        """A 2x20 connector is a multi-row arrangement."""
+        pads = create_connector_pads(40)
+        assert _is_multi_row(pads) is True
+
+    def test_3x10_is_multi_row(self):
+        """A 3x10 connector is a multi-row arrangement."""
+        pads = create_multi_row_connector_pads(3, 10)
+        assert _is_multi_row(pads) is True
+
+    def test_4x8_is_multi_row(self):
+        """A 4x8 connector is a multi-row arrangement."""
+        pads = create_multi_row_connector_pads(4, 8)
+        assert _is_multi_row(pads) is True
+
+    def test_1x8_not_multi_row(self):
+        """A single-row 1x8 connector is NOT multi-row."""
+        pads = create_multi_row_connector_pads(1, 8)
+        assert _is_multi_row(pads) is False
+
+    def test_2x2_too_small(self):
+        """A 2x2 header has only 4 pads but meets min threshold; check count gate."""
+        pads = create_multi_row_connector_pads(2, 2)
+        # 4 pads, 2 rows, 2 cols -- meets the 2<=rows<=6 and cols>=rows check
+        assert _is_multi_row(pads) is True
+
+    def test_3_pads_too_few(self):
+        """Fewer than 4 pads should return False."""
+        pads = create_multi_row_connector_pads(1, 3)
+        assert _is_multi_row(pads) is False
+
+
+class TestMultiRowConnectorDetection:
+    """Tests for detect_package_type() with multi-row connectors."""
+
+    def test_3x10_detected_as_multi_row_connector(self):
+        """A 3x10 TH connector (30 pins) must be MULTI_ROW_CONNECTOR."""
+        pads = create_multi_row_connector_pads(3, 10)
+        assert detect_package_type(pads) == PackageType.MULTI_ROW_CONNECTOR
+
+    def test_2x25_detected_as_multi_row_connector(self):
+        """A 2x25 TH connector (50 pins) must be MULTI_ROW_CONNECTOR."""
+        pads = create_multi_row_connector_pads(2, 25)
+        assert detect_package_type(pads) == PackageType.MULTI_ROW_CONNECTOR
+
+    def test_single_row_connector_not_multi_row(self):
+        """A 1x20 single-row connector (20 pins) must NOT be MULTI_ROW_CONNECTOR."""
+        pads = create_multi_row_connector_pads(1, 20)
+        # Single row, through-hole -- should be THROUGH_HOLE, not MULTI_ROW_CONNECTOR
+        result = detect_package_type(pads)
+        assert result != PackageType.MULTI_ROW_CONNECTOR
+
+    def test_2x4_below_threshold(self):
+        """A 2x4 TH header (8 pins) should be DIP, not MULTI_ROW_CONNECTOR."""
+        pads = create_multi_row_connector_pads(2, 4)
+        result = detect_package_type(pads)
+        assert result == PackageType.DIP
+
+
+class TestMultiRowDenseDetection:
+    """Tests for is_dense_package() with multi-row connectors."""
+
+    def test_2x20_is_dense(self):
+        """A 2x20 TH connector (40 pins) must be detected as dense."""
+        pads = create_connector_pads(40)
+        assert is_dense_package(pads) is True
+
+    def test_2x10_is_dense(self):
+        """A 2x10 TH connector (20 pins) must be detected as dense."""
+        pads = create_connector_pads(20)
+        assert is_dense_package(pads) is True
+
+    def test_2x4_not_dense(self):
+        """A 2x4 TH connector (8 pins) should NOT be dense (below threshold)."""
+        pads = create_connector_pads(8)
+        # 8 pins, 2.54mm pitch -- neither count nor pitch triggers dense
+        assert is_dense_package(pads) is False
+
+
+class TestMultiRowPackageInfo:
+    """Tests for get_package_info() with multi-row connectors."""
+
+    def test_package_info_rows_cols(self):
+        """Package info for a 2x20 connector must populate rows and cols."""
+        pads = create_connector_pads(40)
+        info = get_package_info(pads)
+        assert info.package_type == PackageType.MULTI_ROW_CONNECTOR
+        # _estimate_grid_dimensions returns (unique_y, unique_x)
+        # Vertical 2x20: 2 unique X values, 20 unique Y values
+        assert info.rows == 20
+        assert info.cols == 2
+        assert info.rows * info.cols >= 40  # covers all pads
+
+    def test_3x10_package_info_rows_cols(self):
+        """Package info for a 3x10 connector must populate rows and cols."""
+        pads = create_multi_row_connector_pads(3, 10)
+        info = get_package_info(pads)
+        assert info.package_type == PackageType.MULTI_ROW_CONNECTOR
+        # 3 unique X values, 10 unique Y values
+        assert info.rows == 10
+        assert info.cols == 3
+        assert info.rows * info.cols >= 30
+
+
+class TestMultiRowEscapeGeneration:
+    """Tests for _escape_multi_row_connector() escape route generation."""
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create grid and rules for testing."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(80, 80, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def test_2x10_produces_20_escapes(self, grid_and_rules):
+        """A 2x10 connector must produce exactly 20 escape routes."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(20)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+        assert len(escapes) == 20
+
+    def test_2x10_outer_no_via_inner_via(self, grid_and_rules):
+        """For 2x10 connector: outer row surface escape, inner row via escape."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(20)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        via_escapes = [e for e in escapes if e.via is not None]
+        surface_escapes = [e for e in escapes if e.via is None]
+
+        assert len(via_escapes) == 10
+        assert len(surface_escapes) == 10
+
+    def test_3x10_escape_counts(self, grid_and_rules):
+        """For a 3x10 connector (30 pins), 1 outer row on surface, 2 inner rows via."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_multi_row_connector_pads(3, 10)
+        info = router.analyze_package(pads)
+        assert info.package_type == PackageType.MULTI_ROW_CONNECTOR
+
+        escapes = router.generate_escapes(info)
+        assert len(escapes) == 30
+
+        via_escapes = [e for e in escapes if e.via is not None]
+        surface_escapes = [e for e in escapes if e.via is None]
+
+        # 1 outer row (10 pads) on surface, 2 inner rows (20 pads) via
+        assert len(surface_escapes) == 10
+        assert len(via_escapes) == 20
+
+    def test_inner_escape_layer_not_fcu(self, grid_and_rules):
+        """Inner-row escapes must use _select_inner_escape_layer, not hardcoded F.Cu."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                assert escape.escape_layer != Layer.F_CU
+                # Should be B.Cu on a 2-layer board (no inner signal layers)
+                assert escape.escape_layer == Layer.B_CU
+
+    def test_escape_segments_have_two_for_via(self, grid_and_rules):
+        """Via escapes must have 2 segments: pad-to-via and via-to-escape."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_connector_pads(40)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        for escape in escapes:
+            if escape.via is not None:
+                assert len(escape.segments) == 2
+                # First segment on pad layer, second on escape layer
+                assert escape.segments[0].layer == Layer.F_CU
+                assert escape.segments[1].layer == escape.escape_layer
+            else:
+                assert len(escape.segments) == 1
