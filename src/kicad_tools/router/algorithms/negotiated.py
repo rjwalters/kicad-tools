@@ -173,6 +173,7 @@ def should_terminate_early(
     overflow_history: list[int],
     iteration: int,
     min_iterations: int = 5,
+    unrouted_count: int = 0,
 ) -> bool:
     """Decide if further iterations are futile and should terminate early.
 
@@ -180,6 +181,9 @@ def should_terminate_early(
         overflow_history: List of overflow values from previous iterations
         iteration: Current iteration number
         min_iterations: Minimum iterations before considering early termination
+        unrouted_count: Number of nets still unrouted. When overflow is 0 but
+            unrouted nets remain, the router should continue to give
+            neighborhood rip-up a chance to resolve them.
 
     Returns:
         True if should terminate early, False otherwise
@@ -191,6 +195,11 @@ def should_terminate_early(
     - Overflow is getting worse over time
     """
     if iteration < min_iterations:
+        return False
+
+    # Issue #2297: When overflow is 0 but nets remain unrouted, do not
+    # terminate early -- let neighborhood rip-up attempt to resolve them.
+    if overflow_history and overflow_history[-1] == 0 and unrouted_count > 0:
         return False
 
     if len(overflow_history) < 5:

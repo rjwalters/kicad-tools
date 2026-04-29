@@ -2508,7 +2508,8 @@ class Autorouter:
                     break
 
                 # Adaptive early termination check (Issue #633)
-                if adaptive and should_terminate_early(overflow_history, iteration):
+                unrouted = total_nets - len(net_routes)
+                if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
                     print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
                     print(f"    Overflow history: {overflow_history[-5:]}")
                     break
@@ -2918,6 +2919,68 @@ class Autorouter:
                         flush_print(
                             f"  Targeted fallback resolved {targeted_fallback_count}/{len(still_failed)} nets ({elapsed_str()})"
                         )
+
+                    # Issue #2297: Neighborhood rip-up for standard path when
+                    # targeted fallback was insufficient and nets remain stalled.
+                    still_unrouted_std = [
+                        n for n in net_order
+                        if (n not in net_routes or not net_routes.get(n))
+                        and n in pads_by_net
+                        and n not in off_grid_nets
+                    ]
+                    if overflow == 0 and still_unrouted_std and not timed_out:
+                        # Track stall progression
+                        current_routed = len(net_routes)
+                        if current_routed <= prev_routed_count:
+                            neighborhood_stall_count += 1
+                        else:
+                            neighborhood_stall_count = 0
+                        prev_routed_count = current_routed
+
+                        if neighborhood_stall_count >= neighborhood_stall_threshold:
+                            flush_print(
+                                f"  Neighborhood rip-up: {len(still_unrouted_std)} "
+                                f"net(s) stuck, stall #{neighborhood_stall_count} "
+                                f"(radius escalation) ({elapsed_str()})"
+                            )
+
+                            def _mark_route_neighborhood_std(route: Route) -> None:
+                                self._mark_route(route)
+
+                            improved, new_count = neg_router.neighborhood_ripup(
+                                failed_nets=still_unrouted_std,
+                                net_routes=net_routes,
+                                routes_list=self.routes,
+                                pads_by_net=pads_by_net,
+                                present_cost_factor=present_factor,
+                                mark_route_callback=_mark_route_neighborhood_std,
+                                stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
+                                per_net_timeout=per_net_timeout,
+                                max_attempts=neighborhood_max_attempts,
+                                initial_radius_factor=neighborhood_initial_radius,
+                                escalation_factor=neighborhood_escalation_factor,
+                                ripup_history=ripup_history,
+                            )
+
+                            overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
+
+                            if improved:
+                                flush_print(
+                                    f"    Neighborhood rip-up routed {new_count - current_routed} "
+                                    f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
+                                )
+                                neighborhood_stall_count = 0
+                                prev_routed_count = new_count
+                            else:
+                                flush_print(
+                                    f"    Neighborhood rip-up did not improve "
+                                    f"({new_count}/{total_nets} nets) ({elapsed_str()})"
+                                )
+
+                            if overflow == 0 and len(net_routes) == total_nets:
+                                print(f"  Convergence achieved at iteration {iteration}!")
+                                break
 
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
@@ -4718,6 +4781,7 @@ class Autorouter:
             main_routes = self.route_all_negotiated(
                 progress_callback=progress_callback,
                 timeout=timeout,
+                use_targeted_ripup=True,
             )
         else:
             main_routes = self.route_all(
