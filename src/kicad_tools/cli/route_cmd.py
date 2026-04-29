@@ -933,6 +933,7 @@ def route_with_layer_escalation(
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    max_iterations=getattr(args, "two_phase_iterations", 20),
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
@@ -1348,6 +1349,7 @@ def route_with_rule_relaxation(
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    max_iterations=getattr(args, "two_phase_iterations", 20),
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
@@ -2574,6 +2576,17 @@ def main(argv: list[str] | None = None) -> int:
             "better results on complex multi-layer boards by preventing "
             "overflow divergence. When combined with escape routing, "
             "replaces the negotiated rip-up phase after escape generation."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase-iterations",
+        type=int,
+        default=20,
+        help=(
+            "Max rip-up-and-reroute iterations for the Phase 2 detailed "
+            "negotiated routing loop in two-phase mode (default: 20). "
+            "Higher values allow more convergence attempts at the cost of "
+            "longer runtime. Only effective with --two-phase."
         ),
     )
     parser.add_argument(

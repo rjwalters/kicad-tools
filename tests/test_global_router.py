@@ -1544,3 +1544,93 @@ class TestEscapeRouteRipupEligibility:
 
         # Verify mark_route_usage was called for the escape route
         grid.mark_route_usage.assert_called_with(escape_route)
+
+
+# =============================================================================
+# Two-Phase max_iterations Configurability Tests (Issue #2304)
+# =============================================================================
+
+
+class TestTwoPhaseMaxIterations:
+    """Verify max_iterations parameter threads through two-phase routing."""
+
+    @pytest.fixture
+    def autorouter(self):
+        """Simple two-net autorouter for testing parameter forwarding."""
+        router = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.2,
+                via_drill=0.35,
+                via_diameter=0.7,
+                grid_resolution=0.1,
+            ),
+            force_python=True,
+        )
+        router.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "SIG_A"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "SIG_A"},
+            ],
+        )
+        router.add_component(
+            ref="R2",
+            pads=[
+                {"number": "1", "x": 10.0, "y": 3.0, "net": 2, "net_name": "SIG_B"},
+                {"number": "2", "x": 10.0, "y": 17.0, "net": 2, "net_name": "SIG_B"},
+            ],
+        )
+        return router
+
+    def test_default_max_iterations_is_20(self):
+        """TwoPhaseRouter.route_all() defaults max_iterations to 20."""
+        import inspect
+
+        from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
+
+        sig = inspect.signature(TwoPhaseRouter.route_all)
+        default = sig.parameters["max_iterations"].default
+        assert default == 20, f"Expected default 20, got {default}"
+
+    def test_max_iterations_forwarded_to_detailed(self, autorouter):
+        """max_iterations parameter is forwarded through route_all_two_phase."""
+        from unittest.mock import patch
+
+        from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
+
+        calls = []
+        original = TwoPhaseRouter._detailed_negotiated
+
+        def spy(self_inner, *args, **kwargs):
+            calls.append(kwargs.get("max_iterations"))
+            return original(self_inner, *args, **kwargs)
+
+        with patch.object(TwoPhaseRouter, "_detailed_negotiated", spy):
+            autorouter.route_all_two_phase(
+                use_negotiated=True,
+                max_iterations=7,
+            )
+
+        assert len(calls) == 1
+        assert calls[0] == 7, f"Expected max_iterations=7, got {calls[0]}"
+
+    def test_route_all_two_phase_accepts_max_iterations(self, autorouter):
+        """route_all_two_phase completes with a custom max_iterations value."""
+        routes = autorouter.route_all_two_phase(
+            use_negotiated=False,
+            max_iterations=3,
+        )
+        assert isinstance(routes, list)
+
+    def test_core_default_max_iterations_is_20(self):
+        """Autorouter.route_all_two_phase() defaults max_iterations to 20."""
+        import inspect
+
+        from kicad_tools.router.core import Autorouter
+
+        sig = inspect.signature(Autorouter.route_all_two_phase)
+        default = sig.parameters["max_iterations"].default
+        assert default == 20, f"Expected default 20, got {default}"
