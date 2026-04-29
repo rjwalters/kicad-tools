@@ -181,6 +181,11 @@ class Router:
         self._via_impact_enabled: bool = False
         self._init_via_impact_scoring()
 
+        # Issue #2275: Layer utilization balancing
+        # Cached per-layer fill ratios for the A* cost function.  Updated
+        # after each net routes via ``update_layer_fill_ratios()``.
+        self._layer_fill_ratios: np.ndarray = np.zeros(self.grid.num_layers, dtype=np.float64)
+
         # Issue #1250: Crossing-aware routing
         # Stores previously routed segments for crossing detection.
         # Each entry is (x1, y1, x2, y2, layer_index, net_id) in grid coordinates.
@@ -200,6 +205,14 @@ class Router:
             gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.grid.layer_to_index(seg.layer.value)
             self._routed_segments.append((gx1, gy1, gx2, gy2, layer_idx, seg.net))
+
+    def update_layer_fill_ratios(self) -> None:
+        """Refresh the cached per-layer fill ratios from the grid.
+
+        Issue #2275: Should be called after each net routes so that
+        subsequent A* searches see up-to-date layer utilization.
+        """
+        self._layer_fill_ratios = self.grid.get_layer_fill_ratios()
 
     def clear_routed_segments(self) -> None:
         """Clear the routed segments list.
@@ -1502,6 +1515,11 @@ class Router:
                     )
                     crossing_cost = self.rules.crossing_penalty * num_crossings
 
+                # Issue #2275: Layer utilization cost
+                layer_util_cost = (
+                    self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
+                )
+
                 new_g = (
                     current.g_score
                     + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -1510,6 +1528,7 @@ class Router:
                     + negotiated_cost
                     + zone_cost
                     + crossing_cost
+                    + layer_util_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -1581,6 +1600,11 @@ class Router:
                 if self.grid.num_layers > 2 and 0 < new_layer < self.grid.num_layers - 1:
                     inner_layer_cost = self.rules.cost_layer_inner
 
+                # Issue #2275: Layer utilization cost for target layer
+                layer_util_cost = (
+                    self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
+                )
+
                 new_g = (
                     current.g_score
                     + self.rules.cost_via * layer_pref_mult
@@ -1588,6 +1612,7 @@ class Router:
                     + congestion_cost
                     + negotiated_cost
                     + via_impact_cost
+                    + layer_util_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -2494,6 +2519,11 @@ class Router:
                 )
                 crossing_cost = self.rules.crossing_penalty * num_crossings
 
+            # Issue #2275: Layer utilization cost
+            layer_util_cost = (
+                self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
+            )
+
             new_g = (
                 current.g_score
                 + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -2502,6 +2532,7 @@ class Router:
                 + negotiated_cost
                 + zone_cost
                 + crossing_cost
+                + layer_util_cost
             ) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -2547,11 +2578,17 @@ class Router:
             net_class = self._get_net_class(source_pad.net_name)
             layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
 
+            # Issue #2275: Layer utilization cost for target layer
+            layer_util_cost = (
+                self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
+            )
+
             new_g = (
                 current.g_score
                 + self.rules.cost_via * layer_pref_mult
                 + congestion_cost
                 + negotiated_cost
+                + layer_util_cost
             ) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
