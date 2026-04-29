@@ -395,6 +395,13 @@ class NegotiatedRouter:
                 pad_objs, congestion_fn=congestion_fn
             )
 
+            # Issue #2306: Incremental Steiner target-set expansion.
+            # After routing each RSMT edge, collect the grid cells along
+            # the routed path.  Subsequent edges can terminate A* early
+            # when they reach any cell of the existing net tree, avoiding
+            # full-grid searches for high-fanout nets like GNDD.
+            routed_cells: set[tuple[int, int, int]] = set()
+
             for i, j in rsmt_edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
@@ -404,10 +411,14 @@ class NegotiatedRouter:
                     negotiated_mode=True,
                     present_cost_factor=present_cost_factor,
                     per_net_timeout=per_net_timeout,
+                    extra_goal_cells=routed_cells if routed_cells else None,
                 )
                 if route:
                     mark_route_callback(route)
                     routes.append(route)
+                    # Collect grid cells from the routed segments so later
+                    # edges can terminate early upon reaching this tree.
+                    self._collect_route_cells(route, routed_cells)
         else:
             # 2-pin net
             route = self.router.route(
@@ -422,6 +433,39 @@ class NegotiatedRouter:
                 routes.append(route)
 
         return routes
+
+    def _collect_route_cells(
+        self,
+        route: Route,
+        cell_set: set[tuple[int, int, int]],
+    ) -> None:
+        """Add grid cells covered by a route to *cell_set*.
+
+        For each segment, walk grid cells between the two endpoints and
+        insert ``(gx, gy, layer_index)`` tuples.  Via locations are added
+        on all routable layers so the A* can connect through them.
+
+        Issue #2306: Used by incremental Steiner routing to build the
+        target-set for subsequent RSMT-edge A* searches.
+        """
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+            steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+            for s in range(steps + 1):
+                t = s / steps
+                gx = int(gx1 + t * (gx2 - gx1))
+                gy = int(gy1 + t * (gy2 - gy1))
+                cell_set.add((gx, gy, layer_idx))
+
+        # Add via locations on all routable layers
+        routable = self.grid.get_routable_indices()
+        for via in route.vias:
+            gx, gy = self.grid.world_to_grid(via.x, via.y)
+            for li in routable:
+                cell_set.add((gx, gy, li))
 
     def find_nets_through_overused_cells(
         self,
