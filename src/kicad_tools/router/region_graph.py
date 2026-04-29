@@ -11,6 +11,7 @@ than the detailed routing grid, allowing the GlobalRouter to quickly assign
 corridors (sequences of regions) to each net before detailed routing begins.
 
 Phase A of hierarchical routing (Issue #1095).
+Tile-based capacity estimation and per-layer support (Issue #2276).
 """
 
 from __future__ import annotations
@@ -97,12 +98,24 @@ class Region:
 class RegionEdge:
     """An edge between two adjacent regions in the region graph.
 
+    Supports per-layer capacity tracking: ``layer_capacity`` stores the
+    maximum number of tracks that can cross the boundary on each layer,
+    and ``layer_utilization`` tracks how many are currently assigned.
+
+    When per-layer data is not set (legacy mode), the scalar ``capacity``
+    and ``utilization`` fields are used instead.
+
     Attributes:
         source: Source region ID
         target: Target region ID
         capacity: Maximum number of nets that can cross this boundary
+            (sum across all layers when per-layer data is present)
         utilization: Current number of nets crossing this boundary
         distance: Euclidean distance between region centers (mm)
+        blockage: Total obstacle blockage length along this edge (mm)
+        history_cost: Accumulated history cost from negotiated iterations
+        layer_capacity: Per-layer capacity dict (layer_index -> int)
+        layer_utilization: Per-layer utilization dict (layer_index -> int)
     """
 
     source: int
@@ -110,6 +123,10 @@ class RegionEdge:
     capacity: int = 10
     utilization: int = 0
     distance: float = 0.0
+    blockage: float = 0.0
+    history_cost: float = 0.0
+    layer_capacity: dict[int, int] = field(default_factory=dict)
+    layer_utilization: dict[int, int] = field(default_factory=dict)
 
     @property
     def remaining_capacity(self) -> int:
@@ -117,21 +134,67 @@ class RegionEdge:
         return max(0, self.capacity - self.utilization)
 
     @property
+    def overflow(self) -> int:
+        """Number of nets exceeding capacity (0 if not overflowed)."""
+        return max(0, self.utilization - self.capacity)
+
+    @property
     def congestion_cost(self) -> float:
         """Cost multiplier based on congestion level.
 
         Returns higher cost as the edge approaches full utilization,
         discouraging global paths through congested boundaries.
+        Includes history cost from negotiated iterations.
 
         Returns:
             Cost multiplier (1.0 = uncongested, increases with utilization)
         """
         if self.capacity <= 0:
-            return 100.0
+            return 100.0 + self.history_cost
         ratio = self.utilization / self.capacity
         if ratio >= 1.0:
-            return 10.0
-        return 1.0 + 4.0 * ratio * ratio
+            return 10.0 + self.history_cost
+        return 1.0 + 4.0 * ratio * ratio + self.history_cost
+
+    def remaining_capacity_on_layer(self, layer: int) -> int:
+        """Available capacity on a specific layer.
+
+        Args:
+            layer: Layer index
+
+        Returns:
+            Remaining capacity on that layer, or total remaining if
+            per-layer data is not available.
+        """
+        if not self.layer_capacity:
+            return self.remaining_capacity
+        cap = self.layer_capacity.get(layer, 0)
+        util = self.layer_utilization.get(layer, 0)
+        return max(0, cap - util)
+
+    def use_layer(self, layer: int) -> None:
+        """Record a net crossing this edge on a specific layer.
+
+        Updates both the per-layer utilization and the aggregate
+        utilization counter.
+
+        Args:
+            layer: Layer index the net is routed on
+        """
+        self.utilization += 1
+        if self.layer_utilization:
+            self.layer_utilization[layer] = self.layer_utilization.get(layer, 0) + 1
+
+    def release_layer(self, layer: int) -> None:
+        """Release a net crossing on a specific layer (for rip-up).
+
+        Args:
+            layer: Layer index to release
+        """
+        self.utilization = max(0, self.utilization - 1)
+        if self.layer_utilization:
+            cur = self.layer_utilization.get(layer, 0)
+            self.layer_utilization[layer] = max(0, cur - 1)
 
 
 @dataclass
@@ -158,6 +221,17 @@ class RegionGraph:
     The region graph is constructed once from board dimensions and
     component positions, then reused for all nets during global routing.
 
+    Supports two capacity modes:
+
+    1. **Legacy (flat)**: When ``trace_pitch`` is not provided, edges
+       use the flat ``base_capacity`` value (default 10). This preserves
+       backward compatibility with existing callers.
+
+    2. **Geometry-based**: When ``trace_pitch`` is provided, edge
+       capacities are computed from the physical tile-boundary length
+       divided by the routing pitch. Per-layer capacity is enabled
+       when ``num_layers`` > 1.
+
     Usage:
         graph = RegionGraph(
             board_width=65.0,
@@ -166,6 +240,8 @@ class RegionGraph:
             origin_y=0.0,
             num_cols=10,
             num_rows=10,
+            trace_pitch=0.4,
+            num_layers=2,
         )
         graph.register_obstacles(pads)
         path = graph.find_path(source_region_id, target_region_id)
@@ -177,7 +253,12 @@ class RegionGraph:
         origin_y: Board origin Y coordinate in mm
         num_cols: Number of region columns (default: 10)
         num_rows: Number of region rows (default: 10)
-        base_capacity: Base routing capacity per region (default: 10)
+        base_capacity: Base routing capacity per region (default: 10).
+            Used only when ``trace_pitch`` is not provided.
+        trace_pitch: Routing pitch in mm (trace_width + trace_clearance).
+            When provided, edge capacities are computed from geometry.
+        num_layers: Number of signal routing layers (default: 1).
+            When > 1, per-layer capacity is tracked on each edge.
     """
 
     def __init__(
@@ -189,6 +270,8 @@ class RegionGraph:
         num_cols: int = 10,
         num_rows: int = 10,
         base_capacity: int = 10,
+        trace_pitch: float | None = None,
+        num_layers: int = 1,
     ):
         self.board_width = board_width
         self.board_height = board_height
@@ -197,6 +280,8 @@ class RegionGraph:
         self.num_cols = max(1, num_cols)
         self.num_rows = max(1, num_rows)
         self.base_capacity = base_capacity
+        self.trace_pitch = trace_pitch
+        self.num_layers = max(1, num_layers)
 
         # Build regions
         self.regions: dict[int, Region] = {}
@@ -206,6 +291,12 @@ class RegionGraph:
         # Build edges between adjacent regions
         self.edges: dict[int, list[RegionEdge]] = {}
         self._build_edges()
+
+        # Edge lookup for fast (source, target) access
+        self._edge_lookup: dict[tuple[int, int], RegionEdge] = {}
+        for edges in self.edges.values():
+            for edge in edges:
+                self._edge_lookup[(edge.source, edge.target)] = edge
 
     def _build_regions(self) -> None:
         """Construct the grid of regions covering the board area."""
@@ -238,17 +329,53 @@ class RegionGraph:
 
             self._region_grid.append(row_ids)
 
+    def _compute_edge_capacity(self, edge_length: float, blockage: float = 0.0) -> int:
+        """Compute edge capacity from physical geometry.
+
+        capacity = (edge_length - blockage) / pitch, summed across layers.
+
+        Args:
+            edge_length: Length of the tile boundary in mm.
+            blockage: Obstacle blockage along the boundary in mm.
+
+        Returns:
+            Integer capacity (at least 1).
+        """
+        if self.trace_pitch is None or self.trace_pitch <= 0:
+            return self.base_capacity
+
+        available = max(0.0, edge_length - blockage)
+        per_layer = int(available / self.trace_pitch)
+        total = per_layer * self.num_layers
+        return max(1, total)
+
+    def _make_layer_capacity(self, per_layer_cap: int) -> dict[int, int]:
+        """Build per-layer capacity dict.
+
+        Args:
+            per_layer_cap: Capacity on each layer.
+
+        Returns:
+            Dict mapping layer index to capacity.
+        """
+        if self.num_layers <= 1:
+            return {}
+        return {layer: per_layer_cap for layer in range(self.num_layers)}
+
     def _build_edges(self) -> None:
         """Build edges between adjacent regions (4-connected: up/down/left/right)."""
         for region in self.regions.values():
             self.edges[region.id] = []
+
+        region_width = self.board_width / self.num_cols
+        region_height = self.board_height / self.num_rows
 
         for row in range(self.num_rows):
             for col in range(self.num_cols):
                 region_id = self._region_grid[row][col]
                 region = self.regions[region_id]
 
-                # Right neighbor
+                # Right neighbor -- boundary is vertical, length = region_height
                 if col + 1 < self.num_cols:
                     neighbor_id = self._region_grid[row][col + 1]
                     neighbor = self.regions[neighbor_id]
@@ -256,13 +383,30 @@ class RegionGraph:
                         (region.center_x - neighbor.center_x) ** 2
                         + (region.center_y - neighbor.center_y) ** 2
                     )
-                    edge_capacity = self.base_capacity
+                    edge_length = region_height
+                    edge_capacity = self._compute_edge_capacity(edge_length)
+
+                    if self.trace_pitch is not None and self.trace_pitch > 0:
+                        per_layer_cap = max(
+                            1,
+                            int(max(0.0, edge_length) / self.trace_pitch),
+                        )
+                    else:
+                        per_layer_cap = self.base_capacity
+
+                    layer_cap = self._make_layer_capacity(per_layer_cap)
+                    layer_util: dict[int, int] = (
+                        {l: 0 for l in layer_cap} if layer_cap else {}
+                    )
+
                     self.edges[region_id].append(
                         RegionEdge(
                             source=region_id,
                             target=neighbor_id,
                             capacity=edge_capacity,
                             distance=dist,
+                            layer_capacity=dict(layer_cap),
+                            layer_utilization=dict(layer_util),
                         )
                     )
                     self.edges[neighbor_id].append(
@@ -271,10 +415,12 @@ class RegionGraph:
                             target=region_id,
                             capacity=edge_capacity,
                             distance=dist,
+                            layer_capacity=dict(layer_cap),
+                            layer_utilization=dict(layer_util),
                         )
                     )
 
-                # Bottom neighbor
+                # Bottom neighbor -- boundary is horizontal, length = region_width
                 if row + 1 < self.num_rows:
                     neighbor_id = self._region_grid[row + 1][col]
                     neighbor = self.regions[neighbor_id]
@@ -282,13 +428,30 @@ class RegionGraph:
                         (region.center_x - neighbor.center_x) ** 2
                         + (region.center_y - neighbor.center_y) ** 2
                     )
-                    edge_capacity = self.base_capacity
+                    edge_length = region_width
+                    edge_capacity = self._compute_edge_capacity(edge_length)
+
+                    if self.trace_pitch is not None and self.trace_pitch > 0:
+                        per_layer_cap = max(
+                            1,
+                            int(max(0.0, edge_length) / self.trace_pitch),
+                        )
+                    else:
+                        per_layer_cap = self.base_capacity
+
+                    layer_cap = self._make_layer_capacity(per_layer_cap)
+                    layer_util = (
+                        {l: 0 for l in layer_cap} if layer_cap else {}
+                    )
+
                     self.edges[region_id].append(
                         RegionEdge(
                             source=region_id,
                             target=neighbor_id,
                             capacity=edge_capacity,
                             distance=dist,
+                            layer_capacity=dict(layer_cap),
+                            layer_utilization=dict(layer_util),
                         )
                     )
                     self.edges[neighbor_id].append(
@@ -297,6 +460,8 @@ class RegionGraph:
                             target=region_id,
                             capacity=edge_capacity,
                             distance=dist,
+                            layer_capacity=dict(layer_cap),
+                            layer_utilization=dict(layer_util),
                         )
                     )
 
@@ -325,10 +490,14 @@ class RegionGraph:
         return self.regions[region_id]
 
     def register_obstacles(self, pads: list[Pad]) -> None:
-        """Register component pads as obstacles, reducing region capacity.
+        """Register component pads as obstacles, reducing region and edge capacity.
 
-        Regions with more obstacles have reduced routing capacity, which
-        guides global routing paths around congested areas.
+        For each pad, the obstacle count on the containing region is
+        incremented and blockage is added to edges touching that region.
+
+        When geometry-based capacity is active (``trace_pitch`` set),
+        edge capacities are recomputed after blockage is accumulated.
+        In legacy mode, region capacity is reduced as before.
 
         Args:
             pads: List of Pad objects representing component pins
@@ -338,12 +507,66 @@ class RegionGraph:
             if region is not None:
                 region.obstacle_count += 1
 
-        # Reduce capacity of regions with many obstacles
-        for region in self.regions.values():
-            if region.obstacle_count > 0:
-                # Each obstacle reduces capacity by 1, but keep minimum of 1
-                reduction = min(region.obstacle_count, region.capacity - 1)
-                region.capacity = max(1, region.capacity - reduction)
+        if self.trace_pitch is not None and self.trace_pitch > 0:
+            # Geometry mode: accumulate blockage per edge and recompute capacity
+            self._accumulate_edge_blockage(pads)
+        else:
+            # Legacy mode: reduce region capacity based on obstacle count
+            for region in self.regions.values():
+                if region.obstacle_count > 0:
+                    reduction = min(region.obstacle_count, region.capacity - 1)
+                    region.capacity = max(1, region.capacity - reduction)
+
+    def _accumulate_edge_blockage(self, pads: list[Pad]) -> None:
+        """Accumulate obstacle blockage on tile-boundary edges and recompute capacity.
+
+        Each pad contributes blockage to edges of the region it resides in.
+        Blockage is estimated as the pad's larger dimension (a conservative
+        approximation of how much boundary it blocks).
+
+        After blockage is accumulated, edge capacities are recomputed using
+        the geometry formula.
+
+        Args:
+            pads: List of Pad objects.
+        """
+        # Map region_id -> total blockage from obstacles inside it
+        region_blockage: dict[int, float] = {}
+        for pad in pads:
+            region = self.get_region_at(pad.x, pad.y)
+            if region is not None:
+                pad_size = max(getattr(pad, "width", 0.0), getattr(pad, "height", 0.0))
+                region_blockage[region.id] = region_blockage.get(region.id, 0.0) + pad_size
+
+        region_width = self.board_width / self.num_cols
+        region_height = self.board_height / self.num_rows
+
+        # Update edges: for each edge, blockage is the average of
+        # the two adjacent regions' blockage contributions.
+        for edges in self.edges.values():
+            for edge in edges:
+                src_block = region_blockage.get(edge.source, 0.0)
+                tgt_block = region_blockage.get(edge.target, 0.0)
+                edge.blockage = (src_block + tgt_block) / 2.0
+
+                # Determine edge length from orientation
+                src_region = self.regions[edge.source]
+                tgt_region = self.regions[edge.target]
+                if src_region.row == tgt_region.row:
+                    # Horizontal neighbors -- vertical boundary
+                    edge_length = region_height
+                else:
+                    # Vertical neighbors -- horizontal boundary
+                    edge_length = region_width
+
+                new_cap = self._compute_edge_capacity(edge_length, edge.blockage)
+                edge.capacity = new_cap
+
+                # Recompute per-layer capacity
+                if self.trace_pitch and self.trace_pitch > 0:
+                    available = max(0.0, edge_length - edge.blockage)
+                    per_layer_cap = max(1, int(available / self.trace_pitch))
+                    edge.layer_capacity = self._make_layer_capacity(per_layer_cap)
 
     def find_path(
         self,
@@ -440,7 +663,7 @@ class RegionGraph:
         path.reverse()
         return path
 
-    def update_utilization(self, path: list[int]) -> None:
+    def update_utilization(self, path: list[int], layer: int = 0) -> None:
         """Update region and edge utilization after assigning a path.
 
         This increases the utilization counters for all regions and edges
@@ -448,6 +671,7 @@ class RegionGraph:
 
         Args:
             path: List of region IDs forming the assigned path
+            layer: Layer index for per-layer tracking (default: 0)
         """
         # Update region utilization
         for region_id in path:
@@ -460,8 +684,96 @@ class RegionGraph:
             tgt = path[i + 1]
             for edge in self.edges.get(src, []):
                 if edge.target == tgt:
-                    edge.utilization += 1
+                    edge.use_layer(layer)
                     break
+
+    def release_utilization(self, path: list[int], layer: int = 0) -> None:
+        """Release utilization for a path (for rip-up during negotiation).
+
+        Decrements utilization counters for all regions and edges along
+        the path.
+
+        Args:
+            path: List of region IDs forming the path to release
+            layer: Layer index for per-layer tracking (default: 0)
+        """
+        for region_id in path:
+            if region_id in self.regions:
+                self.regions[region_id].utilization = max(
+                    0, self.regions[region_id].utilization - 1
+                )
+
+        for i in range(len(path) - 1):
+            src = path[i]
+            tgt = path[i + 1]
+            for edge in self.edges.get(src, []):
+                if edge.target == tgt:
+                    edge.release_layer(layer)
+                    break
+
+    def get_total_overflow(self) -> int:
+        """Compute total edge overflow across the graph.
+
+        Overflow on an edge is max(0, utilization - capacity).
+
+        Returns:
+            Sum of overflow across all directed edges.
+        """
+        total = 0
+        seen: set[tuple[int, int]] = set()
+        for edges in self.edges.values():
+            for edge in edges:
+                key = (min(edge.source, edge.target), max(edge.source, edge.target))
+                if key not in seen:
+                    seen.add(key)
+                    total += edge.overflow
+        return total
+
+    def get_overflowed_edges(self) -> list[RegionEdge]:
+        """Return all edges with overflow > 0.
+
+        Returns:
+            List of overflowed RegionEdge objects (one per undirected edge).
+        """
+        result: list[RegionEdge] = []
+        seen: set[tuple[int, int]] = set()
+        for edges in self.edges.values():
+            for edge in edges:
+                key = (min(edge.source, edge.target), max(edge.source, edge.target))
+                if key not in seen and edge.overflow > 0:
+                    seen.add(key)
+                    result.append(edge)
+        return result
+
+    def update_history_costs(self, increment: float) -> None:
+        """Add history cost to overflowed edges (PathFinder-style).
+
+        For each edge with overflow > 0, add ``increment`` to its
+        history cost. This makes the A* search progressively avoid
+        edges that have been overflowed in previous iterations.
+
+        Args:
+            increment: Amount to add to history cost of overflowed edges.
+        """
+        for edges in self.edges.values():
+            for edge in edges:
+                if edge.overflow > 0:
+                    edge.history_cost += increment
+
+    def reset_utilization(self) -> None:
+        """Reset all utilization counters (regions and edges) to zero.
+
+        Used between negotiated iteration rounds to re-route from scratch
+        with updated history costs.
+        """
+        for region in self.regions.values():
+            region.utilization = 0
+        for edges in self.edges.values():
+            for edge in edges:
+                edge.utilization = 0
+                if edge.layer_utilization:
+                    for layer in edge.layer_utilization:
+                        edge.layer_utilization[layer] = 0
 
     def path_to_waypoint_coords(self, path: list[int]) -> list[tuple[float, float]]:
         """Convert a region path to a sequence of waypoint coordinates.

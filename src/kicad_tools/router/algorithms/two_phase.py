@@ -1,7 +1,11 @@
 """Two-phase routing algorithm (Global + Detailed).
 
-Phase 1 uses SparseRouter to find coarse paths and reserve corridors.
+Phase 1 uses tile-based GlobalRouter with geometry-based edge capacity
+and negotiated iteration to assign corridors for each net.
 Phase 2 uses grid-based routing with corridor guidance.
+
+Issue #2276: Replaced SparseRouter global phase with tile-based
+GlobalRouter supporting per-layer capacity and negotiated congestion.
 """
 
 from __future__ import annotations
@@ -25,9 +29,9 @@ if TYPE_CHECKING:
 class TwoPhaseRouter:
     """Two-phase global+detailed routing algorithm.
 
-    Phase 1 (Global): Use SparseRouter to find coarse paths and reserve
-    corridors for each net. This establishes routing channels that prevent
-    nets from blocking each other.
+    Phase 1 (Global): Use tile-based GlobalRouter with geometry-based
+    edge capacity estimation and negotiated congestion to assign
+    corridors for each net.
 
     Phase 2 (Detailed): Use grid-based routing with corridor guidance.
     Routes prefer to stay within their assigned corridors but can exit
@@ -86,8 +90,10 @@ class TwoPhaseRouter:
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
         """
+        from ..global_router import GlobalRouter
         from ..output import format_failed_nets_summary
-        from ..sparse import Corridor, SparseRouter
+        from ..region_graph import RegionGraph
+        from ..sparse import Corridor
 
         start_time = time.time()
 
@@ -134,68 +140,77 @@ class TwoPhaseRouter:
             return f"{time.time() - start_time:.1f}s"
 
         # =====================================================================
-        # Phase 1: Global Routing with SparseRouter
+        # Phase 1: Tile-based Global Routing (Issue #2276)
         # =====================================================================
-        print("\n--- Phase 1: Global Routing ---")
+        print("\n--- Phase 1: Global Routing (tile-based) ---")
         if progress_callback is not None:
             if not progress_callback(0.0, "Phase 1: Global routing", True):
                 return list(self.routes)
 
-        # Create sparse router for global routing
-        sparse_router = SparseRouter(
-            width=self.grid.width,
-            height=self.grid.height,
-            rules=self.rules,
+        # Compute routing pitch from design rules
+        trace_pitch = self.rules.trace_width + self.rules.trace_clearance
+        corridor_width = corridor_width_factor * self.rules.trace_clearance
+
+        # Determine tile grid size: ~10x trace pitch per tile, minimum 3x3
+        tile_size = max(trace_pitch * 10.0, 1.0)
+        num_cols = max(3, int(self.grid.width / tile_size))
+        num_rows = max(3, int(self.grid.height / tile_size))
+
+        # Build tile-based region graph with geometry-based capacity
+        region_graph = RegionGraph(
+            board_width=self.grid.width,
+            board_height=self.grid.height,
             origin_x=self.grid.origin_x,
             origin_y=self.grid.origin_y,
+            num_cols=num_cols,
+            num_rows=num_rows,
+            trace_pitch=trace_pitch,
             num_layers=self.grid.num_layers,
         )
 
-        # Add all pads to sparse router
-        for pad in self.pads.values():
-            sparse_router.add_pad(pad)
+        # Register pads as obstacles for blockage-aware capacity
+        pad_list = list(self.pads.values())
+        region_graph.register_obstacles(pad_list)
 
-        # Build the sparse graph
-        sparse_router.build_graph()
-        stats = sparse_router.get_statistics()
-        print(f"  Sparse graph: {stats['total_waypoints']} waypoints, {stats['total_edges']} edges")
-
-        # Find global paths and reserve corridors
-        corridors: dict[int, Corridor] = {}
-        global_failures: list[int] = []
-        corridor_width = corridor_width_factor * self.rules.trace_clearance
-
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                print(
-                    f"  ⚠ Timeout during global routing at net {i}/{total_nets} ({elapsed_str()})"
-                )
-                break
-
-            pads = self.nets[net]
-            if len(pads) < 2:
-                continue
-
-            # For multi-pad nets, find path between first two pads
-            # (MST routing will handle the rest in detailed phase)
-            pad1 = self.pads[pads[0]]
-            pad2 = self.pads[pads[1]]
-
-            waypoints = sparse_router.find_global_path(pad1, pad2)
-
-            if waypoints:
-                corridor = sparse_router.reserve_corridor(net, waypoints, corridor_width)
-                corridors[net] = corridor
-            else:
-                global_failures.append(net)
-                net_name = self.net_names.get(net, f"Net {net}")
-                print(f"  ⚠ Global routing failed for {net_name}")
-
-        print(
-            f"  Global routing: {len(corridors)}/{total_nets} nets have corridors ({elapsed_str()})"
+        stats = region_graph.get_statistics()
+        flush_print(
+            f"  Tile grid: {num_cols}x{num_rows} "
+            f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
+            f"pitch={trace_pitch:.3f}mm, layers={self.grid.num_layers})"
         )
-        if global_failures:
-            print(f"  ⚠ {len(global_failures)} nets failed global routing (will attempt anyway)")
+
+        # Run global routing with negotiated iteration
+        global_router = GlobalRouter(
+            region_graph=region_graph,
+            corridor_width=corridor_width,
+            default_layer=0,
+            negotiated=True,
+            max_iterations=15,
+            history_increment=1.0,
+        )
+
+        global_result = global_router.route_all(
+            nets=self.nets,
+            pad_dict=self.pads,
+            net_order=net_order,
+        )
+
+        # Extract corridors from global routing result
+        corridors: dict[int, Corridor] = {}
+        for net_id, assign in global_result.assignments.items():
+            corridors[net_id] = assign.corridor
+
+        flush_print(
+            f"  Global routing: {len(corridors)}/{total_nets} nets have corridors "
+            f"({global_result.iterations} iterations, "
+            f"overflow={global_result.final_overflow}, "
+            f"{elapsed_str()})"
+        )
+        if global_result.failed_nets:
+            flush_print(
+                f"  {len(global_result.failed_nets)} nets failed global routing "
+                f"(will attempt anyway)"
+            )
 
         # =====================================================================
         # Phase 2: Detailed Routing with Corridor Guidance
