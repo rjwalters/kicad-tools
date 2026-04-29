@@ -3310,6 +3310,7 @@ class Autorouter:
         corridor_penalty: float | None = None,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -3325,6 +3326,7 @@ class Autorouter:
                 Defaults to ``self.rules.cost_corridor_deviation`` when *None*.
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds
+            per_net_timeout: Optional wall-clock timeout per A* search
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -3336,13 +3338,21 @@ class Autorouter:
             corridor_penalty=corridor_penalty,
             progress_callback=progress_callback,
             timeout=timeout,
+            per_net_timeout=per_net_timeout,
         )
 
-    def _route_net_with_corridor(self, net: int, present_cost_factor: float) -> list[Route]:
+    def _route_net_with_corridor(
+        self, net: int, present_cost_factor: float, per_net_timeout: float | None = None,
+    ) -> list[Route]:
         """Route a single net with corridor-aware costs.
 
         This is similar to _route_net_negotiated but the pathfinder will
         use corridor costs from the grid when available.
+
+        Args:
+            net: Net number to route
+            present_cost_factor: Multiplier for present sharing cost
+            per_net_timeout: Optional wall-clock timeout per A* search
         """
         if net not in self.nets:
             return []
@@ -3378,7 +3388,7 @@ class Autorouter:
             self._mark_route(route)
 
         # Route with corridor-aware costs (negotiated router will pick up corridor costs)
-        new_routes = neg_router.route_net_negotiated(pad_objs, present_cost_factor, mark_route)
+        new_routes = neg_router.route_net_negotiated(pad_objs, present_cost_factor, mark_route, per_net_timeout=per_net_timeout)
         routes.extend(new_routes)
         return routes
 
@@ -4781,10 +4791,11 @@ class Autorouter:
         print("\n--- Phase 2: Main Routing ---")
 
         if use_negotiated:
-            main_routes = self.route_all_negotiated(
+            main_routes = self.route_all_two_phase(
+                use_negotiated=True,
+                corridor_width_factor=2.0,
                 progress_callback=progress_callback,
                 timeout=timeout,
-                use_targeted_ripup=True,
             )
         else:
             main_routes = self.route_all(

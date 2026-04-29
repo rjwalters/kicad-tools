@@ -927,6 +927,13 @@ def route_with_layer_escalation(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
                 )
+            elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                router.route_all_two_phase(
+                    use_negotiated=True,
+                    corridor_width_factor=2.0,
+                    timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
@@ -1328,6 +1335,13 @@ def route_with_rule_relaxation(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                )
+            elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                router.route_all_two_phase(
+                    use_negotiated=True,
+                    corridor_width_factor=2.0,
+                    timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
@@ -1748,6 +1762,13 @@ def route_with_combined_escalation(
                         use_negotiated=(args.strategy == "negotiated"),
                         max_iterations=args.iterations,
                         timeout=args.timeout,
+                    )
+                elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                    router.route_all_two_phase(
+                        use_negotiated=True,
+                        corridor_width_factor=2.0,
+                        timeout=args.timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -2525,6 +2546,18 @@ def main(argv: list[str] | None = None) -> int:
             "the router auto-detects dense packages and enables escape "
             "routing when needed. Use this flag to skip escape routing "
             "even when dense packages are present."
+        ),
+    )
+    parser.add_argument(
+        "--two-phase",
+        action="store_true",
+        help=(
+            "Use two-phase global+detailed routing. Phase 1 allocates "
+            "coarse corridors on a tile graph; Phase 2 routes within those "
+            "corridors using negotiated congestion. Produces dramatically "
+            "better results on complex multi-layer boards by preventing "
+            "overflow divergence. When combined with escape routing, "
+            "replaces the negotiated rip-up phase after escape generation."
         ),
     )
     parser.add_argument(
@@ -3344,7 +3377,14 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Define the Phase 2 routing function
                 def phase2_route_fn():
-                    if args.strategy == "negotiated":
+                    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                        return router.route_all_two_phase(
+                            use_negotiated=True,
+                            corridor_width_factor=2.0,
+                            timeout=args.timeout,
+                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        )
+                    elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
                             max_iterations=args.iterations,
                             timeout=args.timeout,
@@ -3388,6 +3428,13 @@ def main(argv: list[str] | None = None) -> int:
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                )
+            elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                return router.route_all_two_phase(
+                    use_negotiated=True,
+                    corridor_width_factor=2.0,
+                    timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
