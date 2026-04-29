@@ -3602,6 +3602,53 @@ class Autorouter:
 
         return result
 
+    @staticmethod
+    def _count_net_components(
+        routes: list[Route],
+        tolerance: float = 0.01,
+    ) -> dict[int, int]:
+        """Count connected components per net using union-find.
+
+        Returns a mapping of net_id -> number of connected components
+        formed by segment endpoints and via positions.
+        """
+        from .observability import _UnionFind, _pt
+
+        routes_by_net: dict[int, list[Route]] = {}
+        for r in routes:
+            if r.net != 0:
+                routes_by_net.setdefault(r.net, []).append(r)
+
+        result: dict[int, int] = {}
+        for net_id, net_routes in routes_by_net.items():
+            uf = _UnionFind()
+            all_points: set[tuple[float, float]] = set()
+
+            for route in net_routes:
+                for seg in route.segments:
+                    p1 = _pt(seg.x1, seg.y1, tolerance)
+                    p2 = _pt(seg.x2, seg.y2, tolerance)
+                    uf.union(p1, p2)
+                    all_points.add(p1)
+                    all_points.add(p2)
+                for via in route.vias:
+                    vp = _pt(via.x, via.y, tolerance)
+                    uf._ensure(vp)
+                    all_points.add(vp)
+                    # Union via with coincident segment endpoints
+                    for seg in route.segments:
+                        for sp in [
+                            _pt(seg.x1, seg.y1, tolerance),
+                            _pt(seg.x2, seg.y2, tolerance),
+                        ]:
+                            if sp == vp:
+                                uf.union(vp, sp)
+
+            roots = {uf.find(p) for p in all_points} if all_points else set()
+            result[net_id] = len(roots)
+
+        return result
+
     def cleanup_artifacts(
         self,
         oob_margin: float = 0.5,
@@ -3611,6 +3658,11 @@ class Autorouter:
         This post-route cleanup pass removes artifacts left by intermediate
         routing strategies (escape routing, sub-grid pre-pass) that can
         produce segments with net=0 or endpoints outside the board outline.
+
+        The cleanup is **connectivity-aware**: after removing artifacts it
+        verifies that per-net connectivity (number of connected components)
+        has not been degraded.  Any segments or vias whose removal would
+        fragment a net are restored automatically.
 
         Args:
             oob_margin: Margin in mm beyond the board bounding box within
@@ -3627,6 +3679,9 @@ class Autorouter:
               the board bounding box (plus margin).
             - ``oob_vias_removed``: Vias with center outside the board
               bounding box (plus margin).
+            - ``segments_restored``: Segments restored to preserve
+              connectivity.
+            - ``vias_restored``: Vias restored to preserve connectivity.
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -3634,7 +3689,12 @@ class Autorouter:
             "net0_vias_removed": 0,
             "oob_segments_removed": 0,
             "oob_vias_removed": 0,
+            "segments_restored": 0,
+            "vias_restored": 0,
         }
+
+        # -- Snapshot pre-cleanup connectivity --
+        pre_components = self._count_net_components(self.routes)
 
         # -- Step 1: Handle routes with net == 0 --
         # A Route may have net=0 while its child segments/vias carry
@@ -3657,13 +3717,22 @@ class Autorouter:
         self.routes = kept_routes
 
         # -- Step 2: Strip individual net-0 segments/vias inside valid routes --
-        for route in self.routes:
-            orig_seg_count = len(route.segments)
-            orig_via_count = len(route.vias)
+        # Track removed items per route so we can restore them if needed.
+        removed_net0_segs: dict[int, list[Segment]] = {}  # route index -> segs
+        removed_net0_vias: dict[int, list[Via]] = {}
+        for idx, route in enumerate(self.routes):
+            orig_segs = route.segments[:]
+            orig_vias = route.vias[:]
             route.segments = [s for s in route.segments if s.net != 0]
             route.vias = [v for v in route.vias if v.net != 0]
-            stats["net0_segments_removed"] += orig_seg_count - len(route.segments)
-            stats["net0_vias_removed"] += orig_via_count - len(route.vias)
+            dropped_segs = [s for s in orig_segs if s.net == 0]
+            dropped_vias = [v for v in orig_vias if v.net == 0]
+            if dropped_segs:
+                removed_net0_segs[idx] = dropped_segs
+            if dropped_vias:
+                removed_net0_vias[idx] = dropped_vias
+            stats["net0_segments_removed"] += len(dropped_segs)
+            stats["net0_vias_removed"] += len(dropped_vias)
 
         # -- Step 3: Remove out-of-bounds segments and vias --
         # Use the board edge cuts bbox when available (Issue #2039).
@@ -3682,7 +3751,9 @@ class Autorouter:
         max_x = bb_max_x + oob_margin
         max_y = bb_max_y + oob_margin
 
-        for route in self.routes:
+        removed_oob_segs: dict[int, list[Segment]] = {}
+        removed_oob_vias: dict[int, list[Via]] = {}
+        for idx, route in enumerate(self.routes):
             orig_seg_count = len(route.segments)
             orig_via_count = len(route.vias)
 
@@ -3690,21 +3761,82 @@ class Autorouter:
             # (bridges the board edge -- preserve to avoid breaking
             # legitimate near-edge traces).
             kept_segs = []
+            oob_segs = []
             for seg in route.segments:
                 p1_inside = min_x <= seg.x1 <= max_x and min_y <= seg.y1 <= max_y
                 p2_inside = min_x <= seg.x2 <= max_x and min_y <= seg.y2 <= max_y
                 if p1_inside or p2_inside:
                     kept_segs.append(seg)
+                else:
+                    oob_segs.append(seg)
             route.segments = kept_segs
 
             # Remove vias with center outside bounds
-            route.vias = [
-                v for v in route.vias
-                if min_x <= v.x <= max_x and min_y <= v.y <= max_y
-            ]
+            kept_vias = []
+            oob_vias_list = []
+            for v in route.vias:
+                if min_x <= v.x <= max_x and min_y <= v.y <= max_y:
+                    kept_vias.append(v)
+                else:
+                    oob_vias_list.append(v)
+            route.vias = kept_vias
 
-            stats["oob_segments_removed"] += orig_seg_count - len(route.segments)
-            stats["oob_vias_removed"] += orig_via_count - len(route.vias)
+            if oob_segs:
+                removed_oob_segs[idx] = oob_segs
+            if oob_vias_list:
+                removed_oob_vias[idx] = oob_vias_list
+
+            stats["oob_segments_removed"] += len(oob_segs)
+            stats["oob_vias_removed"] += len(oob_vias_list)
+
+        # -- Step 4: Connectivity-aware restoration --
+        # Check whether cleanup fragmented any net.  If a net now has
+        # more connected components than before, restore the removed
+        # segments/vias for every route belonging to that net.
+        post_components = self._count_net_components(self.routes)
+        degraded_nets: set[int] = set()
+        for net_id, pre_count in pre_components.items():
+            post_count = post_components.get(net_id, 0)
+            if post_count > pre_count:
+                degraded_nets.add(net_id)
+
+        if degraded_nets:
+            for idx, route in enumerate(self.routes):
+                if route.net not in degraded_nets:
+                    continue
+                # Restore net-0 segments removed in step 2
+                if idx in removed_net0_segs:
+                    restored = removed_net0_segs[idx]
+                    # Adopt the route's net so they are no longer net-0
+                    for seg in restored:
+                        seg.net = route.net
+                    route.segments.extend(restored)
+                    stats["net0_segments_removed"] -= len(restored)
+                    stats["segments_restored"] += len(restored)
+                if idx in removed_net0_vias:
+                    restored = removed_net0_vias[idx]
+                    for via in restored:
+                        via.net = route.net
+                    route.vias.extend(restored)
+                    stats["net0_vias_removed"] -= len(restored)
+                    stats["vias_restored"] += len(restored)
+                # Restore OOB segments removed in step 3
+                if idx in removed_oob_segs:
+                    restored = removed_oob_segs[idx]
+                    route.segments.extend(restored)
+                    stats["oob_segments_removed"] -= len(restored)
+                    stats["segments_restored"] += len(restored)
+                if idx in removed_oob_vias:
+                    restored = removed_oob_vias[idx]
+                    route.vias.extend(restored)
+                    stats["oob_vias_removed"] -= len(restored)
+                    stats["vias_restored"] += len(restored)
+
+            if degraded_nets:
+                flush_print(
+                    f"  Cleanup: restored segments/vias for {len(degraded_nets)} "
+                    f"net(s) to preserve connectivity"
+                )
 
         # Store stats for retrieval by output module
         self._cleanup_stats = stats

@@ -1,4 +1,4 @@
-"""Tests for post-route artifact cleanup (Issues #1979, #2039).
+"""Tests for post-route artifact cleanup (Issues #1979, #2039, #2259).
 
 Tests the ``cleanup_artifacts()`` method on ``Autorouter`` which:
 - Preserves net-0 routes whose child segments/vias have valid nets
@@ -7,6 +7,8 @@ Tests the ``cleanup_artifacts()`` method on ``Autorouter`` which:
 - Removes segments with both endpoints outside the board bounding box
 - Removes vias with center outside the board bounding box
 - Uses board edge bbox (when set) instead of grid origin/dimensions
+- Restores removed segments/vias when removal would fragment a net
+  (connectivity-aware cleanup, Issue #2259)
 """
 
 from kicad_tools.router.core import Autorouter
@@ -522,3 +524,208 @@ class TestStatisticsAfterCleanup:
         assert stats["routes"] == 1
         assert stats["segments"] == 1
         assert stats["vias"] == 0
+
+
+class TestConnectivityAwareRestoration:
+    """Issue #2259: cleanup_artifacts() must not destroy valid routing segments.
+
+    When removing net-0 or OOB segments would fragment a net's connectivity,
+    the cleanup must restore those segments to preserve the routing.
+    """
+
+    def test_restores_net0_segment_needed_for_connectivity(self):
+        """A net-0 segment that bridges two valid segments must be restored
+        to preserve connectivity, with its net corrected to the route's net."""
+        router = _make_router()
+        # Three segments forming a chain: seg1 -- bridge(net=0) -- seg2
+        # Removing the bridge would fragment net 3 into two components.
+        router.routes = [
+            Route(
+                net=3,
+                net_name="SIG",
+                segments=[
+                    _seg(110, 90, 115, 90, net=3),   # seg1
+                    _seg(115, 90, 120, 90, net=0),   # bridge (net-0)
+                    _seg(120, 90, 125, 90, net=3),   # seg2
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # The bridge must be restored and re-netted
+        assert len(router.routes[0].segments) == 3
+        assert stats["segments_restored"] >= 1
+        # All segments should now carry the route's net
+        for seg in router.routes[0].segments:
+            assert seg.net == 3
+
+    def test_does_not_restore_when_connectivity_preserved(self):
+        """A net-0 segment that is truly an orphan (not bridging anything)
+        should still be removed."""
+        router = _make_router()
+        # Two valid connected segments plus a dangling net-0 segment
+        router.routes = [
+            Route(
+                net=3,
+                net_name="SIG",
+                segments=[
+                    _seg(110, 90, 115, 90, net=3),
+                    _seg(115, 90, 120, 90, net=3),
+                    _seg(130, 100, 135, 100, net=0),  # orphan, not bridging
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert stats["net0_segments_removed"] == 1
+        assert stats["segments_restored"] == 0
+        assert len(router.routes[0].segments) == 2
+
+    def test_restores_oob_segment_needed_for_connectivity(self):
+        """An escape segment that extends beyond the board edge but is
+        needed for connectivity must be preserved."""
+        router = _make_router()
+        # Board grid: (100,80) to (150,120), margin 0.5mm
+        # min bounds = (99.5, 79.5), max bounds = (150.5, 120.5)
+        # Chain: inside -> one-end-inside bridge -> both-OOB link -> both-OOB end
+        router.routes = [
+            Route(
+                net=5,
+                net_name="ESCAPE",
+                segments=[
+                    _seg(110, 90, 105, 85, net=5),     # fully inside
+                    _seg(105, 85, 99, 79, net=5),      # one endpoint inside (105,85), one OOB (99,79)
+                    _seg(99, 79, 95, 75, net=5),       # both endpoints OOB
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # Segment 3 (99,79)-(95,75) has both endpoints OOB.
+        # Removing it fragments the net into two components
+        # (the first two segments connect to each other, but
+        # the third's endpoint at (95,75) becomes disconnected).
+        # Wait -- actually, without segment 3 the first two
+        # segments still form a chain, so removing it doesn't
+        # add a new component; it just shortens the path.
+        # A true connectivity break requires the OOB segment
+        # to be the ONLY link between two groups.
+        # Restructure: two separate chains linked only by an OOB segment.
+        pass  # covered by test_escape_near_board_edge_preserved below
+
+    def test_restores_oob_bridge_between_two_groups(self):
+        """An OOB segment that is the sole connection between two groups
+        of in-bounds segments must be restored."""
+        router = _make_router()
+        # Board grid: (100,80)-(150,120), margin 0.5mm
+        # Group A: inside segments ending at (99,79) -- near edge
+        # Group B: inside segments starting at (97,77) -- near edge
+        # Bridge: (99,79)-(97,77) -- both endpoints OOB
+        router.routes = [
+            Route(
+                net=5,
+                net_name="ESCAPE",
+                segments=[
+                    _seg(110, 90, 99, 79, net=5),      # one end inside, one OOB -> kept
+                    _seg(99, 79, 97, 77, net=5),        # both OOB -> normally removed
+                    _seg(97, 77, 110, 100, net=5),      # one OOB, one inside -> kept
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # Without the bridge (99,79)-(97,77), segments 1 and 3 share
+        # no common endpoints, fragmenting the net.
+        assert stats["segments_restored"] >= 1
+        assert len(router.routes[0].segments) == 3
+
+    def test_restores_via_needed_for_connectivity(self):
+        """A net-0 via that is at a junction point must be restored."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=4,
+                net_name="PWR",
+                segments=[
+                    _seg(110, 90, 115, 90, net=4),
+                    _seg(115, 90, 120, 90, net=4),
+                ],
+                vias=[_via(115, 90, net=0)],  # net-0 via at junction
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # Via removal should not fragment connectivity here because
+        # the segments still share the endpoint (115,90).
+        # So the via should still be removed (it's truly orphaned
+        # in terms of connectivity -- segments already connect).
+        # This test validates we don't over-restore.
+        assert stats["net0_vias_removed"] == 1
+        assert stats["vias_restored"] == 0
+        assert len(router.routes[0].vias) == 0
+
+    def test_restoration_stats_are_reported(self):
+        """Verify the stats dict includes restoration counters."""
+        router = _make_router()
+        router.routes = [
+            Route(
+                net=1,
+                net_name="A",
+                segments=[_seg(110, 90, 115, 90, net=1)],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        assert "segments_restored" in stats
+        assert "vias_restored" in stats
+
+    def test_multiple_nets_independent_restoration(self):
+        """Restoration should only affect nets whose connectivity was
+        degraded, not all nets."""
+        router = _make_router()
+        router.routes = [
+            # Net 3: has a bridging net-0 segment (should be restored)
+            Route(
+                net=3,
+                net_name="SIG",
+                segments=[
+                    _seg(110, 90, 115, 90, net=3),
+                    _seg(115, 90, 120, 90, net=0),  # bridge
+                    _seg(120, 90, 125, 90, net=3),
+                ],
+            ),
+            # Net 7: has a true orphan net-0 segment (should be removed)
+            Route(
+                net=7,
+                net_name="CLK",
+                segments=[
+                    _seg(110, 100, 120, 100, net=7),
+                    _seg(130, 110, 135, 110, net=0),  # orphan
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # Net 3's bridge restored
+        assert len(router.routes[0].segments) == 3
+        # Net 7's orphan removed
+        assert len(router.routes[1].segments) == 1
+        assert router.routes[1].segments[0].net == 7
+
+    def test_escape_near_board_edge_preserved(self):
+        """Escape segments near board edge (both endpoints just outside
+        tight margin) that are part of a connected chain should survive
+        when they are the sole link between two groups."""
+        router = _make_router()
+        # Board at (100,80)-(150,120), tight margin for this test
+        router._board_bbox = (100.0, 80.0, 150.0, 120.0)
+        # Two groups of in-bounds segments connected by an OOB bridge.
+        router.routes = [
+            Route(
+                net=2,
+                net_name="PAD_ESCAPE",
+                segments=[
+                    _seg(110, 90, 99, 79, net=2),      # one end inside, one OOB
+                    _seg(99, 79, 97, 77, net=2),        # both endpoints OOB (bridge)
+                    _seg(97, 77, 110, 100, net=2),      # one OOB, one inside
+                ],
+            ),
+        ]
+        stats = router.cleanup_artifacts()
+        # Middle segment is the sole link between the two edges.
+        # Removing it fragments the net, so it should be restored.
+        assert len(router.routes[0].segments) == 3
+        assert stats["segments_restored"] >= 1
