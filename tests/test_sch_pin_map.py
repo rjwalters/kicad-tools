@@ -175,6 +175,145 @@ POWER_SYMBOL_SCHEMATIC = """\
 )
 """
 
+# Schematic with PWR_FLAG alongside a real power symbol on the same wire.
+# R1 pin 1 connects to a wire with both +5V and PWR_FLAG symbols.
+# The net must resolve to "+5V", not "PWR_FLAG".
+PWR_FLAG_WITH_POWER_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000050")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pf-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "power:+5V") (at 100 35 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pf-pwr5v")
+    (property "Reference" "#PWR02" (at 100 31 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "+5V" (at 100 31 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pwr5v-p1"))
+  )
+  (symbol
+    (lib_id "power:PWR_FLAG") (at 100 40 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pf-pwrflag")
+    (property "Reference" "#FLG01" (at 100 38 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "PWR_FLAG" (at 100 38 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pwrflag-p1"))
+  )
+  (wire (pts (xy 100 46.19) (xy 100 35))
+    (stroke (width 0) (type default)) (uuid "w-pf1"))
+)
+"""
+
+# Schematic with PWR_FLAG as the only power symbol on an otherwise labelled net.
+# The label name should win, not PWR_FLAG.
+PWR_FLAG_WITH_LABEL_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000051")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pfl-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "power:PWR_FLAG") (at 100 40 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pfl-pwrflag")
+    (property "Reference" "#FLG01" (at 100 38 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "PWR_FLAG" (at 100 38 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pfl-pwrflag-p1"))
+  )
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-pfl1"))
+  (wire (pts (xy 100 40) (xy 100 35))
+    (stroke (width 0) (type default)) (uuid "w-pfl2"))
+  (label "VCC_3V3" (at 100 35 0)
+    (effects (font (size 1.27 1.27)) (justify left bottom))
+    (uuid "lbl-vcc"))
+)
+"""
+
+# Schematic with PWR_FLAG on an otherwise unlabeled net (no label, no other
+# power symbol).  The net should resolve as an unnamed local net (_local_N),
+# not "PWR_FLAG".
+PWR_FLAG_ONLY_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000052")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pfo-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "power:PWR_FLAG") (at 100 40 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pfo-pwrflag")
+    (property "Reference" "#FLG01" (at 100 38 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "PWR_FLAG" (at 100 38 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pfo-pwrflag-p1"))
+  )
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-pfo1"))
+)
+"""
+
 # Schematic with an unconnected pin
 UNCONNECTED_SCHEMATIC = """\
 (kicad_sch
@@ -567,6 +706,69 @@ class TestBuildWireGraph:
 
         power_coord = _to_coord(100, 40)
         assert net_names[power_coord] == "+3.3V"
+
+    def test_pwr_flag_excluded_from_net_names(self, tmp_path):
+        """PWR_FLAG must not appear as a net name in the wire graph."""
+        sch = Schematic.load(_write_sch(tmp_path, PWR_FLAG_WITH_POWER_SCHEMATIC))
+        _, net_names = _build_wire_graph(sch)
+
+        # No coordinate should have "PWR_FLAG" as its net name
+        for coord, name in net_names.items():
+            assert name != "PWR_FLAG", (
+                f"PWR_FLAG should not be registered as a net name at {coord}"
+            )
+
+        # The +5V power symbol at (100, 35) should still be registered
+        pwr_coord = _to_coord(100, 35)
+        assert net_names[pwr_coord] == "+5V"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: PWR_FLAG filtering
+# ---------------------------------------------------------------------------
+
+
+class TestPwrFlagFiltering:
+    """PWR_FLAG is an ERC annotation and must never appear as a net name."""
+
+    def test_pwr_flag_with_power_symbol(self, tmp_path):
+        """PWR_FLAG alongside +5V: pin must resolve to +5V, not PWR_FLAG."""
+        sch = Schematic.load(_write_sch(tmp_path, PWR_FLAG_WITH_POWER_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "R1" in pin_map
+        r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_pin1_net == "+5V", (
+            f"R1 pin 1 should resolve to '+5V', got {r1_pin1_net!r}"
+        )
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+
+    def test_pwr_flag_with_label(self, tmp_path):
+        """PWR_FLAG alongside a label: pin must resolve to the label name."""
+        sch = Schematic.load(_write_sch(tmp_path, PWR_FLAG_WITH_LABEL_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "R1" in pin_map
+        r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_pin1_net == "VCC_3V3", (
+            f"R1 pin 1 should resolve to 'VCC_3V3', got {r1_pin1_net!r}"
+        )
+
+    def test_pwr_flag_only_unlabeled_net(self, tmp_path):
+        """PWR_FLAG on an otherwise unlabeled net: should get _local_N, not PWR_FLAG."""
+        sch = Schematic.load(_write_sch(tmp_path, PWR_FLAG_ONLY_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert "R1" in pin_map
+        r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_pin1_net != "PWR_FLAG", (
+            "R1 pin 1 must not resolve to 'PWR_FLAG'"
+        )
+        # It should be a synthetic local net since the pin is wired but unlabeled
+        assert r1_pin1_net is not None and r1_pin1_net.startswith("_local_"), (
+            f"R1 pin 1 should get _local_N synthetic net, got {r1_pin1_net!r}"
+        )
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
 
 
 # ---------------------------------------------------------------------------
