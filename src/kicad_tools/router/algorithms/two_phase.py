@@ -228,6 +228,8 @@ class TwoPhaseRouter:
         if use_negotiated:
             detailed_routes = self._detailed_negotiated(
                 net_order=net_order,
+                corridor_penalty=corridor_penalty,
+                corridors=corridors,
                 progress_callback=progress_callback,
                 timeout=timeout,
                 start_time=start_time,
@@ -270,9 +272,11 @@ class TwoPhaseRouter:
     def _detailed_negotiated(
         self,
         net_order: list[int],
-        progress_callback: ProgressCallback | None,
-        timeout: float | None,
-        start_time: float,
+        corridor_penalty: float = 5.0,
+        corridors: dict | None = None,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+        start_time: float = 0.0,
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing."""
         from ..algorithms import NegotiatedRouter
@@ -334,6 +338,18 @@ class TwoPhaseRouter:
 
                 present_factor += present_factor_increment
                 self.grid.update_history_costs(history_increment)
+
+                # Issue #2288: Relax corridor constraint as iterations progress
+                # so the detailed router can escape suboptimal global corridors.
+                # Floor of 0.2 keeps a mild preference even in late iterations.
+                if corridors:
+                    effective_penalty = corridor_penalty * max(
+                        0.2, 1.0 - 0.1 * iteration
+                    )
+                    for net, corridor in corridors.items():
+                        self.grid.set_corridor_preference(
+                            corridor, net, effective_penalty
+                        )
 
                 overused = self.grid.find_overused_cells()
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
