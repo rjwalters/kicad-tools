@@ -2181,6 +2181,10 @@ class Autorouter:
         max_parallel_workers: int = 4,
         batch_routing: bool = False,
         hierarchical: bool = False,
+        neighborhood_stall_threshold: int = 2,
+        neighborhood_max_attempts: int = 3,
+        neighborhood_initial_radius: float = 1.0,
+        neighborhood_escalation_factor: float = 2.0,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -2219,6 +2223,15 @@ class Autorouter:
             hierarchical: If True, use hierarchical coarse-to-fine routing (Issue #1092).
                 First performs global routing on a coarse grid, then refines with
                 the fine grid near pads and congestion points.
+            neighborhood_stall_threshold: Number of consecutive stall iterations
+                (0 overflow, unrouted nets, no progress) before activating
+                neighborhood rip-up (Issue #2274). Default: 2.
+            neighborhood_max_attempts: Maximum rip-up attempts per neighborhood
+                rip-up activation (Issue #2274). Default: 3.
+            neighborhood_initial_radius: Initial bounding-box expansion factor
+                for neighborhood rip-up (Issue #2274). Default: 1.0.
+            neighborhood_escalation_factor: Multiplier applied to radius on
+                each consecutive stall (Issue #2274). Default: 2.0.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -2322,6 +2335,9 @@ class Autorouter:
         # (Issue #762: escape strategies need this even when use_targeted_ripup=False)
         pads_by_net: dict[int, list[Pad]] = {}
         ripup_history: dict[int, int] = {}
+        # Issue #2274: Track consecutive stalls for neighborhood rip-up escalation
+        neighborhood_stall_count = 0
+        prev_routed_count = 0
         for net in net_order:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
@@ -2612,6 +2628,69 @@ class Autorouter:
                     if overflow == 0 and len(net_routes) == total_nets:
                         print(f"  Convergence achieved at iteration {iteration}!")
                         break
+
+                    # Issue #2274: Neighborhood rip-up when stalled with 0
+                    # overflow but unrouted nets remain.
+                    still_unrouted_targeted = [
+                        n for n in net_order
+                        if (n not in net_routes or not net_routes.get(n))
+                        and n in pads_by_net
+                        and n not in off_grid_nets
+                    ]
+                    if overflow == 0 and still_unrouted_targeted and not timed_out:
+                        # Track stall progression
+                        current_routed = len(net_routes)
+                        if current_routed <= prev_routed_count:
+                            neighborhood_stall_count += 1
+                        else:
+                            neighborhood_stall_count = 0
+                        prev_routed_count = current_routed
+
+                        if neighborhood_stall_count >= neighborhood_stall_threshold:
+                            flush_print(
+                                f"  Neighborhood rip-up: {len(still_unrouted_targeted)} "
+                                f"net(s) stuck, stall #{neighborhood_stall_count} "
+                                f"(radius escalation) ({elapsed_str()})"
+                            )
+
+                            def _mark_route_neighborhood(route: Route) -> None:
+                                self._mark_route(route)
+
+                            improved, new_count = neg_router.neighborhood_ripup(
+                                failed_nets=still_unrouted_targeted,
+                                net_routes=net_routes,
+                                routes_list=self.routes,
+                                pads_by_net=pads_by_net,
+                                present_cost_factor=present_factor,
+                                mark_route_callback=_mark_route_neighborhood,
+                                stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
+                                per_net_timeout=per_net_timeout,
+                                max_attempts=neighborhood_max_attempts,
+                                initial_radius_factor=neighborhood_initial_radius,
+                                escalation_factor=neighborhood_escalation_factor,
+                                ripup_history=ripup_history,
+                            )
+
+                            overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
+                            overflow_history[-1] = overflow
+
+                            if improved:
+                                flush_print(
+                                    f"    Neighborhood rip-up routed {new_count - current_routed} "
+                                    f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
+                                )
+                                neighborhood_stall_count = 0
+                                prev_routed_count = new_count
+                            else:
+                                flush_print(
+                                    f"    Neighborhood rip-up did not improve "
+                                    f"({new_count}/{total_nets} nets) ({elapsed_str()})"
+                                )
+
+                            if overflow == 0 and len(net_routes) == total_nets:
+                                print(f"  Convergence achieved at iteration {iteration}!")
+                                break
 
                     # Adaptive oscillation detection for targeted mode (Issue #633)
                     # Guard: skip escape strategies when overflow is already 0 (#2262)

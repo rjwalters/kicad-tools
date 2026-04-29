@@ -74,6 +74,46 @@ from .rules import DesignRules
 logger = logging.getLogger(__name__)
 
 
+class RoutedNetsUnblocker:
+    """Context manager that temporarily unblocks routed-net cells.
+
+    Used by relaxed A* (Issue #2274) to find a path ignoring routed nets.
+    Static obstacles (pads, board edges) are preserved; only cells blocked
+    by routed traces are cleared on entry and restored on exit.
+    """
+
+    def __init__(self, grid: "RoutingGrid") -> None:
+        self._grid = grid
+        self._saved_blocked: np.ndarray | None = None
+        self._saved_net: np.ndarray | None = None
+
+    def __enter__(self) -> "RoutedNetsUnblocker":
+        # Save full copies of the blocked and net arrays
+        self._saved_blocked = self._grid._blocked.copy()
+        self._saved_net = self._grid._net.copy()
+
+        # Build mask: cells that are blocked by routed nets (not by pads/obstacles)
+        # A routed-net cell has: blocked=True, pad_blocked=False, net != 0
+        routed_mask = (
+            self._grid._blocked
+            & ~self._grid._pad_blocked
+            & (self._grid._net != 0)
+        )
+
+        # Clear those cells
+        self._grid._blocked[routed_mask] = False
+        self._grid._net[routed_mask] = 0
+
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        # Restore saved arrays
+        if self._saved_blocked is not None:
+            np.copyto(self._grid._blocked, self._saved_blocked)
+        if self._saved_net is not None:
+            np.copyto(self._grid._net, self._saved_net)
+
+
 class _CellView:
     """Lightweight view into grid arrays, providing GridCell-like interface."""
 
@@ -1837,6 +1877,26 @@ class RoutingGrid:
         elif hasattr(result, "item"):  # NumPy/MLX
             return int(result.item())
         return int(result)
+
+    # =========================================================================
+    # NEIGHBORHOOD RIP-UP SUPPORT (Issue #2274)
+    # =========================================================================
+
+    def temporarily_unblock_routed_nets(self) -> "RoutedNetsUnblocker":
+        """Return a context manager that temporarily unblocks routed-net cells.
+
+        Static obstacles (pads, board edges, zones marked with ``pad_blocked``)
+        are preserved.  Only cells that are blocked by routed traces
+        (``blocked=True``, ``pad_blocked=False``, ``net != 0``) are cleared
+        on entry and restored on exit.
+
+        This is used by relaxed A* to find a path ignoring routed nets so
+        that neighborhood rip-up can identify true blockers.
+
+        Returns:
+            A context manager that saves/restores blocked and net arrays.
+        """
+        return RoutedNetsUnblocker(self)
 
     # =========================================================================
     # ZONE (COPPER POUR) SUPPORT

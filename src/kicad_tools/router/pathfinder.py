@@ -1676,6 +1676,106 @@ class Router:
 
         return blocking_nets
 
+    def find_blocking_nets_relaxed(
+        self,
+        start: Pad,
+        end: Pad,
+        saved_blocked: "np.ndarray",
+        saved_net: "np.ndarray",
+        per_net_timeout: float | None = None,
+    ) -> set[int]:
+        """Find blocking nets using relaxed A* (Issue #2274).
+
+        Runs A* with routed-net obstacles temporarily removed (the caller
+        is responsible for invoking this inside a
+        ``grid.temporarily_unblock_routed_nets()`` context manager).  If a
+        path is found, examines the *original* blocked/net arrays to
+        determine which routed nets occupy cells along that path.
+
+        This replaces the Bresenham straight-line check for cases where the
+        only viable path is not a straight line.
+
+        Args:
+            start: Source pad.
+            end: Destination pad.
+            saved_blocked: The *original* blocked array before unblocking.
+            saved_net: The *original* net array before unblocking.
+            per_net_timeout: Optional timeout for the relaxed A* search.
+
+        Returns:
+            Set of routed-net IDs whose cells lie along the relaxed path.
+        """
+        # Run normal A* (the grid has routed nets unblocked already)
+        route = self.route(
+            start,
+            end,
+            negotiated_mode=True,
+            present_cost_factor=0.0,
+            per_net_timeout=per_net_timeout,
+        )
+        if route is None:
+            return set()
+
+        blocking: set[int] = set()
+        source_net = start.net
+
+        # Walk every cell along every segment of the relaxed path and check
+        # the *original* grid state to find which routed nets were there.
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+            # Walk segment cells (Bresenham)
+            dx = abs(gx2 - gx1)
+            dy = abs(gy2 - gy1)
+            sx = 1 if gx1 < gx2 else -1
+            sy = 1 if gy1 < gy2 else -1
+            err = dx - dy
+            gx, gy = gx1, gy1
+            while True:
+                # Check this cell and clearance envelope
+                for cdy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+                    for cdx in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+                        cx, cy = gx + cdx, gy + cdy
+                        if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
+                            was_blocked = bool(saved_blocked[layer_idx, cy, cx])
+                            orig_net = int(saved_net[layer_idx, cy, cx])
+                            if (
+                                was_blocked
+                                and orig_net != 0
+                                and orig_net != source_net
+                                and not self.grid._pad_blocked[layer_idx, cy, cx]
+                            ):
+                                blocking.add(orig_net)
+
+                if gx == gx2 and gy == gy2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    gx += sx
+                if e2 < dx:
+                    err += dx
+                    gy += sy
+
+        # Also check via locations
+        for via in route.vias:
+            vgx, vgy = self.grid.world_to_grid(via.x, via.y)
+            for layer_idx in range(self.grid.num_layers):
+                if 0 <= vgx < self.grid.cols and 0 <= vgy < self.grid.rows:
+                    was_blocked = bool(saved_blocked[layer_idx, vgy, vgx])
+                    orig_net = int(saved_net[layer_idx, vgy, vgx])
+                    if (
+                        was_blocked
+                        and orig_net != 0
+                        and orig_net != source_net
+                        and not self.grid._pad_blocked[layer_idx, vgy, vgx]
+                    ):
+                        blocking.add(orig_net)
+
+        return blocking
+
     def _convert_path_to_route(
         self,
         path: list[tuple[float, float, int, bool]],
