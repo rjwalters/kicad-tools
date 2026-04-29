@@ -1520,6 +1520,9 @@ class Router:
                     self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
                 )
 
+                # Issue #2288: Corridor deviation penalty from global routing
+                corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, start.net)
+
                 new_g = (
                     current.g_score
                     + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -1529,6 +1532,7 @@ class Router:
                     + zone_cost
                     + crossing_cost
                     + layer_util_cost
+                    + corridor_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -1605,6 +1609,11 @@ class Router:
                     self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
                 )
 
+                # Issue #2288: Corridor deviation penalty from global routing
+                corridor_cost = self.grid.get_corridor_cost(
+                    current.x, current.y, new_layer, start.net
+                )
+
                 new_g = (
                     current.g_score
                     + self.rules.cost_via * layer_pref_mult
@@ -1613,6 +1622,7 @@ class Router:
                     + negotiated_cost
                     + via_impact_cost
                     + layer_util_cost
+                    + corridor_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -2624,6 +2634,9 @@ class Router:
                 self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
             )
 
+            # Issue #2288: Corridor deviation penalty from global routing
+            corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, source_pad.net)
+
             new_g = (
                 current.g_score
                 + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -2633,6 +2646,7 @@ class Router:
                 + zone_cost
                 + crossing_cost
                 + layer_util_cost
+                + corridor_cost
             ) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -2683,12 +2697,18 @@ class Router:
                 self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
             )
 
+            # Issue #2288: Corridor deviation penalty from global routing
+            corridor_cost = self.grid.get_corridor_cost(
+                current.x, current.y, new_layer, source_pad.net
+            )
+
             new_g = (
                 current.g_score
                 + self.rules.cost_via * layer_pref_mult
                 + congestion_cost
                 + negotiated_cost
                 + layer_util_cost
+                + corridor_cost
             ) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:

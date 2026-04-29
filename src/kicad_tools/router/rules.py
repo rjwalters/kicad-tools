@@ -103,6 +103,13 @@ class DesignRules:
     # via when the current layer is mostly full.  Set to 0.0 to disable.
     cost_layer_utilization: float = 5.0
 
+    # Global corridor deviation penalty (Issue #2288)
+    # Penalizes cells outside the corridor assigned by global routing.  The penalty
+    # is applied per-cell during A* expansion to steer the detailed router along
+    # the corridor path established by the two-phase global router.  Set to 0.0
+    # to disable corridor guidance.
+    cost_corridor_deviation: float = 5.0
+
     # Crossing-aware routing (Issue #1250)
     # Penalizes candidate edges that cross already-routed segments on the same layer.
     # This steers A* toward non-crossing paths while still permitting crossings when
