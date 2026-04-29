@@ -80,6 +80,7 @@ class TwoPhaseRouter:
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         initial_routes: list[Route] | None = None,
+        max_iterations: int = 20,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -94,6 +95,8 @@ class TwoPhaseRouter:
             initial_routes: Pre-existing routes (e.g. escape routes) that
                 should be seeded into the negotiated router's tracking dict
                 so they participate in rip-up/reroute (Issue #2294).
+            max_iterations: Maximum rip-up-and-reroute iterations for the
+                Phase 2 detailed negotiated routing loop (default: 20).
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -246,6 +249,7 @@ class TwoPhaseRouter:
                 start_time=start_time,
                 per_net_timeout=per_net_timeout,
                 initial_routes=initial_routes,
+                max_iterations=max_iterations,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -292,6 +296,7 @@ class TwoPhaseRouter:
         start_time: float = 0.0,
         per_net_timeout: float | None = None,
         initial_routes: list[Route] | None = None,
+        max_iterations: int = 20,
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing.
 
@@ -365,9 +370,6 @@ class TwoPhaseRouter:
 
         # Rip-up and reroute iterations if needed
         if overflow > 0:
-            import copy
-
-            max_iterations = 10
             history_increment = 1.0
             present_factor_increment = 0.5
 

@@ -3376,6 +3376,7 @@ class Autorouter:
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         initial_routes: list[Route] | None = None,
+        max_iterations: int = 20,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -3396,6 +3397,8 @@ class Autorouter:
                 into the negotiated router's tracking dict.  These routes
                 participate in rip-up/reroute so they are not permanently
                 reserved on the grid (Issue #2294).
+            max_iterations: Maximum rip-up-and-reroute iterations for the
+                Phase 2 detailed negotiated routing loop (default: 20).
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -3409,6 +3412,7 @@ class Autorouter:
             timeout=timeout,
             per_net_timeout=per_net_timeout,
             initial_routes=initial_routes,
+            max_iterations=max_iterations,
         )
 
     def _route_net_with_corridor(
