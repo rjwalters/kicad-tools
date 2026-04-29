@@ -85,14 +85,17 @@ class MSTRouter:
         pad_objs: list[Pad],
         mark_route_callback: callable,
         failure_callback: callable | None = None,
+        use_steiner: bool = True,
     ) -> list[Route]:
-        """Route a net using MST ordering.
+        """Route a net using MST or RSMT ordering.
 
         Args:
             pad_objs: List of Pad objects to connect
             mark_route_callback: Callback to mark a route on the grid
             failure_callback: Optional callback to record routing failures.
                 Called with (source_pad, target_pad) when routing fails.
+            use_steiner: If True, use RSMT decomposition (Steiner tree)
+                instead of plain MST for multi-pin nets. Default True.
 
         Returns:
             List of successfully created routes
@@ -103,14 +106,19 @@ class MSTRouter:
         routes: list[Route] = []
 
         if len(pad_objs) > 2:
-            # Build and sort MST edges by length
-            mst_edges = self.build_mst(pad_objs)
-            mst_edges.sort(
-                key=lambda e: abs(pad_objs[e[0]].x - pad_objs[e[1]].x)
-                + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
-            )
+            if use_steiner:
+                from .steiner import build_rsmt
 
-            for i, j in mst_edges:
+                pad_objs, edges = build_rsmt(pad_objs)
+            else:
+                # Build and sort MST edges by length
+                edges = self.build_mst(pad_objs)
+                edges.sort(
+                    key=lambda e: abs(pad_objs[e[0]].x - pad_objs[e[1]].x)
+                    + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
+                )
+
+            for i, j in edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
                 route = self.router.route(source_pad, target_pad)

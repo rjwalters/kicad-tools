@@ -242,6 +242,7 @@ class Pad:
     pin: str = ""  # Pin number/name
     through_hole: bool = False  # PTH pads block both layers
     drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
+    steiner_point: bool = False  # True for virtual Steiner tree branch points
 
 
 @dataclass

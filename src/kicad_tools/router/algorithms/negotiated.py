@@ -331,40 +331,12 @@ class NegotiatedRouter:
         routes: list[Route] = []
 
         if len(pad_objs) > 2:
-            # MST-based routing with negotiated mode
-            n = len(pad_objs)
+            # RSMT-based routing with negotiated mode
+            from .steiner import build_rsmt
 
-            # Build MST using Prim's algorithm
-            connected: set[int] = {0}
-            unconnected = set(range(1, n))
-            mst_edges: list[tuple[int, int]] = []
+            pad_objs, rsmt_edges = build_rsmt(pad_objs)
 
-            while unconnected:
-                best_dist = float("inf")
-                best_edge: tuple[int, int] | None = None
-
-                for i in connected:
-                    for j in unconnected:
-                        dist = abs(pad_objs[i].x - pad_objs[j].x) + abs(
-                            pad_objs[i].y - pad_objs[j].y
-                        )
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_edge = (i, j)
-
-                if best_edge:
-                    i, j = best_edge
-                    mst_edges.append((i, j))
-                    connected.add(j)
-                    unconnected.remove(j)
-
-            # Sort edges by length
-            mst_edges.sort(
-                key=lambda e: abs(pad_objs[e[0]].x - pad_objs[e[1]].x)
-                + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
-            )
-
-            for i, j in mst_edges:
+            for i, j in rsmt_edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
                 route = self.router.route(
