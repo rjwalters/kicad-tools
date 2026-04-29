@@ -1176,6 +1176,7 @@ class Router:
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
         per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route between two pads using congestion-aware A*.
 
@@ -1189,6 +1190,10 @@ class Router:
                     Higher values explore fewer nodes but may miss optimal paths.
             per_net_timeout: Optional wall-clock timeout in seconds for this A* search.
                     If exceeded, returns None (no route found within time budget).
+            extra_goal_cells: Optional set of (gx, gy, layer) grid cells that
+                    count as goals in addition to the end pad.  Used by incremental
+                    Steiner routing (Issue #2306) so that A* can terminate early
+                    when it reaches any cell of the previously-routed net tree.
         """
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         # Keep cache valid within this route call for same-position checks
@@ -1347,6 +1352,35 @@ class Router:
                 # Geometric validation failed (Issue #750) - continue A* search
                 # This allows finding alternate paths (e.g., B.Cu when F.Cu fails)
                 # The node stays in closed_set, preventing re-exploration on this layer
+                continue
+
+            # Issue #2306: Incremental Steiner goal check - terminate early when
+            # reaching any cell of the previously-routed net tree.  This avoids
+            # running the full A* to the target pad when a shorter connection to
+            # the existing tree exists, dramatically reducing search time for
+            # high-fanout nets (e.g., GNDD with 7+ components).
+            if extra_goal_cells and current_key in extra_goal_cells:
+                # Create a synthetic end pad at the reached grid cell so
+                # _reconstruct_route can build a valid Route object.
+                wx, wy = self.grid.grid_to_world(current.x, current.y)
+                layer_val = self.grid.index_to_layer(current.layer)
+                synthetic_end = Pad(
+                    x=wx,
+                    y=wy,
+                    width=self.rules.trace_width,
+                    height=self.rules.trace_width,
+                    net=start.net,
+                    net_name=start.net_name,
+                    layer=Layer(layer_val),
+                    ref="",
+                    pin="",
+                    through_hole=False,
+                    steiner_point=True,
+                )
+                route = self._reconstruct_route(current, start, synthetic_end)
+                if route is not None:
+                    return route
+                # Geometric validation failed - keep searching
                 continue
 
             # Batch pre-compute costs for all neighbors (Issue #963)
