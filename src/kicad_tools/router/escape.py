@@ -57,7 +57,7 @@ class PackageType(Enum):
     TSSOP = auto()  # Thin Shrink Small Outline Package (0.65mm pitch)
     SOT = auto()  # Small Outline Transistor
     DIP = auto()  # Dual In-line Package
-    CONNECTOR = auto()  # Dense through-hole connector (dual-row, >= 20 pins)
+    MULTI_ROW_CONNECTOR = auto()  # Multi-row through-hole connector (2xN, 3xN, 4xN, >= 20 pins)
     THROUGH_HOLE = auto()  # Generic through-hole
 
 
@@ -171,6 +171,11 @@ def is_dense_package(
     if len(pads) > pin_count_threshold:
         return True
 
+    # Multi-row through-hole connectors (>= 20 pins) are dense because
+    # inner-row pads are blocked by outer-row escape paths
+    if len(pads) >= 20 and _is_multi_row(pads):
+        return True
+
     # Calculate minimum pin pitch
     min_pitch = _calculate_min_pitch(pads)
     if min_pitch <= 0:
@@ -246,11 +251,11 @@ def detect_package_type(pads: list[Pad]) -> PackageType:
     if through_hole_count > len(pads) * 0.8:
         if len(pads) <= 3:
             return PackageType.SOT
+        # Multi-row through-hole connectors (2xN, 3xN, 4xN with >= 20 pins)
+        # need BGA-style fanout escape with row-aware layer assignment
+        if _is_multi_row(pads) and len(pads) >= 20:
+            return PackageType.MULTI_ROW_CONNECTOR
         if _is_dual_row(pads):
-            # Dense dual-row through-hole connectors (>= 20 pins) need
-            # a dedicated escape strategy; smaller ones use DIP radial.
-            if len(pads) >= 20:
-                return PackageType.CONNECTOR
             return PackageType.DIP
         return PackageType.THROUGH_HOLE
 
@@ -343,9 +348,9 @@ def get_package_info(
     bounding_box = (min(xs), min(ys), max(xs), max(ys))
     pin_pitch = _calculate_min_pitch(pads)
 
-    # Estimate rows/cols for grid packages
+    # Estimate rows/cols for grid and multi-row packages
     rows, cols = 0, 0
-    if package_type == PackageType.BGA:
+    if package_type in (PackageType.BGA, PackageType.MULTI_ROW_CONNECTOR):
         rows, cols = _estimate_grid_dimensions(pads)
 
     return PackageInfo(
@@ -392,6 +397,53 @@ def _is_dual_row(pads: list[Pad]) -> bool:
     # Or 2 distinct X values, many Y values
     if len(xs) == 2 and len(ys) >= len(pads) // 2 - 1:
         return True
+
+    return False
+
+
+def _is_multi_row(pads: list[Pad]) -> bool:
+    """Check if pads form a multi-row arrangement (2, 3, or 4+ rows).
+
+    Multi-row connectors have a small number of rows (2-6) and many columns.
+    This is more general than ``_is_dual_row`` which only detects exactly
+    2 rows.  A 2-row connector passes both checks, but a 3xN or 4xN header
+    only passes this one.
+
+    The heuristic: count unique coordinate values along each axis.  If one
+    axis has 2-6 unique values and the other has at least as many unique
+    values as the smaller axis count, it is a multi-row arrangement.
+
+    Args:
+        pads: List of pads from a single component
+
+    Returns:
+        True if the pads form a multi-row arrangement
+    """
+    if len(pads) < 4:
+        return False
+
+    ys = sorted({round(p.y, 2) for p in pads})
+    xs = sorted({round(p.x, 2) for p in pads})
+
+    # Check if rows are along Y axis (few Y values, many X values)
+    if 2 <= len(ys) <= 6 and len(xs) >= len(ys):
+        # Verify roughly equal pad counts per row
+        row_counts = []
+        for y_val in ys:
+            count = sum(1 for p in pads if round(p.y, 2) == y_val)
+            row_counts.append(count)
+        # Rows should have similar pad counts (within 2x)
+        if min(row_counts) > 0 and max(row_counts) / min(row_counts) <= 2.0:
+            return True
+
+    # Check if rows are along X axis (few X values, many Y values)
+    if 2 <= len(xs) <= 6 and len(ys) >= len(xs):
+        row_counts = []
+        for x_val in xs:
+            count = sum(1 for p in pads if round(p.x, 2) == x_val)
+            row_counts.append(count)
+        if min(row_counts) > 0 and max(row_counts) / min(row_counts) <= 2.0:
+            return True
 
     return False
 
@@ -665,8 +717,8 @@ class EscapeRouter:
             escapes = self._escape_fine_pitch_dual_row(package)
         elif package.package_type == PackageType.SOP:
             escapes = self._escape_sop_staggered(package)
-        elif package.package_type == PackageType.CONNECTOR:
-            escapes = self._escape_connector_dual_row(package)
+        elif package.package_type == PackageType.MULTI_ROW_CONNECTOR:
+            escapes = self._escape_multi_row_connector(package)
         else:
             escapes = self._escape_radial(package)
 
@@ -1604,25 +1656,27 @@ class EscapeRouter:
 
         return escapes
 
-    def _escape_connector_dual_row(self, package: PackageInfo) -> list[EscapeRoute]:
-        """Generate escape routes for dense through-hole connectors.
+    def _escape_multi_row_connector(self, package: PackageInfo) -> list[EscapeRoute]:
+        """Generate BGA-style fanout escape routes for multi-row connectors.
 
-        Dense dual-row connectors (e.g., 2x20 pin headers at 2.54mm pitch)
-        cannot use simple radial escape because inner-row pins are blocked
-        by outer-row pins escaping in the same direction.
+        Multi-row through-hole connectors (e.g., 2x20 pin headers at 2.54mm
+        pitch) cannot use simple radial escape because inner-row pads are
+        blocked by outer-row escape paths.
 
-        Strategy:
-        - Outer-row pins escape perpendicular to the row on the surface layer.
-        - Inner-row pins drop via to an alternate layer (B.Cu or inner signal
-          layer) and escape perpendicular on that layer.
-        - Within each row, vias are staggered to avoid via-to-via clearance
-          violations.
+        Strategy (row-aware, analogous to BGA ring escape):
+        - Rows are sorted by distance from package center (outermost first).
+        - Outer rows (ring_index 0): escape perpendicular on the surface
+          layer (F.Cu).  No via needed.
+        - Inner rows (ring_index >= 1): short trace to a staggered via,
+          then escape on an inner/back layer selected via
+          ``_select_inner_escape_layer()``.
+        - Via positions within each inner row are staggered along the row
+          axis to maintain via-to-via clearance.
 
-        This is analogous to the BGA ring-based escape but adapted for
-        the dual-row through-hole geometry of connectors.
+        Works for 2xN, 3xN, and 4xN through-hole arrangements.
 
         Args:
-            package: CONNECTOR package info (>= 20 pins, dual-row, through-hole)
+            package: MULTI_ROW_CONNECTOR package info (>= 20 pins, multi-row, TH)
 
         Returns:
             List of escape routes with layer-aware escape
@@ -1630,164 +1684,147 @@ class EscapeRouter:
         escapes: list[EscapeRoute] = []
         center_x, center_y = package.center
 
-        # Determine orientation from pad positions
+        # Determine connector orientation from pad positions
         xs = [p.x for p in package.pads]
         ys = [p.y for p in package.pads]
         x_spread = max(xs) - min(xs)
         y_spread = max(ys) - min(ys)
+
+        # "horizontal" means the long axis is X (many columns, few rows of Y)
         is_horizontal = x_spread > y_spread
 
-        # Split pads into two rows
-        row_a: list[Pad] = []
-        row_b: list[Pad] = []
-
+        # Group pads into rows.  For a horizontal connector the rows are
+        # distinguished by their Y coordinate; for vertical, by X.
         if is_horizontal:
+            row_coords = sorted({round(p.y, 2) for p in package.pads})
+            rows_map: dict[float, list[Pad]] = {rc: [] for rc in row_coords}
             for pad in package.pads:
-                if pad.y > center_y:
-                    row_a.append(pad)
-                else:
-                    row_b.append(pad)
-            row_a.sort(key=lambda p: p.x)
-            row_b.sort(key=lambda p: p.x)
-            # Row farther from center in Y is the outer row
-            outer_dir_a = EscapeDirection.NORTH
-            outer_dir_b = EscapeDirection.SOUTH
+                rows_map[round(pad.y, 2)].append(pad)
+            for rc in row_coords:
+                rows_map[rc].sort(key=lambda p: p.x)
         else:
+            row_coords = sorted({round(p.x, 2) for p in package.pads})
+            rows_map = {rc: [] for rc in row_coords}
             for pad in package.pads:
-                if pad.x > center_x:
-                    row_a.append(pad)
-                else:
-                    row_b.append(pad)
-            row_a.sort(key=lambda p: p.y)
-            row_b.sort(key=lambda p: p.y)
-            outer_dir_a = EscapeDirection.EAST
-            outer_dir_b = EscapeDirection.WEST
+                rows_map[round(pad.x, 2)].append(pad)
+            for rc in row_coords:
+                rows_map[rc].sort(key=lambda p: p.y)
 
-        escapes.extend(
-            self._create_connector_row_escapes(
-                pads=row_a,
-                direction=outer_dir_a,
-                is_outer=True,
-                package=package,
-            )
-        )
-        escapes.extend(
-            self._create_connector_row_escapes(
-                pads=row_b,
-                direction=outer_dir_b,
-                is_outer=True,
-                package=package,
-            )
-        )
+        # Sort rows by distance from center (outermost first)
+        if is_horizontal:
+            sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_y), reverse=True)
+        else:
+            sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_x), reverse=True)
 
-        return escapes
-
-    def _create_connector_row_escapes(
-        self,
-        pads: list[Pad],
-        direction: EscapeDirection,
-        is_outer: bool,
-        package: PackageInfo,
-    ) -> list[EscapeRoute]:
-        """Create escape routes for one row of a connector.
-
-        Even-indexed pins escape on the surface layer (perpendicular outward).
-        Odd-indexed pins drop via to an alternate layer and escape there,
-        with staggered via placement to avoid via-to-via clearance violations.
-
-        Args:
-            pads: Row of pads sorted by position
-            direction: Perpendicular escape direction for this row
-            is_outer: Whether this is the outer row (currently unused; both rows
-                use the same strategy since through-hole pads are accessible
-                from both sides)
-            package: Package info
-
-        Returns:
-            List of escape routes
-        """
-        escapes: list[EscapeRoute] = []
-        dx, dy = self._direction_to_vector(direction)
+        # Select inner escape layer once (not hardcoded)
+        inner_escape_layer = self._select_inner_escape_layer(Layer.F_CU)
 
         escape_dist = self.escape_clearance + self.rules.trace_width
-        via_offset = self.rules.via_diameter / 2 + self.rules.via_clearance + self.rules.trace_clearance
+        via_offset_base = (
+            self.rules.via_diameter / 2
+            + self.rules.via_clearance
+            + self.rules.trace_clearance
+        )
 
-        # Select alternate layer for via escapes
-        escape_layer = self._select_inner_escape_layer(Layer.F_CU)
+        for ring_idx, coord in enumerate(sorted_coords):
+            row_pads = rows_map[coord]
+            is_outer = ring_idx == 0
 
-        for i, pad in enumerate(pads):
-            needs_via = i % 2 == 1  # Odd pins via to alternate layer
-
-            if needs_via:
-                # Stagger via position: alternate between closer/farther from row
-                stagger = self.via_spacing / 3 if (i // 2) % 2 == 0 else 0.0
-                via_x = pad.x + dx * (via_offset + stagger)
-                via_y = pad.y + dy * (via_offset + stagger)
-
-                # Escape point beyond via on the alternate layer
-                ep_x = via_x + dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
-                ep_y = via_y + dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
-
-                trace_width = self._get_trace_width_for_net(pad.net_name)
-
-                segments: list[Segment] = [
-                    Segment(
-                        x1=pad.x, y1=pad.y, x2=via_x, y2=via_y,
-                        width=trace_width, layer=pad.layer,
-                        net=pad.net, net_name=pad.net_name,
-                    ),
-                    Segment(
-                        x1=via_x, y1=via_y, x2=ep_x, y2=ep_y,
-                        width=trace_width, layer=escape_layer,
-                        net=pad.net, net_name=pad.net_name,
-                    ),
-                ]
-
-                via = Via(
-                    x=via_x, y=via_y,
-                    drill=self.rules.via_drill,
-                    diameter=self.rules.via_diameter,
-                    layers=(pad.layer, escape_layer),
-                    net=pad.net, net_name=pad.net_name,
-                )
-
-                escapes.append(
-                    EscapeRoute(
-                        pad=pad,
-                        direction=direction,
-                        escape_point=(ep_x, ep_y),
-                        escape_layer=escape_layer,
-                        via_pos=(via_x, via_y),
-                        segments=segments,
-                        via=via,
-                        ring_index=1,
-                    )
+            # Determine perpendicular escape direction for this row
+            if is_horizontal:
+                direction = (
+                    EscapeDirection.NORTH if coord > center_y else EscapeDirection.SOUTH
                 )
             else:
-                # Even pin: surface escape perpendicular to row
-                ep_x = pad.x + dx * escape_dist
-                ep_y = pad.y + dy * escape_dist
+                direction = (
+                    EscapeDirection.EAST if coord > center_x else EscapeDirection.WEST
+                )
 
+            dx, dy = self._direction_to_vector(direction)
+
+            for i, pad in enumerate(row_pads):
                 trace_width = self._get_trace_width_for_net(pad.net_name)
 
-                segment = Segment(
-                    x1=pad.x, y1=pad.y, x2=ep_x, y2=ep_y,
-                    width=trace_width, layer=pad.layer,
-                    net=pad.net, net_name=pad.net_name,
-                )
+                if is_outer:
+                    # Outer row: surface escape, no via
+                    ep_x = pad.x + dx * escape_dist
+                    ep_y = pad.y + dy * escape_dist
 
-                escapes.append(
-                    EscapeRoute(
-                        pad=pad,
-                        direction=direction,
-                        escape_point=(ep_x, ep_y),
-                        escape_layer=pad.layer,
-                        via_pos=None,
-                        segments=[segment],
-                        via=None,
-                        ring_index=0,
+                    segment = Segment(
+                        x1=pad.x, y1=pad.y, x2=ep_x, y2=ep_y,
+                        width=trace_width, layer=pad.layer,
+                        net=pad.net, net_name=pad.net_name,
                     )
-                )
+
+                    escapes.append(
+                        EscapeRoute(
+                            pad=pad,
+                            direction=direction,
+                            escape_point=(ep_x, ep_y),
+                            escape_layer=pad.layer,
+                            via_pos=None,
+                            segments=[segment],
+                            via=None,
+                            ring_index=0,
+                        )
+                    )
+                else:
+                    # Inner row: via down to alternate layer with staggered
+                    # via placement.  Alternate vias toward pin-1 / pin-N
+                    # along the row axis, offset by via_spacing / 2.
+                    stagger = (self.via_spacing / 2) * (1.0 if i % 2 == 0 else -1.0)
+
+                    if is_horizontal:
+                        via_x = pad.x + stagger
+                        via_y = pad.y + dy * via_offset_base
+                    else:
+                        via_x = pad.x + dx * via_offset_base
+                        via_y = pad.y + stagger
+
+                    # Escape point beyond via on the inner layer
+                    ep_x = via_x + dx * (
+                        self.rules.via_diameter / 2 + self.rules.trace_clearance
+                    )
+                    ep_y = via_y + dy * (
+                        self.rules.via_diameter / 2 + self.rules.trace_clearance
+                    )
+
+                    segments: list[Segment] = [
+                        Segment(
+                            x1=pad.x, y1=pad.y, x2=via_x, y2=via_y,
+                            width=trace_width, layer=pad.layer,
+                            net=pad.net, net_name=pad.net_name,
+                        ),
+                        Segment(
+                            x1=via_x, y1=via_y, x2=ep_x, y2=ep_y,
+                            width=trace_width, layer=inner_escape_layer,
+                            net=pad.net, net_name=pad.net_name,
+                        ),
+                    ]
+
+                    via = Via(
+                        x=via_x, y=via_y,
+                        drill=self.rules.via_drill,
+                        diameter=self.rules.via_diameter,
+                        layers=(pad.layer, inner_escape_layer),
+                        net=pad.net, net_name=pad.net_name,
+                    )
+
+                    escapes.append(
+                        EscapeRoute(
+                            pad=pad,
+                            direction=direction,
+                            escape_point=(ep_x, ep_y),
+                            escape_layer=inner_escape_layer,
+                            via_pos=(via_x, via_y),
+                            segments=segments,
+                            via=via,
+                            ring_index=ring_idx,
+                        )
+                    )
+
+        # Validate pairwise clearances within each row
+        self._validate_escape_clearances(escapes, self.rules.trace_clearance)
 
         return escapes
 
