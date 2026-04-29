@@ -756,3 +756,68 @@ class TestNegotiatedRouterCongestionEstimator:
             nr.route_net_negotiated(pads, 1.0, lambda r: None)
 
         assert captured_fn["fn"] is None
+
+
+class TestShouldTerminateEarlyLowOverflow:
+    """Tests for Issue #2295: tighter stagnation window when overflow < 5."""
+
+    def test_terminates_after_3_iterations_with_low_overflow(self):
+        """When overflow is low (< 5), stagnation should be detected in 3 iterations.
+
+        History: [10, 6, 3, 3, 3, 3] -- overflow dropped to 3 then stagnated.
+        The low-overflow path uses a 3-iteration window: recent=[3,3,3],
+        earlier=[10,6,3], min(earlier)=3, so min(recent)>=min(earlier) -> terminate.
+        """
+        history = [10, 6, 3, 3, 3, 3]
+        assert should_terminate_early(history, iteration=6, min_iterations=5) is True
+
+    def test_does_not_terminate_early_when_overflow_high(self):
+        """When overflow >= 5, the standard 5-iteration window should still apply.
+
+        History: [20, 15, 10, 10, 10] -- only 3 stagnant iterations at overflow 10.
+        With 5-iteration window, recent=[20,15,10,10,10], min=10, earlier=[20],
+        min(earlier)=20, 10 < 20 -> no termination.
+        """
+        history = [20, 15, 10, 10, 10]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is False
+
+    def test_low_overflow_stagnation_at_boundary(self):
+        """Overflow of exactly 4 (< 5) should use the shorter window.
+
+        History: [10, 4, 4, 4, 4] -- stagnated at 4 for 4 iterations.
+        3-iteration window: recent=[4,4,4], earlier=[10,4], min(earlier)=4.
+        min(recent)=4 >= 4 -> terminate.
+        """
+        history = [10, 4, 4, 4, 4]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is True
+
+    def test_low_overflow_does_not_terminate_when_improving(self):
+        """Even with low overflow, should not terminate if still improving.
+
+        History: [10, 4, 3, 2, 1] -- steadily decreasing.
+        3-iteration window: recent=[3,2,1], earlier=[10,4], min(earlier)=4.
+        min(recent)=1 < 4 -> no termination.
+        """
+        history = [10, 4, 3, 2, 1]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is False
+
+    def test_overflow_5_uses_standard_window(self):
+        """Overflow of exactly 5 should NOT trigger the shorter window.
+
+        History: [20, 10, 5, 5, 5, 5, 5, 5, 5, 5] -- stagnated at 5.
+        Standard 5-iteration window: recent=[5,5,5,5,5], earlier=[20,10,5,5,5],
+        min(earlier)=5. min(recent)=5 >= 5 -> terminate via standard path.
+        """
+        history = [20, 10, 5, 5, 5, 5, 5, 5, 5, 5]
+        assert should_terminate_early(history, iteration=10, min_iterations=5) is True
+
+    def test_zero_overflow_with_unrouted_does_not_terminate(self):
+        """Issue #2297: overflow=0 with unrouted nets should not terminate.
+
+        Even though 0 < 5, the unrouted_count guard takes precedence.
+        """
+        history = [10, 5, 0, 0, 0, 0, 0]
+        assert (
+            should_terminate_early(history, iteration=7, min_iterations=5, unrouted_count=2)
+            is False
+        )

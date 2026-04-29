@@ -189,7 +189,7 @@ def should_terminate_early(
         True if should terminate early, False otherwise
 
     Terminates when:
-    - No improvement in last 5 iterations
+    - No improvement in last 5 iterations (or 3 when overflow is low)
     - Monotonic divergence detected (overflow climbing away from best)
     - Oscillation detected
     - Overflow is getting worse over time
@@ -205,27 +205,38 @@ def should_terminate_early(
     if len(overflow_history) < 5:
         return False
 
-    recent = overflow_history[-5:]
+    # Issue #2295: Use a shorter stagnation window when overflow is low.
+    # When only a few nets cause all overflow (e.g., overflow < 5), the
+    # router often oscillates without resolving them.  A 3-iteration
+    # window saves 2 full iterations of pointless rip-up (~240s on
+    # high-pad-count boards like chorus-test-revA).
+    stagnation_window = 5
+    current_overflow = overflow_history[-1] if overflow_history else 0
+    if current_overflow > 0 and current_overflow < 5 and len(overflow_history) >= 3:
+        stagnation_window = 3
+
+    recent = overflow_history[-stagnation_window:]
 
     # Issue #1823: Check if the recent window contains a new global minimum.
     # If so, skip the "no improvement" stagnation check (but still allow
     # other termination checks like monotonic divergence).
     best_overall = min(overflow_history)
     recent_has_new_global_min = False
-    if min(recent) == best_overall and len(overflow_history) > 5:
-        best_before_recent = min(overflow_history[:-5])
+    if min(recent) == best_overall and len(overflow_history) > stagnation_window:
+        best_before_recent = min(overflow_history[:-stagnation_window])
         if min(recent) < best_before_recent:
             recent_has_new_global_min = True
 
-    # No improvement in last 5 iterations.
-    # When len(overflow_history) == 5 there is no earlier window; use the
-    # first recorded value as baseline instead of float('inf') which would
-    # make this check unreachable and mask stale-baseline divergence.
+    # No improvement in last N iterations (5 normally, 3 for low overflow).
+    # When len(overflow_history) == stagnation_window there is no earlier
+    # window; use the first recorded value as baseline instead of
+    # float('inf') which would make this check unreachable and mask
+    # stale-baseline divergence.
     # Issue #1823: Skip this check when recent window found a new global
     # minimum -- the router is still making progress.
     if not recent_has_new_global_min:
-        if len(overflow_history) > 5:
-            earlier = overflow_history[:-5]
+        if len(overflow_history) > stagnation_window:
+            earlier = overflow_history[:-stagnation_window]
         else:
             earlier = overflow_history[:1]
         if min(recent) >= min(earlier):
