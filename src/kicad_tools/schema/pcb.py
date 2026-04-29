@@ -3923,15 +3923,31 @@ class PCB:
 
         return False
 
-    def assign_nets_from_netlist(self, netlist) -> dict[str, list[str]]:
+    def assign_nets_from_netlist(
+        self,
+        netlist,
+        pin_to_pad_map: dict[tuple[str, str], str] | None = None,
+    ) -> dict[str, list[str]]:
         """
         Assign nets to all footprint pads based on netlist connectivity.
 
         Iterates through all nets in the netlist and assigns them to the
         corresponding pads on footprints in the PCB.
 
+        When the netlist is produced by the pure-Python fallback path
+        (``build_netlist_from_schematic``), the ``node.pin`` values are
+        schematic symbol pin numbers.  These may differ from the footprint
+        pad numbers when alternate pin-to-pad mappings are in effect.
+        Callers can supply *pin_to_pad_map* to translate schematic pin
+        numbers to footprint pad numbers before assignment.
+
         Args:
             netlist: A Netlist object containing connectivity information
+            pin_to_pad_map: Optional mapping from ``(reference, pin_number)``
+                to ``pad_number``.  When provided, each ``node.pin`` is
+                looked up in the map before being used as a pad number.
+                If a key is not found in the map, ``node.pin`` is used
+                as-is (identity fallback).
 
         Returns:
             Dictionary with statistics:
@@ -3965,6 +3981,12 @@ class PCB:
                 ref = node.reference
                 pin = node.pin
 
+                # Resolve schematic pin number to footprint pad number
+                if pin_to_pad_map is not None:
+                    pad_number = pin_to_pad_map.get((ref, pin), pin)
+                else:
+                    pad_number = pin
+
                 # Check if footprint exists
                 fp = self.get_footprint(ref)
                 if not fp:
@@ -3973,9 +3995,9 @@ class PCB:
                         warned_refs.add(ref)
                     continue
 
-                # Assign net to pad
-                if self.assign_net_to_footprint_pad(ref, pin, net.name):
-                    stats["assigned"].append(f"{ref}.{pin}")
+                # Assign net to pad using the resolved pad number
+                if self.assign_net_to_footprint_pad(ref, pad_number, net.name):
+                    stats["assigned"].append(f"{ref}.{pad_number}")
                 else:
                     stats["missing_pads"].append(f"{ref}.{pin}")
 

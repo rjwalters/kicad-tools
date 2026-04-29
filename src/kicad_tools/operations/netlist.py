@@ -708,6 +708,104 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
     )
 
 
+def build_pin_to_pad_map(
+    sch_path: str | Path,
+    pcb,
+) -> dict[tuple[str, str], str]:
+    """Build a mapping from schematic pin numbers to footprint pad numbers.
+
+    For each component present in both the schematic and the PCB, this
+    function compares the symbol's pin definitions (from ``lib_symbols``)
+    with the footprint's pad definitions.  When a direct pin-number match
+    exists (the common case), an identity entry is recorded.  When pin
+    numbers do not match pad numbers, a heuristic mapping based on
+    positional order or pin-name-to-pad-name matching is used.
+
+    This mapping is consumed by
+    :meth:`~kicad_tools.schema.pcb.PCB.assign_nets_from_netlist` to
+    translate ``NetNode.pin`` values produced by the pure-Python fallback
+    into correct footprint pad numbers.
+
+    Args:
+        sch_path: Path to the root ``.kicad_sch`` file.
+        pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB` object.
+
+    Returns:
+        Dict mapping ``(reference, schematic_pin_number)`` to
+        ``pad_number``.  Missing entries should be treated as identity
+        (pin number == pad number).
+    """
+    from kicad_tools.schematic.models import Schematic
+
+    sch_path = Path(sch_path)
+    pin_pad_map: dict[tuple[str, str], str] = {}
+
+    # Recursively collect all schematic symbols across sheets
+    all_symbols: list = []
+
+    def _collect_symbols(path: Path, visited: set[Path] | None = None) -> None:
+        if visited is None:
+            visited = set()
+        resolved = path.resolve()
+        if resolved in visited or not path.exists():
+            return
+        visited.add(resolved)
+
+        sch = Schematic.load(str(path))
+        all_symbols.extend(sch.symbols)
+
+        # Recurse into sub-sheets
+        for entry in _get_sheet_entries(path):
+            _collect_symbols(path.parent / entry.filename, visited)
+
+    _collect_symbols(sch_path)
+
+    # Build pad lookup for each PCB footprint: ref -> {pad_number: pad}
+    pcb_pad_lookup: dict[str, dict[str, object]] = {}
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        pcb_pad_lookup[fp.reference] = {pad.number: pad for pad in fp.pads}
+
+    # For each schematic symbol, build pin->pad mapping
+    for sym in all_symbols:
+        ref = sym.reference
+        if not ref or ref.startswith("#"):
+            continue
+        if ref not in pcb_pad_lookup:
+            continue
+
+        pad_numbers = pcb_pad_lookup[ref]
+
+        for pin in sym.symbol_def.pins:
+            pin_num = pin.number
+            if pin_num in pad_numbers:
+                # Direct match: pin number == pad number (common case)
+                pin_pad_map[(ref, pin_num)] = pin_num
+            else:
+                # Pin number doesn't match any pad -- try name-based matching.
+                # Some footprints label pads by function name (e.g. "A1")
+                # while the symbol uses sequential numbers.
+                for pad_num, pad in pad_numbers.items():
+                    pad_name = getattr(pad, "name", None) or ""
+                    if pad_name and pad_name == pin.name:
+                        pin_pad_map[(ref, pin_num)] = pad_num
+                        logger.debug(
+                            "Pin-to-pad name match: %s pin %s -> pad %s (name=%s)",
+                            ref,
+                            pin_num,
+                            pad_num,
+                            pin.name,
+                        )
+                        break
+                else:
+                    # No match by name either; record identity as last resort.
+                    # assign_net_to_footprint_pad will log missing_pads.
+                    pin_pad_map[(ref, pin_num)] = pin_num
+
+    return pin_pad_map
+
+
 def export_netlist(
     sch_path: str | Path,
     output_path: str | Path | None = None,
