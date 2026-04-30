@@ -11,10 +11,14 @@ from .base import (
     ManufacturerProfile,
     PartsLibrary,
     load_design_rules_from_yaml,
+    load_rotation_corrections,
 )
 
 # Load design rules from YAML configuration
 _DESIGN_RULES = load_design_rules_from_yaml("jlcpcb")
+
+# Load rotation corrections for JLCPCB pick-and-place files
+_ROTATION_CORRECTIONS = load_rotation_corrections("jlcpcb")
 
 # JLCPCB Assembly Capabilities
 JLCPCB_ASSEMBLY = AssemblyCapabilities(
@@ -120,6 +124,9 @@ JLCPCB_PROFILE = ManufacturerProfile(
     bom_format="jlcpcb",
     supported_layers=[1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
     pricing_model="per_pcb",
+    rotation_corrections=_ROTATION_CORRECTIONS,
+    pnp_format_id="jlcpcb",
+    gerber_preset_id="jlcpcb",
 )
 
 

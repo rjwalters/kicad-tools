@@ -16,7 +16,7 @@ from kicad_tools.exceptions import ValidationError
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from .bom_formats import BOMExportConfig, export_bom, read_existing_lcsc_assignments
 from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
-from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
+from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter, GerberManufacturerPreset
 from .pnp import PnPExportConfig, export_pnp
 
 logger = logging.getLogger(__name__)
@@ -383,9 +383,17 @@ class AssemblyPackage:
         if self.config.exclude_references:
             footprints = [fp for fp in footprints if not self._is_excluded(fp.reference)]
 
+        # Resolve per-footprint rotation corrections from manufacturer profile
+        rotation_corrections = self._get_rotation_corrections()
+
         # Generate CPL – pass None when no explicit config so that the
         # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
-        pnp_csv = export_pnp(footprints, self.manufacturer, self.config.pnp_config)
+        pnp_csv = export_pnp(
+            footprints,
+            self.manufacturer,
+            self.config.pnp_config,
+            rotation_corrections=rotation_corrections,
+        )
 
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.manufacturer)
@@ -394,6 +402,23 @@ class AssemblyPackage:
 
         logger.info(f"Generated CPL: {pnp_path}")
         return pnp_path
+
+    def _get_rotation_corrections(self) -> dict[str, float] | None:
+        """Resolve rotation corrections from the manufacturer profile.
+
+        Returns the per-footprint rotation correction dict from the
+        manufacturer's profile, or ``None`` if no corrections are
+        available.
+        """
+        try:
+            from ..manufacturers import get_profile
+
+            profile = get_profile(self.manufacturer)
+            if profile.rotation_corrections:
+                return profile.rotation_corrections
+        except (ValueError, ImportError):
+            pass
+        return None
 
     def _generate_gerbers(self, output_dir: Path) -> Path:
         """Generate Gerber files."""

@@ -11,6 +11,7 @@ from .base import (
     ManufacturerProfile,
     PartsLibrary,
     load_design_rules_from_yaml,
+    load_rotation_corrections,
 )
 
 # Load design rules from YAML configuration
@@ -92,6 +93,9 @@ SEEED_OPL = PartsLibrary(
 )
 
 # Complete Seeed Fusion Profile
+# Load rotation corrections for Seeed pick-and-place files
+_ROTATION_CORRECTIONS = load_rotation_corrections("seeed")
+
 SEEED_PROFILE = ManufacturerProfile(
     id="seeed",
     name="Seeed Fusion",
@@ -109,6 +113,9 @@ SEEED_PROFILE = ManufacturerProfile(
     bom_format="seeed",
     supported_layers=[1, 2, 4, 6, 8],
     pricing_model="per_pcb",
+    rotation_corrections=_ROTATION_CORRECTIONS,
+    pnp_format_id="seeed",
+    gerber_preset_id="seeed",
 )
 
 

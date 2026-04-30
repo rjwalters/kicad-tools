@@ -5,6 +5,9 @@ Provides dataclasses for design rules, assembly capabilities, and
 manufacturer profiles that can be used across different fabrication houses.
 """
 
+from __future__ import annotations
+
+import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,55 @@ def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, "DesignRules"
         rules[config_name] = DesignRules(**config_data)
 
     return rules
+
+
+@dataclass
+class FileNamingConvention:
+    """Output file naming rules for a manufacturer."""
+
+    bom_filename: str = "bom_{manufacturer}.csv"
+    pnp_filename: str = "cpl_{manufacturer}.csv"
+    gerber_zip_name: str = "gerbers.zip"
+
+
+def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
+    """Load rotation corrections from a YAML data file.
+
+    Args:
+        manufacturer_id: Manufacturer identifier (e.g., "jlcpcb")
+
+    Returns:
+        Dict mapping footprint glob pattern to rotation offset in degrees.
+        Empty dict if no rotation corrections file exists.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
+    if not yaml_path.exists():
+        return {}
+
+    data = _load_yaml(yaml_path)
+    return data.get("rotation_corrections", {})
+
+
+def match_rotation_correction(
+    footprint: str,
+    corrections: dict[str, float],
+) -> float:
+    """Find the rotation correction for a footprint using glob matching.
+
+    Patterns are matched using :func:`fnmatch.fnmatch` so that entries
+    like ``SOT-23*`` match ``SOT-23``, ``SOT-23-3``, etc.
+
+    Args:
+        footprint: Footprint name to match (e.g. ``SOT-23-3``)
+        corrections: Dict mapping glob pattern to rotation degrees
+
+    Returns:
+        Rotation correction in degrees, or ``0.0`` if no match.
+    """
+    for pattern, offset in corrections.items():
+        if fnmatch.fnmatch(footprint, pattern):
+            return float(offset)
+    return 0.0
 
 
 @dataclass
@@ -238,6 +290,18 @@ class ManufacturerProfile:
 
     # Pricing model
     pricing_model: str = "per_pcb"  # "per_pcb", "per_sqin", etc.
+
+    # Export settings: rotation corrections per footprint pattern
+    rotation_corrections: dict[str, float] = field(default_factory=dict)
+
+    # Export format IDs (keys into BOM_FORMATTERS / PNP_FORMATTERS registries)
+    pnp_format_id: str | None = None
+
+    # Gerber preset ID (key into MANUFACTURER_PRESETS in export/gerber.py)
+    gerber_preset_id: str | None = None
+
+    # File naming convention for export outputs
+    file_naming: FileNamingConvention = field(default_factory=FileNamingConvention)
 
     def get_design_rules(self, layers: int = 4, copper_oz: float = 1.0) -> DesignRules:
         """Get design rules for a specific configuration."""

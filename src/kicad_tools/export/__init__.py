@@ -66,10 +66,13 @@ from .gerber import (
     MANUFACTURER_PRESETS,
     GerberConfig,
     GerberExporter,
-    ManufacturerPreset,
+    GerberManufacturerPreset,
     export_gerbers,
     find_kicad_cli,
 )
+
+# Backward-compatible alias
+ManufacturerPreset = GerberManufacturerPreset
 from .manufacturing import (
     ManufacturingConfig,
     ManufacturingPackage,
@@ -132,7 +135,8 @@ __all__ = [
     # Gerber
     "GerberExporter",
     "GerberConfig",
-    "ManufacturerPreset",
+    "GerberManufacturerPreset",
+    "ManufacturerPreset",  # backward-compatible alias
     "MANUFACTURER_PRESETS",
     "export_gerbers",
     "find_kicad_cli",
