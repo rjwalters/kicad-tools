@@ -933,7 +933,7 @@ def route_with_layer_escalation(
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    max_iterations=getattr(args, "two_phase_iterations", 20),
+                    max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
@@ -1349,7 +1349,7 @@ def route_with_rule_relaxation(
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    max_iterations=getattr(args, "two_phase_iterations", 20),
+                    max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
@@ -1782,7 +1782,7 @@ def route_with_combined_escalation(
                         corridor_width_factor=2.0,
                         timeout=args.timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        max_iterations=getattr(args, "two_phase_iterations", 20),
+                        max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -2206,7 +2206,11 @@ def main(argv: list[str] | None = None) -> int:
         "--iterations",
         type=int,
         default=15,
-        help="Max iterations for negotiated routing (default: 15)",
+        help=(
+            "Max iterations for negotiated routing (default: 15). "
+            "Also applies to two-phase routing when --two-phase-iterations "
+            "is not explicitly set."
+        ),
     )
     parser.add_argument(
         "--timeout",
@@ -2582,12 +2586,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--two-phase-iterations",
         type=int,
-        default=20,
+        default=None,
         help=(
             "Max rip-up-and-reroute iterations for the Phase 2 detailed "
-            "negotiated routing loop in two-phase mode (default: 20). "
-            "Higher values allow more convergence attempts at the cost of "
-            "longer runtime. Only effective with --two-phase."
+            "negotiated routing loop in two-phase mode. Overrides --iterations "
+            "for the two-phase path when both are given. If omitted, falls back "
+            "to --iterations (default: 20 when neither flag is set). "
+            "Only effective with --two-phase."
         ),
     )
     parser.add_argument(
@@ -2664,6 +2669,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    # Resolve two-phase iteration count.
+    # Priority: --two-phase-iterations (explicit) > --iterations (explicit) > 20 (default)
+    _TWO_PHASE_DEFAULT = 20
+    _two_phase_iters_explicit = getattr(args, "two_phase_iterations", None) is not None
+    _iterations_explicitly_set = args.iterations != parser.get_default("iterations")
+    if not _two_phase_iters_explicit:
+        if _iterations_explicitly_set:
+            args.two_phase_iterations = args.iterations
+        else:
+            args.two_phase_iterations = _TWO_PHASE_DEFAULT
+
     # Validate input
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
@@ -2729,6 +2745,9 @@ def main(argv: list[str] | None = None) -> int:
         # Apply to routing parameters
         args.mc_trials = perf_config.monte_carlo_trials
         args.iterations = perf_config.negotiated_iterations
+        # Also apply calibrated iterations to two-phase if not explicitly set
+        if not _two_phase_iters_explicit:
+            args.two_phase_iterations = perf_config.negotiated_iterations
 
     # Determine output path
     if args.output:
@@ -3413,7 +3432,7 @@ def main(argv: list[str] | None = None) -> int:
                             corridor_width_factor=2.0,
                             timeout=args.timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            max_iterations=getattr(args, "two_phase_iterations", 20),
+                            max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
@@ -3466,7 +3485,7 @@ def main(argv: list[str] | None = None) -> int:
                     corridor_width_factor=2.0,
                     timeout=args.timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    max_iterations=getattr(args, "two_phase_iterations", 20),
+                    max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
