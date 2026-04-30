@@ -15,6 +15,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from kicad_tools.core.geometry import (
+    point_to_segment_distance as _point_to_segment_distance,
+    segment_to_segment_distance as _segment_to_segment_distance,
+)
+
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
@@ -1025,33 +1030,9 @@ def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, floa
     return abs_x, abs_y
 
 
-def _point_to_segment_distance(
-    px: float, py: float, x1: float, y1: float, x2: float, y2: float
-) -> float:
-    """Calculate the distance from a point to a line segment."""
-    dx = x2 - x1
-    dy = y2 - y1
-    len_sq = dx * dx + dy * dy
 
-    if len_sq == 0:
-        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / len_sq))
-    closest_x = x1 + t * dx
-    closest_y = y1 + t * dy
-
-    return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
-
-
-def _segment_to_segment_distance(
-    x1: float, y1: float, x2: float, y2: float, x3: float, y3: float, x4: float, y4: float
-) -> float:
-    """Calculate minimum distance between two line segments."""
-    d1 = _point_to_segment_distance(x1, y1, x3, y3, x4, y4)
-    d2 = _point_to_segment_distance(x2, y2, x3, y3, x4, y4)
-    d3 = _point_to_segment_distance(x3, y3, x1, y1, x2, y2)
-    d4 = _point_to_segment_distance(x4, y4, x1, y1, x2, y2)
-    return min(d1, d2, d3, d4)
+# _point_to_segment_distance and _segment_to_segment_distance are imported
+# from kicad_tools.core.geometry (consolidated in #2349).
 
 
 def _clearance_calculate(

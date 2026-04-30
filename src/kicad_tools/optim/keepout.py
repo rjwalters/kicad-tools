@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline
 from kicad_tools.optim.components import Keepout
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
@@ -549,60 +550,9 @@ def _detect_kicad_keepout_zones(pcb: PCB) -> list[KeepoutZone]:
     return zones
 
 
-def _extract_board_outline(pcb: PCB) -> Polygon | None:
-    """Extract board outline from Edge.Cuts layer."""
-    sexp = pcb._sexp
 
-    # Look for gr_rect on Edge.Cuts
-    for child in sexp.iter_children():
-        if child.tag == "gr_rect":
-            layer = child.find("layer")
-            if layer and layer.get_string(0) == "Edge.Cuts":
-                start = child.find("start")
-                end = child.find("end")
-                if start and end:
-                    x1 = start.get_float(0) or 0.0
-                    y1 = start.get_float(1) or 0.0
-                    x2 = end.get_float(0) or 0.0
-                    y2 = end.get_float(1) or 0.0
-                    return Polygon(
-                        vertices=[
-                            Vector2D(x1, y1),
-                            Vector2D(x2, y1),
-                            Vector2D(x2, y2),
-                            Vector2D(x1, y2),
-                        ]
-                    )
-
-    # Look for gr_line elements on Edge.Cuts
-    edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
-    for child in sexp.iter_children():
-        if child.tag == "gr_line":
-            layer = child.find("layer")
-            if layer and layer.get_string(0) == "Edge.Cuts":
-                start = child.find("start")
-                end = child.find("end")
-                if start and end:
-                    x1 = start.get_float(0) or 0.0
-                    y1 = start.get_float(1) or 0.0
-                    x2 = end.get_float(0) or 0.0
-                    y2 = end.get_float(1) or 0.0
-                    edge_lines.append(((x1, y1), (x2, y2)))
-
-    if len(edge_lines) >= 4:
-        # Return bounding box
-        all_x = [p[0] for line in edge_lines for p in line]
-        all_y = [p[1] for line in edge_lines for p in line]
-        return Polygon(
-            vertices=[
-                Vector2D(min(all_x), min(all_y)),
-                Vector2D(max(all_x), min(all_y)),
-                Vector2D(max(all_x), max(all_y)),
-                Vector2D(min(all_x), max(all_y)),
-            ]
-        )
-
-    return None
+# _extract_board_outline is imported from kicad_tools.optim.board_outline
+# (consolidated in #2349).
 
 
 def add_keepout_zones(optimizer: PlacementOptimizer, zones: list[KeepoutZone]) -> int:
