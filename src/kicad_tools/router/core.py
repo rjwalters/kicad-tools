@@ -402,6 +402,11 @@ class Autorouter:
         # the edge clearance zone.
         self._edge_clearance: float | None = None
 
+        # Shapely-based board geometry for accurate non-rectangular edge
+        # clearance (Issue #2340).  Set by load_pcb_for_routing() when
+        # Shapely is available.
+        self._board_geometry: Any | None = None
+
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
 

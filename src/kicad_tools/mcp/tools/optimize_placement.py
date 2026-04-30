@@ -87,8 +87,21 @@ def _read_board_data(
 
     pcb = SchemaPCB.load(pcb_path)
 
-    # Board outline from Edge.Cuts graphic lines
-    board_outline = _extract_board_outline(pcb)
+    # Board outline -- try Shapely geometry first, fall back to legacy AABB
+    board_outline: BoardOutline | None = None
+    try:
+        from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+
+        if has_shapely():
+            try:
+                board_geom = BoardGeometry.from_pcb(pcb)
+                board_outline = board_geom.to_board_outline()
+            except (ValueError, Exception):
+                pass
+    except ImportError:
+        pass
+    if board_outline is None:
+        board_outline = _extract_board_outline(pcb)
 
     # Components from footprints
     components: list[ComponentDef] = []
