@@ -1,5 +1,6 @@
 """Tests for routing result cache."""
 
+import math
 import sqlite3
 from pathlib import Path
 from unittest import mock
@@ -12,11 +13,15 @@ from kicad_tools.router import (
     Route,
     RoutingCache,
     Segment,
+    SubProblemSignature,
     Via,
     compute_pad_positions_hash,
+    normalize_routes_to_origin,
+    transform_routes,
 )
 from kicad_tools.router.cache import CACHE_VERSION
 from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Pad
 
 
 class TestCacheKey:
@@ -658,4 +663,402 @@ class TestSchemaMigration:
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         conn.close()
-        assert version == "2"
+        assert version == "3"
+
+
+class TestSubProblemSignature:
+    """Tests for SubProblemSignature computation (Issue #2336)."""
+
+    def _make_pads(self, positions, layer=Layer.F_CU, width=0.6, height=0.6):
+        """Helper to create Pad objects from (x, y) positions."""
+        return [
+            Pad(x=x, y=y, width=width, height=height, net=1, net_name="N",
+                layer=layer)
+            for x, y in positions
+        ]
+
+    def test_same_pads_same_signature(self):
+        """Identical pad configs produce the same signature hash."""
+        rules = DesignRules()
+        pads1 = self._make_pads([(0, 0), (10, 0)])
+        pads2 = self._make_pads([(0, 0), (10, 0)])
+
+        sig1 = SubProblemSignature.compute(pads1, rules)
+        sig2 = SubProblemSignature.compute(pads2, rules)
+
+        assert sig1.signature_hash == sig2.signature_hash
+
+    def test_translated_pads_same_signature(self):
+        """Pads translated by a constant offset produce the same signature."""
+        rules = DesignRules()
+        pads1 = self._make_pads([(0, 0), (10, 0)])
+        pads2 = self._make_pads([(50, 30), (60, 30)])
+
+        sig1 = SubProblemSignature.compute(pads1, rules)
+        sig2 = SubProblemSignature.compute(pads2, rules)
+
+        assert sig1.signature_hash == sig2.signature_hash
+
+    def test_rotated_pads_same_signature(self):
+        """Pads rotated 90 degrees produce the same signature."""
+        rules = DesignRules()
+        # Horizontal pair
+        pads1 = self._make_pads([(0, 0), (10, 0)])
+        # Vertical pair (90-degree rotation around midpoint)
+        pads2 = self._make_pads([(5, -5), (5, 5)])
+
+        sig1 = SubProblemSignature.compute(pads1, rules)
+        sig2 = SubProblemSignature.compute(pads2, rules)
+
+        assert sig1.signature_hash == sig2.signature_hash
+
+    def test_different_geometry_different_signature(self):
+        """Different pad geometry produces different signatures."""
+        rules = DesignRules()
+        pads1 = self._make_pads([(0, 0), (10, 0)])
+        pads2 = self._make_pads([(0, 0), (20, 0)])
+
+        sig1 = SubProblemSignature.compute(pads1, rules)
+        sig2 = SubProblemSignature.compute(pads2, rules)
+
+        assert sig1.signature_hash != sig2.signature_hash
+
+    def test_different_pad_dimensions_different_signature(self):
+        """Different pad sizes produce different signatures."""
+        rules = DesignRules()
+        pads1 = self._make_pads([(0, 0), (10, 0)], width=0.6, height=0.6)
+        pads2 = self._make_pads([(0, 0), (10, 0)], width=1.0, height=1.0)
+
+        sig1 = SubProblemSignature.compute(pads1, rules)
+        sig2 = SubProblemSignature.compute(pads2, rules)
+
+        assert sig1.signature_hash != sig2.signature_hash
+
+    def test_different_rules_different_signature(self):
+        """Different design rules produce different signatures."""
+        rules1 = DesignRules(trace_width=0.2)
+        rules2 = DesignRules(trace_width=0.3)
+        pads = self._make_pads([(0, 0), (10, 0)])
+
+        sig1 = SubProblemSignature.compute(pads, rules1)
+        sig2 = SubProblemSignature.compute(pads, rules2)
+
+        assert sig1.signature_hash != sig2.signature_hash
+
+    def test_empty_pads(self):
+        """Empty pad list produces a deterministic signature."""
+        rules = DesignRules()
+        sig = SubProblemSignature.compute([], rules)
+        assert sig.signature_hash == "empty"
+        assert sig.pad_count == 0
+
+    def test_centroid_computed_correctly(self):
+        """Centroid is at the average position of all pads."""
+        rules = DesignRules()
+        pads = self._make_pads([(0, 0), (10, 0), (10, 10), (0, 10)])
+        sig = SubProblemSignature.compute(pads, rules)
+        assert sig.centroid_x == pytest.approx(5.0)
+        assert sig.centroid_y == pytest.approx(5.0)
+
+    def test_cache_version_change_invalidates_signature(self):
+        """Changing CACHE_VERSION produces a different signature hash."""
+        rules = DesignRules()
+        pads = self._make_pads([(0, 0), (10, 0)])
+
+        sig1 = SubProblemSignature.compute(pads, rules)
+        with mock.patch("kicad_tools.router.cache.CACHE_VERSION", "99.0.0"):
+            sig2 = SubProblemSignature.compute(pads, rules)
+
+        assert sig1.signature_hash != sig2.signature_hash
+
+
+class TestSubProblemTransform:
+    """Tests for route transform functions (Issue #2336)."""
+
+    def test_transform_identity(self):
+        """Zero translation and rotation preserves coordinates."""
+        routes = [Route(
+            net=0, net_name="",
+            segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2,
+                              layer=Layer.F_CU, net=0)],
+            vias=[],
+        )]
+        result = transform_routes(routes, dx=0, dy=0, angle=0,
+                                  target_net=1, target_net_name="N1")
+        assert result[0].segments[0].x1 == pytest.approx(0)
+        assert result[0].segments[0].y1 == pytest.approx(0)
+        assert result[0].segments[0].x2 == pytest.approx(5)
+        assert result[0].net == 1
+        assert result[0].net_name == "N1"
+
+    def test_transform_translation(self):
+        """Translation shifts all coordinates."""
+        routes = [Route(
+            net=0, net_name="",
+            segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2,
+                              layer=Layer.F_CU, net=0)],
+            vias=[Via(x=2.5, y=0, drill=0.3, diameter=0.6,
+                      layers=(Layer.F_CU, Layer.B_CU), net=0)],
+        )]
+        result = transform_routes(routes, dx=10, dy=20, angle=0,
+                                  target_net=5, target_net_name="NET5")
+        seg = result[0].segments[0]
+        assert seg.x1 == pytest.approx(10)
+        assert seg.y1 == pytest.approx(20)
+        assert seg.x2 == pytest.approx(15)
+        via = result[0].vias[0]
+        assert via.x == pytest.approx(12.5)
+        assert via.y == pytest.approx(20)
+
+    def test_transform_rotation_90(self):
+        """90-degree rotation transforms correctly."""
+        routes = [Route(
+            net=0, net_name="",
+            segments=[Segment(x1=5, y1=0, x2=0, y2=0, width=0.2,
+                              layer=Layer.F_CU, net=0)],
+            vias=[],
+        )]
+        result = transform_routes(routes, dx=0, dy=0, angle=math.pi / 2,
+                                  target_net=1, target_net_name="N")
+        seg = result[0].segments[0]
+        assert seg.x1 == pytest.approx(0, abs=1e-3)
+        assert seg.y1 == pytest.approx(5, abs=1e-3)
+        assert seg.x2 == pytest.approx(0, abs=1e-3)
+        assert seg.y2 == pytest.approx(0, abs=1e-3)
+
+    def test_normalize_then_transform_roundtrip(self):
+        """Normalizing then transforming recovers original coordinates."""
+        original = [Route(
+            net=1, net_name="NET1",
+            segments=[Segment(x1=10, y1=20, x2=15, y2=20, width=0.2,
+                              layer=Layer.F_CU, net=1)],
+            vias=[],
+        )]
+
+        pads = [
+            Pad(x=10, y=20, width=0.6, height=0.6, net=1, net_name="NET1",
+                layer=Layer.F_CU),
+            Pad(x=15, y=20, width=0.6, height=0.6, net=1, net_name="NET1",
+                layer=Layer.F_CU),
+        ]
+        sig = SubProblemSignature.compute(pads, DesignRules())
+
+        normalized = normalize_routes_to_origin(
+            original, sig.centroid_x, sig.centroid_y, sig.rotation_angle
+        )
+        restored = transform_routes(
+            normalized,
+            dx=sig.centroid_x,
+            dy=sig.centroid_y,
+            angle=sig.rotation_angle,
+            target_net=1,
+            target_net_name="NET1",
+        )
+
+        orig_seg = original[0].segments[0]
+        rest_seg = restored[0].segments[0]
+        assert rest_seg.x1 == pytest.approx(orig_seg.x1, abs=1e-3)
+        assert rest_seg.y1 == pytest.approx(orig_seg.y1, abs=1e-3)
+        assert rest_seg.x2 == pytest.approx(orig_seg.x2, abs=1e-3)
+        assert rest_seg.y2 == pytest.approx(orig_seg.y2, abs=1e-3)
+
+
+class TestSubProblemCache:
+    """Tests for sub-problem cache store/retrieve (Issue #2336)."""
+
+    @pytest.fixture
+    def temp_cache(self, tmp_path):
+        """Create a temporary cache for testing."""
+        cache_dir = tmp_path / "sub_cache"
+        return RoutingCache(cache_dir=cache_dir, ttl_days=30)
+
+    @pytest.fixture
+    def sample_sig(self):
+        """Create a sample sub-problem signature."""
+        pads = [
+            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N",
+                layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N",
+                layer=Layer.F_CU),
+        ]
+        return SubProblemSignature.compute(pads, DesignRules())
+
+    @pytest.fixture
+    def sample_normalized_routes(self):
+        """Create sample routes in normalized (centroid-relative) coords."""
+        return [Route(
+            net=0, net_name="",
+            segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2,
+                              layer=Layer.F_CU, net=0)],
+            vias=[],
+        )]
+
+    def test_put_and_get(self, temp_cache, sample_sig, sample_normalized_routes):
+        """Store and retrieve a sub-problem solution."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+
+        result = temp_cache.get_sub_problem(sample_sig)
+
+        assert result is not None
+        assert result.signature_hash == sample_sig.signature_hash
+        assert result.segment_count == 1
+        assert result.via_count == 0
+
+    def test_get_miss(self, temp_cache, sample_sig):
+        """Cache miss returns None."""
+        result = temp_cache.get_sub_problem(sample_sig)
+        assert result is None
+
+    def test_hit_count_increments(self, temp_cache, sample_sig,
+                                  sample_normalized_routes):
+        """Hit count increases on each get."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+
+        r1 = temp_cache.get_sub_problem(sample_sig)
+        assert r1 is not None
+        assert r1.hit_count == 1
+
+        r2 = temp_cache.get_sub_problem(sample_sig)
+        assert r2 is not None
+        assert r2.hit_count == 2
+
+    def test_version_mismatch_miss(self, temp_cache, sample_sig,
+                                   sample_normalized_routes):
+        """Different CACHE_VERSION causes cache miss."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+
+        with mock.patch("kicad_tools.router.cache.CACHE_VERSION", "99.0.0"):
+            result = temp_cache.get_sub_problem(sample_sig)
+
+        assert result is None
+
+    def test_deserialized_routes_match(self, temp_cache, sample_sig,
+                                      sample_normalized_routes):
+        """Deserialized routes from cache match the originals."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+
+        result = temp_cache.get_sub_problem(sample_sig)
+        routes = temp_cache.deserialize_routes(result.route_data)
+
+        assert len(routes) == 1
+        seg = routes[0].segments[0]
+        assert seg.x1 == pytest.approx(-5)
+        assert seg.x2 == pytest.approx(5)
+
+    def test_clear_includes_sub_problems(self, temp_cache, sample_sig,
+                                         sample_normalized_routes):
+        """clear() removes sub-problem entries."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+        count = temp_cache.clear()
+        assert count >= 1
+
+        result = temp_cache.get_sub_problem(sample_sig)
+        assert result is None
+
+    def test_stats_include_sub_problems(self, temp_cache, sample_sig,
+                                        sample_normalized_routes):
+        """stats() includes sub-problem counts."""
+        temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
+        stats = temp_cache.stats()
+
+        assert stats["sub_problem_count"] == 1
+        assert stats["sub_problem_size_bytes"] > 0
+
+    def test_expired_sub_problem_not_returned(self, tmp_path, sample_sig,
+                                              sample_normalized_routes):
+        """Sub-problems respect TTL expiry."""
+        cache = RoutingCache(cache_dir=tmp_path / "exp_cache", ttl_days=0)
+        cache.put_sub_problem(sample_sig, sample_normalized_routes)
+
+        result = cache.get_sub_problem(sample_sig)
+        assert result is None
+
+
+class TestSchemaMigrationV2toV3:
+    """Tests for database schema migration from v2 to v3 (Issue #2336)."""
+
+    def _create_v2_database(self, db_path: Path) -> None:
+        """Manually create a v2 schema database."""
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE routing_results (
+                cache_key TEXT PRIMARY KEY,
+                pcb_hash TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                version TEXT NOT NULL,
+                routes_data BLOB NOT NULL,
+                success_count INTEGER NOT NULL,
+                failure_count INTEGER NOT NULL,
+                total_segments INTEGER NOT NULL,
+                total_vias INTEGER NOT NULL,
+                compute_time_ms INTEGER NOT NULL,
+                data_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                last_accessed TEXT NOT NULL
+            );
+
+            CREATE TABLE partial_routes (
+                pcb_hash TEXT NOT NULL,
+                net_id INTEGER NOT NULL,
+                net_name TEXT NOT NULL,
+                route_data BLOB NOT NULL,
+                pad_positions_hash TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                data_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (pcb_hash, net_id)
+            );
+
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            INSERT INTO meta (key, value) VALUES ('cache_version', '2.0.0');
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_migration_creates_sub_problem_table(self, tmp_path):
+        """Migration from v2 creates the sub_problem_solutions table."""
+        cache_dir = tmp_path / "migrate_v2_cache"
+        cache_dir.mkdir()
+        db_path = cache_dir / "routing.db"
+        self._create_v2_database(db_path)
+
+        cache = RoutingCache(cache_dir=cache_dir)
+
+        # Verify sub_problem_solutions table exists and is usable
+        pads = [
+            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N",
+                layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N",
+                layer=Layer.F_CU),
+        ]
+        sig = SubProblemSignature.compute(pads, DesignRules())
+        routes = [Route(
+            net=0, net_name="",
+            segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2,
+                              layer=Layer.F_CU, net=0)],
+            vias=[],
+        )]
+        cache.put_sub_problem(sig, routes)
+        result = cache.get_sub_problem(sig)
+        assert result is not None
+
+    def test_migration_updates_schema_version_to_3(self, tmp_path):
+        """Migration updates schema_version to 3."""
+        cache_dir = tmp_path / "migrate_v2_ver"
+        cache_dir.mkdir()
+        db_path = cache_dir / "routing.db"
+        self._create_v2_database(db_path)
+
+        RoutingCache(cache_dir=cache_dir)
+
+        conn = sqlite3.connect(str(db_path))
+        version = conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        conn.close()
+        assert version == "3"

@@ -28,10 +28,14 @@ from .congestion_estimator import CongestionEstimator, NetBBox, TileGrid
 from .cache import (
     CachedNetRoute,
     CachedRoutingResult,
+    CachedSubProblem,
     CacheKey,
     RoutingCache,
+    SubProblemSignature,
     compute_pad_positions_hash,
     get_default_cache_path,
+    normalize_routes_to_origin,
+    transform_routes,
 )
 from .analysis import (
     BlockingObstacle,

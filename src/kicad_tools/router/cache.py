@@ -9,6 +9,7 @@ Key features:
 - Content-addressable caching using SHA-256 hashes
 - Full routing result caching for exact PCB configurations
 - Per-net partial route caching for incremental routing
+- Sub-problem pattern caching for recurring pad geometries (Issue #2336)
 - Automatic cache invalidation based on kicad-tools version
 - Configurable TTL and max size limits
 """
@@ -18,18 +19,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .primitives import Route
+    from .primitives import Pad, Route
     from .rules import DesignRules
 
 logger = logging.getLogger(__name__)
@@ -173,13 +175,292 @@ class CachedNetRoute:
     created_at: datetime
 
 
+@dataclass
+class SubProblemSignature:
+    """Position- and rotation-invariant signature for a routing sub-problem.
+
+    Issue #2336: Captures the relative pad geometry and connectivity of a
+    net, normalized so that the same physical pattern at different positions
+    and rotations produces the same hash.  This allows solved routing
+    sub-problems (e.g. bypass cap connections) to be reused across the board
+    and even across different boards.
+
+    Signature components:
+    1. Relative pad positions (centroid at origin, first vector along +X)
+    2. Pad dimensions and types (width, height, through-hole, drill)
+    3. Layer assignment for each pad
+    4. Design rules (clearance, trace width, via size)
+    """
+
+    signature_hash: str
+    centroid_x: float
+    centroid_y: float
+    rotation_angle: float  # radians, used to un-rotate cached solution
+    pad_count: int
+    rules_hash: str
+
+    @classmethod
+    def compute(
+        cls,
+        pads: list[Pad],
+        rules: DesignRules,
+    ) -> SubProblemSignature:
+        """Compute a position/rotation-invariant signature from pad geometry.
+
+        Args:
+            pads: List of Pad objects belonging to the net.
+            rules: Design rules that affect routing solutions.
+
+        Returns:
+            SubProblemSignature with a deterministic hash.
+        """
+        if not pads:
+            return cls(
+                signature_hash="empty",
+                centroid_x=0.0,
+                centroid_y=0.0,
+                rotation_angle=0.0,
+                pad_count=0,
+                rules_hash="",
+            )
+
+        # 1. Compute centroid
+        cx = sum(p.x for p in pads) / len(pads)
+        cy = sum(p.y for p in pads) / len(pads)
+
+        # 2. Translate pads so centroid is at origin
+        relative = [(p.x - cx, p.y - cy) for p in pads]
+
+        # 3. Compute rotation angle: rotate so first pad (by angle from
+        #    centroid) aligns with +X axis.  For single-pad nets or pads
+        #    all at the centroid, rotation is 0.
+        angles = [(math.atan2(ry, rx), i) for i, (rx, ry) in enumerate(relative)
+                  if abs(rx) > 1e-6 or abs(ry) > 1e-6]
+
+        if angles:
+            angles.sort()
+            rotation = angles[0][0]
+        else:
+            rotation = 0.0
+
+        cos_r = math.cos(-rotation)
+        sin_r = math.sin(-rotation)
+
+        # 4. Rotate all relative positions and round for hashing stability.
+        #    Adding 0.0 converts -0.0 to 0.0 so JSON serialization is stable.
+        rotated = []
+        for rx, ry in relative:
+            nx = round(rx * cos_r - ry * sin_r, 4) + 0.0
+            ny = round(rx * sin_r + ry * cos_r, 4) + 0.0
+            rotated.append((nx, ny))
+
+        # 5. Sort rotated positions for order independence, pairing with
+        #    pad metadata
+        pad_entries = []
+        for i, (nx, ny) in enumerate(rotated):
+            p = pads[i]
+            pad_entries.append((
+                nx, ny,
+                round(p.width, 4),
+                round(p.height, 4),
+                p.through_hole,
+                round(p.drill, 4),
+                p.layer.value,
+            ))
+        pad_entries.sort()
+
+        # 6. Build rules hash (only routing-relevant fields)
+        rules_data = {
+            "trace_width": rules.trace_width,
+            "trace_clearance": rules.trace_clearance,
+            "via_drill": rules.via_drill,
+            "via_diameter": rules.via_diameter,
+            "grid_resolution": rules.grid_resolution,
+        }
+        rules_json = json.dumps(rules_data, sort_keys=True)
+        rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
+
+        # 7. Combine everything into a signature hash
+        sig_data = {
+            "pads": pad_entries,
+            "rules": rules_hash,
+            "version": CACHE_VERSION,
+        }
+        sig_json = json.dumps(sig_data, sort_keys=True)
+        signature_hash = hashlib.sha256(sig_json.encode()).hexdigest()
+
+        return cls(
+            signature_hash=signature_hash,
+            centroid_x=cx,
+            centroid_y=cy,
+            rotation_angle=rotation,
+            pad_count=len(pads),
+            rules_hash=rules_hash,
+        )
+
+
+@dataclass
+class CachedSubProblem:
+    """A cached solution for a routing sub-problem.
+
+    Stores the route segments/vias in centroid-relative, rotation-normalized
+    coordinates.  On cache hit the caller applies an affine transform
+    (rotate + translate) to place the solution at the current location.
+    """
+
+    signature_hash: str
+    route_data: bytes  # Compressed JSON of relative route
+    segment_count: int
+    via_count: int
+    hit_count: int
+    created_at: datetime
+    last_accessed: datetime
+
+
+def transform_routes(
+    routes: list[Route],
+    dx: float,
+    dy: float,
+    angle: float,
+    target_net: int,
+    target_net_name: str,
+) -> list[Route]:
+    """Apply affine transform (rotate then translate) to route geometry.
+
+    Args:
+        routes: Routes in centroid-relative, rotation-normalized coordinates.
+        dx: Translation in X (centroid of target pads).
+        dy: Translation in Y (centroid of target pads).
+        angle: Rotation angle in radians to apply.
+        target_net: Net ID to assign to the transformed routes.
+        target_net_name: Net name to assign.
+
+    Returns:
+        New list of Route objects with transformed coordinates.
+    """
+    from .layers import Layer
+    from .primitives import Route as RouteClass
+    from .primitives import Segment, Via
+
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    def _transform(x: float, y: float) -> tuple[float, float]:
+        rx = round(x * cos_a - y * sin_a + dx, 4)
+        ry = round(x * sin_a + y * cos_a + dy, 4)
+        return rx, ry
+
+    transformed = []
+    for route in routes:
+        new_segs = []
+        for seg in route.segments:
+            x1, y1 = _transform(seg.x1, seg.y1)
+            x2, y2 = _transform(seg.x2, seg.y2)
+            new_segs.append(Segment(
+                x1=x1, y1=y1, x2=x2, y2=y2,
+                width=seg.width,
+                layer=seg.layer,
+                net=target_net,
+                net_name=target_net_name,
+            ))
+        new_vias = []
+        for via in route.vias:
+            vx, vy = _transform(via.x, via.y)
+            new_vias.append(Via(
+                x=vx, y=vy,
+                drill=via.drill,
+                diameter=via.diameter,
+                layers=via.layers,
+                net=target_net,
+                net_name=target_net_name,
+            ))
+        transformed.append(RouteClass(
+            net=target_net,
+            net_name=target_net_name,
+            segments=new_segs,
+            vias=new_vias,
+        ))
+
+    return transformed
+
+
+def normalize_routes_to_origin(
+    routes: list[Route],
+    centroid_x: float,
+    centroid_y: float,
+    rotation_angle: float,
+) -> list[Route]:
+    """Transform routes into centroid-relative, rotation-normalized coordinates.
+
+    This is the inverse of ``transform_routes``: first translate so that the
+    centroid is at the origin, then rotate by ``-rotation_angle`` to align
+    with the canonical orientation.
+
+    Args:
+        routes: Routes in world coordinates.
+        centroid_x: X centroid of the pad configuration.
+        centroid_y: Y centroid of the pad configuration.
+        rotation_angle: Rotation angle that was applied to normalize pads.
+
+    Returns:
+        New list of Route objects in normalized coordinates.
+    """
+    from .primitives import Route as RouteClass
+    from .primitives import Segment, Via
+
+    # Inverse: translate by -centroid, then rotate by -angle
+    cos_a = math.cos(-rotation_angle)
+    sin_a = math.sin(-rotation_angle)
+
+    def _inv_transform(x: float, y: float) -> tuple[float, float]:
+        tx = x - centroid_x
+        ty = y - centroid_y
+        rx = round(tx * cos_a - ty * sin_a, 4)
+        ry = round(tx * sin_a + ty * cos_a, 4)
+        return rx, ry
+
+    normalized = []
+    for route in routes:
+        new_segs = []
+        for seg in route.segments:
+            x1, y1 = _inv_transform(seg.x1, seg.y1)
+            x2, y2 = _inv_transform(seg.x2, seg.y2)
+            new_segs.append(Segment(
+                x1=x1, y1=y1, x2=x2, y2=y2,
+                width=seg.width,
+                layer=seg.layer,
+                net=0,
+                net_name="",
+            ))
+        new_vias = []
+        for via in route.vias:
+            vx, vy = _inv_transform(via.x, via.y)
+            new_vias.append(Via(
+                x=vx, y=vy,
+                drill=via.drill,
+                diameter=via.diameter,
+                layers=via.layers,
+                net=0,
+                net_name="",
+            ))
+        normalized.append(RouteClass(
+            net=0,
+            net_name="",
+            segments=new_segs,
+            vias=new_vias,
+        ))
+
+    return normalized
+
+
 class RoutingCache:
     """
     SQLite-backed cache for routing results.
 
     Stores routing results locally to reduce computation time for
     iterative PCB design workflows. Supports both full routing result
-    caching and per-net partial route caching for incremental updates.
+    caching, per-net partial route caching for incremental updates,
+    and sub-problem pattern caching for recurring pad geometries.
 
     Example::
 
@@ -198,9 +479,17 @@ class RoutingCache:
 
         # Incremental routing
         unchanged_nets = cache.get_unchanged_net_routes(pcb_hash, net_pad_hashes)
+
+        # Sub-problem pattern reuse (Issue #2336)
+        sig = SubProblemSignature.compute(pads, rules)
+        cached_sub = cache.get_sub_problem(sig)
+        if cached_sub:
+            routes = cache.deserialize_routes(cached_sub.route_data)
+            transformed = transform_routes(routes, sig.centroid_x, sig.centroid_y,
+                                           sig.rotation_angle, net_id, net_name)
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     DEFAULT_TTL_DAYS = 30
     DEFAULT_MAX_SIZE_MB = 500
 
@@ -262,12 +551,28 @@ class RoutingCache:
                     PRIMARY KEY (pcb_hash, net_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS sub_problem_solutions (
+                    signature_hash TEXT PRIMARY KEY,
+                    route_data BLOB NOT NULL,
+                    segment_count INTEGER NOT NULL,
+                    via_count INTEGER NOT NULL,
+                    pad_count INTEGER NOT NULL,
+                    rules_hash TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    hit_count INTEGER NOT NULL DEFAULT 0,
+                    data_size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_accessed TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_routing_results_pcb
                     ON routing_results(pcb_hash);
                 CREATE INDEX IF NOT EXISTS idx_routing_results_accessed
                     ON routing_results(last_accessed);
                 CREATE INDEX IF NOT EXISTS idx_partial_routes_hash
                     ON partial_routes(pad_positions_hash);
+                CREATE INDEX IF NOT EXISTS idx_sub_problem_accessed
+                    ON sub_problem_solutions(last_accessed);
             """)
 
             # Check schema version
@@ -294,6 +599,31 @@ class RoutingCache:
             conn.execute("ALTER TABLE partial_routes ADD COLUMN version TEXT NOT NULL DEFAULT ''")
             logger.info(
                 "Migrated cache schema from v1 to v2: added version column to partial_routes"
+            )
+
+        if from_version < 3:
+            # Schema v3 (Issue #2336): add sub_problem_solutions table for
+            # pattern-level caching of recurring pad geometries.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sub_problem_solutions (
+                    signature_hash TEXT PRIMARY KEY,
+                    route_data BLOB NOT NULL,
+                    segment_count INTEGER NOT NULL,
+                    via_count INTEGER NOT NULL,
+                    pad_count INTEGER NOT NULL,
+                    rules_hash TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    hit_count INTEGER NOT NULL DEFAULT 0,
+                    data_size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_accessed TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sub_problem_accessed
+                    ON sub_problem_solutions(last_accessed);
+            """)
+            logger.info(
+                "Migrated cache schema to v3: added sub_problem_solutions table"
             )
 
         conn.execute(
@@ -635,6 +965,120 @@ class RoutingCache:
         logger.info(f"Found {len(unchanged_routes)}/{len(net_pad_hashes)} unchanged net routes")
         return unchanged_routes
 
+    # ------------------------------------------------------------------
+    # Sub-problem pattern cache (Issue #2336)
+    # ------------------------------------------------------------------
+
+    def put_sub_problem(
+        self,
+        signature: SubProblemSignature,
+        routes: list[Route],
+    ) -> None:
+        """Store a solved routing sub-problem in the cache.
+
+        The routes must already be in centroid-relative, rotation-normalized
+        coordinates (use ``normalize_routes_to_origin`` before calling).
+
+        Args:
+            signature: Sub-problem signature computed from pad geometry.
+            routes: Route objects in normalized coordinates.
+        """
+        route_data = self.serialize_routes(routes)
+        data_size = len(route_data)
+        now = datetime.now().isoformat()
+        pkg_version = _get_kicad_tools_version()
+        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+
+        seg_count = sum(len(r.segments) for r in routes)
+        via_count = sum(len(r.vias) for r in routes)
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO sub_problem_solutions (
+                    signature_hash, route_data, segment_count, via_count,
+                    pad_count, rules_hash, version, hit_count,
+                    data_size, created_at, last_accessed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    signature.signature_hash,
+                    route_data,
+                    seg_count,
+                    via_count,
+                    signature.pad_count,
+                    signature.rules_hash,
+                    version,
+                    data_size,
+                    now,
+                    now,
+                ),
+            )
+
+        logger.debug(
+            "Cached sub-problem %s (%d segs, %d vias, %d bytes)",
+            signature.signature_hash[:12],
+            seg_count,
+            via_count,
+            data_size,
+        )
+
+    def get_sub_problem(
+        self,
+        signature: SubProblemSignature,
+    ) -> CachedSubProblem | None:
+        """Look up a cached sub-problem solution by geometry signature.
+
+        Args:
+            signature: Sub-problem signature to look up.
+
+        Returns:
+            CachedSubProblem if found and not expired, None otherwise.
+        """
+        pkg_version = _get_kicad_tools_version()
+        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM sub_problem_solutions
+                WHERE signature_hash = ? AND version = ?
+                """,
+                (signature.signature_hash, version),
+            )
+            row = cursor.fetchone()
+
+            if row is None:
+                return None
+
+            if self._is_expired(row["created_at"]):
+                return None
+
+            # Update access time and hit count
+            conn.execute(
+                """
+                UPDATE sub_problem_solutions
+                SET last_accessed = ?, hit_count = hit_count + 1
+                WHERE signature_hash = ?
+                """,
+                (datetime.now().isoformat(), signature.signature_hash),
+            )
+
+            logger.debug(
+                "Sub-problem cache hit: %s (hits: %d)",
+                signature.signature_hash[:12],
+                row["hit_count"] + 1,
+            )
+            return CachedSubProblem(
+                signature_hash=row["signature_hash"],
+                route_data=row["route_data"],
+                segment_count=row["segment_count"],
+                via_count=row["via_count"],
+                hit_count=row["hit_count"] + 1,
+                created_at=datetime.fromisoformat(row["created_at"]),
+                last_accessed=datetime.fromisoformat(row["last_accessed"]),
+            )
+
     def _enforce_size_limit(self, new_data_size: int) -> None:
         """Evict oldest entries if cache exceeds size limit."""
         with self._connect() as conn:
@@ -680,10 +1124,14 @@ class RoutingCache:
             cursor = conn.execute("SELECT COUNT(*) FROM partial_routes")
             partial_count = cursor.fetchone()[0]
 
+            cursor = conn.execute("SELECT COUNT(*) FROM sub_problem_solutions")
+            sub_count = cursor.fetchone()[0]
+
             conn.execute("DELETE FROM routing_results")
             conn.execute("DELETE FROM partial_routes")
+            conn.execute("DELETE FROM sub_problem_solutions")
 
-            return result_count + partial_count
+            return result_count + partial_count + sub_count
 
     def clear_expired(self) -> int:
         """
@@ -704,6 +1152,12 @@ class RoutingCache:
 
             cursor = conn.execute(
                 "DELETE FROM partial_routes WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed += cursor.rowcount
+
+            cursor = conn.execute(
+                "DELETE FROM sub_problem_solutions WHERE created_at < ?",
                 (cutoff,),
             )
             removed += cursor.rowcount
@@ -743,12 +1197,28 @@ class RoutingCache:
 
             newest = conn.execute("SELECT MAX(created_at) FROM routing_results").fetchone()[0]
 
-        total_size = result_size + partial_size
+            # Sub-problem stats (Issue #2336)
+            sub_count = conn.execute(
+                "SELECT COUNT(*) FROM sub_problem_solutions"
+            ).fetchone()[0]
+
+            sub_size = conn.execute(
+                "SELECT COALESCE(SUM(data_size), 0) FROM sub_problem_solutions"
+            ).fetchone()[0]
+
+            sub_total_hits = conn.execute(
+                "SELECT COALESCE(SUM(hit_count), 0) FROM sub_problem_solutions"
+            ).fetchone()[0]
+
+        total_size = result_size + partial_size + sub_size
         return {
             "routing_results_count": result_count,
             "routing_results_size_bytes": result_size,
             "partial_routes_count": partial_count,
             "partial_routes_size_bytes": partial_size,
+            "sub_problem_count": sub_count,
+            "sub_problem_size_bytes": sub_size,
+            "sub_problem_total_hits": sub_total_hits,
             "total_size_bytes": total_size,
             "total_size_mb": total_size / (1024 * 1024),
             "valid_results": valid_results,
