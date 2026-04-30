@@ -191,6 +191,15 @@ class Router:
         # Each entry is (x1, y1, x2, y2, layer_index, net_id) in grid coordinates.
         self._routed_segments: list[tuple[int, int, int, int, int, int]] = []
 
+        # Issue #2325: Via placement diagnostic counters.
+        # These track via placement attempts and rejections to help diagnose
+        # zero-via routing failures on multi-layer boards.
+        self._via_diag_attempts: int = 0
+        self._via_diag_blocked: int = 0
+        self._via_diag_zone_blocked: int = 0
+        self._via_diag_exclusion_blocked: int = 0
+        self._via_diag_eligible: int = 0
+
     def add_routed_segments(self, segments: list[Segment]) -> None:
         """Add committed route segments for crossing detection.
 
@@ -221,6 +230,31 @@ class Router:
         have been removed.
         """
         self._routed_segments.clear()
+
+    def get_via_diagnostics(self) -> dict[str, int]:
+        """Return via placement diagnostic counters (Issue #2325).
+
+        Returns:
+            Dictionary with keys ``attempts``, ``blocked``, ``zone_blocked``,
+            ``exclusion_blocked``, and ``eligible`` (candidates that passed all
+            placement checks but may still be pruned by closed-set or g-score
+            dominance).
+        """
+        return {
+            "attempts": self._via_diag_attempts,
+            "blocked": self._via_diag_blocked,
+            "zone_blocked": self._via_diag_zone_blocked,
+            "exclusion_blocked": self._via_diag_exclusion_blocked,
+            "eligible": self._via_diag_eligible,
+        }
+
+    def reset_via_diagnostics(self) -> None:
+        """Reset via placement diagnostic counters to zero."""
+        self._via_diag_attempts = 0
+        self._via_diag_blocked = 0
+        self._via_diag_zone_blocked = 0
+        self._via_diag_exclusion_blocked = 0
+        self._via_diag_eligible = 0
 
     @staticmethod
     def _segments_intersect(
@@ -854,8 +888,15 @@ class Router:
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
 
-        # Check all layers using priority ordering
+        # Check all layers using priority ordering.
+        # Issue #2325: Skip plane layers when checking via blockage.  On plane
+        # layers (GND/PWR), KiCad's zone fill creates the anti-pad or thermal
+        # relief automatically.  Checking blocking on plane layers causes false
+        # rejections from PTH pad clearance zones, which on dense boards can
+        # prevent ALL via placement.
         for check_layer in self._get_layer_priority():
+            if self.grid.is_plane_layer(check_layer):
+                continue
             if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing,
                                      radius=radius):
                 # Cache the negative result
@@ -1592,20 +1633,26 @@ class Router:
                 # Check if via placement is valid on ALL layers (through-hole via)
                 # Issue #966: Use cached via check with layer priority ordering
                 # Issue #1692: Pass per-net via radius for wider net classes
+                self._via_diag_attempts += 1
                 if not self._check_via_placement_cached(
                     current.x, current.y, start.net, allow_sharing,
                     radius=net_via_half_cells,
                 ):
+                    self._via_diag_blocked += 1
                     continue
 
                 # Check zone blocking for via (would pierce other-net zones)
                 if not self._can_place_via_in_zones(current.x, current.y, start.net):
+                    self._via_diag_zone_blocked += 1
                     continue
 
                 # Issue #1019: Check via exclusion zone near fine-pitch pads
                 # If via is in exclusion zone, skip this position (hard constraint)
                 if self._is_via_in_exclusion_zone(current.x, current.y):
+                    self._via_diag_exclusion_blocked += 1
                     continue
+
+                self._via_diag_eligible += 1
 
                 neighbor_key = (current.x, current.y, new_layer)
                 if neighbor_key in closed_set:
@@ -1648,16 +1695,26 @@ class Router:
                     current.x, current.y, new_layer, start.net
                 )
 
-                new_g = (
-                    current.g_score
-                    + self.rules.cost_via * layer_pref_mult
+                # Issue #2325: Cap the total incremental via cost to prevent
+                # accumulated additive penalties from making vias prohibitively
+                # expensive.  Without the cap, dense boards can accumulate
+                # inner-layer, utilization, corridor, congestion, and impact
+                # costs that exceed 20x the base movement cost, causing A* to
+                # exhaust its iteration budget before ever considering a via.
+                via_incremental = (
+                    self.rules.cost_via * layer_pref_mult
                     + inner_layer_cost
                     + congestion_cost
                     + negotiated_cost
                     + via_impact_cost
                     + layer_util_cost
                     + corridor_cost
-                ) * cost_mult
+                )
+                if self.rules.via_cost_cap_factor > 0.0:
+                    via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
+                    via_incremental = min(via_incremental, via_cap)
+
+                new_g = (current.g_score + via_incremental) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
                     g_scores[neighbor_key] = new_g
@@ -2703,14 +2760,19 @@ class Router:
             # Check via blocking on all layers
             # Issue #966: Use cached via check with layer priority ordering
             # Issue #1692: Pass per-net via radius for wider net classes
+            self._via_diag_attempts += 1
             if not self._check_via_placement_cached(
                 current.x, current.y, source_pad.net, allow_sharing,
                 radius=via_radius,
             ):
+                self._via_diag_blocked += 1
                 continue
 
             if not self._can_place_via_in_zones(current.x, current.y, source_pad.net):
+                self._via_diag_zone_blocked += 1
                 continue
+
+            self._via_diag_eligible += 1
 
             neighbor_key = (current.x, current.y, new_layer)
             if neighbor_key in closed_set:
@@ -2736,14 +2798,19 @@ class Router:
                 current.x, current.y, new_layer, source_pad.net
             )
 
-            new_g = (
-                current.g_score
-                + self.rules.cost_via * layer_pref_mult
+            # Issue #2325: Cap via incremental cost (same logic as forward A*)
+            via_incremental = (
+                self.rules.cost_via * layer_pref_mult
                 + congestion_cost
                 + negotiated_cost
                 + layer_util_cost
                 + corridor_cost
-            ) * cost_mult
+            )
+            if self.rules.via_cost_cap_factor > 0.0:
+                via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
+                via_incremental = min(via_incremental, via_cap)
+
+            new_g = (current.g_score + via_incremental) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
                 g_scores[neighbor_key] = new_g
