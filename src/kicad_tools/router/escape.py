@@ -1425,9 +1425,9 @@ class EscapeRouter:
                 )
 
         if skipped_count:
-            logger.info(
+            logger.warning(
                 "Escape routing for %s: %d of %d pins deferred to main router "
-                "due to segment-to-pad clearance violations",
+                "(clearance violation)",
                 ref, skipped_count, len(pads),
             )
 

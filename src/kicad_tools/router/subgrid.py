@@ -166,12 +166,14 @@ class SubGridResult:
         analysis: The analysis that produced these escapes
         unblocked_count: Number of pad grid cells that were unblocked
         failed_pads: Pads where escape routing could not find a valid path
+        failure_reasons: Per-pad failure reason, keyed by (ref, pin)
     """
 
     escapes: list[SubGridEscape] = field(default_factory=list)
     analysis: SubGridAnalysis | None = None
     unblocked_count: int = 0
     failed_pads: list[Pad] = field(default_factory=list)
+    failure_reasons: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def success_count(self) -> int:
@@ -183,6 +185,23 @@ class SubGridResult:
         """Total pads attempted."""
         return self.success_count + len(self.failed_pads)
 
+    def failures_by_component(self) -> dict[str, dict[str, int]]:
+        """Aggregate failure counts per component, grouped by reason.
+
+        Returns:
+            ``{ref: {reason: count}}`` sorted by ref.
+        """
+        by_ref: dict[str, dict[str, int]] = {}
+        for pad in self.failed_pads:
+            ref = pad.ref or "<unknown>"
+            reason = self.failure_reasons.get(
+                (pad.ref, pad.pin), "unknown",
+            )
+            if ref not in by_ref:
+                by_ref[ref] = {}
+            by_ref[ref][reason] = by_ref[ref].get(reason, 0) + 1
+        return dict(sorted(by_ref.items()))
+
     def format_summary(self) -> str:
         """Format a summary of escape results."""
         lines = [
@@ -191,8 +210,25 @@ class SubGridResult:
         if self.unblocked_count > 0:
             lines.append(f"  Grid cells unblocked: {self.unblocked_count}")
         if self.failed_pads:
-            failed_refs = sorted({p.ref for p in self.failed_pads})
-            lines.append(f"  Failed components: {', '.join(failed_refs)}")
+            # Per-component breakdown with reasons
+            by_ref = self.failures_by_component()
+            # Count total attempted per component from analysis
+            attempted_by_ref: dict[str, int] = {}
+            if self.analysis is not None:
+                for sgp in self.analysis.off_grid_pads:
+                    ref = sgp.pad.ref or "<unknown>"
+                    attempted_by_ref[ref] = attempted_by_ref.get(ref, 0) + 1
+            for ref, reasons in by_ref.items():
+                total_failed = sum(reasons.values())
+                total_attempted = attempted_by_ref.get(ref, total_failed)
+                escaped = total_attempted - total_failed
+                reason_parts = [
+                    f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())
+                ]
+                lines.append(
+                    f"  {ref}: {escaped}/{total_attempted} pads escaped "
+                    f"({', '.join(reason_parts)})"
+                )
         return "\n".join(lines)
 
 
@@ -346,17 +382,19 @@ class SubGridRouter:
         result = SubGridResult(analysis=analysis)
 
         for sgp in analysis.off_grid_pads:
-            escape = self._find_escape_for_pad(sgp)
+            escape, reason = self._find_escape_for_pad(sgp)
             if escape is not None:
                 result.escapes.append(escape)
             else:
                 result.failed_pads.append(sgp.pad)
+                result.failure_reasons[(sgp.pad.ref, sgp.pad.pin)] = reason
                 logger.debug(
-                    "Sub-grid escape failed for %s.%s at (%.3f, %.3f)",
+                    "Sub-grid escape failed for %s.%s at (%.3f, %.3f): %s",
                     sgp.pad.ref,
                     sgp.pad.pin,
                     sgp.pad.x,
                     sgp.pad.y,
+                    reason,
                 )
 
         logger.info(
@@ -364,6 +402,26 @@ class SubGridRouter:
             result.success_count,
             result.total_attempted,
         )
+
+        # Per-package failure summary at WARNING level
+        if result.failed_pads:
+            by_ref = result.failures_by_component()
+            # Count attempted per component
+            attempted_by_ref: dict[str, int] = {}
+            for sgp in analysis.off_grid_pads:
+                ref = sgp.pad.ref or "<unknown>"
+                attempted_by_ref[ref] = attempted_by_ref.get(ref, 0) + 1
+            for ref, reasons in by_ref.items():
+                total_failed = sum(reasons.values())
+                total_attempted = attempted_by_ref.get(ref, total_failed)
+                escaped = total_attempted - total_failed
+                reason_parts = [
+                    f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())
+                ]
+                logger.warning(
+                    "%s: %d/%d pads escaped (%s)",
+                    ref, escaped, total_attempted, ", ".join(reason_parts),
+                )
 
         return result
 
@@ -927,7 +985,9 @@ class SubGridRouter:
 
         return True
 
-    def _find_escape_for_pad(self, sgp: SubGridPad) -> SubGridEscape | None:
+    def _find_escape_for_pad(
+        self, sgp: SubGridPad,
+    ) -> tuple[SubGridEscape | None, str]:
         """Find the best escape point for a single off-grid pad.
 
         Searches nearby grid points for the best escape target, considering
@@ -953,7 +1013,9 @@ class SubGridRouter:
             sgp: SubGridPad to find escape for
 
         Returns:
-            SubGridEscape if found, None if no valid escape point exists
+            Tuple of (SubGridEscape, reason). On success reason is "ok".
+            On failure, SubGridEscape is None and reason describes the
+            failure (e.g. "no grid point reachable", "clearance violation").
         """
         pad = sgp.pad
 
@@ -1012,7 +1074,7 @@ class SubGridRouter:
                 sgp, candidates, width, layer, component_pitches,
             )
             if escape is not None:
-                return escape
+                return escape, "ok"
 
         # --- Phase 2: Expanded search radius (2x) ---
         # The initial radius may be too small for pads surrounded by
@@ -1040,7 +1102,7 @@ class SubGridRouter:
                     "Escape for %s.%s succeeded with expanded radius %d",
                     pad.ref, pad.pin, expanded_radius,
                 )
-                return escape
+                return escape, "ok"
 
         # --- Phase 3: Relaxed clearance mode ---
         # For escape segments specifically, reduce the clearance requirement
@@ -1080,7 +1142,7 @@ class SubGridRouter:
                     pad.ref, pad.pin,
                     relaxed_clearance, self.rules.trace_clearance,
                 )
-                return escape
+                return escape, "ok"
 
         # --- Phase 4: Multi-hop escape ---
         # When direct escape fails, try routing through an intermediate
@@ -1096,15 +1158,23 @@ class SubGridRouter:
                 "Escape for %s.%s succeeded via multi-hop",
                 pad.ref, pad.pin,
             )
-            return escape
+            return escape, "ok"
 
-        # All strategies exhausted
+        # All strategies exhausted -- determine the dominant failure reason.
+        # If we never found any candidates at any radius, no grid point was
+        # reachable.  Otherwise candidates existed but all violated clearance.
+        had_any_candidates = bool(candidates or expanded_candidates or relaxed_candidates)
+        if had_any_candidates:
+            reason = "clearance violation"
+        else:
+            reason = "no grid point reachable"
+
         logger.debug(
             "All escape strategies failed for %s.%s "
-            "(normal, expanded, relaxed, multi-hop)",
-            pad.ref, pad.pin,
+            "(normal, expanded, relaxed, multi-hop): %s",
+            pad.ref, pad.pin, reason,
         )
-        return None
+        return None, reason
 
     def _try_multi_hop_escape(
         self,
