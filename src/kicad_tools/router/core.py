@@ -358,6 +358,12 @@ class Autorouter:
         self._escape_router: EscapeRouter | None = None
         self._subgrid_router: SubGridRouter | None = None
 
+        # Issue #2330: Waypoint injection replaces the sub-grid escape pre-pass.
+        # When True, the pathfinder injects off-grid pad positions directly into
+        # the A* search graph, eliminating the need for escape segments.
+        # The sub-grid pre-pass is retained as a fallback when this is False.
+        self.use_waypoint_injection: bool = True
+
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
         # routing so the SubGridRouter uses fine grid resolution for pads
@@ -1256,7 +1262,8 @@ class Autorouter:
         routes.extend(new_routes)
 
         # Issue #1603: Retry with sub-grid escape on PIN_ACCESS failure
-        if not _subgrid_retry and not new_routes:
+        # Issue #2330: Skip sub-grid retry when waypoint injection is active
+        if not _subgrid_retry and not new_routes and not self.use_waypoint_injection:
             # Check if this net has a PIN_ACCESS failure
             has_pin_access_failure = any(
                 f.net == net and f.failure_cause == FailureCause.PIN_ACCESS
@@ -4959,11 +4966,19 @@ class Autorouter:
         between main grid points, and unblocks grid cells at escape
         endpoints. This is a no-op for boards with no off-grid pads.
 
+        Issue #2330: When waypoint injection is enabled, the pathfinder
+        handles off-grid pads directly via injected waypoint nodes in the
+        A* search graph.  The sub-grid pre-pass is skipped entirely.
+
         Returns:
             List of escape Route objects (empty if no off-grid pads)
 
         Issue #1603: Wire sub-grid routing into default route_all pipeline.
         """
+        # Issue #2330: Skip sub-grid pre-pass when waypoint injection is active
+        if self.use_waypoint_injection:
+            return []
+
         subgrid_result = self.prepare_subgrid_escapes()
 
         if not (subgrid_result.analysis and subgrid_result.analysis.has_off_grid_pads):
