@@ -1,17 +1,29 @@
 (version 1)
-(rule "Trace Width"
+(rule "Trace Width - OSHPark"
+  (condition "A.Type == 'track'")
   (constraint track_width (min 0.127mm)))
-(rule "Clearance"
+(rule "Clearance - OSHPark"
   (constraint clearance (min 0.127mm)))
-(rule "Via Drill"
+(rule "Via Drill - OSHPark"
+  (condition "A.Type == 'via'")
   (constraint hole_size (min 0.254mm)))
-(rule "Via Diameter"
+(rule "Via Diameter - OSHPark"
+  (condition "A.Type == 'via'")
   (constraint via_diameter (min 0.508mm)))
-(rule "Annular Ring"
+(rule "Annular Ring - OSHPark"
   (constraint annular_width (min 0.127mm)))
-(rule "Copper to Edge"
+(rule "Copper to Edge - OSHPark"
   (constraint edge_clearance (min 0.381mm)))
-(rule "Hole to Edge"
-  (constraint hole_to_hole (min 0.381mm)))
-(rule "Silkscreen Width"
-  (constraint silk_clearance (min 0.127mm)))
+(rule "Hole to Edge - OSHPark"
+  (condition "A.Type == 'via' || A.Type == 'pad'")
+  (constraint hole_clearance (min 0.381mm)))
+(rule "Silkscreen Width - OSHPark"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_thickness (min 0.127mm)))
+(rule "Silkscreen Height - OSHPark"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_height (min 0.762mm)))
+(rule "Solder Mask Clearance - OSHPark"
+  (constraint solder_mask_margin (min 0.05mm)))
+(rule "Solder Mask Dam - OSHPark"
+  (constraint physical_hole_clearance (min 0.102mm)))

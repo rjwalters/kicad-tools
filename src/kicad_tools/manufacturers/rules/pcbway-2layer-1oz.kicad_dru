@@ -1,17 +1,29 @@
 (version 1)
-(rule "Trace Width"
+(rule "Trace Width - PCBWay"
+  (condition "A.Type == 'track'")
   (constraint track_width (min 0.127mm)))
-(rule "Clearance"
+(rule "Clearance - PCBWay"
   (constraint clearance (min 0.127mm)))
-(rule "Via Drill"
+(rule "Via Drill - PCBWay"
+  (condition "A.Type == 'via'")
   (constraint hole_size (min 0.2mm)))
-(rule "Via Diameter"
+(rule "Via Diameter - PCBWay"
+  (condition "A.Type == 'via'")
   (constraint via_diameter (min 0.4mm)))
-(rule "Annular Ring"
-  (constraint annular_width (min 0.1mm)))
-(rule "Copper to Edge"
+(rule "Annular Ring - PCBWay"
+  (constraint annular_width (min 0.15mm)))
+(rule "Copper to Edge - PCBWay"
   (constraint edge_clearance (min 0.25mm)))
-(rule "Hole to Edge"
-  (constraint hole_to_hole (min 0.4mm)))
-(rule "Silkscreen Width"
-  (constraint silk_clearance (min 0.15mm)))
+(rule "Hole to Edge - PCBWay"
+  (condition "A.Type == 'via' || A.Type == 'pad'")
+  (constraint hole_clearance (min 0.4mm)))
+(rule "Silkscreen Width - PCBWay"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_thickness (min 0.15mm)))
+(rule "Silkscreen Height - PCBWay"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_height (min 0.8mm)))
+(rule "Solder Mask Clearance - PCBWay"
+  (constraint solder_mask_margin (min 0.05mm)))
+(rule "Solder Mask Dam - PCBWay"
+  (constraint physical_hole_clearance (min 0.1mm)))

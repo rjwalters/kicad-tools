@@ -352,9 +352,9 @@ class TestDRUFiles:
             assert version is not None, f"{dru_file} missing version"
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
-            # Check for 8 rules (standard set)
+            # Check for 11 rules (standard set with condition expressions)
             rules = sexp.find_children("rule")
-            assert len(rules) == 8, f"{dru_file} should have 8 rules, has {len(rules)}"
+            assert len(rules) == 11, f"{dru_file} should have 11 rules, has {len(rules)}"
 
 
 class TestMfrCLICommands:
@@ -636,3 +636,137 @@ class TestDRUFiles2Layer:
         assert dru_trace_width == pytest.approx(rules.min_trace_width_mm), (
             f"Track width mismatch: DRU={dru_trace_width}, Python={rules.min_trace_width_mm}"
         )
+
+
+class TestDruGenerator:
+    """Tests for the centralized DRU generator."""
+
+    def test_generate_dru_returns_valid_content(self):
+        """Test that generate_dru produces valid KiCad DRU content."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        assert content.startswith("(version 1)")
+        assert "(rule" in content
+
+    def test_generate_dru_has_11_rules(self):
+        """Test that generate_dru produces all 11 rules."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        rule_count = content.count("(rule ")
+        assert rule_count == 11, f"Expected 11 rules, got {rule_count}"
+
+    def test_generate_dru_has_condition_expressions(self):
+        """Test that generated DRU includes condition expressions."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        # Via Drill should be scoped to vias
+        assert "A.Type == 'via'" in content
+        # Trace Width should be scoped to tracks
+        assert "A.Type == 'track'" in content
+        # Silkscreen rules should be scoped to silk layer
+        assert "A.Layer == 'F.Silkscreen'" in content
+
+    def test_generate_dru_covers_solder_mask_rules(self):
+        """Test that solder mask dam and clearance rules are present."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        assert "solder_mask_margin" in content
+        assert "physical_hole_clearance" in content
+        assert f"{rules.min_solder_mask_clearance_mm}mm" in content
+        assert f"{rules.min_solder_mask_dam_mm}mm" in content
+
+    def test_generate_dru_covers_silkscreen_height(self):
+        """Test that silkscreen height rule is present."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        assert "text_height" in content
+        assert f"{rules.min_silkscreen_height_mm}mm" in content
+
+    def test_generate_dru_without_manufacturer_name(self):
+        """Test generate_dru works without a manufacturer name."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        rules = DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.127,
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        content = generate_dru(rules)
+
+        assert "(version 1)" in content
+        assert '"Trace Width"' in content
+        # No manufacturer suffix
+        assert " - " not in content.split("\n")[1]
+
+    def test_generate_dru_values_match_rules(self):
+        """Test that generated DRU values match the DesignRules input."""
+        import re
+
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("pcbway")
+        rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="PCBWay")
+
+        # Check track_width
+        match = re.search(r"track_width \(min ([\d.]+)mm\)", content)
+        assert match
+        assert float(match.group(1)) == pytest.approx(rules.min_trace_width_mm)
+
+        # Check clearance
+        match = re.search(r"clearance \(min ([\d.]+)mm\)", content)
+        assert match
+        assert float(match.group(1)) == pytest.approx(rules.min_clearance_mm)
+
+        # Check via_diameter
+        match = re.search(r"via_diameter \(min ([\d.]+)mm\)", content)
+        assert match
+        assert float(match.group(1)) == pytest.approx(rules.min_via_diameter_mm)
+
+    def test_generate_dru_all_manufacturers(self):
+        """Test generate_dru works for all supported manufacturers."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        for mfr_id in get_manufacturer_ids():
+            profile = get_profile(mfr_id)
+            rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+            content = generate_dru(rules, manufacturer_name=profile.name)
+            assert "(version 1)" in content, f"Failed for {mfr_id}"
+            assert content.count("(rule ") == 11, f"Wrong rule count for {mfr_id}"
+
+    def test_static_dru_files_match_dynamic_generation(self):
+        """Test that static .kicad_dru files match dynamic generation output."""
+        from pathlib import Path
+
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        expected = generate_dru(rules, manufacturer_name=profile.name)
+
+        actual = (rules_dir / "jlcpcb-2layer-1oz.kicad_dru").read_text()
+        assert actual == expected, "Static DRU file does not match dynamic generation"

@@ -1,17 +1,29 @@
 (version 1)
-(rule "Trace Width"
-  (constraint track_width (min 0.127mm)))
-(rule "Clearance"
-  (constraint clearance (min 0.127mm)))
-(rule "Via Drill"
+(rule "Trace Width - FlashPCB"
+  (condition "A.Type == 'track'")
+  (constraint track_width (min 0.13mm)))
+(rule "Clearance - FlashPCB"
+  (constraint clearance (min 0.13mm)))
+(rule "Via Drill - FlashPCB"
+  (condition "A.Type == 'via'")
   (constraint hole_size (min 0.2mm)))
-(rule "Via Diameter"
-  (constraint via_diameter (min 0.45mm)))
-(rule "Annular Ring"
-  (constraint annular_width (min 0.127mm)))
-(rule "Copper to Edge"
-  (constraint edge_clearance (min 0.254mm)))
-(rule "Hole to Edge"
-  (constraint hole_to_hole (min 0.254mm)))
-(rule "Silkscreen Width"
-  (constraint silk_clearance (min 0.127mm)))
+(rule "Via Diameter - FlashPCB"
+  (condition "A.Type == 'via'")
+  (constraint via_diameter (min 0.86mm)))
+(rule "Annular Ring - FlashPCB"
+  (constraint annular_width (min 0.33mm)))
+(rule "Copper to Edge - FlashPCB"
+  (constraint edge_clearance (min 1.0mm)))
+(rule "Hole to Edge - FlashPCB"
+  (condition "A.Type == 'via' || A.Type == 'pad'")
+  (constraint hole_clearance (min 1.0mm)))
+(rule "Silkscreen Width - FlashPCB"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_thickness (min 0.08mm)))
+(rule "Silkscreen Height - FlashPCB"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_height (min 0.8mm)))
+(rule "Solder Mask Clearance - FlashPCB"
+  (constraint solder_mask_margin (min 0.05mm)))
+(rule "Solder Mask Dam - FlashPCB"
+  (constraint physical_hole_clearance (min 0.13mm)))

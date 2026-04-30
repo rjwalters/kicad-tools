@@ -464,20 +464,9 @@ def cmd_export(args):
             print(json.dumps(data, indent=2))
 
     elif args.format == "kicad_dru":
-        dru_content = f"""(version 1)
-(rule "Trace Width - {profile.name}"
-  (constraint track_width (min {rules.min_trace_width_mm}mm)))
-(rule "Clearance - {profile.name}"
-  (constraint clearance (min {rules.min_clearance_mm}mm)))
-(rule "Via Drill - {profile.name}"
-  (constraint hole_size (min {rules.min_via_drill_mm}mm)))
-(rule "Via Diameter - {profile.name}"
-  (constraint via_diameter (min {rules.min_via_diameter_mm}mm)))
-(rule "Annular Ring - {profile.name}"
-  (constraint annular_width (min {rules.min_annular_ring_mm}mm)))
-(rule "Copper to Edge - {profile.name}"
-  (constraint edge_clearance (min {rules.min_copper_to_edge_mm}mm)))
-"""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        dru_content = generate_dru(rules, manufacturer_name=profile.name)
 
         if args.output:
             output_path = Path(args.output)

@@ -260,6 +260,8 @@ def cmd_find(args):
 
 def cmd_export_dru(args):
     """Export KiCad DRC rules file."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
@@ -268,25 +270,8 @@ def cmd_export_dru(args):
 
     rules = profile.get_design_rules(args.layers, args.copper)
 
-    # Generate .kicad_dru content
-    dru_content = f"""(version 1)
-(rule "Trace Width"
-  (constraint track_width (min {rules.min_trace_width_mm}mm)))
-(rule "Clearance"
-  (constraint clearance (min {rules.min_clearance_mm}mm)))
-(rule "Via Drill"
-  (constraint hole_size (min {rules.min_via_drill_mm}mm)))
-(rule "Via Diameter"
-  (constraint via_diameter (min {rules.min_via_diameter_mm}mm)))
-(rule "Annular Ring"
-  (constraint annular_width (min {rules.min_annular_ring_mm}mm)))
-(rule "Copper to Edge"
-  (constraint edge_clearance (min {rules.min_copper_to_edge_mm}mm)))
-(rule "Hole to Edge"
-  (constraint hole_to_hole (min {rules.min_hole_to_edge_mm}mm)))
-(rule "Silkscreen Width"
-  (constraint silk_clearance (min {rules.min_silkscreen_width_mm}mm)))
-"""
+    # Generate .kicad_dru content via shared generator
+    dru_content = generate_dru(rules, manufacturer_name=profile.name)
 
     # Output to specified path or current directory
     if args.output:
