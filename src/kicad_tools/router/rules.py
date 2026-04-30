@@ -156,6 +156,7 @@ class DesignRules:
     # ICs (0.5-0.65mm pitch) to be routed without requiring a global fine grid.
     subgrid_routing: bool = False  # Enable sub-grid escape routing
     subgrid_escape_radius: int = 3  # Grid cells to search for escape endpoint
+    subgrid_clearance_factor: float = 0.5  # Relaxed clearance multiplier for sub-grid escape Phase 3
 
     # Constraint-aware net ordering (Issue #1020)
     # Routes highly-constrained nets first to give them access to routing resources

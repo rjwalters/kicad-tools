@@ -1226,6 +1226,11 @@ class EscapeRouter:
         only need to clear the pad congestion zone. Using the full trace width
         would violate clearances between adjacent fine-pitch pads.
 
+        Issue #2319: Escape segments are validated against neighboring pad
+        copper.  If a segment would violate clearance against an adjacent
+        pad, the escape for that pin is omitted (deferred to the main router).
+        The escape router also uses ``fine_pitch_clearance`` when configured.
+
         Args:
             pads: Row of pads sorted by position along the row
             direction: Primary escape direction (perpendicular to row)
@@ -1236,6 +1241,13 @@ class EscapeRouter:
         """
         escapes: list[EscapeRoute] = []
         dx, dy = self._direction_to_vector(direction)
+
+        # Issue #2319: Use per-component clearance (respects fine_pitch_clearance)
+        # instead of the raw trace_clearance everywhere.
+        ref = pads[0].ref if pads else ""
+        effective_clearance = self.rules.get_clearance_for_component(
+            ref, pin_pitch=package.pin_pitch,
+        )
 
         # Issue #1778: Use min_trace_width for escape segments in fine-pitch
         # packages. The escape segments are short and only need to clear the
@@ -1249,7 +1261,7 @@ class EscapeRouter:
 
         # For fine-pitch, use minimal escape distance
         # Vias placed just outside pad clearance zone
-        pad_clearance = self.rules.trace_clearance + package.pin_pitch / 4
+        pad_clearance = effective_clearance + package.pin_pitch / 4
         via_offset = pad_clearance + self.rules.via_diameter / 2
 
         # Issue #1784: Compute lateral fan-out offset for odd-pin vias when
@@ -1261,14 +1273,16 @@ class EscapeRouter:
         # gap = pin_pitch - escape_width.  When that gap is less than
         # trace_clearance we must shift the odd-pin via laterally.
         lateral_clearance = package.pin_pitch - escape_width
-        if lateral_clearance < self.rules.trace_clearance:
-            lateral_offset = (self.rules.trace_clearance - lateral_clearance + escape_width) / 2
+        if lateral_clearance < effective_clearance:
+            lateral_offset = (effective_clearance - lateral_clearance + escape_width) / 2
         else:
             lateral_offset = 0.0
 
         # Row direction unit vector (perpendicular to escape direction).
         # Sign chosen so that a positive offset moves "forward" along the row.
         row_dx, row_dy = -dy, dx
+
+        skipped_count = 0
 
         for i, pad in enumerate(pads):
             # Determine if this pin needs layer transition
@@ -1296,26 +1310,38 @@ class EscapeRouter:
 
                 # Escape point is beyond the via on the escape layer,
                 # continuing inward (same direction as via placement).
-                escape_x = via_x - dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
-                escape_y = via_y - dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                escape_x = via_x - dx * (self.rules.via_diameter / 2 + effective_clearance)
+                escape_y = via_y - dy * (self.rules.via_diameter / 2 + effective_clearance)
 
                 # Create segments
                 segments: list[Segment] = []
 
                 # Segment from pad to via on surface layer (may be diagonal
                 # when lateral_offset > 0)
-                segments.append(
-                    Segment(
-                        x1=pad.x,
-                        y1=pad.y,
-                        x2=via_x,
-                        y2=via_y,
-                        width=escape_width,
-                        layer=pad.layer,
-                        net=pad.net,
-                        net_name=pad.net_name,
-                    )
+                surface_seg = Segment(
+                    x1=pad.x,
+                    y1=pad.y,
+                    x2=via_x,
+                    y2=via_y,
+                    width=escape_width,
+                    layer=pad.layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
                 )
+                segments.append(surface_seg)
+
+                # Issue #2319: Check segment-to-pad clearance for the surface
+                # segment against neighboring pads before committing.
+                if self._segment_violates_pad_clearance(
+                    surface_seg, i, pads, effective_clearance,
+                ):
+                    skipped_count += 1
+                    logger.debug(
+                        "Escape for pad %s (pin %d) skipped: segment-to-pad "
+                        "clearance violation (deferred to main router)",
+                        pad.net_name, i,
+                    )
+                    continue
 
                 # Create via
                 via = Via(
@@ -1373,6 +1399,18 @@ class EscapeRouter:
                     net_name=pad.net_name,
                 )
 
+                # Issue #2319: Check segment-to-pad clearance before committing.
+                if self._segment_violates_pad_clearance(
+                    segment, i, pads, effective_clearance,
+                ):
+                    skipped_count += 1
+                    logger.debug(
+                        "Escape for pad %s (pin %d) skipped: segment-to-pad "
+                        "clearance violation (deferred to main router)",
+                        pad.net_name, i,
+                    )
+                    continue
+
                 escapes.append(
                     EscapeRoute(
                         pad=pad,
@@ -1386,10 +1424,94 @@ class EscapeRouter:
                     )
                 )
 
+        if skipped_count:
+            logger.info(
+                "Escape routing for %s: %d of %d pins deferred to main router "
+                "due to segment-to-pad clearance violations",
+                ref, skipped_count, len(pads),
+            )
+
         # Issue #1784: Post-generation pairwise clearance validation
-        self._validate_escape_clearances(escapes, self.rules.trace_clearance)
+        # Issue #2319: Use effective_clearance (respects fine_pitch_clearance)
+        self._validate_escape_clearances(escapes, effective_clearance, pads)
 
         return escapes
+
+    @staticmethod
+    def _segment_to_pad_edge_gap(seg: Segment, pad: Pad) -> float:
+        """Return the minimum edge-to-edge gap between a segment and a pad.
+
+        The pad is modelled as a rectangle centred at (pad.x, pad.y) with
+        half-extents (pad.width/2, pad.height/2).  The segment centre-line
+        runs from (seg.x1, seg.y1) to (seg.x2, seg.y2).
+
+        The closest distance from the segment centre-line to the pad
+        rectangle boundary is computed, then both the segment half-width
+        and pad half-extent (in the direction of the closest approach) are
+        subtracted to yield the edge-to-edge gap.
+
+        A negative return value means the segment copper overlaps the pad
+        copper.
+        """
+        # Closest point on the segment to the pad centre
+        sx, sy = seg.x2 - seg.x1, seg.y2 - seg.y1
+        seg_len_sq = sx * sx + sy * sy
+        if seg_len_sq < 1e-12:
+            # Degenerate segment (zero length)
+            cpx, cpy = seg.x1, seg.y1
+        else:
+            t = max(0.0, min(1.0,
+                ((pad.x - seg.x1) * sx + (pad.y - seg.y1) * sy) / seg_len_sq))
+            cpx = seg.x1 + t * sx
+            cpy = seg.y1 + t * sy
+
+        # Distance from closest point on segment to the pad rectangle edge.
+        # The pad is axis-aligned (no rotation support needed for SOP pads).
+        half_w = pad.width / 2
+        half_h = pad.height / 2
+        dx_abs = abs(cpx - pad.x)
+        dy_abs = abs(cpy - pad.y)
+
+        # Signed distance from pad rectangle (negative = inside)
+        outside_x = max(0.0, dx_abs - half_w)
+        outside_y = max(0.0, dy_abs - half_h)
+
+        if outside_x == 0.0 and outside_y == 0.0:
+            # Point is inside the pad rectangle
+            rect_dist = -min(half_w - dx_abs, half_h - dy_abs)
+        else:
+            rect_dist = math.sqrt(outside_x * outside_x + outside_y * outside_y)
+
+        # Edge-to-edge gap = centre-to-rect distance minus half-segment-width
+        return rect_dist - seg.width / 2
+
+    def _segment_violates_pad_clearance(
+        self,
+        seg: Segment,
+        pad_index: int,
+        pads: list[Pad],
+        min_clearance: float,
+    ) -> bool:
+        """Check whether *seg* violates clearance against neighboring pads.
+
+        Only checks the immediate neighbors (pad_index-1 and pad_index+1) in
+        the row, since those are the pads most likely to be violated.  The
+        segment's own pad (at pad_index) is skipped because the segment
+        originates from it.
+
+        Returns True if any neighbor pad is violated.
+        """
+        for neighbor_idx in (pad_index - 1, pad_index + 1):
+            if neighbor_idx < 0 or neighbor_idx >= len(pads):
+                continue
+            neighbor = pads[neighbor_idx]
+            # Only check pads on the same layer as the segment
+            if neighbor.layer != seg.layer:
+                continue
+            gap = self._segment_to_pad_edge_gap(seg, neighbor)
+            if gap < min_clearance - 1e-6:
+                return True
+        return False
 
     @staticmethod
     def _min_segment_distance(s1: Segment, s2: Segment) -> float:
@@ -1432,6 +1554,7 @@ class EscapeRouter:
         self,
         escapes: list[EscapeRoute],
         min_clearance: float,
+        row_pads: list[Pad] | None = None,
     ) -> None:
         """Validate pairwise clearance between consecutive escape routes.
 
@@ -1439,7 +1562,11 @@ class EscapeRouter:
         surface-layer segments maintain at least *min_clearance* edge-to-edge
         distance.  Logs a warning for any violating pair so that regressions
         are visible without silently producing DRC violations.
+
+        Issue #2319: When *row_pads* is provided, also validates each
+        segment against neighboring pad copper (segment-to-pad clearance).
         """
+        # Segment-to-segment validation (original)
         for idx in range(len(escapes) - 1):
             e1 = escapes[idx]
             e2 = escapes[idx + 1]
@@ -1459,6 +1586,36 @@ class EscapeRouter:
                             edge_gap,
                             min_clearance,
                         )
+
+        # Issue #2319: Segment-to-pad validation
+        if row_pads:
+            # Build a quick lookup: pad -> index in row
+            pad_indices: dict[int, int] = {id(p): idx for idx, p in enumerate(row_pads)}
+            for escape in escapes:
+                pad_idx = pad_indices.get(id(escape.pad))
+                if pad_idx is None:
+                    continue
+                for seg in escape.segments:
+                    # Check against neighboring pads (not the escape's own pad)
+                    for neighbor_offset in (-1, 1):
+                        ni = pad_idx + neighbor_offset
+                        if ni < 0 or ni >= len(row_pads):
+                            continue
+                        neighbor = row_pads[ni]
+                        if neighbor.layer != seg.layer:
+                            continue
+                        gap = self._segment_to_pad_edge_gap(seg, neighbor)
+                        if gap < min_clearance - 1e-6:
+                            logger.warning(
+                                "Escape segment-to-pad clearance violation: "
+                                "segment of %s vs pad %s on %s: "
+                                "gap=%.4fmm (required %.4fmm)",
+                                escape.pad.net_name,
+                                neighbor.net_name,
+                                seg.layer.kicad_name,
+                                gap,
+                                min_clearance,
+                            )
 
     def _escape_sop_staggered(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate escape routes with staggered vias for SOP/TSSOP/SOIC packages.

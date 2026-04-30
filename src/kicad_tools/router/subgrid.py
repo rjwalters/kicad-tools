@@ -1044,22 +1044,25 @@ class SubGridRouter:
 
         # --- Phase 3: Relaxed clearance mode ---
         # For escape segments specifically, reduce the clearance requirement
-        # to 50% of the design rule.  Escape segments are very short (sub-
-        # grid distance) and connect directly to pad copper, so slightly
-        # reduced clearance is acceptable and preferable to no connection.
-        relaxed_clearance = self.rules.trace_clearance * 0.5
+        # by the configurable subgrid_clearance_factor.  Escape segments are
+        # very short (sub-grid distance) and connect directly to pad copper,
+        # so slightly reduced clearance is acceptable and preferable to no
+        # connection.  The factor is configurable via DesignRules to allow
+        # boards with tight-pitch packages to tighten or loosen the relaxation.
+        factor = self.rules.subgrid_clearance_factor
+        relaxed_clearance = self.rules.trace_clearance * factor
 
         # Re-collect candidates with relaxed clearance for the hard-reject
         # filter so previously rejected candidates are now included.
         relaxed_candidates = self._collect_coarse_candidates(
             sgp, expanded_radius, check_layers, width,
-            min_clearance_factor=0.5,
+            min_clearance_factor=factor,
         )
         if fine_res is not None and fine_res < self.grid.resolution:
             # Generate fine-grid candidates with relaxed clearance
             relaxed_candidates.extend(
                 self._generate_fine_grid_candidates(
-                    sgp, fine_res, min_clearance_factor=0.5,
+                    sgp, fine_res, min_clearance_factor=factor,
                 )
             )
 
@@ -1141,7 +1144,7 @@ class SubGridRouter:
         # Collect intermediate candidates: grid points near the pad that
         # might be accessible even with clearance issues (we use relaxed
         # clearance for the first hop).
-        relaxed_clearance = self.rules.trace_clearance * 0.5
+        relaxed_clearance = self.rules.trace_clearance * self.rules.subgrid_clearance_factor
 
         # Search for intermediate points (within normal radius)
         for dy in range(-radius, radius + 1):
