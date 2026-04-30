@@ -3133,8 +3133,26 @@ def main(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
         )
         if fine_pitch_report.has_warnings:
-            flush_print("\n--- Fine-Pitch Component Analysis ---")
-            show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
+            if router.use_waypoint_injection:
+                # Waypoint injection handles off-grid pads by injecting their
+                # exact positions into the A* search graph, so the grid-alignment
+                # warnings are misleading.  Show a brief summary instead.
+                if fine_pitch_report.total_off_grid > 0:
+                    flush_print(
+                        f"\n  {fine_pitch_report.total_off_grid} pads off-grid; "
+                        "waypoint injection will handle pad connections"
+                    )
+                # Still show full per-component detail at verbose (-v)
+                if args.verbose:
+                    flush_print("\n--- Fine-Pitch Component Analysis (verbose) ---")
+                    show_fine_pitch_warnings(
+                        fine_pitch_report, quiet=quiet, verbose=True
+                    )
+            else:
+                flush_print("\n--- Fine-Pitch Component Analysis ---")
+                show_fine_pitch_warnings(
+                    fine_pitch_report, quiet=quiet, verbose=args.verbose
+                )
 
     # Show pre-route RUDY congestion estimation (Issue #2278)
     if getattr(args, "show_congestion", False):
