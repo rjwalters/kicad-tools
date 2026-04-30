@@ -410,9 +410,14 @@ class TwoPhaseRouter:
 
                 neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-                for net in nets_to_reroute:
+                for i, net in enumerate(nets_to_reroute):
                     if check_timeout():
                         break
+                    net_name = self.net_names.get(net, f"Net {net}")
+                    flush_print(
+                        f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: "
+                        f"{net_name}... ({elapsed_str()})"
+                    )
                     routes = self._route_net_with_corridor(net, present_factor, per_net_timeout=per_net_timeout)
                     if routes:
                         net_routes[net] = routes
