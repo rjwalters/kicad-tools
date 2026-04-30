@@ -200,6 +200,123 @@ class Router:
         self._via_diag_exclusion_blocked: int = 0
         self._via_diag_eligible: int = 0
 
+        # Issue #2330: Waypoint injection for off-grid pad routing.
+        # Maps virtual (negative) grid indices to exact world coordinates.
+        # Populated per-route call; cleared at the start of each route.
+        self._waypoint_world_coords: dict[tuple[int, int], tuple[float, float]] = {}
+        # Counter for assigning unique negative waypoint indices.
+        self._waypoint_id_counter: int = 0
+
+    # ------------------------------------------------------------------
+    # Waypoint helpers (Issue #2330)
+    # ------------------------------------------------------------------
+
+    def _is_pad_off_grid(self, pad: Pad) -> bool:
+        """Check whether a pad's center falls off the routing grid.
+
+        A pad is considered off-grid when the distance from its center to
+        the nearest grid point exceeds ``resolution / 4`` in either axis.
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+        tolerance = self.grid.resolution / 4
+        return abs(pad.x - snap_x) > tolerance or abs(pad.y - snap_y) > tolerance
+
+    def _create_waypoint(self, pad: Pad) -> tuple[int, int]:
+        """Allocate a unique virtual grid index pair for *pad*.
+
+        The returned ``(wx, wy)`` are negative integers that will never
+        collide with real grid indices (which are >= 0).  The mapping
+        from ``(wx, wy)`` to the pad's world coordinates is stored in
+        ``self._waypoint_world_coords``.
+        """
+        self._waypoint_id_counter -= 1
+        wp_id = self._waypoint_id_counter
+        # Use the same negative value for both axes — uniqueness comes
+        # from the single counter, and the pair is used as a dict key.
+        key = (wp_id, wp_id)
+        self._waypoint_world_coords[key] = (pad.x, pad.y)
+        return key
+
+    def _waypoint_grid_edges(
+        self, wp_key: tuple[int, int], pad: Pad, net: int, allow_sharing: bool = False,
+    ) -> list[tuple[int, int, float]]:
+        """Return grid-cell neighbors reachable from a waypoint node.
+
+        For each of the nearest grid cells (within a 3-cell radius of the
+        pad's grid-snapped position), compute the Euclidean edge cost from
+        the waypoint's world position to the grid cell's world position.
+        Cells that are blocked by other nets are skipped unless they fall
+        within the pad's metal area.
+
+        Returns:
+            List of ``(gx, gy, edge_cost)`` tuples.
+        """
+        wx, wy = self._waypoint_world_coords[wp_key]
+        center_gx, center_gy = self.grid.world_to_grid(wx, wy)
+        radius = 3  # search radius in grid cells
+        edges: list[tuple[int, int, float]] = []
+
+        # Precompute pad metal bounds for same-net passability check.
+        metal_bounds = self._get_pad_metal_bounds(pad)
+        mgx1, mgy1, mgx2, mgy2 = metal_bounds
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                gx = center_gx + dx
+                gy = center_gy + dy
+                if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+                    continue
+
+                # Check accessibility on any layer the pad can use
+                if pad.through_hole:
+                    check_layers = self.grid.get_routable_indices()
+                else:
+                    check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+                accessible = False
+                for li in check_layers:
+                    cell = self.grid.grid[li][gy][gx]
+                    # Inside pad metal — always accessible
+                    if mgx1 <= gx <= mgx2 and mgy1 <= gy <= mgy2:
+                        accessible = True
+                        break
+                    if not cell.blocked:
+                        accessible = True
+                        break
+                    if cell.net == net:
+                        accessible = True
+                        break
+                    # Clearance-zone cell (not actual copper) — accessible
+                    if not cell.pad_blocked:
+                        accessible = True
+                        break
+                if not accessible:
+                    continue
+
+                # Euclidean distance in world units
+                gw_x, gw_y = self.grid.grid_to_world(gx, gy)
+                dist = math.sqrt((wx - gw_x) ** 2 + (wy - gw_y) ** 2)
+                # Convert to grid-cell cost units
+                edge_cost = dist / self.grid.resolution
+                edges.append((gx, gy, edge_cost))
+
+        return edges
+
+    def _waypoint_to_world(self, x: int, y: int) -> tuple[float, float] | None:
+        """Resolve a node's grid indices to world coordinates.
+
+        If ``(x, y)`` is a waypoint (negative indices), return the stored
+        world position.  Otherwise return ``None`` (caller should use
+        ``grid_to_world``).
+        """
+        key = (x, y)
+        return self._waypoint_world_coords.get(key)
+
+    def _is_waypoint(self, x: int, y: int) -> bool:
+        """Return True if ``(x, y)`` represents a waypoint node."""
+        return x < 0 and y < 0 and (x, y) in self._waypoint_world_coords
+
     def add_routed_segments(self, segments: list[Segment]) -> None:
         """Add committed route segments for crossing detection.
 
@@ -1240,6 +1357,10 @@ class Router:
         # Keep cache valid within this route call for same-position checks
         self.clear_via_cache()
 
+        # Issue #2330: Reset waypoint state for this route call
+        self._waypoint_world_coords.clear()
+        self._waypoint_id_counter = 0
+
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
@@ -1357,6 +1478,39 @@ class Router:
                     heapq.heappush(open_set, start_node)
                     g_scores[(sgx, sgy, sl)] = 0
 
+        # Issue #2330: Waypoint injection for off-grid start pad.
+        # Inject the exact pad world position as a waypoint node with edges
+        # to nearby grid cells so A* can route from the precise pad location.
+        start_wp_key: tuple[int, int] | None = None
+        if self._is_pad_off_grid(start):
+            start_wp_key = self._create_waypoint(start)
+            wp_edges = self._waypoint_grid_edges(
+                start_wp_key, start, start.net, allow_sharing,
+            )
+            for gx, gy, edge_cost in wp_edges:
+                for sl in start_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), heuristic_context)
+                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, sl)
+                    neighbor_key = (gx, gy, sl)
+                    if neighbor_key not in g_scores or wp_g < g_scores[neighbor_key]:
+                        g_scores[neighbor_key] = wp_g
+                        heapq.heappush(open_set, wp_node)
+
+        # Issue #2330: Waypoint for off-grid end pad — used in goal check.
+        end_wp_key: tuple[int, int] | None = None
+        if self._is_pad_off_grid(end):
+            end_wp_key = self._create_waypoint(end)
+            end_wp_grid_edges = self._waypoint_grid_edges(
+                end_wp_key, end, start.net, allow_sharing,
+            )
+            # Build set of grid cells reachable from end waypoint for goal check
+            end_wp_goal_cells: set[tuple[int, int]] = {
+                (gx, gy) for gx, gy, _cost in end_wp_grid_edges
+            }
+        else:
+            end_wp_goal_cells = set()
+
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
 
@@ -1382,11 +1536,18 @@ class Router:
 
             # Goal check - accept any cell within end pad's metal area (Issue #956)
             # This handles off-grid pads where the center doesn't align with routing grid
-            if (
+            # Issue #2330: Also accept cells reachable from the end pad's waypoint
+            is_in_end_metal = (
                 end_metal_gx1 <= current.x <= end_metal_gx2
                 and end_metal_gy1 <= current.y <= end_metal_gy2
                 and current.layer in end_layers
-            ):
+            )
+            is_end_waypoint_reachable = (
+                end_wp_goal_cells
+                and (current.x, current.y) in end_wp_goal_cells
+                and current.layer in end_layers
+            )
+            if is_in_end_metal or is_end_waypoint_reachable:
                 route = self._reconstruct_route(current, start, end)
                 if route is not None:
                     return route
@@ -2347,6 +2508,10 @@ class Router:
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         self.clear_via_cache()
 
+        # Issue #2330: Reset waypoint state for this route call
+        self._waypoint_world_coords.clear()
+        self._waypoint_id_counter = 0
+
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
@@ -2443,6 +2608,22 @@ class Router:
                     forward_g[key] = 0
                     forward_nodes[key] = node
 
+        # Issue #2330: Waypoint injection for off-grid start pad (bidirectional)
+        if self._is_pad_off_grid(start):
+            bidir_start_wp = self._create_waypoint(start)
+            for gx, gy, edge_cost in self._waypoint_grid_edges(
+                bidir_start_wp, start, start.net, allow_sharing,
+            ):
+                for sl in start_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), forward_context)
+                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, sl)
+                    fkey = (gx, gy, sl)
+                    if fkey not in forward_g or wp_g < forward_g[fkey]:
+                        forward_g[fkey] = wp_g
+                        forward_nodes[fkey] = wp_node
+                        heapq.heappush(forward_open, wp_node)
+
         # Initialize backward search (end -> start)
         # Issue #977: Initialize from ALL cells within end pad's metal area
         backward_open: list[AStarNode] = []
@@ -2459,6 +2640,22 @@ class Router:
                     key = (egx, egy, el)
                     backward_g[key] = 0
                     backward_nodes[key] = node
+
+        # Issue #2330: Waypoint injection for off-grid end pad (bidirectional)
+        if self._is_pad_off_grid(end):
+            bidir_end_wp = self._create_waypoint(end)
+            for gx, gy, edge_cost in self._waypoint_grid_edges(
+                bidir_end_wp, end, end.net, allow_sharing,
+            ):
+                for el in end_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, el, (0, 0), backward_context)
+                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, el)
+                    bkey = (gx, gy, el)
+                    if bkey not in backward_g or wp_g < backward_g[bkey]:
+                        backward_g[bkey] = wp_g
+                        backward_nodes[bkey] = wp_node
+                        heapq.heappush(backward_open, wp_node)
 
         # Best meeting point tracking
         best_path_cost = float("inf")
