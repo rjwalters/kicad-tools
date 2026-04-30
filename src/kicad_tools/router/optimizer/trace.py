@@ -48,9 +48,9 @@ class TraceOptimizer:
         optimizer = TraceOptimizer()
         optimized_route = optimizer.optimize_route(route)
 
-        # Optimize with collision checking
-        from kicad_tools.router import GridCollisionChecker
-        checker = GridCollisionChecker(grid)
+        # Optimize with collision checking (auto-selects best checker)
+        from kicad_tools.router.optimizer import make_collision_checker
+        checker = make_collision_checker(grid)
         optimizer = TraceOptimizer(collision_checker=checker)
         optimized_route = optimizer.optimize_route(route)
 

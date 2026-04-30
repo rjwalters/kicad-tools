@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .primitives import Pad
 
+from .geometry import point_to_segment_distance as _geom_point_to_seg_dist
 from .layers import Layer
 from .primitives import Route, Segment, Via
 from .rules import DesignRules, NetClassRouting
@@ -139,20 +140,7 @@ class Corridor:
         self, px: float, py: float, x1: float, y1: float, x2: float, y2: float
     ) -> float:
         """Calculate perpendicular distance from point to line segment."""
-        dx = x2 - x1
-        dy = y2 - y1
-        length_sq = dx * dx + dy * dy
-
-        if length_sq < 1e-10:
-            # Degenerate segment (point)
-            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-        # Project point onto line, clamped to segment
-        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-        proj_x = x1 + t * dx
-        proj_y = y1 + t * dy
-
-        return math.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
+        return _geom_point_to_seg_dist(px, py, x1, y1, x2, y2)
 
     @classmethod
     def from_waypoints(cls, waypoints: list[Waypoint], net: int, width: float) -> Corridor:

@@ -67,6 +67,10 @@ from kicad_tools.acceleration import (
 )
 from kicad_tools.exceptions import RoutingError
 
+from .geometry import (
+    point_to_segment_distance as _geom_point_to_seg_dist,
+    segment_to_segment_distance as _geom_seg_to_seg_dist,
+)
 from .layers import Layer, LayerStack
 from .primitives import Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
@@ -1305,28 +1309,7 @@ class RoutingGrid:
         y2: float,
     ) -> float:
         """Calculate the distance from a point to a line segment."""
-        import math
-
-        # Vector from p1 to p2
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # Length squared of segment
-        len_sq = dx * dx + dy * dy
-
-        if len_sq == 0:
-            # Segment is a point
-            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-        # Parameter t for the closest point on the line
-        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / len_sq))
-
-        # Closest point on segment
-        closest_x = x1 + t * dx
-        closest_y = y1 + t * dy
-
-        # Distance from point to closest point
-        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+        return _geom_point_to_seg_dist(px, py, x1, y1, x2, y2)
 
     def _segment_to_segment_distance(
         self,
@@ -1340,13 +1323,7 @@ class RoutingGrid:
         y4: float,
     ) -> float:
         """Calculate minimum distance between two line segments."""
-        # Check all four endpoint-to-segment distances
-        d1 = self._point_to_segment_distance(x1, y1, x3, y3, x4, y4)
-        d2 = self._point_to_segment_distance(x2, y2, x3, y3, x4, y4)
-        d3 = self._point_to_segment_distance(x3, y3, x1, y1, x2, y2)
-        d4 = self._point_to_segment_distance(x4, y4, x1, y1, x2, y2)
-
-        return min(d1, d2, d3, d4)
+        return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
 
     def compute_component_pitches(self) -> dict[str, float]:
         """Compute minimum pin pitch for each component.

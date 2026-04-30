@@ -25,6 +25,7 @@ from typing import Optional
 
 import numpy as np
 
+from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
@@ -397,24 +398,7 @@ class Router:
             True if the segments properly intersect (share an interior point).
             Shared endpoints are NOT counted as intersections.
         """
-
-        def cross(ox: int, oy: int, px: int, py: int, qx: int, qy: int) -> int:
-            """Sign of cross product (OP x OQ)."""
-            return (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
-
-        d1 = cross(bx1, by1, bx2, by2, ax1, ay1)
-        d2 = cross(bx1, by1, bx2, by2, ax2, ay2)
-        d3 = cross(ax1, ay1, ax2, ay2, bx1, by1)
-        d4 = cross(ax1, ay1, ax2, ay2, bx2, by2)
-
-        # Proper intersection: each segment straddles the line of the other
-        if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
-            (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)
-        ):
-            return True
-
-        # Collinear / endpoint touching are NOT counted as crossings
-        return False
+        return _geom_segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
 
     def _count_edge_crossings(
         self,

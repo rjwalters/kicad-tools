@@ -34,6 +34,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .core import Autorouter
 
+from .geometry import (
+    point_to_segment_distance as _geom_point_to_seg_dist,
+    segment_to_segment_distance as _geom_seg_to_seg_dist,
+)
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
 from .primitives import Route, Segment, Via
@@ -108,15 +112,7 @@ def _point_to_segment_distance(
     px: float, py: float, x1: float, y1: float, x2: float, y2: float
 ) -> float:
     """Minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
-    dx = x2 - x1
-    dy = y2 - y1
-    seg_len_sq = dx * dx + dy * dy
-    if seg_len_sq == 0:
-        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
-    cx = x1 + t * dx
-    cy = y1 + t * dy
-    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+    return _geom_point_to_seg_dist(px, py, x1, y1, x2, y2)
 
 
 def _segment_to_segment_distance(
@@ -124,11 +120,7 @@ def _segment_to_segment_distance(
     x3: float, y3: float, x4: float, y4: float,
 ) -> float:
     """Minimum distance between two line segments."""
-    d1 = _point_to_segment_distance(x1, y1, x3, y3, x4, y4)
-    d2 = _point_to_segment_distance(x2, y2, x3, y3, x4, y4)
-    d3 = _point_to_segment_distance(x3, y3, x1, y1, x2, y2)
-    d4 = _point_to_segment_distance(x4, y4, x1, y1, x2, y2)
-    return min(d1, d2, d3, d4)
+    return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
 
 
 # ---------------------------------------------------------------------------
