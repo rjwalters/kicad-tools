@@ -368,6 +368,7 @@ class CppPathfinder:
         start_layers: list[int] | None = None,
         end_layers: list[int] | None = None,
         per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route between two pads.
 
@@ -381,6 +382,8 @@ class CppPathfinder:
             weight: A* weight (1.0 = optimal, >1.0 = faster)
             start_layers: Valid start layers (for PTH pads)
             end_layers: Valid end layers (for PTH pads)
+            extra_goal_cells: Additional goal cells for early termination
+                (accepted for API compatibility but not yet used by C++ backend)
 
         Returns:
             Route object if successful, None if no path found
