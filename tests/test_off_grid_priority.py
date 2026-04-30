@@ -8,10 +8,8 @@ Verifies that:
 5. RSMT decomposition is disabled for nets with off-grid pads
 """
 
-import pytest
 
 from kicad_tools.router.core import Autorouter, _format_pad_ref
-from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
