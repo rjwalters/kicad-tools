@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import random
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 
 from kicad_tools.cli.progress import flush_print
 
+logger = logging.getLogger(__name__)
+
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import (
     HierarchicalRouter,
@@ -34,6 +37,12 @@ from .algorithms import (
     should_terminate_early,
 )
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
+from .cache import (
+    RoutingCache,
+    SubProblemSignature,
+    normalize_routes_to_origin,
+    transform_routes,
+)
 from .bus_routing import BusRouter
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
@@ -405,6 +414,14 @@ class Autorouter:
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
 
+        # Sub-problem pattern cache (Issue #2336)
+        # When set, enables cross-board reuse of routing solutions for
+        # recurring pad geometries (e.g. bypass caps, pull-up networks).
+        self._sub_problem_cache: RoutingCache | None = None
+        self._sub_problem_hits: int = 0
+        self._sub_problem_misses: int = 0
+        self._sub_problem_collisions: int = 0
+
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
 
@@ -436,6 +453,27 @@ class Autorouter:
         # Populated by register_block() when blocks have internal traces.
         # (Issue #1587)
         self._block_internal_connections: dict[str, list[dict]] = {}
+
+    def enable_sub_problem_cache(
+        self,
+        cache: RoutingCache | None = None,
+    ) -> None:
+        """Enable sub-problem pattern caching for recurring pad geometries.
+
+        Issue #2336: When enabled, the router computes a position/rotation-
+        invariant signature for each net's pad configuration before routing.
+        If a matching solution exists in the cache, it is transformed to the
+        current location and validated against the grid. On cache miss, the
+        freshly routed solution is stored for future reuse.
+
+        Args:
+            cache: RoutingCache instance to use. If None, creates a default
+                   cache using the standard cache directory.
+        """
+        if cache is None:
+            cache = RoutingCache()
+        self._sub_problem_cache = cache
+        logger.info("Sub-problem pattern cache enabled")
 
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
@@ -1109,6 +1147,25 @@ class Autorouter:
             return routes
 
         pad_objs = [self.pads[p] for p in pads_for_routing]
+
+        # Issue #2336: Try sub-problem pattern cache before A* search.
+        # Compute a position/rotation-invariant signature and check for a
+        # cached solution that can be transformed to the current location.
+        sub_sig = None
+        if self._sub_problem_cache is not None:
+            cached_routes = self._try_sub_problem_cache(net, pad_objs)
+            if cached_routes is not None:
+                for route in cached_routes:
+                    self._mark_route(route)
+                    routes.append(route)
+                    self.routes.append(route)
+                # Record decision if enabled
+                if self.record_decisions and cached_routes:
+                    self._record_routing_decision(net, cached_routes)
+                return routes
+            # Signature was computed; we'll store the solution after routing
+            sub_sig = SubProblemSignature.compute(pad_objs, self.rules)
+
         mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
         def mark_route(route: Route):
@@ -1306,11 +1363,128 @@ class Autorouter:
                 if retry_routes:
                     routes.extend(retry_routes)
 
+        # Issue #2336: Store freshly routed solution in sub-problem cache
+        if sub_sig is not None and new_routes and self._sub_problem_cache is not None:
+            self._store_sub_problem(sub_sig, new_routes)
+
         # Record routing decision if enabled
         if self.record_decisions and routes:
             self._record_routing_decision(net, routes)
 
         return routes
+
+    def _try_sub_problem_cache(
+        self,
+        net: int,
+        pad_objs: list[Pad],
+    ) -> list[Route] | None:
+        """Attempt to reuse a cached sub-problem solution.
+
+        Issue #2336: Computes a position/rotation-invariant signature from
+        the pad geometry, looks up the cache, transforms a hit to the
+        current position, and validates against the current grid state.
+
+        Args:
+            net: Net ID being routed.
+            pad_objs: Pad objects for this net.
+
+        Returns:
+            Transformed routes if cache hit and validation passes, else None.
+        """
+        assert self._sub_problem_cache is not None
+
+        sig = SubProblemSignature.compute(pad_objs, self.rules)
+        cached = self._sub_problem_cache.get_sub_problem(sig)
+
+        if cached is None:
+            self._sub_problem_misses += 1
+            return None
+
+        # Deserialize and transform to current position
+        raw_routes = self._sub_problem_cache.deserialize_routes(cached.route_data)
+        net_name = self.net_names.get(net, f"Net_{net}")
+        transformed = transform_routes(
+            raw_routes,
+            dx=sig.centroid_x,
+            dy=sig.centroid_y,
+            angle=sig.rotation_angle,
+            target_net=net,
+            target_net_name=net_name,
+        )
+
+        # Validate: ensure no segment overlaps an occupied grid cell
+        # belonging to a different net
+        if not self._validate_transformed_routes(transformed, net):
+            self._sub_problem_collisions += 1
+            logger.debug(
+                "Sub-problem cache hit rejected (collision): net %d sig %s",
+                net,
+                sig.signature_hash[:12],
+            )
+            return None
+
+        self._sub_problem_hits += 1
+        logger.debug(
+            "Sub-problem cache hit accepted: net %d sig %s (%d segs, %d vias)",
+            net,
+            sig.signature_hash[:12],
+            sum(len(r.segments) for r in transformed),
+            sum(len(r.vias) for r in transformed),
+        )
+        return transformed
+
+    def _validate_transformed_routes(
+        self,
+        routes: list[Route],
+        net: int,
+    ) -> bool:
+        """Check that transformed routes do not collide with existing routes.
+
+        Walks every segment endpoint and via location, converting to grid
+        coordinates and checking that the cell is not blocked by another net.
+
+        Args:
+            routes: Transformed routes to validate.
+            net: Net ID (same-net cells are allowed).
+
+        Returns:
+            True if all cells are available or belong to this net.
+        """
+        from .layers import Layer
+
+        for route in routes:
+            for seg in route.segments:
+                for wx, wy in [(seg.x1, seg.y1), (seg.x2, seg.y2)]:
+                    gx, gy = self.grid.world_to_grid(wx, wy)
+                    if self.grid.is_blocked(gx, gy, seg.layer, net):
+                        return False
+            for via in route.vias:
+                gx, gy = self.grid.world_to_grid(via.x, via.y)
+                for layer in [via.layers[0], via.layers[1]]:
+                    if self.grid.is_blocked(gx, gy, layer, net):
+                        return False
+        return True
+
+    def _store_sub_problem(
+        self,
+        sig: SubProblemSignature,
+        routes: list[Route],
+    ) -> None:
+        """Store a freshly routed solution in the sub-problem cache.
+
+        Args:
+            sig: Sub-problem signature for the pad configuration.
+            routes: Successfully routed solution in world coordinates.
+        """
+        assert self._sub_problem_cache is not None
+
+        normalized = normalize_routes_to_origin(
+            routes,
+            sig.centroid_x,
+            sig.centroid_y,
+            sig.rotation_angle,
+        )
+        self._sub_problem_cache.put_sub_problem(sig, normalized)
 
     def _record_routing_decision(self, net: int, routes: list[Route]) -> None:
         """Record a routing decision for a net."""
