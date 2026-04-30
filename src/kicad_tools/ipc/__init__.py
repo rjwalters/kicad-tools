@@ -13,8 +13,8 @@ Example usage::
     from kicad_tools.ipc import IPCClient, discover_socket
 
     socket_path = discover_socket()
-    async with IPCClient(socket_path) as client:
-        version = await client.get_version()
+    with IPCClient(socket_path) as client:
+        version = client.get_version()
         print(f"Connected to KiCad {version}")
 
 The IPC client is separate from the MCP server (``kicad_tools.mcp``).
