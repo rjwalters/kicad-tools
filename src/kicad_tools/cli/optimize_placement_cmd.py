@@ -31,6 +31,7 @@ from kicad_tools.placement.cost import (
     PlacementScore,
     evaluate_placement,
 )
+from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
 from kicad_tools.placement.seed import force_directed_placement, random_placement
 from kicad_tools.placement.strategy import PlacementStrategy, StrategyConfig
 from kicad_tools.placement.vector import (
@@ -325,45 +326,9 @@ def _read_board_data(
     return components, nets, board_outline, rules, pcb.board_origin
 
 
-def _extract_board_outline(pcb) -> BoardOutline:
-    """Extract board outline from Edge.Cuts graphic lines.
 
-    Edge.Cuts coordinates are in sheet-absolute space, but footprint
-    positions on ``SchemaPCB`` are board-relative (the origin is already
-    subtracted).  We must convert the outline to the same board-relative
-    coordinate system so the optimizer bounds match component positions.
-    """
-    xs: list[float] = []
-    ys: list[float] = []
-
-    for line in pcb.graphic_lines:
-        if line.layer == "Edge.Cuts":
-            xs.extend([line.start[0], line.end[0]])
-            ys.extend([line.start[1], line.end[1]])
-
-    if xs and ys:
-        # Convert from sheet-absolute to board-relative coordinates.
-        ox, oy = pcb.board_origin
-        xs = [x - ox for x in xs]
-        ys = [y - oy for y in ys]
-        return BoardOutline(min_x=min(xs), min_y=min(ys), max_x=max(xs), max_y=max(ys))
-
-    # Fallback: use footprint bounding box with margin
-    for fp in pcb.footprints:
-        xs.append(fp.position[0])
-        ys.append(fp.position[1])
-
-    if xs and ys:
-        margin = 10.0
-        return BoardOutline(
-            min_x=min(xs) - margin,
-            min_y=min(ys) - margin,
-            max_x=max(xs) + margin,
-            max_y=max(ys) + margin,
-        )
-
-    # Default fallback
-    return BoardOutline(min_x=0.0, min_y=0.0, max_x=100.0, max_y=100.0)
+# _extract_board_outline is imported from kicad_tools.placement.geometry
+# (consolidated in #2349).
 
 
 def _footprint_size_from_pads(fp) -> tuple[float, float]:

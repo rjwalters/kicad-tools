@@ -205,6 +205,56 @@ def compute_boundary_violation(
     return total
 
 
+def extract_board_outline(pcb: Any) -> BoardOutline:
+    """Extract board outline from Edge.Cuts graphic lines.
+
+    Edge.Cuts coordinates are in sheet-absolute space, but footprint
+    positions on ``SchemaPCB`` are board-relative (the origin is already
+    subtracted).  We must convert the outline to the same board-relative
+    coordinate system so the optimizer bounds match component positions.
+
+    Args:
+        pcb: Parsed PCB schema object with ``graphic_lines``,
+            ``board_origin``, and ``footprints`` attributes.
+
+    Returns:
+        A :class:`BoardOutline` representing the bounding rectangle
+        of the Edge.Cuts outline, or a fallback based on footprint
+        positions / default dimensions.
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+
+    for line in pcb.graphic_lines:
+        if line.layer == "Edge.Cuts":
+            xs.extend([line.start[0], line.end[0]])
+            ys.extend([line.start[1], line.end[1]])
+
+    if xs and ys:
+        # Convert from sheet-absolute to board-relative coordinates.
+        ox, oy = pcb.board_origin
+        xs = [x - ox for x in xs]
+        ys = [y - oy for y in ys]
+        return BoardOutline(min_x=min(xs), min_y=min(ys), max_x=max(xs), max_y=max(ys))
+
+    # Fallback: use footprint bounding box with margin
+    for fp in pcb.footprints:
+        xs.append(fp.position[0])
+        ys.append(fp.position[1])
+
+    if xs and ys:
+        margin = 10.0
+        return BoardOutline(
+            min_x=min(xs) - margin,
+            min_y=min(ys) - margin,
+            max_x=max(xs) + margin,
+            max_y=max(ys) + margin,
+        )
+
+    # Default fallback
+    return BoardOutline(min_x=0.0, min_y=0.0, max_x=100.0, max_y=100.0)
+
+
 def compute_boundary_violation_shapely(
     placements: Sequence[PlacedComponent],
     component_defs: Sequence[ComponentDef],

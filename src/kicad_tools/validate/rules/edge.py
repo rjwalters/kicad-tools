@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_to_segment_distance as _core_pt_seg_dist
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
@@ -291,6 +293,9 @@ class EdgeClearanceRule(DRCRule):
     ) -> float:
         """Calculate distance from a point to a line segment.
 
+        Thin wrapper around :func:`kicad_tools.core.geometry.point_to_segment_distance`
+        that accepts tuple arguments for API compatibility.
+
         Args:
             point: (x, y) coordinate
             seg_start: Start of line segment (x, y)
@@ -299,27 +304,4 @@ class EdgeClearanceRule(DRCRule):
         Returns:
             Distance from point to the closest point on the segment
         """
-        px, py = point
-        x1, y1 = seg_start
-        x2, y2 = seg_end
-
-        # Vector from seg_start to seg_end
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # Length squared of segment
-        length_sq = dx * dx + dy * dy
-
-        if length_sq == 0:
-            # Segment is a point
-            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-        # Project point onto segment line, clamped to [0, 1]
-        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-
-        # Find closest point on segment
-        closest_x = x1 + t * dx
-        closest_y = y1 + t * dy
-
-        # Return distance to closest point
-        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+        return _core_pt_seg_dist(point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1])

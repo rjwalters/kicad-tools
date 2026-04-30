@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
+from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline_shared
 from kicad_tools.optim.components import Component, FunctionalCluster, Keepout, Pin, Spring
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.constraints import (
@@ -325,40 +326,33 @@ class PlacementOptimizer:
 
     @staticmethod
     def _extract_board_outline(pcb: PCB) -> Polygon | None:
-        """
-        Extract board outline from Edge.Cuts layer.
+        """Extract board outline from Edge.Cuts layer.
 
         Handles ``gr_rect``, ``gr_line``, and ``gr_arc`` elements.  Arcs are
         linearised into short line segments so that the resulting polygon
         closely approximates curved board edges.
 
+        For boards without arcs, delegates to
+        :func:`kicad_tools.optim.board_outline.extract_board_outline`.
+
         Returns None if no outline found.
         """
-        # Access the raw SExp to find Edge.Cuts graphics
         sexp = pcb._sexp
 
-        # Look for gr_rect on Edge.Cuts (simple rectangular boards)
+        # Check whether any arcs exist on Edge.Cuts
+        has_arcs = False
         for child in sexp.iter_children():
-            if child.tag == "gr_rect":
+            if child.tag == "gr_arc":
                 layer = child.find("layer")
                 if layer and layer.get_string(0) == "Edge.Cuts":
-                    start = child.find("start")
-                    end = child.find("end")
-                    if start and end:
-                        x1 = start.get_float(0) or 0.0
-                        y1 = start.get_float(1) or 0.0
-                        x2 = end.get_float(0) or 0.0
-                        y2 = end.get_float(1) or 0.0
-                        return Polygon(
-                            vertices=[
-                                Vector2D(x1, y1),
-                                Vector2D(x2, y1),
-                                Vector2D(x2, y2),
-                                Vector2D(x1, y2),
-                            ]
-                        )
+                    has_arcs = True
+                    break
 
-        # Collect gr_line and gr_arc elements on Edge.Cuts
+        if not has_arcs:
+            # Delegate to the shared implementation (gr_rect + gr_line only)
+            return _extract_board_outline_shared(pcb)
+
+        # Arc-aware path: collect gr_line and gr_arc segments
         edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
         for child in sexp.iter_children():
             if child.tag == "gr_line":
@@ -380,7 +374,6 @@ class PlacementOptimizer:
                     edge_lines.extend(arc_lines)
 
         if len(edge_lines) >= 3:
-            # Try to chain the lines into a closed polygon
             vertices = PlacementOptimizer._chain_lines_to_polygon(edge_lines)
             if vertices:
                 return Polygon(vertices=[Vector2D(x, y) for x, y in vertices])
