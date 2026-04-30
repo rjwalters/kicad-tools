@@ -89,6 +89,14 @@ class DesignRules:
     cost_via: float = 10.0  # Penalty for layer change
     cost_layer_inner: float = 2.0  # Penalty for using inner layers (applied by pathfinder)
 
+    # Via cost cap (Issue #2325)
+    # Caps the total incremental cost of a single via transition to prevent
+    # accumulated additive penalties (inner-layer cost, layer utilization,
+    # corridor deviation, congestion, via impact) from making vias
+    # prohibitively expensive.  The effective cap is ``via_cost_cap_factor *
+    # cost_via``.  Set to 0.0 to disable capping.
+    via_cost_cap_factor: float = 2.0
+
     # Congestion-aware routing
     cost_congestion: float = 2.0  # Multiplier for congested regions
     congestion_threshold: float = 0.3  # Density above which region is congested
