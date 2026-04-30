@@ -126,6 +126,10 @@ class Panel:
         self._next_net: int = 1
         self._panel_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._frame_config: FrameConfig | None = None
+        self._mousebite_config: MousebiteConfig | None = None
+        self._vcut_config: VCutConfig | None = None
+        self._tooling_config: ToolingHoleConfig | None = None
+        self._fiducial_config: FiducialConfig | None = None
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -510,14 +514,14 @@ class Panel:
             self._render_tab(panel_sexp, tab)
 
         # Add mousebite holes
-        if hasattr(self, "_mousebite_config"):
+        if self._mousebite_config is not None:
             for tab in self._tabs:
                 holes = generate_mousebite_holes(tab, self._mousebite_config)
                 for hole in holes:
                     panel_sexp.append(mousebite_hole_to_sexp(hole))
 
         # Add V-cut lines
-        if hasattr(self, "_vcut_config"):
+        if self._vcut_config is not None:
             vcut_positions_h, vcut_positions_v = self._compute_vcut_positions()
             lines = generate_vcut_lines(
                 self._panel_bounds, vcut_positions_h, "horizontal", self._vcut_config
@@ -535,13 +539,13 @@ class Panel:
             self._render_frame(panel_sexp)
 
         # Add tooling holes
-        if hasattr(self, "_tooling_config"):
+        if self._tooling_config is not None:
             holes = compute_tooling_holes(self._panel_bounds, self._tooling_config)
             for hole in holes:
                 panel_sexp.append(tooling_hole_to_sexp(hole))
 
         # Add fiducials
-        if hasattr(self, "_fiducial_config"):
+        if self._fiducial_config is not None:
             fiducials = compute_fiducials(self._panel_bounds, self._fiducial_config)
             for fid in fiducials:
                 panel_sexp.append(fiducial_to_sexp(fid))
@@ -590,7 +594,6 @@ class Panel:
         # Always include net 0
         panel_sexp.append(SExp.list("net", 0, ""))
         self._net_map.clear()
-        self._net_map[0] = 0
         self._next_net = 1
 
         # Collect source nets
