@@ -28,6 +28,7 @@ from .algorithms import (
     MSTRouter,
     NegotiatedRouter,
     TwoPhaseRouter,
+    calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
@@ -2340,6 +2341,13 @@ class Autorouter:
         neighborhood_max_attempts: int = 3,
         neighborhood_initial_radius: float = 1.0,
         neighborhood_escalation_factor: float = 2.0,
+        ema_smoothing: bool = False,
+        ema_alpha: float = 0.6,
+        exponential_cost: bool = False,
+        pres_fac_mult: float = 1.3,
+        pres_fac_cap: float = 50.0,
+        congestion_auto_tune: bool = False,
+        hotset_only: bool = False,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -2387,6 +2395,31 @@ class Autorouter:
                 for neighborhood rip-up (Issue #2274). Default: 1.0.
             neighborhood_escalation_factor: Multiplier applied to radius on
                 each consecutive stall (Issue #2274). Default: 2.0.
+            ema_smoothing: If True, use EMA-smoothed per-cell present cost
+                instead of raw ``factor * usage_count``.  Prevents bang-bang
+                oscillation by smoothing cost transitions across iterations
+                (Issue #2333). Default: False.
+            ema_alpha: Weight of the new value in the EMA update
+                (Issue #2333).  Default: 0.6 (60% new, 40% previous).
+            exponential_cost: If True, use exponential present cost
+                escalation (OrthoRoute-style) instead of the default
+                linear ramp.  More aggressively forces nets away from
+                congested areas in later iterations (Issue #2333).
+                Default: False.
+            pres_fac_mult: Multiplicative factor per iteration in
+                exponential cost mode (Issue #2333). Default: 1.3.
+            pres_fac_cap: Maximum present cost factor in exponential
+                mode (Issue #2333). Default: 50.0.
+            congestion_auto_tune: If True, dynamically adjust
+                ``pres_fac_mult`` and ``history_increment`` based on the
+                actual congestion ratio each iteration (Issue #2333).
+                Default: False.
+            hotset_only: If True, each rip-up iteration only reroutes
+                nets identified by ``find_nets_through_overused_cells``,
+                skipping neighborhood rip-up and full-reorder fallbacks.
+                Produces faster, more predictable iterations at the cost
+                of potentially slower convergence (Issue #2333).
+                Default: False.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -2424,6 +2457,14 @@ class Autorouter:
             )
         if batch_routing:
             print("  Batch routing: enabled (GPU-accelerated)")
+        if ema_smoothing:
+            print(f"  EMA smoothing: enabled (alpha={ema_alpha})")
+        if exponential_cost:
+            print(f"  Exponential cost: enabled (mult={pres_fac_mult}, cap={pres_fac_cap})")
+        if congestion_auto_tune:
+            print("  Congestion auto-tune: enabled")
+        if hotset_only:
+            print("  Hotset-only reroute: enabled")
         if timeout:
             print(f"  Timeout: {timeout}s")
         if per_net_timeout:
@@ -2645,21 +2686,42 @@ class Autorouter:
                     total_cells = self.grid.cols * self.grid.rows * self.grid.num_layers
                     overflow_ratio = overflow / max(total_cells, 1)
 
+                    # Issue #2333: Congestion-ratio-based auto-tuning
+                    iter_pres_fac_mult = pres_fac_mult
+                    iter_history_increment = history_increment
+                    if congestion_auto_tune:
+                        iter_pres_fac_mult, iter_history_increment = (
+                            calculate_congestion_tuned_params(
+                                overflow_ratio, pres_fac_mult, history_increment
+                            )
+                        )
+
                     # Adaptive history increment based on convergence progress
                     adaptive_history = calculate_history_increment(
-                        iteration, overflow_history, history_increment
+                        iteration, overflow_history, iter_history_increment
                     )
                     # Adaptive present cost based on iteration and congestion
                     present_factor = calculate_present_cost(
-                        iteration, max_iterations, overflow_ratio, initial_present_factor
+                        iteration, max_iterations, overflow_ratio, initial_present_factor,
+                        exponential=exponential_cost,
+                        pres_fac_mult=iter_pres_fac_mult,
+                        pres_fac_cap=pres_fac_cap,
                     )
                     print(
                         f"  Adaptive params: history={adaptive_history:.2f}, present={present_factor:.2f}"
                     )
                     self.grid.update_history_costs(adaptive_history)
+
+                    # Issue #2333: EMA smoothing of per-cell present cost
+                    if ema_smoothing:
+                        self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
                 else:
                     present_factor += present_factor_increment
                     self.grid.update_history_costs(history_increment)
+
+                    # Issue #2333: EMA smoothing in non-adaptive mode
+                    if ema_smoothing:
+                        self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
 
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
 
@@ -2793,7 +2855,7 @@ class Autorouter:
                             # direct path but still prevent routing via clearance/congestion.
                             # Try ripping up ALL routed nets and re-routing failed net first.
                             routed_nets = list(net_routes.keys())
-                            if routed_nets and iteration <= 2 and not full_reorder_used_this_iter:  # Try in first few iterations
+                            if routed_nets and iteration <= 2 and not full_reorder_used_this_iter and not hotset_only:  # Try in first few iterations
                                 print(
                                     f"    No direct blockers found - trying full reorder for net {failed_net}"
                                 )
@@ -2875,7 +2937,7 @@ class Autorouter:
                         and n in pads_by_net
                         and n not in off_grid_nets
                     ]
-                    if overflow == 0 and still_unrouted_targeted and not timed_out:
+                    if overflow == 0 and still_unrouted_targeted and not timed_out and not hotset_only:
                         # Track stall progression
                         current_routed = len(net_routes)
                         if current_routed <= prev_routed_count:
@@ -3041,11 +3103,12 @@ class Autorouter:
                     # the standard rip-up path only re-attempts failed nets without
                     # clearing the routed nets that block them. Fall back to
                     # targeted rip-up to identify and displace blockers.
+                    # Issue #2333: Skip fallbacks in hotset-only mode.
                     still_failed = [
                         n for n in net_order
                         if n not in net_routes and n in pads_by_net and n not in off_grid_nets
                     ]
-                    if overflow == 0 and still_failed and not timed_out:
+                    if overflow == 0 and still_failed and not timed_out and not hotset_only:
                         flush_print(
                             f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
                             f" - engaging targeted rip-up fallback ({elapsed_str()})"
@@ -3090,13 +3153,14 @@ class Autorouter:
 
                     # Issue #2297: Neighborhood rip-up for standard path when
                     # targeted fallback was insufficient and nets remain stalled.
+                    # Issue #2333: Skip in hotset-only mode.
                     still_unrouted_std = [
                         n for n in net_order
                         if (n not in net_routes or not net_routes.get(n))
                         and n in pads_by_net
                         and n not in off_grid_nets
                     ]
-                    if overflow == 0 and still_unrouted_std and not timed_out:
+                    if overflow == 0 and still_unrouted_std and not timed_out and not hotset_only:
                         # Track stall progression
                         current_routed = len(net_routes)
                         if current_routed <= prev_routed_count:

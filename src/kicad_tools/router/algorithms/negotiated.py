@@ -274,6 +274,10 @@ def calculate_present_cost(
     total_iterations: int,
     overflow_ratio: float,
     base_cost: float = 0.5,
+    *,
+    exponential: bool = False,
+    pres_fac_mult: float = 1.3,
+    pres_fac_cap: float = 50.0,
 ) -> float:
     """Calculate adaptive present cost factor based on iteration and congestion.
 
@@ -282,6 +286,14 @@ def calculate_present_cost(
         total_iterations: Maximum number of iterations
         overflow_ratio: Current overflow / total cells (congestion metric)
         base_cost: Base present cost value (default: 0.5)
+        exponential: If True, use exponential escalation (OrthoRoute-style)
+            instead of linear ramp.  Exponential pressure more aggressively
+            forces nets away from congested areas in later iterations.
+            Issue #2333.
+        pres_fac_mult: Multiplicative factor applied per iteration in
+            exponential mode.  Default 1.3 (30% increase per iteration).
+        pres_fac_cap: Maximum present cost factor in exponential mode
+            to prevent overshooting.  Default 50.0.
 
     Returns:
         Adjusted present cost factor
@@ -290,6 +302,12 @@ def calculate_present_cost(
     - As iterations progress (more pressure over time)
     - When congestion is high (need to discourage contested resources)
     """
+    if exponential:
+        # OrthoRoute-style: base * mult^iteration, capped to prevent runaway
+        raw = base_cost * (pres_fac_mult ** iteration)
+        return min(raw, pres_fac_cap)
+
+    # Linear mode (original behaviour)
     # Increase pressure as iterations progress (gradual ramp)
     progress_factor = 1.0 + (iteration / max(total_iterations, 1))
 
@@ -297,6 +315,42 @@ def calculate_present_cost(
     congestion_factor = 1.0 + min(overflow_ratio * 2, 2.0)  # Cap at 3x
 
     return base_cost * progress_factor * congestion_factor
+
+
+def calculate_congestion_tuned_params(
+    overflow_ratio: float,
+    base_pres_fac_mult: float = 1.3,
+    base_history_increment: float = 0.5,
+) -> tuple[float, float]:
+    """Derive present-cost multiplier and history increment from congestion ratio.
+
+    OrthoRoute-inspired auto-tuning: instead of using fixed parameters,
+    scale them based on the actual congestion level so that convergence
+    is less dependent on board characteristics.
+
+    Args:
+        overflow_ratio: Fraction of overused edges (overused / total cells).
+        base_pres_fac_mult: Base exponential multiplier (default: 1.3).
+        base_history_increment: Base history increment (default: 0.5).
+
+    Returns:
+        Tuple of (adjusted_pres_fac_mult, adjusted_history_increment).
+
+    Issue #2333.
+    """
+    # When congestion is high (>10%), escalate more aggressively
+    # When congestion is low (<1%), reduce escalation to fine-tune
+    if overflow_ratio > 0.10:
+        scale = 1.0 + min(overflow_ratio, 0.5)  # cap at 1.5x
+    elif overflow_ratio < 0.01:
+        scale = 0.7
+    else:
+        scale = 1.0
+
+    adjusted_mult = 1.0 + (base_pres_fac_mult - 1.0) * scale
+    adjusted_hist = base_history_increment * scale
+
+    return adjusted_mult, adjusted_hist
 
 
 class NegotiatedRouter:

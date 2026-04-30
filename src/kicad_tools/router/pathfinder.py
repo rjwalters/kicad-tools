@@ -1179,7 +1179,12 @@ class Router:
         history_costs = self.grid._history_cost[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
 
         # Compute present cost + history cost
-        present_costs = present_cost_factor * usage_counts
+        # Issue #2333: When EMA smoothing is active, use the smoothed
+        # per-cell present cost instead of the raw usage * factor.
+        if self.grid._present_cost_ema is not None:
+            present_costs = self.grid._present_cost_ema[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
+        else:
+            present_costs = present_cost_factor * usage_counts
         costs[valid_indices] = present_costs + history_costs
 
         return costs
