@@ -323,3 +323,168 @@ class TestBestStateTracking:
         assert len(two_phase.routes) == len(routes)
         # Grid's _marked_routes should have the same count
         assert len(grid._marked_routes) == len(routes)
+
+
+class TestEarlyStopOverflowRegression:
+    """Verify early-stop fires when overflow regresses across iterations (Issue #2317)."""
+
+    def _build_two_phase(
+        self,
+        overflow_sequence: list[int],
+    ) -> tuple[TwoPhaseRouter, FakeGrid]:
+        """Build a TwoPhaseRouter with controlled overflow behavior."""
+        grid = FakeGrid(overflow_sequence)
+        router = MagicMock()
+        rules = MagicMock()
+        rules.cost_corridor_deviation = 5.0
+        rules.corridor_decay_rate = 0.1
+        rules.corridor_decay_floor = 0.1
+
+        call_count = [0]
+
+        def fake_route_net_with_corridor(net, present_factor, per_net_timeout=None):
+            idx = call_count[0]
+            call_count[0] += 1
+            return [_make_route(net, tag=f"iter{idx}")]
+
+        two_phase = TwoPhaseRouter(
+            grid=grid,
+            router=router,
+            rules=rules,
+            net_class_map=None,
+            nets={1: [("R1", "1"), ("R1", "2")]},
+            net_names={1: "VCC"},
+            pads={},
+            routes=[],
+            routing_failures=[],
+            get_net_priority=lambda n: n,
+            route_net=lambda n: [_make_route(n)],
+            route_net_with_corridor=fake_route_net_with_corridor,
+            mark_route=lambda r: None,
+        )
+
+        return two_phase, grid
+
+    def test_early_stop_on_regression(self, capsys):
+        """Early stop fires when overflow regresses after reaching a best.
+
+        Overflow sequence: [81, 18, 25, 30, ...].
+        With patience=2, should_terminate_early should fire after we have
+        enough history showing regression (no improvement over 18).
+        The loop should NOT run all max_iterations.
+        """
+        # Overflow sequence:
+        #   [0] initial pass = 81
+        #   [1] iteration 1  = 18  <-- best
+        #   [2] iteration 2  = 25  (regression)
+        #   [3] iteration 3  = 30  (further regression)
+        #   [4] iteration 4  = 35  (further regression)
+        #   [5] iteration 5  = 40  (would be iteration 5 if reached)
+        #   [6] post-loop check (final overflow for best-state restore)
+        # With patience=2, the early termination should fire well before
+        # iteration 10.  We provide enough overflow values for max_iterations=10.
+        overflow_seq = [81, 18, 25, 30, 35, 40, 45, 50, 55, 60, 65, 65]
+        two_phase, grid = self._build_two_phase(overflow_seq)
+
+        with patch(
+            "kicad_tools.router.algorithms.NegotiatedRouter",
+            FakeNegotiatedRouter,
+        ):
+            routes = two_phase._detailed_negotiated(
+                net_order=[1],
+                corridor_penalty=5.0,
+                max_iterations=10,
+                patience=2,
+            )
+
+        captured = capsys.readouterr()
+        # Early stop message should appear
+        assert "Early stop: overflow not improving" in captured.out
+        assert "best=18" in captured.out
+        # Best-state restore should occur since final overflow > best
+        assert "Restoring" in captured.out
+        # Should have returned routes
+        assert len(routes) > 0
+
+    def test_no_early_stop_when_converging(self, capsys):
+        """No early stop when overflow monotonically decreases to zero."""
+        # Overflow sequence:
+        #   [0] initial pass = 81
+        #   [1] iteration 1  = 18
+        #   [2] iteration 2  = 10
+        #   [3] iteration 3  = 5
+        #   [4] iteration 4  = 0  <-- converged
+        #   [5] post-loop check = 0
+        two_phase, grid = self._build_two_phase([81, 18, 10, 5, 0, 0])
+
+        with patch(
+            "kicad_tools.router.algorithms.NegotiatedRouter",
+            FakeNegotiatedRouter,
+        ):
+            routes = two_phase._detailed_negotiated(
+                net_order=[1],
+                corridor_penalty=5.0,
+                max_iterations=10,
+                patience=2,
+            )
+
+        captured = capsys.readouterr()
+        # Should converge normally, no early stop
+        assert "Converged at iteration 4" in captured.out
+        assert "Early stop" not in captured.out
+        assert len(routes) > 0
+
+    def test_best_state_restored_after_early_stop(self):
+        """Best-state restore still works correctly after early-stop fires."""
+        # Overflow sequence:
+        #   [0] initial pass = 81
+        #   [1] iteration 1  = 18  <-- best
+        #   [2] iteration 2  = 25
+        #   [3] iteration 3  = 30
+        #   [4] iteration 4  = 35
+        #   [5] iteration 5  = 40
+        #   [6] post-loop check (for best-state restore)
+        overflow_seq = [81, 18, 25, 30, 35, 40, 40]
+        two_phase, grid = self._build_two_phase(overflow_seq)
+
+        with patch(
+            "kicad_tools.router.algorithms.NegotiatedRouter",
+            FakeNegotiatedRouter,
+        ):
+            routes = two_phase._detailed_negotiated(
+                net_order=[1],
+                corridor_penalty=5.0,
+                max_iterations=10,
+                patience=2,
+            )
+
+        # Routes should be returned and grid state should be consistent
+        assert len(routes) > 0
+        assert len(two_phase.routes) == len(routes)
+        assert len(grid._marked_routes) == len(routes)
+
+    def test_patience_parameter_respected(self, capsys):
+        """Higher patience value delays early termination."""
+        # With a high patience (e.g. 8), early stop should not fire for
+        # a sequence that regresses only a few times.
+        # Overflow sequence that would trigger early stop with patience=2
+        # but should NOT trigger with patience=8:
+        #   [0] initial = 81, [1] = 18, [2] = 25, [3] = 30, [4] = 0
+        overflow_seq = [81, 18, 25, 30, 0, 0]
+        two_phase, grid = self._build_two_phase(overflow_seq)
+
+        with patch(
+            "kicad_tools.router.algorithms.NegotiatedRouter",
+            FakeNegotiatedRouter,
+        ):
+            routes = two_phase._detailed_negotiated(
+                net_order=[1],
+                corridor_penalty=5.0,
+                max_iterations=10,
+                patience=8,  # High patience -- early stop should not fire
+            )
+
+        captured = capsys.readouterr()
+        # Should converge at iteration 4 (overflow=0), not early stop
+        assert "Converged at iteration 4" in captured.out
+        assert "Early stop" not in captured.out
