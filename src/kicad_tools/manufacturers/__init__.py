@@ -26,9 +26,12 @@ Usage:
 from .base import (
     AssemblyCapabilities,
     DesignRules,
+    FileNamingConvention,
     ManufacturerProfile,
     PartsLibrary,
     load_design_rules_from_yaml,
+    load_rotation_corrections,
+    match_rotation_correction,
 )
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
@@ -42,11 +45,14 @@ __all__ = [
     "AssemblyCapabilities",
     "PartsLibrary",
     "ManufacturerProfile",
+    "FileNamingConvention",
     # Functions
     "get_profile",
     "list_manufacturers",
     "get_manufacturer_ids",
     "load_design_rules_from_yaml",
+    "load_rotation_corrections",
+    "match_rotation_correction",
     # Profiles (for direct access)
     "FLASHPCB_PROFILE",
     "JLCPCB_PROFILE",

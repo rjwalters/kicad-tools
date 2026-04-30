@@ -60,7 +60,7 @@ class GerberConfig:
 
 
 @dataclass
-class ManufacturerPreset:
+class GerberManufacturerPreset:
     """Preset configuration for a specific manufacturer."""
 
     name: str
@@ -69,7 +69,7 @@ class ManufacturerPreset:
 
 
 # Manufacturer presets
-JLCPCB_PRESET = ManufacturerPreset(
+JLCPCB_PRESET = GerberManufacturerPreset(
     name="JLCPCB",
     config=GerberConfig(
         use_protel_extensions=True,
@@ -91,7 +91,7 @@ JLCPCB_PRESET = ManufacturerPreset(
     },
 )
 
-PCBWAY_PRESET = ManufacturerPreset(
+PCBWAY_PRESET = GerberManufacturerPreset(
     name="PCBWay",
     config=GerberConfig(
         use_protel_extensions=True,
@@ -102,7 +102,7 @@ PCBWAY_PRESET = ManufacturerPreset(
     ),
 )
 
-OSHPARK_PRESET = ManufacturerPreset(
+OSHPARK_PRESET = GerberManufacturerPreset(
     name="OSH Park",
     config=GerberConfig(
         use_protel_extensions=True,
@@ -113,7 +113,7 @@ OSHPARK_PRESET = ManufacturerPreset(
     ),
 )
 
-SEEED_PRESET = ManufacturerPreset(
+SEEED_PRESET = GerberManufacturerPreset(
     name="Seeed Fusion",
     config=GerberConfig(
         use_protel_extensions=True,
@@ -139,7 +139,7 @@ SEEED_PRESET = ManufacturerPreset(
     },
 )
 
-MANUFACTURER_PRESETS: dict[str, ManufacturerPreset] = {
+MANUFACTURER_PRESETS: dict[str, GerberManufacturerPreset] = {
     "jlcpcb": JLCPCB_PRESET,
     "pcbway": PCBWAY_PRESET,
     "oshpark": OSHPARK_PRESET,

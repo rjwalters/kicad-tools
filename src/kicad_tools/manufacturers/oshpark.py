@@ -30,6 +30,8 @@ OSHPARK_PROFILE = ManufacturerProfile(
     bom_format="generic",
     supported_layers=[2, 4],
     pricing_model="per_sqin",  # $5/sq.in for 2-layer, $10/sq.in for 4-layer
+    # No rotation corrections -- PCB-only manufacturer
+    gerber_preset_id="oshpark",
 )
 
 

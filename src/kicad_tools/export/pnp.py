@@ -61,8 +61,13 @@ class PnPFormatter(ABC):
     manufacturer_id: str = ""
     manufacturer_name: str = ""
 
-    def __init__(self, config: PnPExportConfig | None = None):
+    def __init__(
+        self,
+        config: PnPExportConfig | None = None,
+        rotation_corrections: dict[str, float] | None = None,
+    ):
         self.config = config or PnPExportConfig()
+        self.rotation_corrections: dict[str, float] = rotation_corrections or {}
 
     @abstractmethod
     def format(self, placements: list[PlacementData]) -> str:
@@ -75,7 +80,15 @@ class PnPFormatter(ABC):
         pass
 
     def apply_transforms(self, placement: PlacementData) -> PlacementData:
-        """Apply coordinate transforms based on config."""
+        """Apply coordinate transforms and per-footprint rotation corrections.
+
+        When ``rotation_corrections`` is populated (e.g. from a
+        manufacturer preset), the footprint name is matched against the
+        correction database and the corresponding offset is added to the
+        component rotation **before** the global ``rotation_offset``.
+        """
+        from kicad_tools.manufacturers.base import match_rotation_correction
+
         x = placement.x + self.config.x_offset
         y = placement.y + self.config.y_offset
 
@@ -84,7 +97,12 @@ class PnPFormatter(ABC):
         if self.config.mirror_y:
             y = -y
 
-        rotation = (placement.rotation + self.config.rotation_offset) % 360
+        # Per-footprint rotation correction
+        fp_correction = match_rotation_correction(
+            placement.footprint, self.rotation_corrections
+        )
+
+        rotation = (placement.rotation + fp_correction + self.config.rotation_offset) % 360
 
         return PlacementData(
             reference=placement.reference,
@@ -119,10 +137,14 @@ class JLCPCBPnPFormatter(PnPFormatter):
     manufacturer_id = "jlcpcb"
     manufacturer_name = "JLCPCB"
 
-    def __init__(self, config: PnPExportConfig | None = None):
+    def __init__(
+        self,
+        config: PnPExportConfig | None = None,
+        rotation_corrections: dict[str, float] | None = None,
+    ):
         if config is None:
             config = PnPExportConfig(exclude_tht=True)
-        super().__init__(config)
+        super().__init__(config, rotation_corrections)
 
     def get_headers(self) -> list[str]:
         """JLCPCB CPL column headers."""
@@ -307,13 +329,19 @@ PNP_FORMATTERS: dict[str, type[PnPFormatter]] = {
 }
 
 
-def get_pnp_formatter(manufacturer: str, config: PnPExportConfig | None = None) -> PnPFormatter:
+def get_pnp_formatter(
+    manufacturer: str,
+    config: PnPExportConfig | None = None,
+    rotation_corrections: dict[str, float] | None = None,
+) -> PnPFormatter:
     """
     Get pick-and-place formatter for a manufacturer.
 
     Args:
         manufacturer: Manufacturer ID (jlcpcb, pcbway, generic)
         config: Export configuration
+        rotation_corrections: Per-footprint rotation corrections (pattern -> degrees).
+            When provided, these are applied during ``apply_transforms()``.
 
     Returns:
         PnPFormatter for the specified manufacturer
@@ -329,7 +357,7 @@ def get_pnp_formatter(manufacturer: str, config: PnPExportConfig | None = None) 
             context={"manufacturer": manufacturer, "available": available},
             suggestions=[f"Use one of: {', '.join(available)}"],
         )
-    return formatter_class(config)
+    return formatter_class(config, rotation_corrections)
 
 
 def extract_placements(
@@ -404,6 +432,7 @@ def export_pnp(
     manufacturer: str = "generic",
     config: PnPExportConfig | None = None,
     pcb_path: str | Path | None = None,
+    rotation_corrections: dict[str, float] | None = None,
 ) -> str:
     """
     Export pick-and-place file.
@@ -417,6 +446,9 @@ def export_pnp(
             origin is read from the PCB and subtracted from all component
             coordinates so that output positions are relative to the
             board's manufacturing origin.
+        rotation_corrections: Per-footprint rotation corrections
+            (pattern -> degrees).  When provided, these are applied
+            during formatting via ``PnPFormatter.apply_transforms()``.
 
     Returns:
         Formatted CPL as CSV string
@@ -448,6 +480,6 @@ def export_pnp(
 
     # Let the formatter provide its own default config (e.g., JLCPCB
     # defaults to exclude_tht=True) when the caller did not supply one.
-    formatter = get_pnp_formatter(manufacturer, config)
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
     placements = extract_placements(footprints, formatter.config)
     return formatter.format(placements)
