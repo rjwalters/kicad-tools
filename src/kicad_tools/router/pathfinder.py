@@ -198,7 +198,7 @@ class Router:
         self._via_diag_blocked: int = 0
         self._via_diag_zone_blocked: int = 0
         self._via_diag_exclusion_blocked: int = 0
-        self._via_diag_placed: int = 0
+        self._via_diag_eligible: int = 0
 
     def add_routed_segments(self, segments: list[Segment]) -> None:
         """Add committed route segments for crossing detection.
@@ -236,14 +236,16 @@ class Router:
 
         Returns:
             Dictionary with keys ``attempts``, ``blocked``, ``zone_blocked``,
-            ``exclusion_blocked``, and ``placed``.
+            ``exclusion_blocked``, and ``eligible`` (candidates that passed all
+            placement checks but may still be pruned by closed-set or g-score
+            dominance).
         """
         return {
             "attempts": self._via_diag_attempts,
             "blocked": self._via_diag_blocked,
             "zone_blocked": self._via_diag_zone_blocked,
             "exclusion_blocked": self._via_diag_exclusion_blocked,
-            "placed": self._via_diag_placed,
+            "eligible": self._via_diag_eligible,
         }
 
     def reset_via_diagnostics(self) -> None:
@@ -252,7 +254,7 @@ class Router:
         self._via_diag_blocked = 0
         self._via_diag_zone_blocked = 0
         self._via_diag_exclusion_blocked = 0
-        self._via_diag_placed = 0
+        self._via_diag_eligible = 0
 
     @staticmethod
     def _segments_intersect(
@@ -1650,7 +1652,7 @@ class Router:
                     self._via_diag_exclusion_blocked += 1
                     continue
 
-                self._via_diag_placed += 1
+                self._via_diag_eligible += 1
 
                 neighbor_key = (current.x, current.y, new_layer)
                 if neighbor_key in closed_set:
@@ -2758,14 +2760,19 @@ class Router:
             # Check via blocking on all layers
             # Issue #966: Use cached via check with layer priority ordering
             # Issue #1692: Pass per-net via radius for wider net classes
+            self._via_diag_attempts += 1
             if not self._check_via_placement_cached(
                 current.x, current.y, source_pad.net, allow_sharing,
                 radius=via_radius,
             ):
+                self._via_diag_blocked += 1
                 continue
 
             if not self._can_place_via_in_zones(current.x, current.y, source_pad.net):
+                self._via_diag_zone_blocked += 1
                 continue
+
+            self._via_diag_eligible += 1
 
             neighbor_key = (current.x, current.y, new_layer)
             if neighbor_key in closed_set:

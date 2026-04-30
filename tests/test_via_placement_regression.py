@@ -5,11 +5,6 @@ specifically addressing the regression where accumulated via costs and
 plane-layer PTH pad blocking prevented all via placement.
 """
 
-import math
-
-import numpy as np
-import pytest
-
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -78,10 +73,12 @@ class TestPlanelayerViaSkip:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         rules = DesignRules(grid_resolution=0.5)
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules,
+            width=20.0,
+            height=20.0,
+            rules=rules,
             layer_stack=stack,
         )
-        router = Router(grid, rules)
+        Router(grid, rules)  # Ensure Router accepts this grid
 
         # Verify that plane layers are correctly identified
         assert grid.is_plane_layer(1)  # In1.Cu (GND)
@@ -99,7 +96,9 @@ class TestPlanelayerViaSkip:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         rules = DesignRules(grid_resolution=0.5)
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules,
+            width=20.0,
+            height=20.0,
+            rules=rules,
             layer_stack=stack,
         )
         router = Router(grid, rules)
@@ -128,7 +127,9 @@ class TestPlanelayerViaSkip:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         rules = DesignRules(grid_resolution=0.5)
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules,
+            width=20.0,
+            height=20.0,
+            rules=rules,
             layer_stack=stack,
         )
         router = Router(grid, rules)
@@ -151,7 +152,9 @@ class TestViaDiagnostics:
         stack = LayerStack.two_layer()
         rules = DesignRules(grid_resolution=0.5)
         grid = RoutingGrid(
-            width=10.0, height=10.0, rules=rules,
+            width=10.0,
+            height=10.0,
+            rules=rules,
             layer_stack=stack,
         )
         router = Router(grid, rules)
@@ -161,14 +164,16 @@ class TestViaDiagnostics:
         assert diag["blocked"] == 0
         assert diag["zone_blocked"] == 0
         assert diag["exclusion_blocked"] == 0
-        assert diag["placed"] == 0
+        assert diag["eligible"] == 0
 
     def test_diagnostic_counters_reset(self):
         """reset_via_diagnostics should zero all counters."""
         stack = LayerStack.two_layer()
         rules = DesignRules(grid_resolution=0.5)
         grid = RoutingGrid(
-            width=10.0, height=10.0, rules=rules,
+            width=10.0,
+            height=10.0,
+            rules=rules,
             layer_stack=stack,
         )
         router = Router(grid, rules)
@@ -200,7 +205,8 @@ class TestFourLayerRoutingProducesVias:
             via_cost_cap_factor=2.0,
         )
         router = Autorouter(
-            width=30.0, height=20.0,
+            width=30.0,
+            height=20.0,
             rules=rules,
             layer_stack=stack,
         )
@@ -209,9 +215,12 @@ class TestFourLayerRoutingProducesVias:
         pads_r1 = [
             {
                 "number": "1",
-                "x": 5.0, "y": 10.0,
-                "width": 1.0, "height": 1.0,
-                "net": 1, "net_name": "SIG1",
+                "x": 5.0,
+                "y": 10.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 1,
+                "net_name": "SIG1",
                 "layer": Layer.F_CU,
             },
         ]
@@ -221,9 +230,12 @@ class TestFourLayerRoutingProducesVias:
         pads_r2 = [
             {
                 "number": "1",
-                "x": 25.0, "y": 10.0,
-                "width": 1.0, "height": 1.0,
-                "net": 1, "net_name": "SIG1",
+                "x": 25.0,
+                "y": 10.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 1,
+                "net_name": "SIG1",
                 "layer": Layer.B_CU,
             },
         ]
@@ -233,10 +245,7 @@ class TestFourLayerRoutingProducesVias:
         results = router.route_all()
 
         # Check that at least one route has a via
-        has_via = any(
-            route.vias and len(route.vias) > 0
-            for route in results
-        )
+        has_via = any(route.vias and len(route.vias) > 0 for route in results)
         assert has_via, "Cross-layer route should produce at least one via"
 
     def test_four_layer_with_pth_pads_allows_vias(self):
@@ -253,7 +262,8 @@ class TestFourLayerRoutingProducesVias:
             via_cost_cap_factor=2.0,
         )
         router = Autorouter(
-            width=40.0, height=30.0,
+            width=40.0,
+            height=30.0,
             rules=rules,
             layer_stack=stack,
         )
@@ -263,9 +273,12 @@ class TestFourLayerRoutingProducesVias:
             pads = [
                 {
                     "number": "1",
-                    "x": 5.0 + i * 3.0, "y": 15.0,
-                    "width": 1.7, "height": 1.7,
-                    "net": 10 + i, "net_name": f"PTH_NET_{i}",
+                    "x": 5.0 + i * 3.0,
+                    "y": 15.0,
+                    "width": 1.7,
+                    "height": 1.7,
+                    "net": 10 + i,
+                    "net_name": f"PTH_NET_{i}",
                     "through_hole": True,
                     "drill": 1.0,
                 },
@@ -276,18 +289,24 @@ class TestFourLayerRoutingProducesVias:
         pads_front = [
             {
                 "number": "1",
-                "x": 30.0, "y": 5.0,
-                "width": 0.8, "height": 0.8,
-                "net": 1, "net_name": "SIGNAL",
+                "x": 30.0,
+                "y": 5.0,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 1,
+                "net_name": "SIGNAL",
                 "layer": Layer.F_CU,
             },
         ]
         pads_back = [
             {
                 "number": "1",
-                "x": 30.0, "y": 25.0,
-                "width": 0.8, "height": 0.8,
-                "net": 1, "net_name": "SIGNAL",
+                "x": 30.0,
+                "y": 25.0,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 1,
+                "net_name": "SIGNAL",
                 "layer": Layer.B_CU,
             },
         ]
@@ -301,10 +320,7 @@ class TestFourLayerRoutingProducesVias:
         signal_routes = [r for r in results if r.net == 1]
         assert len(signal_routes) > 0, "SIGNAL net should have at least one route"
 
-        has_via = any(
-            route.vias and len(route.vias) > 0
-            for route in signal_routes
-        )
+        has_via = any(route.vias and len(route.vias) > 0 for route in signal_routes)
         assert has_via, "Cross-layer SIGNAL route should use via despite PTH pads on plane layers"
 
 
@@ -331,8 +347,7 @@ class TestViaCostCapEffect:
         congestion_cost = 4.0  # Congested area
 
         uncapped_total = (
-            base_via_cost + inner_layer_cost + layer_util_cost
-            + corridor_cost + congestion_cost
+            base_via_cost + inner_layer_cost + layer_util_cost + corridor_cost + congestion_cost
         )
         capped_total = min(uncapped_total, cap)
 
