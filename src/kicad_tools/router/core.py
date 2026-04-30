@@ -428,6 +428,13 @@ class Autorouter:
         self._sub_problem_misses: int = 0
         self._sub_problem_collisions: int = 0
 
+        # Issue #2334: Stochastic cost perturbation to escape local minima.
+        # When stagnation is detected, random noise is added to per-net
+        # priority scores in _get_net_priority() to break symmetry and
+        # explore alternative routing orders.
+        self._perturbation_magnitude: float = 0.0
+        self._perturbation_rng: random.Random = random.Random(42)
+
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
 
@@ -1625,6 +1632,29 @@ class Autorouter:
             self._component_pitches = self.grid.compute_component_pitches()
         return self._component_pitches
 
+    def _activate_perturbation(self, stagnation_count: int) -> None:
+        """Activate stochastic cost perturbation (Issue #2334).
+
+        Scales perturbation magnitude with stagnation duration so the
+        router explores more aggressively the longer it remains stuck.
+
+        Args:
+            stagnation_count: Number of consecutive iterations with no
+                improvement in overflow.
+        """
+        self._perturbation_magnitude = 0.1 * stagnation_count
+        # Re-seed the RNG each activation so different stagnation
+        # episodes explore different orderings.
+        self._perturbation_rng = random.Random(stagnation_count * 7 + 13)
+
+    def _reset_perturbation(self) -> None:
+        """Reset perturbation to zero (Issue #2334).
+
+        Called when a new best overflow is achieved, indicating the
+        router has escaped the local minimum.
+        """
+        self._perturbation_magnitude = 0.0
+
     def _calculate_constraint_score(self, net_id: int) -> float:
         """Calculate a constraint score for a net based on routing difficulty.
 
@@ -1857,6 +1887,17 @@ class Autorouter:
         # Issue #2278: Pre-route RUDY congestion score (negated so higher = route first)
         estimator = self._ensure_congestion_estimator()
         congestion_score = estimator.get_net_congestion_score(net_id)
+
+        # Issue #2334: When stochastic perturbation is active, add random
+        # noise to the congestion score to break symmetry and explore
+        # alternative routing orders.  The noise is applied to the 6th
+        # tuple element (congestion score) which serves as the final
+        # tiebreaker, so it only changes the ordering of nets that are
+        # otherwise equivalent in priority, complexity, constraint, and
+        # pad count.
+        if self._perturbation_magnitude > 0:
+            noise = self._perturbation_rng.gauss(0, self._perturbation_magnitude)
+            congestion_score += noise
 
         return (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
 
@@ -2527,6 +2568,7 @@ class Autorouter:
         pres_fac_cap: float = 50.0,
         congestion_auto_tune: bool = False,
         hotset_only: bool = False,
+        perturbation: bool = True,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -2599,6 +2641,9 @@ class Autorouter:
                 Produces faster, more predictable iterations at the cost
                 of potentially slower convergence (Issue #2333).
                 Default: False.
+            perturbation: If True (default), enable stochastic cost perturbation
+                when oscillation is detected (Issue #2334). Adds random noise to
+                per-net priority scores to break symmetry and escape local minima.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -2652,6 +2697,14 @@ class Autorouter:
         # Track overflow history for adaptive mode (Issue #633)
         overflow_history: list[int] = []
         escape_strategy_index = 0
+
+        # Issue #2334: Stochastic perturbation state tracking.
+        # perturbation_stagnation_count tracks how many iterations the
+        # overflow has not improved, used to scale perturbation magnitude.
+        perturbation_stagnation_count = 0
+        perturbation_best_overflow: int | None = None
+        # Ensure perturbation is reset at the start of each routing call
+        self._reset_perturbation()
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         # Issue #1295: Filter out pour nets before negotiated routing
@@ -2802,6 +2855,7 @@ class Autorouter:
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
         overflow_history.append(overflow)  # Track for adaptive mode
+        perturbation_best_overflow = overflow  # Issue #2334: baseline for perturbation
         flush_print(
             f"  Routed {len(net_routes)}/{total_nets} nets, overflow: {overflow} ({elapsed_str()})"
         )
@@ -2842,11 +2896,25 @@ class Autorouter:
                     break
 
                 # Adaptive early termination check (Issue #633)
+                # Issue #2334: When perturbation is enabled, activate it
+                # instead of terminating early. Only terminate if
+                # perturbation has already been active for 3+ iterations
+                # without finding a new best.
                 unrouted = total_nets - len(net_routes)
                 if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
-                    print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
-                    print(f"    Overflow history: {overflow_history[-5:]}")
-                    break
+                    if perturbation and perturbation_stagnation_count < 3:
+                        # Activate perturbation instead of terminating
+                        perturbation_stagnation_count += 1
+                        self._activate_perturbation(perturbation_stagnation_count)
+                        flush_print(
+                            f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
+                            f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
+                        )
+                    else:
+                        print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
+                        print(f"    Overflow history: {overflow_history[-5:]}")
+                        self._reset_perturbation()
+                        break
 
                 if progress_callback is not None:
                     progress = iteration / (max_iterations + 1)
@@ -2901,6 +2969,13 @@ class Autorouter:
                     # Issue #2333: EMA smoothing in non-adaptive mode
                     if ema_smoothing:
                         self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
+
+                # Issue #2334: Re-sort net order when perturbation is active
+                # so the rip-up iterations explore different orderings.
+                if self._perturbation_magnitude > 0:
+                    net_order = sorted(
+                        net_order, key=lambda n: self._get_net_priority(n)
+                    )
 
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
 
@@ -3097,6 +3172,24 @@ class Autorouter:
                     overused = self.grid.find_overused_cells()
                     # Track overflow for both branches (Issue #633)
                     overflow_history.append(overflow)
+
+                    # Issue #2334: Reset perturbation when overflow improves
+                    if perturbation and perturbation_best_overflow is not None:
+                        if overflow < perturbation_best_overflow:
+                            if self._perturbation_magnitude > 0:
+                                flush_print(
+                                    f"  Perturbation reset: overflow improved "
+                                    f"{perturbation_best_overflow} → {overflow} ({elapsed_str()})"
+                                )
+                            perturbation_stagnation_count = 0
+                            self._reset_perturbation()
+                            perturbation_best_overflow = overflow
+                        # Update best even when perturbation is inactive
+                        elif overflow == perturbation_best_overflow:
+                            pass  # No change
+                    if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
+                        perturbation_best_overflow = overflow
+
                     flush_print(
                         f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
                         f"overflow: {overflow} ({elapsed_str()})"
@@ -3105,6 +3198,7 @@ class Autorouter:
                     # Check for convergence in targeted mode
                     # Issue #858: Also check that all nets were routed
                     if overflow == 0 and len(net_routes) == total_nets:
+                        self._reset_perturbation()
                         print(f"  Convergence achieved at iteration {iteration}!")
                         break
 
@@ -3174,6 +3268,16 @@ class Autorouter:
                     # Adaptive oscillation detection for targeted mode (Issue #633)
                     # Guard: skip escape strategies when overflow is already 0 (#2262)
                     if adaptive and overflow > 0 and detect_oscillation(overflow_history):
+                        # Issue #2334: Activate perturbation on oscillation to
+                        # perturb net ordering for subsequent iterations.
+                        if perturbation:
+                            perturbation_stagnation_count += 1
+                            self._activate_perturbation(perturbation_stagnation_count)
+                            flush_print(
+                                f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
+                                f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
+                            )
+
                         print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
                         print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
@@ -3396,14 +3500,38 @@ class Autorouter:
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
 
+                # Issue #2334: Reset perturbation when overflow improves
+                if perturbation and perturbation_best_overflow is not None:
+                    if overflow < perturbation_best_overflow:
+                        if self._perturbation_magnitude > 0:
+                            flush_print(
+                                f"  Perturbation reset: overflow improved "
+                                f"{perturbation_best_overflow} → {overflow} ({elapsed_str()})"
+                            )
+                        perturbation_stagnation_count = 0
+                        self._reset_perturbation()
+                        perturbation_best_overflow = overflow
+                if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
+                    perturbation_best_overflow = overflow
+
                 # Issue #858: Also check that all nets were routed
                 if overflow == 0 and len(net_routes) == total_nets:
+                    self._reset_perturbation()
                     print(f"  Convergence achieved at iteration {iteration}!")
                     break
 
                 # Adaptive oscillation detection and escape (Issue #633)
                 # Guard: skip escape strategies when overflow is already 0 (#2262)
                 if adaptive and overflow > 0 and detect_oscillation(overflow_history):
+                    # Issue #2334: Activate perturbation on oscillation
+                    if perturbation:
+                        perturbation_stagnation_count += 1
+                        self._activate_perturbation(perturbation_stagnation_count)
+                        flush_print(
+                            f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
+                            f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
+                        )
+
                     print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
                     print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
@@ -3430,6 +3558,9 @@ class Autorouter:
                     else:
                         print(f"    All {tried} escape strategies exhausted without improvement")
                         # Continue to next iteration with different parameters
+
+        # Issue #2334: Always reset perturbation at end of routing
+        self._reset_perturbation()
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time

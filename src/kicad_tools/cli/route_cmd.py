@@ -943,6 +943,7 @@ def route_with_layer_escalation(
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
+                    perturbation=getattr(args, "perturbation", True),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -1359,6 +1360,7 @@ def route_with_rule_relaxation(
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
+                    perturbation=getattr(args, "perturbation", True),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -2288,6 +2290,15 @@ def main(argv: list[str] | None = None) -> int:
         "--quiet",
         action="store_true",
         help="Suppress progress output (for scripting)",
+    )
+    parser.add_argument(
+        "--perturbation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable stochastic cost perturbation to escape local minima "
+            "(default: enabled). Use --no-perturbation to disable."
+        ),
     )
     parser.add_argument(
         "--power-nets",
@@ -3495,6 +3506,7 @@ def main(argv: list[str] | None = None) -> int:
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
+                    perturbation=getattr(args, "perturbation", True),
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
