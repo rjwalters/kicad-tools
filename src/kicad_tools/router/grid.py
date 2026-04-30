@@ -480,6 +480,7 @@ class RoutingGrid:
         self._net = xp.zeros(grid_shape, dtype=np.int32)
         self._usage_count = xp.zeros(grid_shape, dtype=np.int16)
         self._history_cost = xp.zeros(grid_shape, dtype=np.float32)
+        self._present_cost_ema: np.ndarray | None = None  # Lazy; allocated on first use (Issue #2333)
         self._is_obstacle = xp.zeros(grid_shape, dtype=np.bool_)
         self._is_zone = xp.zeros(grid_shape, dtype=np.bool_)
         self._pad_blocked = xp.zeros(grid_shape, dtype=np.bool_)
@@ -503,6 +504,8 @@ class RoutingGrid:
         self._net = to_numpy(self._net)
         self._usage_count = to_numpy(self._usage_count)
         self._history_cost = to_numpy(self._history_cost)
+        if self._present_cost_ema is not None:
+            self._present_cost_ema = to_numpy(self._present_cost_ema)
         self._is_obstacle = to_numpy(self._is_obstacle)
         self._is_zone = to_numpy(self._is_zone)
         self._pad_blocked = to_numpy(self._pad_blocked)
@@ -542,6 +545,8 @@ class RoutingGrid:
             self._net = backend.asarray(self._net)
             self._usage_count = backend.asarray(self._usage_count)
             self._history_cost = backend.asarray(self._history_cost)
+            if self._present_cost_ema is not None:
+                self._present_cost_ema = backend.asarray(self._present_cost_ema)
             self._is_obstacle = backend.asarray(self._is_obstacle)
             self._is_zone = backend.asarray(self._is_zone)
             self._pad_blocked = backend.asarray(self._pad_blocked)
@@ -1909,6 +1914,44 @@ class RoutingGrid:
             if self._backend_type != BackendType.CPU:
                 self._gpu_dirty = True
 
+    def update_present_cost_ema(
+        self,
+        present_cost_factor: float,
+        alpha: float = 0.6,
+    ) -> None:
+        """Update the per-cell present-cost EMA (Issue #2333).
+
+        Smooths the per-cell present cost using an exponential moving
+        average to prevent bang-bang oscillation in the PathFinder cost
+        model.  The EMA tracks ``present_cost_factor * usage_count``
+        for each cell.
+
+        The EMA array is allocated lazily on first call so there is zero
+        memory overhead when EMA smoothing is not used.
+
+        Args:
+            present_cost_factor: Current present cost multiplier.
+            alpha: Weight of the new value (default 0.6).
+                ``ema = alpha * new + (1 - alpha) * ema``.
+        """
+        xp = self._backend
+
+        # Compute current per-cell present cost
+        if self._backend_type == BackendType.CPU:
+            usage_float = self._usage_count.astype(np.float32)
+        else:
+            usage_float = xp.asarray(self._usage_count, dtype=np.float32)
+
+        new_present = present_cost_factor * usage_float
+
+        if self._present_cost_ema is None:
+            # First call: initialise to the current present cost
+            self._present_cost_ema = new_present.copy()
+        else:
+            self._present_cost_ema = (
+                alpha * new_present + (1.0 - alpha) * self._present_cost_ema
+            )
+
     def get_negotiated_cost(
         self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
     ) -> float:
@@ -1921,7 +1964,11 @@ class RoutingGrid:
         if cell.is_obstacle:
             return float("inf")
 
-        present_cost = present_cost_factor * cell.usage_count
+        # Issue #2333: Use EMA-smoothed present cost when available
+        if self._present_cost_ema is not None:
+            present_cost = float(self._present_cost_ema[layer, gy, gx])
+        else:
+            present_cost = present_cost_factor * cell.usage_count
         history_cost = cell.history_cost
 
         return present_cost + history_cost

@@ -17,6 +17,7 @@ from .monte_carlo import MonteCarloRouter
 from .mst import MSTRouter
 from .negotiated import (
     NegotiatedRouter,
+    calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
@@ -32,7 +33,8 @@ __all__ = [
     "MonteCarloRouter",
     "TwoPhaseRouter",
     "build_rsmt",
-    # Adaptive parameter functions (Issue #633)
+    # Adaptive parameter functions (Issue #633, #2333)
+    "calculate_congestion_tuned_params",
     "calculate_history_increment",
     "calculate_present_cost",
     "detect_oscillation",
