@@ -75,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Show detailed violation information",
     )
     parser.add_argument(
+        "--filter-config",
+        type=Path,
+        help="TOML file with [[erc.filters]] rules to suppress or reclassify violations",
+    )
+    parser.add_argument(
         "--keep-report",
         action="store_true",
         help="Keep the ERC report file after running",
@@ -135,6 +140,32 @@ def main(argv: list[str] | None = None) -> int:
         print("Expected .kicad_sch (schematic) or .json/.rpt (report)", file=sys.stderr)
         return 1
 
+    # Apply violation filters from config file
+    filter_ignored_count = 0
+    if args.filter_config:
+        try:
+            from ..validate.filters import load_filters_from_toml
+
+            _drc_filters, erc_filters = load_filters_from_toml(str(args.filter_config))
+            if erc_filters:
+                from ..validate.filters import FilterEngine
+
+                engine = FilterEngine(erc_filters)
+                filter_result = engine.apply(report.violations)
+                report = ERCReport(
+                    source_file=report.source_file,
+                    kicad_version=report.kicad_version,
+                    coordinate_units=report.coordinate_units,
+                    violations=filter_result.kept,
+                )
+                filter_ignored_count = filter_result.ignored_count
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Error loading filter config: {e}", file=sys.stderr)
+            return 1
+
     # Apply filters
     violations = [v for v in report.violations if not v.excluded]
 
@@ -156,11 +187,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(violations, report)
+        output_json(violations, report, filtered_count=filter_ignored_count)
     elif args.format == "summary":
-        output_summary(violations, report)
+        output_summary(violations, report, filtered_count=filter_ignored_count)
     else:
-        output_table(violations, report, args.verbose, args.by_sheet)
+        output_table(violations, report, args.verbose, args.by_sheet,
+                      filtered_count=filter_ignored_count)
 
     # Exit code
     error_count = sum(1 for v in violations if v.is_error)
@@ -218,6 +250,7 @@ def output_table(
     report: ERCReport,
     verbose: bool = False,
     by_sheet: bool = False,
+    filtered_count: int = 0,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -235,6 +268,8 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if filtered_count > 0:
+        print(f"  Filtered:   {filtered_count} violations filtered")
     if report.exclusion_count > 0:
         print(f"  Excluded:   {report.exclusion_count} (not counted)")
 
@@ -331,24 +366,33 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}      - {suggestion}")
 
 
-def output_json(violations: list[ERCViolation], report: ERCReport) -> None:
+def output_json(violations: list[ERCViolation], report: ERCReport,
+                 filtered_count: int = 0) -> None:
     """Output violations as JSON."""
+    summary: dict = {
+        "errors": sum(1 for v in violations if v.is_error),
+        "warnings": sum(1 for v in violations if not v.is_error),
+    }
+    if filtered_count > 0:
+        summary["filtered"] = filtered_count
+
     data = {
         "source": report.source_file,
         "kicad_version": report.kicad_version,
-        "summary": {
-            "errors": sum(1 for v in violations if v.is_error),
-            "warnings": sum(1 for v in violations if not v.is_error),
-        },
+        "summary": summary,
         "violations": [v.to_dict() for v in violations],
     }
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: list[ERCViolation], report: ERCReport) -> None:
+def output_summary(violations: list[ERCViolation], report: ERCReport,
+                    filtered_count: int = 0) -> None:
     """Output violation summary by type."""
     if not violations:
-        print("No ERC violations found.")
+        if filtered_count > 0:
+            print(f"No ERC violations found ({filtered_count} violations filtered).")
+        else:
+            print("No ERC violations found.")
         return
 
     print(f"ERC Summary: {report.source_file}")

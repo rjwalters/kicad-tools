@@ -117,6 +117,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Show fix suggestions for each violation",
     )
     parser.add_argument(
+        "--filter-config",
+        type=Path,
+        help="TOML file with [[drc.filters]] rules to suppress or reclassify violations",
+    )
+    parser.add_argument(
         "--keep-report",
         action="store_true",
         help="Keep the DRC report file after running",
@@ -172,6 +177,33 @@ def main(argv: list[str] | None = None) -> int:
         print("Expected .kicad_pcb (PCB) or .json/.rpt (report)", file=sys.stderr)
         return 1
 
+    # Apply violation filters from config file
+    filter_ignored_count = 0
+    if args.filter_config:
+        try:
+            from ..validate.filters import load_filters_from_toml
+
+            drc_filters, _erc_filters = load_filters_from_toml(str(args.filter_config))
+            if drc_filters:
+                from ..validate.filters import FilterEngine
+
+                engine = FilterEngine(drc_filters)
+                filter_result = engine.apply(report.violations)
+                report = DRCReport(
+                    source_file=report.source_file,
+                    created_at=report.created_at,
+                    pcb_name=report.pcb_name,
+                    violations=filter_result.kept,
+                    footprint_errors=report.footprint_errors,
+                )
+                filter_ignored_count = filter_result.ignored_count
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Error loading filter config: {e}", file=sys.stderr)
+            return 1
+
     # Manufacturer check mode
     if args.mfr:
         return output_manufacturer_check(report, args.mfr, args.layers, args.verbose)
@@ -206,12 +238,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(violations, report, show_suggestions=args.suggest)
+        output_json(violations, report, show_suggestions=args.suggest,
+                     filtered_count=filter_ignored_count)
     elif args.format == "summary":
-        output_summary(violations, report)
+        output_summary(violations, report, filtered_count=filter_ignored_count)
     else:
         output_table(
-            violations, report, args.verbose, show_suggestions=args.suggest, layers=args.layers
+            violations, report, args.verbose, show_suggestions=args.suggest, layers=args.layers,
+            filtered_count=filter_ignored_count,
         )
 
     # Exit code
@@ -271,6 +305,7 @@ def output_table(
     verbose: bool = False,
     show_suggestions: bool = False,
     layers: int = 2,
+    filtered_count: int = 0,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -288,6 +323,8 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if filtered_count > 0:
+        print(f"  Filtered:   {filtered_count} violations filtered")
 
     if not violations:
         print(f"\n{'=' * 60}")
@@ -413,6 +450,7 @@ def output_json(
     violations: list[DRCViolation],
     report: DRCReport,
     show_suggestions: bool = False,
+    filtered_count: int = 0,
 ) -> None:
     """Output violations as JSON."""
     violations_data = []
@@ -423,22 +461,30 @@ def output_json(
             del v_dict["suggestions"]
         violations_data.append(v_dict)
 
+    summary: dict = {
+        "errors": sum(1 for v in violations if v.is_error),
+        "warnings": sum(1 for v in violations if not v.is_error),
+    }
+    if filtered_count > 0:
+        summary["filtered"] = filtered_count
+
     data = {
         "source": report.source_file,
         "pcb_name": report.pcb_name,
-        "summary": {
-            "errors": sum(1 for v in violations if v.is_error),
-            "warnings": sum(1 for v in violations if not v.is_error),
-        },
+        "summary": summary,
         "violations": violations_data,
     }
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: list[DRCViolation], report: DRCReport) -> None:
+def output_summary(violations: list[DRCViolation], report: DRCReport,
+                    filtered_count: int = 0) -> None:
     """Output violation summary by type."""
     if not violations:
-        print("No DRC violations found.")
+        if filtered_count > 0:
+            print(f"No DRC violations found ({filtered_count} violations filtered).")
+        else:
+            print("No DRC violations found.")
         return
 
     print(f"DRC Summary: {report.source_file}")

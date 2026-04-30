@@ -53,6 +53,30 @@ class ERCReport:
         """Get excluded violations."""
         return [v for v in self.violations if v.excluded]
 
+    def apply_filters(
+        self,
+        filters: "list[ViolationFilter]",
+    ) -> "ERCReport":
+        """Return a new report with violations filtered/reclassified.
+
+        Args:
+            filters: List of :class:`ViolationFilter` rules to apply.
+
+        Returns:
+            A new :class:`ERCReport` containing only the kept violations
+            (those not suppressed by ``action="ignore"`` rules).
+        """
+        from kicad_tools.validate.filters import FilterEngine, ViolationFilter
+
+        engine = FilterEngine(filters)
+        result = engine.apply(self.violations)
+        return ERCReport(
+            source_file=self.source_file,
+            kicad_version=self.kicad_version,
+            coordinate_units=self.coordinate_units,
+            violations=result.kept,
+        )
+
     def by_type(self, vtype: ERCViolationType) -> list[ERCViolation]:
         """Get violations of a specific type."""
         return [v for v in self.violations if v.type == vtype and not v.excluded]
