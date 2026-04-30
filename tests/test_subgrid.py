@@ -9,7 +9,7 @@ import pytest
 
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad
+from kicad_tools.router.primitives import Pad, Segment
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.subgrid import (
     SubGridAnalysis,
@@ -2161,3 +2161,205 @@ class TestEscapeFallbackStrategies:
                 f"Escape for {escape.pad.ref}.{escape.pad.pin} violates "
                 f"clearance={clearance:.4f}mm"
             )
+
+
+class TestSubGridResultFailureTracking:
+    """Tests for per-component failure aggregation (issue #2351)."""
+
+    def test_failures_by_component_empty(self):
+        """No failures should produce empty dict."""
+        result = SubGridResult(escapes=[], failed_pads=[])
+        assert result.failures_by_component() == {}
+
+    def test_failures_by_component_single(self):
+        """Single failure should appear in aggregation."""
+        pad = make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1")
+        result = SubGridResult(
+            escapes=[],
+            failed_pads=[pad],
+            failure_reasons={("U1", "1"): "clearance violation"},
+        )
+        by_ref = result.failures_by_component()
+        assert by_ref == {"U1": {"clearance violation": 1}}
+
+    def test_failures_by_component_multiple_refs(self):
+        """Failures across multiple components should be grouped."""
+        p1 = make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1")
+        p2 = make_pad(x=2.0, y=1.0, net=2, ref="U1", pin="2")
+        p3 = make_pad(x=3.0, y=1.0, net=3, ref="U2", pin="1")
+        result = SubGridResult(
+            escapes=[],
+            failed_pads=[p1, p2, p3],
+            failure_reasons={
+                ("U1", "1"): "clearance violation",
+                ("U1", "2"): "no grid point reachable",
+                ("U2", "1"): "clearance violation",
+            },
+        )
+        by_ref = result.failures_by_component()
+        assert by_ref == {
+            "U1": {"clearance violation": 1, "no grid point reachable": 1},
+            "U2": {"clearance violation": 1},
+        }
+
+    def test_failures_by_component_unknown_reason(self):
+        """Pad with no recorded reason should show 'unknown'."""
+        pad = make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1")
+        result = SubGridResult(
+            escapes=[],
+            failed_pads=[pad],
+            failure_reasons={},  # no reason recorded
+        )
+        by_ref = result.failures_by_component()
+        assert by_ref == {"U1": {"unknown": 1}}
+
+    def test_format_summary_with_failure_reasons(self):
+        """format_summary should include per-component breakdown."""
+        p1 = make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1")
+        p2 = make_pad(x=2.0, y=1.0, net=2, ref="U1", pin="2")
+        # Create a minimal analysis to track attempted counts
+        analysis = SubGridAnalysis(
+            off_grid_pads=[
+                SubGridPad(pad=p1, grid_x=10, grid_y=10,
+                           offset_x=0.05, offset_y=0.0,
+                           snap_x=1.0, snap_y=1.0),
+                SubGridPad(pad=p2, grid_x=20, grid_y=10,
+                           offset_x=0.05, offset_y=0.0,
+                           snap_x=2.0, snap_y=1.0),
+            ],
+        )
+        result = SubGridResult(
+            escapes=[],
+            failed_pads=[p1, p2],
+            failure_reasons={
+                ("U1", "1"): "clearance violation",
+                ("U1", "2"): "clearance violation",
+            },
+            analysis=analysis,
+        )
+        summary = result.format_summary()
+        assert "0/2 pads escaped" in summary
+        assert "U1:" in summary
+        assert "clearance violation: 2" in summary
+
+    def test_format_summary_mixed_success_failure(self):
+        """format_summary with some escapes and some failures."""
+        p_ok = make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1")
+        p_fail = make_pad(x=2.0, y=1.0, net=2, ref="U1", pin="2")
+        escape = SubGridEscape(
+            pad=p_ok,
+            segment=Segment(
+                x1=1.0, y1=1.0, x2=1.1, y2=1.0,
+                width=0.2, layer=Layer.F_CU, net=1,
+            ),
+            grid_point=(11, 10),
+            snap_point=(1.1, 1.0),
+        )
+        analysis = SubGridAnalysis(
+            off_grid_pads=[
+                SubGridPad(pad=p_ok, grid_x=10, grid_y=10,
+                           offset_x=0.05, offset_y=0.0,
+                           snap_x=1.0, snap_y=1.0),
+                SubGridPad(pad=p_fail, grid_x=20, grid_y=10,
+                           offset_x=0.05, offset_y=0.0,
+                           snap_x=2.0, snap_y=1.0),
+            ],
+        )
+        result = SubGridResult(
+            escapes=[escape],
+            failed_pads=[p_fail],
+            failure_reasons={("U1", "2"): "no grid point reachable"},
+            analysis=analysis,
+        )
+        summary = result.format_summary()
+        assert "1/2 pads escaped" in summary
+        assert "U1: 1/2 pads escaped" in summary
+        assert "no grid point reachable" in summary
+
+
+class TestSubGridEscapeFailureLogging:
+    """Tests for WARNING-level logging on escape failures (issue #2351)."""
+
+    def test_generate_escape_segments_logs_warning_on_failure(self, caplog):
+        """generate_escape_segments should log WARNING per failed component."""
+        import logging
+
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        # Very small search radius to force failure
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=1)
+
+        # Off-grid pad surrounded by other-net pads on all sides
+        off_grid_pad = make_pad(
+            x=5.05, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # Surround with large pads from different nets
+        blockers = []
+        for bx, by, bnet in [
+            (4.8, 5.0, 10), (5.3, 5.0, 11),
+            (5.05, 4.7, 12), (5.05, 5.3, 13),
+            (4.8, 4.7, 14), (5.3, 4.7, 15),
+            (4.8, 5.3, 16), (5.3, 5.3, 17),
+        ]:
+            blockers.append(make_pad(
+                x=bx, y=by, net=bnet, ref="U2", pin=str(bnet),
+                width=0.4, height=0.4,
+            ))
+
+        all_pads = [off_grid_pad] + blockers
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.router.subgrid"):
+            result = subgrid.generate_escape_segments(analysis)
+
+        if result.failed_pads:
+            # Should have WARNING logs with per-component info
+            warning_msgs = [
+                r.message for r in caplog.records if r.levelno == logging.WARNING
+            ]
+            assert any("U1:" in msg for msg in warning_msgs), (
+                f"Expected WARNING with 'U1:' but got: {warning_msgs}"
+            )
+            # Failure reasons should be populated
+            assert len(result.failure_reasons) == len(result.failed_pads)
+
+    def test_generate_escape_segments_no_warning_on_success(self, caplog):
+        """generate_escape_segments should not warn when all pads escape."""
+        import logging
+
+        grid, rules = make_grid_and_rules(
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+
+        # Single off-grid pad with lots of room -- should succeed
+        pads = [
+            make_pad(x=1.05, y=1.0, net=1, ref="U1", pin="1",
+                     width=0.3, height=0.45),
+        ]
+        for p in pads:
+            grid.add_pad(p)
+
+        subgrid = SubGridRouter(grid, rules)
+        analysis = subgrid.analyze_pads(pads)
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.router.subgrid"):
+            result = subgrid.generate_escape_segments(analysis)
+
+        warning_msgs = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert not warning_msgs, (
+            f"Expected no WARNING on success but got: {warning_msgs}"
+        )
