@@ -1021,9 +1021,9 @@ def route_with_layer_escalation(
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
-            GridCollisionChecker,
             OptimizationConfig,
             TraceOptimizer,
+            make_collision_checker,
         )
 
         if not quiet:
@@ -1041,7 +1041,7 @@ def route_with_layer_escalation(
         # the router finished with residual overflow.  This prevents the
         # optimizer from fragmenting routes through overused cells.
         has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = GridCollisionChecker(
+        collision_checker = make_collision_checker(
             final_result.router.grid, ignore_overflow=has_overflow
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
@@ -1459,9 +1459,9 @@ def route_with_rule_relaxation(
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
-            GridCollisionChecker,
             OptimizationConfig,
             TraceOptimizer,
+            make_collision_checker,
         )
 
         if not quiet:
@@ -1478,7 +1478,7 @@ def route_with_rule_relaxation(
         # Issue #2303: Use overflow-tolerant collision checking when
         # the router finished with residual overflow.
         has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = GridCollisionChecker(
+        collision_checker = make_collision_checker(
             final_result.router.grid, ignore_overflow=has_overflow
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
@@ -1914,9 +1914,9 @@ def route_with_combined_escalation(
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
-            GridCollisionChecker,
             OptimizationConfig,
             TraceOptimizer,
+            make_collision_checker,
         )
 
         if not quiet:
@@ -1933,7 +1933,7 @@ def route_with_combined_escalation(
         # Issue #2303: Use overflow-tolerant collision checking when
         # the router finished with residual overflow.
         has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = GridCollisionChecker(
+        collision_checker = make_collision_checker(
             final_result.router.grid, ignore_overflow=has_overflow
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
@@ -3575,9 +3575,9 @@ def main(argv: list[str] | None = None) -> int:
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if not args.no_optimize and router.routes:
         from kicad_tools.router.optimizer import (
-            GridCollisionChecker,
             OptimizationConfig,
             TraceOptimizer,
+            make_collision_checker,
         )
 
         if not quiet:
@@ -3599,7 +3599,7 @@ def main(argv: list[str] | None = None) -> int:
         # Issue #2303: Use overflow-tolerant collision checking when
         # the router finished with residual overflow.
         has_overflow = router.grid.get_total_overflow() > 0
-        collision_checker = GridCollisionChecker(
+        collision_checker = make_collision_checker(
             router.grid, ignore_overflow=has_overflow
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)

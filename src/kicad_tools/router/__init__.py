@@ -188,6 +188,7 @@ from .net_class import (
 from .optimizer import (
     CollisionChecker,
     GridCollisionChecker,
+    VectorCollisionChecker,
     OptimizationConfig,
     OptimizationStats,
     TraceOptimizer,
@@ -423,6 +424,7 @@ __all__ = [
     "OptimizationStats",
     "CollisionChecker",
     "GridCollisionChecker",
+    "VectorCollisionChecker",
     # Zones
     "ZoneManager",
     "ZoneFiller",

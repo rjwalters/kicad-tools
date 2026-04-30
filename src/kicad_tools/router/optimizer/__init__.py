@@ -18,9 +18,9 @@ Example::
     optimizer = TraceOptimizer()
     optimized_route = optimizer.optimize_route(route)
 
-    # Optimize with collision checking
-    from kicad_tools.router import GridCollisionChecker
-    checker = GridCollisionChecker(grid)
+    # Optimize with collision checking (auto-selects best checker)
+    from kicad_tools.router.optimizer import make_collision_checker
+    checker = make_collision_checker(grid)
     optimizer = TraceOptimizer(collision_checker=checker)
     optimized_route = optimizer.optimize_route(route)
 
@@ -30,7 +30,12 @@ Example::
     print(f"Reduced vias from {stats['vias_before']} to {stats['vias_after']}")
 """
 
-from .collision import CollisionChecker, GridCollisionChecker
+from .collision import (
+    CollisionChecker,
+    GridCollisionChecker,
+    VectorCollisionChecker,
+    make_collision_checker,
+)
 from .config import OptimizationConfig, OptimizationStats
 from .serpentine import (
     SerpentineConfig,
@@ -52,6 +57,8 @@ from .via_optimizer import (
 __all__ = [
     "CollisionChecker",
     "GridCollisionChecker",
+    "VectorCollisionChecker",
+    "make_collision_checker",
     "LayerConnectivityError",
     "OptimizationConfig",
     "OptimizationStats",

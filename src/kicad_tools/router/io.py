@@ -50,6 +50,10 @@ if TYPE_CHECKING:
     from .primitives import Pad
 
 from .core import Autorouter
+from .geometry import (
+    point_to_segment_distance as _geom_point_to_seg_dist,
+    segment_to_segment_distance as _geom_seg_to_seg_dist,
+)
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
@@ -1842,23 +1846,7 @@ def _point_to_segment_distance(
     px: float, py: float, x1: float, y1: float, x2: float, y2: float
 ) -> float:
     """Calculate minimum distance from a point to a line segment."""
-    # Vector from start to end
-    dx = x2 - x1
-    dy = y2 - y1
-
-    # Handle zero-length segment
-    seg_len_sq = dx * dx + dy * dy
-    if seg_len_sq == 0:
-        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-    # Project point onto line, clamped to segment
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
-
-    # Closest point on segment
-    closest_x = x1 + t * dx
-    closest_y = y1 + t * dy
-
-    return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+    return _geom_point_to_seg_dist(px, py, x1, y1, x2, y2)
 
 
 def _segment_to_segment_distance(
@@ -1871,15 +1859,8 @@ def _segment_to_segment_distance(
     x4: float,
     y4: float,
 ) -> float:
-    """Calculate minimum distance between two line segments.
-
-    Checks all four endpoint-to-segment distances and returns the minimum.
-    """
-    d1 = _point_to_segment_distance(x1, y1, x3, y3, x4, y4)
-    d2 = _point_to_segment_distance(x2, y2, x3, y3, x4, y4)
-    d3 = _point_to_segment_distance(x3, y3, x1, y1, x2, y2)
-    d4 = _point_to_segment_distance(x4, y4, x1, y1, x2, y2)
-    return min(d1, d2, d3, d4)
+    """Calculate minimum distance between two line segments."""
+    return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
 
 
 def detect_layer_stack(pcb_text: str) -> LayerStack:
