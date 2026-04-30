@@ -1794,6 +1794,7 @@ def route_with_combined_escalation(
                         batch_routing=getattr(args, "batch_routing", False)
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
+                        perturbation=getattr(args, "perturbation", True),
                     )
                 elif args.strategy == "basic":
                     router.route_all()
@@ -3453,6 +3454,7 @@ def main(argv: list[str] | None = None) -> int:
                             batch_routing=getattr(args, "batch_routing", False)
                             or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
+                            perturbation=getattr(args, "perturbation", True),
                         )
                     else:
                         return router.route_all()
