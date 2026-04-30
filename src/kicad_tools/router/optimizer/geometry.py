@@ -174,6 +174,82 @@ def shorten_segment_start(seg: Segment, amount: float, min_length: float = 0.05)
     )
 
 
+def perpendicular_direction(seg: Segment, tolerance: float = 1e-4) -> tuple[float, float]:
+    """Return a unit vector perpendicular to a segment.
+
+    The perpendicular is rotated 90 degrees counter-clockwise from the
+    segment direction.  For a zero-length segment the result is (0, 0).
+
+    Args:
+        seg: The segment to compute the perpendicular for.
+        tolerance: Tolerance for zero-length detection.
+
+    Returns:
+        (px, py) unit perpendicular vector.
+    """
+    dx = seg.x2 - seg.x1
+    dy = seg.y2 - seg.y1
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < tolerance:
+        return (0.0, 0.0)
+    # Rotate 90 degrees CCW: (dx, dy) -> (-dy, dx)
+    return (-dy / length, dx / length)
+
+
+def project_point_onto_line(
+    px: float,
+    py: float,
+    lx1: float,
+    ly1: float,
+    lx2: float,
+    ly2: float,
+) -> tuple[float, float]:
+    """Project a point onto an infinite line defined by two points.
+
+    Args:
+        px, py: The point to project.
+        lx1, ly1: First point on the line.
+        lx2, ly2: Second point on the line.
+
+    Returns:
+        (x, y) projected point on the line.
+    """
+    dx = lx2 - lx1
+    dy = ly2 - ly1
+    len_sq = dx * dx + dy * dy
+    if len_sq < 1e-12:
+        return (lx1, ly1)
+    t = ((px - lx1) * dx + (py - ly1) * dy) / len_sq
+    return (lx1 + t * dx, ly1 + t * dy)
+
+
+def translate_segment(
+    seg: Segment,
+    dx: float,
+    dy: float,
+) -> Segment:
+    """Return a copy of *seg* translated by (dx, dy).
+
+    Args:
+        seg: The segment to translate.
+        dx: Translation in x.
+        dy: Translation in y.
+
+    Returns:
+        A new Segment with translated endpoints.
+    """
+    return Segment(
+        x1=seg.x1 + dx,
+        y1=seg.y1 + dy,
+        x2=seg.x2 + dx,
+        y2=seg.y2 + dy,
+        width=seg.width,
+        layer=seg.layer,
+        net=seg.net,
+        net_name=seg.net_name,
+    )
+
+
 def count_corners(segments: list[Segment], tolerance: float = 1e-4) -> int:
     """Count number of corners (direction changes) in a segment list."""
     if len(segments) < 2:

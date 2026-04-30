@@ -11,6 +11,7 @@ from .algorithms import (
     convert_corners_45,
     eliminate_zigzags,
     merge_collinear,
+    pull_tight_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -21,12 +22,15 @@ from .geometry import (
     is_90_degree_corner,
     is_connected,
     is_zigzag,
+    perpendicular_direction,
+    project_point_onto_line,
     same_direction,
     segment_direction,
     segments_touch,
     shorten_segment_end,
     shorten_segment_start,
     total_length,
+    translate_segment,
 )
 from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
@@ -97,6 +101,7 @@ class TraceOptimizer:
         3. Zigzag elimination
         4. Staircase compression
         5. 45-degree corner conversion
+        6. PullTight perpendicular segment translation
 
         Args:
             segments: List of segments to optimize (may contain multiple chains).
@@ -127,6 +132,9 @@ class TraceOptimizer:
 
             if self.config.convert_45_corners:
                 result = self.convert_corners_45(result)
+
+            if self.config.pull_tight:
+                result = self.pull_tight(result)
 
             all_optimized.extend(result)
 
@@ -213,6 +221,21 @@ class TraceOptimizer:
             List with corners converted to 45 degrees.
         """
         return convert_corners_45(segments, self.config, self._path_is_clear)
+
+    def pull_tight(self, segments: list[Segment]) -> list[Segment]:
+        """PullTight post-processing: translate interior segments to shorten total length.
+
+        Iteratively moves interior segments perpendicular to their direction
+        toward the ideal straight-line path, respecting DRC clearances via
+        the collision checker.
+
+        Args:
+            segments: List of connected segments (single chain).
+
+        Returns:
+            Optimised list of segments.
+        """
+        return pull_tight_pass(segments, self.config, self._path_is_clear)
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.
