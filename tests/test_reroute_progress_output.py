@@ -1,13 +1,15 @@
 """Tests for per-net progress output during rip-up-and-reroute iterations (Issue #1265).
 
 These tests verify that flush_print is called with per-net progress messages
-during both the targeted and full rip-up reroute loops in route_all_negotiated().
+during both the targeted and full rip-up reroute loops in route_all_negotiated(),
+and during two-phase rip-up reroute iterations (Issue #2318).
 """
 
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
 from kicad_tools.router.core import Autorouter
 
 
@@ -393,4 +395,251 @@ class TestRerouteProgressFormat:
         )
         assert "2/2" in reroute_msgs[1], (
             f"Expected second message to contain '2/2': {reroute_msgs[1]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Two-Phase Router rip-up reroute progress tests (Issue #2318)
+# ---------------------------------------------------------------------------
+
+
+def _make_two_phase_router():
+    """Create a minimal TwoPhaseRouter with two nets for testing reroute progress."""
+    autorouter = Autorouter(width=50.0, height=40.0)
+    # Net 1: two pads
+    pads1 = [
+        {"number": "1", "x": 5.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
+        {"number": "2", "x": 15.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
+    ]
+    autorouter.add_component("U1", pads1)
+    # Net 2: two pads
+    pads2 = [
+        {"number": "1", "x": 10.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
+        {"number": "2", "x": 10.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
+    ]
+    autorouter.add_component("U2", pads2)
+
+    # Build a TwoPhaseRouter using the autorouter's internals
+    def noop_route_net(net):
+        return []
+
+    def noop_route_net_with_corridor(net, present_factor, per_net_timeout=None):
+        return []
+
+    def noop_mark_route(route):
+        pass
+
+    tp = TwoPhaseRouter(
+        grid=autorouter.grid,
+        router=autorouter.router,
+        rules=autorouter.rules,
+        net_class_map=None,
+        nets=autorouter.nets,
+        net_names=autorouter.net_names,
+        pads=autorouter.pads,
+        routes=list(autorouter.routes),
+        routing_failures=[],
+        get_net_priority=lambda n: n,
+        route_net=noop_route_net,
+        route_net_with_corridor=noop_route_net_with_corridor,
+        mark_route=noop_mark_route,
+    )
+    return tp
+
+
+class TestTwoPhaseRerouteProgressOutput:
+    """Tests for per-net progress output during two-phase rip-up reroute iterations."""
+
+    def test_flush_print_called_per_net_in_reroute_loop(self):
+        """Verify flush_print emits per-net 'Re-routing net' messages in _detailed_negotiated."""
+        tp = _make_two_phase_router()
+
+        flush_print_calls = []
+
+        def tracking_flush_print(msg):
+            flush_print_calls.append(msg)
+
+        overflow_call_count = [0]
+
+        def mock_overflow():
+            overflow_call_count[0] += 1
+            # First call (after initial pass): overflow triggers rip-up
+            if overflow_call_count[0] == 1:
+                return 2
+            return 0
+
+        overused_call_count = [0]
+
+        def mock_overused():
+            overused_call_count[0] += 1
+            if overused_call_count[0] == 1:
+                return list(_FAKE_OVERUSED)
+            return []
+
+        def mock_find_nets(self_neg, net_routes, overused_cells):
+            if overused_cells:
+                return [1, 2]
+            return []
+
+        net_order = [n for n in sorted(tp.nets.keys()) if n != 0]
+
+        with (
+            patch(
+                "kicad_tools.router.algorithms.two_phase.flush_print",
+                side_effect=tracking_flush_print,
+            ),
+            patch.object(tp.grid, "get_total_overflow", side_effect=mock_overflow),
+            patch.object(tp.grid, "find_overused_cells", side_effect=mock_overused),
+            patch.object(
+                NegotiatedRouter,
+                "find_nets_through_overused_cells",
+                mock_find_nets,
+            ),
+        ):
+            tp._detailed_negotiated(
+                net_order=net_order,
+                max_iterations=2,
+            )
+
+        reroute_msgs = [msg for msg in flush_print_calls if "Re-routing net" in msg]
+        rip_up_msgs = [msg for msg in flush_print_calls if "ripping up" in msg]
+
+        # The rip-up loop should have been entered
+        assert len(rip_up_msgs) > 0, (
+            f"Expected 'ripping up' message but found none. "
+            f"All flush_print calls: {flush_print_calls}"
+        )
+
+        # Per-net progress lines should be present (one per net)
+        assert len(reroute_msgs) == 2, (
+            f"Expected 2 'Re-routing net' messages (one per net) but found {len(reroute_msgs)}. "
+            f"All flush_print calls: {flush_print_calls}"
+        )
+
+    def test_reroute_message_format_includes_counter_and_name(self):
+        """Verify two-phase reroute messages include N/M counter, net name, and elapsed time."""
+        tp = _make_two_phase_router()
+
+        flush_print_calls = []
+
+        def tracking_flush_print(msg):
+            flush_print_calls.append(msg)
+
+        overflow_call_count = [0]
+
+        def mock_overflow():
+            overflow_call_count[0] += 1
+            if overflow_call_count[0] == 1:
+                return 2
+            return 0
+
+        overused_call_count = [0]
+
+        def mock_overused():
+            overused_call_count[0] += 1
+            if overused_call_count[0] == 1:
+                return list(_FAKE_OVERUSED)
+            return []
+
+        def mock_find_nets(self_neg, net_routes, overused_cells):
+            if overused_cells:
+                return [1, 2]
+            return []
+
+        net_order = [n for n in sorted(tp.nets.keys()) if n != 0]
+
+        with (
+            patch(
+                "kicad_tools.router.algorithms.two_phase.flush_print",
+                side_effect=tracking_flush_print,
+            ),
+            patch.object(tp.grid, "get_total_overflow", side_effect=mock_overflow),
+            patch.object(tp.grid, "find_overused_cells", side_effect=mock_overused),
+            patch.object(
+                NegotiatedRouter,
+                "find_nets_through_overused_cells",
+                mock_find_nets,
+            ),
+        ):
+            tp._detailed_negotiated(
+                net_order=net_order,
+                max_iterations=2,
+            )
+
+        reroute_msgs = [msg for msg in flush_print_calls if "Re-routing net" in msg]
+        assert len(reroute_msgs) >= 2, (
+            f"Expected at least 2 'Re-routing net' messages, got {len(reroute_msgs)}"
+        )
+
+        for msg in reroute_msgs:
+            # Should contain N/M counter
+            assert "/" in msg, f"Expected 'N/M' counter in message: {msg}"
+            # Should contain net name
+            assert any(name in msg for name in ["VCC", "GND"]), (
+                f"Expected net name in message: {msg}"
+            )
+            # Should contain elapsed time in (N.Ns) format
+            assert re.search(r"\(\d+\.\d+s\)", msg), (
+                f"Expected elapsed time in format '(N.Ns)' in message: {msg}"
+            )
+
+        # Verify 1-indexed counter
+        assert "1/2" in reroute_msgs[0], (
+            f"Expected first message to contain '1/2': {reroute_msgs[0]}"
+        )
+        assert "2/2" in reroute_msgs[1], (
+            f"Expected second message to contain '2/2': {reroute_msgs[1]}"
+        )
+
+    def test_no_reroute_output_when_nets_to_reroute_is_empty(self):
+        """Verify no per-net reroute output when nets_to_reroute is empty (converged)."""
+        tp = _make_two_phase_router()
+
+        flush_print_calls = []
+
+        def tracking_flush_print(msg):
+            flush_print_calls.append(msg)
+
+        overflow_call_count = [0]
+
+        def mock_overflow():
+            overflow_call_count[0] += 1
+            # Overflow triggers iteration, but no nets found
+            if overflow_call_count[0] == 1:
+                return 1
+            return 0
+
+        def mock_overused():
+            return list(_FAKE_OVERUSED)
+
+        def mock_find_nets(self_neg, net_routes, overused_cells):
+            # No nets through overused cells => empty reroute set
+            return []
+
+        net_order = [n for n in sorted(tp.nets.keys()) if n != 0]
+
+        with (
+            patch(
+                "kicad_tools.router.algorithms.two_phase.flush_print",
+                side_effect=tracking_flush_print,
+            ),
+            patch.object(tp.grid, "get_total_overflow", side_effect=mock_overflow),
+            patch.object(tp.grid, "find_overused_cells", side_effect=mock_overused),
+            patch.object(
+                NegotiatedRouter,
+                "find_nets_through_overused_cells",
+                mock_find_nets,
+            ),
+        ):
+            tp._detailed_negotiated(
+                net_order=net_order,
+                max_iterations=2,
+            )
+
+        reroute_msgs = [msg for msg in flush_print_calls if "Re-routing net" in msg]
+
+        # No per-net reroute messages should appear since nets_to_reroute was empty
+        assert len(reroute_msgs) == 0, (
+            f"Expected no 'Re-routing net' messages when nets_to_reroute is empty, "
+            f"but found {len(reroute_msgs)}: {reroute_msgs}"
         )
