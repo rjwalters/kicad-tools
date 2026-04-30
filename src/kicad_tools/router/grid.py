@@ -412,6 +412,14 @@ class RoutingGrid:
         self._seg_rtree_count: int = 0  # total indexed segments across all layers
         self._rtree_available = RTREE_AVAILABLE
 
+        # Issue #2335: Clearance-compensated spatial indexing.
+        # R-tree envelopes are inflated by max_clearance so that intersection
+        # queries return all segments that *could* violate clearance, without
+        # per-query clearance arithmetic.  The inflation amount is cached so
+        # that insert/remove use a consistent value; invalidate_spatial_index()
+        # rebuilds the index when rules change.
+        self._rtree_clearance_inflation: float = self.rules.max_clearance
+
     def _select_backend(self) -> tuple[BackendType, Any]:
         """Select the appropriate backend based on config and grid size.
 
@@ -987,18 +995,22 @@ class RoutingGrid:
         )
 
         if use_rtree:
-            # Query R-tree for candidate segments whose envelopes overlap the
-            # query segment's envelope. We expand by a generous search radius
-            # so that min_actual_clearance is computed accurately for nearby
-            # segments, not just those within the violation threshold. Segments
-            # beyond search_radius have clearance >= search_radius which is
-            # sufficient for reporting purposes.
-            search_radius = max(min_clearance * 10, 5.0)
+            # Issue #2335: R-tree envelopes are already inflated by
+            # _rtree_clearance_inflation (= max_clearance).  The query
+            # envelope only needs the query segment's own half-width plus a
+            # small margin for accurate min_actual_clearance reporting on
+            # nearby (non-violating) segments.  Segments whose inflated
+            # envelopes do not intersect this query region are guaranteed to
+            # have edge-to-edge clearance >= max_clearance and can be safely
+            # skipped.  The extra ``min_clearance`` term ensures that all
+            # potential violators are captured even when the query segment's
+            # required clearance differs from the index inflation.
+            search_margin = seg_half_width + min_clearance
             query_envelope = (
-                min(seg.x1, seg.x2) - seg_half_width - search_radius,
-                min(seg.y1, seg.y2) - seg_half_width - search_radius,
-                max(seg.x1, seg.x2) + seg_half_width + search_radius,
-                max(seg.y1, seg.y2) + seg_half_width + search_radius,
+                min(seg.x1, seg.x2) - search_margin,
+                min(seg.y1, seg.y2) - search_margin,
+                max(seg.x1, seg.x2) + search_margin,
+                max(seg.y1, seg.y2) + search_margin,
             )
             candidate_ids = list(
                 self._seg_rtree[seg_layer_idx].intersection(query_envelope)
@@ -1411,33 +1423,57 @@ class RoutingGrid:
         return self._seg_rtree[layer_idx]
 
     @staticmethod
-    def _segment_envelope(seg: Segment) -> tuple[float, float, float, float]:
-        """Compute the axis-aligned bounding box for a segment, expanded by half-width.
+    def _segment_envelope(
+        seg: Segment, clearance_inflation: float = 0.0
+    ) -> tuple[float, float, float, float]:
+        """Compute the axis-aligned bounding box for a segment.
+
+        The envelope is expanded by the segment half-width plus an optional
+        clearance inflation value.  When ``clearance_inflation`` is non-zero
+        (Issue #2335), the envelope grows so that a simple intersection test
+        against a query point/segment can replace per-candidate clearance
+        arithmetic.
+
+        Args:
+            seg: The segment whose envelope to compute.
+            clearance_inflation: Additional expansion in mm beyond the
+                segment half-width.  Typically set to
+                ``DesignRules.max_clearance`` for conservative indexing.
 
         Returns:
             (min_x, min_y, max_x, max_y) tuple suitable for R-tree insertion/query.
         """
-        hw = seg.width / 2
+        margin = seg.width / 2 + clearance_inflation
         return (
-            min(seg.x1, seg.x2) - hw,
-            min(seg.y1, seg.y2) - hw,
-            max(seg.x1, seg.x2) + hw,
-            max(seg.y1, seg.y2) + hw,
+            min(seg.x1, seg.x2) - margin,
+            min(seg.y1, seg.y2) - margin,
+            max(seg.x1, seg.x2) + margin,
+            max(seg.y1, seg.y2) + margin,
         )
 
     def _rtree_insert_segment(self, seg: Segment, layer_idx: int) -> None:
-        """Insert a segment into the per-layer R-tree index."""
+        """Insert a segment into the per-layer R-tree index.
+
+        Issue #2335: The envelope is inflated by ``_rtree_clearance_inflation``
+        so that intersection queries return all segments that could violate
+        clearance without per-query arithmetic.
+        """
         idx = self._get_rtree_for_layer(layer_idx)
         if idx is None:
             return
         seg_id = id(seg)
-        envelope = self._segment_envelope(seg)
+        envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
         idx.insert(seg_id, envelope)
         self._seg_rtree_items[layer_idx][seg_id] = seg
         self._seg_rtree_count += 1
 
     def _rtree_remove_segment(self, seg: Segment, layer_idx: int) -> None:
-        """Remove a segment from the per-layer R-tree index."""
+        """Remove a segment from the per-layer R-tree index.
+
+        Issue #2335: Uses the same ``_rtree_clearance_inflation`` that was
+        applied at insertion time so that the R-tree deletion matches the
+        stored envelope.
+        """
         if not self._rtree_available:
             return
         if layer_idx not in self._seg_rtree:
@@ -1445,7 +1481,7 @@ class RoutingGrid:
         seg_id = id(seg)
         if seg_id not in self._seg_rtree_items.get(layer_idx, {}):
             return
-        envelope = self._segment_envelope(seg)
+        envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
         self._seg_rtree[layer_idx].delete(seg_id, envelope)
         del self._seg_rtree_items[layer_idx][seg_id]
         self._seg_rtree_count = max(0, self._seg_rtree_count - 1)
@@ -1461,6 +1497,36 @@ class RoutingGrid:
         for seg in route.segments:
             layer_idx = self.layer_to_index(seg.layer.value)
             self._rtree_remove_segment(seg, layer_idx)
+
+    def invalidate_spatial_index(self) -> None:
+        """Rebuild the R-tree spatial index with current clearance values.
+
+        Issue #2335: Call this when ``DesignRules`` or net-class clearance
+        values change after segments have been indexed (e.g., during
+        two-phase routing rule adjustments).  The method re-reads
+        ``rules.max_clearance``, clears the existing R-tree structures, and
+        re-inserts every indexed segment with the updated inflation.
+        """
+        if not self._rtree_available:
+            return
+
+        # Collect all currently indexed segments before clearing.
+        segments_by_layer: dict[int, list[Segment]] = {}
+        for layer_idx, items in self._seg_rtree_items.items():
+            segments_by_layer[layer_idx] = list(items.values())
+
+        # Clear the R-tree structures.
+        self._seg_rtree.clear()
+        self._seg_rtree_items.clear()
+        self._seg_rtree_count = 0
+
+        # Update inflation from (possibly changed) design rules.
+        self._rtree_clearance_inflation = self.rules.max_clearance
+
+        # Re-insert all segments with the new inflation value.
+        for layer_idx, segments in segments_by_layer.items():
+            for seg in segments:
+                self._rtree_insert_segment(seg, layer_idx)
 
     def mark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Mark a route's cells as used.

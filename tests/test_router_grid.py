@@ -2267,3 +2267,258 @@ class TestGridQuantizationClearance:
             f"Segments 0.6mm apart should pass clearance validation "
             f"(clearance={clearance:.4f}mm)"
         )
+
+
+class TestClearanceCompensatedSpatialIndex:
+    """Tests for clearance-compensated R-tree spatial indexing (Issue #2335).
+
+    Verifies that R-tree envelopes are inflated by max_clearance so that
+    intersection queries capture all potential clearance violators without
+    per-query clearance arithmetic.
+    """
+
+    @pytest.fixture
+    def rules(self):
+        """Design rules with known clearance values."""
+        return DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+        )
+
+    @pytest.fixture
+    def grid(self, rules):
+        """Grid for clearance-compensated indexing tests."""
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_inflated_envelope_wider_than_segment(self, grid):
+        """Verify inflated envelope is wider than the non-inflated one."""
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        plain = RoutingGrid._segment_envelope(seg, clearance_inflation=0.0)
+        inflated = RoutingGrid._segment_envelope(
+            seg, clearance_inflation=grid.rules.max_clearance
+        )
+        # Inflated envelope must be strictly larger on all sides.
+        assert inflated[0] < plain[0]
+        assert inflated[1] < plain[1]
+        assert inflated[2] > plain[2]
+        assert inflated[3] > plain[3]
+
+    def test_inflated_envelope_expansion_amount(self, grid):
+        """Verify envelope is expanded by exactly max_clearance beyond half-width."""
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        mc = grid.rules.max_clearance
+        inflated = RoutingGrid._segment_envelope(seg, clearance_inflation=mc)
+        hw = seg.width / 2
+        margin = hw + mc
+        assert inflated[0] == pytest.approx(5.0 - margin)
+        assert inflated[1] == pytest.approx(5.0 - margin)
+        assert inflated[2] == pytest.approx(10.0 + margin)
+        assert inflated[3] == pytest.approx(5.0 + margin)
+
+    def test_rtree_insert_uses_inflated_envelope(self, grid):
+        """Verify that _rtree_insert_segment stores inflated envelopes.
+
+        A query point inside the inflated zone (but outside the plain
+        envelope) must return the segment as a candidate.
+        """
+        if not grid._rtree_available:
+            pytest.skip("rtree library not installed")
+
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        grid._rtree_insert_segment(seg, layer_idx)
+
+        # Query a point just inside the inflated zone but outside the plain
+        # envelope.  The plain envelope extends to y = 5.0 + 0.1 = 5.1.
+        # The inflated envelope extends to y = 5.0 + 0.1 + max_clearance.
+        mc = grid.rules.max_clearance
+        probe_y = 5.1 + mc * 0.5  # Inside inflated, outside plain
+        hits = list(grid._seg_rtree[layer_idx].intersection((7.0, probe_y, 7.0, probe_y)))
+        assert len(hits) > 0, "Inflated envelope should capture nearby query point"
+
+    def test_rtree_query_outside_inflated_zone_misses(self, grid):
+        """Query point outside the inflated zone should return no hits."""
+        if not grid._rtree_available:
+            pytest.skip("rtree library not installed")
+
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        grid._rtree_insert_segment(seg, layer_idx)
+
+        mc = grid.rules.max_clearance
+        # Far outside the inflated envelope.
+        probe_y = 5.0 + seg.width / 2 + mc + 1.0
+        hits = list(grid._seg_rtree[layer_idx].intersection((7.0, probe_y, 7.0, probe_y)))
+        assert len(hits) == 0, "Query outside inflated zone should miss"
+
+    def test_same_net_excluded_with_inflated_envelopes(self, grid):
+        """Same-net segments are excluded from clearance validation results."""
+        seg1 = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        grid.mark_route(route)
+
+        # A second segment from the same net, right next to the first.
+        seg2 = Segment(
+            x1=5.0, y1=5.1, x2=10.0, y2=5.1,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        is_valid, _, _ = grid.validate_segment_clearance(seg2, exclude_net=1)
+        assert is_valid is True, "Same-net segments should not cause violations"
+
+    def test_invalidate_spatial_index_rebuilds(self, grid):
+        """Verify invalidate_spatial_index rebuilds with updated inflation."""
+        if not grid._rtree_available:
+            pytest.skip("rtree library not installed")
+
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+        grid.mark_route(route)
+
+        # Change clearance and rebuild.
+        old_inflation = grid._rtree_clearance_inflation
+        grid.rules.trace_clearance = 0.5
+        grid.invalidate_spatial_index()
+
+        new_inflation = grid._rtree_clearance_inflation
+        assert new_inflation > old_inflation, (
+            "Inflation should increase after raising trace_clearance"
+        )
+        # Segment count should be preserved.
+        assert grid._seg_rtree_count == 1
+
+    def test_invalidate_preserves_segment_data(self, grid):
+        """After invalidate, indexed segments are still queryable."""
+        if not grid._rtree_available:
+            pytest.skip("rtree library not installed")
+
+        seg1 = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        seg2 = Segment(
+            x1=5.0, y1=8.0, x2=10.0, y2=8.0,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+        grid.mark_route(route1)
+        grid.mark_route(route2)
+
+        grid.rules.trace_clearance = 0.3
+        grid.invalidate_spatial_index()
+
+        assert grid._seg_rtree_count == 2
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        items = grid._seg_rtree_items[layer_idx]
+        assert len(items) == 2
+
+    def test_clearance_validation_with_inflated_index(self, grid):
+        """Integration: validate_segment_clearance gives correct results with inflated R-tree."""
+        seg1 = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        grid.mark_route(route)
+
+        # Segment too close -- should violate.
+        seg_close = Segment(
+            x1=5.0, y1=5.25, x2=10.0, y2=5.25,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+        is_valid, clearance, loc = grid.validate_segment_clearance(
+            seg_close, exclude_net=2
+        )
+        assert is_valid is False, (
+            f"Segments 0.25mm apart center-to-center should violate "
+            f"0.2mm clearance (actual clearance={clearance:.4f}mm)"
+        )
+
+        # Segment far away -- should pass.
+        seg_far = Segment(
+            x1=5.0, y1=8.0, x2=10.0, y2=8.0,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+        is_valid, clearance, loc = grid.validate_segment_clearance(
+            seg_far, exclude_net=2
+        )
+        assert is_valid is True, (
+            f"Segments 3mm apart should pass clearance validation "
+            f"(clearance={clearance:.4f}mm)"
+        )
+
+    def test_expanded_obstacles_and_inflated_rtree_coexist(self):
+        """Verify no double-inflation when expanded_obstacles and inflated R-tree are both active."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.2,
+        )
+        grid = RoutingGrid(
+            width=20.0, height=20.0, rules=rules, expanded_obstacles=True
+        )
+
+        seg1 = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        grid.mark_route(route)
+
+        # A segment with generous clearance should pass even in expanded mode.
+        seg2 = Segment(
+            x1=5.0, y1=6.0, x2=10.0, y2=6.0,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+        is_valid, clearance, _ = grid.validate_segment_clearance(
+            seg2, exclude_net=2
+        )
+        assert is_valid is True, (
+            f"1mm separation should pass even with expanded_obstacles "
+            f"(clearance={clearance:.4f}mm)"
+        )
+
+    def test_mixed_net_class_clearances(self):
+        """Board with different clearance values uses conservative (max) inflation."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.2,
+            component_clearances={"U1": 0.1},
+            fine_pitch_clearance=0.15,
+        )
+        grid = RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+        # max_clearance should be max(0.2, 0.2, 0.1, 0.15) = 0.2
+        assert grid._rtree_clearance_inflation == pytest.approx(0.2)
+        assert rules.max_clearance == pytest.approx(0.2)
+
+    def test_max_clearance_property(self):
+        """Test that max_clearance returns the correct maximum."""
+        rules = DesignRules(
+            trace_clearance=0.2,
+            via_clearance=0.3,
+            component_clearances={"U1": 0.4},
+            fine_pitch_clearance=0.15,
+        )
+        assert rules.max_clearance == pytest.approx(0.4)
