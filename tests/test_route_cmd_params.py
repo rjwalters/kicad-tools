@@ -808,3 +808,314 @@ class TestRouteCommandNoCacheFlag:
 
             call_args = mock_main.call_args[0][0]
             assert "--no-cache" not in call_args
+
+
+class TestRouteParserPerNetTimeoutFlag:
+    """Tests for --per-net-timeout and --timeout in subcommand parser and dispatch bridge."""
+
+    def test_parser_accepts_per_net_timeout(self):
+        """Centralized parser accepts --per-net-timeout without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--per-net-timeout", "60"])
+        assert args.per_net_timeout == 60.0
+
+    def test_parser_per_net_timeout_default_is_30(self):
+        """--per-net-timeout defaults to 30.0 when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.per_net_timeout == 30.0
+
+    def test_parser_accepts_per_net_timeout_zero(self):
+        """--per-net-timeout 0 is accepted (disables timeout)."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--per-net-timeout", "0"])
+        assert args.per_net_timeout == 0.0
+
+    def test_parser_accepts_timeout(self):
+        """Centralized parser accepts --timeout without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--timeout", "120"])
+        assert args.timeout == 120.0
+
+    def test_parser_timeout_default_is_none(self):
+        """--timeout defaults to None when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.timeout is None
+
+    def test_per_net_timeout_forwarded(self):
+        """--per-net-timeout is forwarded to route_cmd.main when non-default."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+            backend="auto",
+            strict=False,
+            per_net_timeout=60.0,
+            timeout=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--per-net-timeout" in call_args
+            idx = call_args.index("--per-net-timeout")
+            assert call_args[idx + 1] == "60.0"
+
+    def test_per_net_timeout_not_forwarded_when_default(self):
+        """--per-net-timeout is not forwarded when equal to default 30.0."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+            backend="auto",
+            strict=False,
+            per_net_timeout=30.0,
+            timeout=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--per-net-timeout" not in call_args
+
+    def test_timeout_forwarded(self):
+        """--timeout is forwarded to route_cmd.main when set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+            backend="auto",
+            strict=False,
+            per_net_timeout=30.0,
+            timeout=120.0,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--timeout" in call_args
+            idx = call_args.index("--timeout")
+            assert call_args[idx + 1] == "120.0"
+
+    def test_timeout_not_forwarded_when_none(self):
+        """--timeout is not forwarded when None (default)."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+            backend="auto",
+            strict=False,
+            per_net_timeout=30.0,
+            timeout=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--timeout" not in call_args
+
+    def test_per_net_timeout_zero_forwarded(self):
+        """--per-net-timeout 0 is forwarded (disables timeout)."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+            backend="auto",
+            strict=False,
+            per_net_timeout=0.0,
+            timeout=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--per-net-timeout" in call_args
+            idx = call_args.index("--per-net-timeout")
+            assert call_args[idx + 1] == "0.0"
+
+    def test_route_help_shows_per_net_timeout(self):
+        """kct route --help output includes --per-net-timeout and --timeout."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        help_output = StringIO()
+        with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
+            parser.parse_args(["route", "--help"])
+
+        help_text = help_output.getvalue()
+        assert "--per-net-timeout" in help_text
+        assert "--timeout" in help_text

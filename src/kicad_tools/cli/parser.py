@@ -2124,6 +2124,19 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    route_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+    )
+    route_parser.add_argument(
+        "--per-net-timeout",
+        type=float,
+        default=30.0,
+        help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
+        "Prevents individual nets from monopolizing the router. Use 0 to disable.",
+    )
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
     route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")

@@ -178,6 +178,12 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--mc-trials", str(args.mc_trials)])
     if args.iterations != 15:
         sub_argv.extend(["--iterations", str(args.iterations)])
+    timeout_val = getattr(args, "timeout", None)
+    if timeout_val is not None:
+        sub_argv.extend(["--timeout", str(timeout_val)])
+    per_net_timeout_val = getattr(args, "per_net_timeout", 30.0)
+    if per_net_timeout_val != 30.0:
+        sub_argv.extend(["--per-net-timeout", str(per_net_timeout_val)])
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:
