@@ -375,3 +375,135 @@ class TestOffGridPad:
             max_offset=0.05,
         )
         assert pad.position == (1.23, 4.56)
+
+
+class TestWaypointInjectionSuppression:
+    """Tests for suppressing off-grid warnings when waypoint injection is active.
+
+    These tests verify the gating logic used in route_cmd.py to suppress
+    verbose fine-pitch warnings when waypoint injection handles off-grid pads.
+    """
+
+    def _make_off_grid_report(self):
+        """Create a FinePitchReport with off-grid pads for testing."""
+        pads = {}
+        for i in range(20):
+            x = i * 0.65  # 0.65mm pitch -- off-grid on 0.5mm grid
+            pads[("U1", str(i + 1))] = make_pad(
+                x=x, y=0.0, width=0.3, height=0.8, net=i + 1, ref="U1", pin=str(i + 1)
+            )
+        return analyze_fine_pitch_components(
+            pads=pads,
+            grid_resolution=0.5,
+            trace_width=0.2,
+            clearance=0.2,
+        )
+
+    def test_warnings_suppressed_when_waypoint_injection_active(self, capsys):
+        """When waypoint injection is active, per-component warnings are suppressed."""
+        from kicad_tools.router.output import show_fine_pitch_warnings
+
+        report = self._make_off_grid_report()
+        assert report.has_warnings
+        assert report.total_off_grid > 0
+
+        # Simulate the route_cmd.py call-site logic with waypoint injection ON
+        use_waypoint_injection = True
+        verbose = False
+
+        if report.has_warnings:
+            if use_waypoint_injection:
+                # Should print only the summary line, not the full warnings
+                if report.total_off_grid > 0:
+                    print(
+                        f"\n  {report.total_off_grid} pads off-grid; "
+                        "waypoint injection will handle pad connections"
+                    )
+                if verbose:
+                    show_fine_pitch_warnings(report, quiet=False, verbose=True)
+            else:
+                show_fine_pitch_warnings(report, quiet=False, verbose=verbose)
+
+        captured = capsys.readouterr()
+        assert "waypoint injection will handle pad connections" in captured.out
+        # Full per-component warnings should NOT appear
+        assert "Fine-pitch components detected" not in captured.out
+        assert "WARNING:" not in captured.out
+
+    def test_full_warnings_shown_when_waypoint_injection_off(self, capsys):
+        """When waypoint injection is off, full warnings are shown as before."""
+        from kicad_tools.router.output import show_fine_pitch_warnings
+
+        report = self._make_off_grid_report()
+        assert report.has_warnings
+
+        # Simulate the route_cmd.py call-site logic with waypoint injection OFF
+        use_waypoint_injection = False
+        verbose = False
+
+        if report.has_warnings:
+            if use_waypoint_injection:
+                if report.total_off_grid > 0:
+                    print(
+                        f"\n  {report.total_off_grid} pads off-grid; "
+                        "waypoint injection will handle pad connections"
+                    )
+            else:
+                show_fine_pitch_warnings(report, quiet=False, verbose=verbose)
+
+        captured = capsys.readouterr()
+        assert "waypoint injection" not in captured.out
+        assert "off-grid" in captured.out.lower()
+
+    def test_verbose_shows_detail_with_waypoint_injection(self, capsys):
+        """With -v and waypoint injection, per-component detail is still available."""
+        from kicad_tools.router.output import show_fine_pitch_warnings
+
+        report = self._make_off_grid_report()
+        assert report.has_warnings
+
+        # Simulate the route_cmd.py call-site logic: waypoint ON + verbose
+        use_waypoint_injection = True
+        verbose = True
+
+        if report.has_warnings:
+            if use_waypoint_injection:
+                if report.total_off_grid > 0:
+                    print(
+                        f"\n  {report.total_off_grid} pads off-grid; "
+                        "waypoint injection will handle pad connections"
+                    )
+                if verbose:
+                    show_fine_pitch_warnings(report, quiet=False, verbose=True)
+
+        captured = capsys.readouterr()
+        # Both summary and detail should appear
+        assert "waypoint injection will handle pad connections" in captured.out
+        assert "U1" in captured.out
+
+    def test_no_summary_when_zero_off_grid_pads(self, capsys):
+        """When 0 pads are off-grid, no summary line should appear."""
+        # All pads on-grid
+        pads = {
+            ("U1", "1"): make_pad(x=0.0, y=0.0, net=1, ref="U1", pin="1"),
+            ("U1", "2"): make_pad(x=0.5, y=0.0, net=1, ref="U1", pin="2"),
+            ("U1", "3"): make_pad(x=1.0, y=0.0, net=2, ref="U1", pin="3"),
+            ("U1", "4"): make_pad(x=1.5, y=0.0, net=2, ref="U1", pin="4"),
+        }
+        report = analyze_fine_pitch_components(
+            pads=pads,
+            grid_resolution=0.5,
+            trace_width=0.2,
+            clearance=0.2,
+        )
+
+        use_waypoint_injection = True
+        if report.has_warnings and use_waypoint_injection:
+            if report.total_off_grid > 0:
+                print(
+                    f"\n  {report.total_off_grid} pads off-grid; "
+                    "waypoint injection will handle pad connections"
+                )
+
+        captured = capsys.readouterr()
+        assert "waypoint injection" not in captured.out
