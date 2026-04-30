@@ -266,13 +266,36 @@ class TwoPhaseRouter:
         # Clear corridor preferences (not needed after routing)
         self.grid.clear_all_corridor_preferences()
 
-        # Summary
-        successful_nets = len({r.net for r in detailed_routes})
+        # Summary — use connectivity-aware counting so we only report
+        # nets where all pads are in the same connected component (#2352).
+        nets_with_segments = len({r.net for r in detailed_routes})
+        connected_nets = nets_with_segments  # fallback if pad data unavailable
+
+        if self.pads and self.nets:
+            from ..observability import validate_net_connectivity
+
+            net_pads: dict[int, list] = {}
+            for net_id, pad_keys in self.nets.items():
+                pad_list = [self.pads[k] for k in pad_keys if k in self.pads]
+                if pad_list:
+                    net_pads[net_id] = pad_list
+            connectivity = validate_net_connectivity(detailed_routes, net_pads)
+            connected_nets = sum(
+                1
+                for info in connectivity.values()
+                if info["connected"]
+            )
+
         total_elapsed = time.time() - start_time
         print("\n=== Two-Phase Routing Complete ===")
         print(f"  Total nets: {total_nets}")
         print(f"  Global routing: {len(corridors)} corridors assigned")
-        print(f"  Detailed routing: {successful_nets} nets routed")
+        print(f"  Detailed routing: {connected_nets} nets routed")
+        if connected_nets < nets_with_segments:
+            print(
+                f"    ({nets_with_segments - connected_nets} additional net(s) "
+                "have partial routes)"
+            )
         print(f"  Total time: {total_elapsed:.1f}s")
 
         # Print failed nets summary if any routes failed
@@ -284,7 +307,7 @@ class TwoPhaseRouter:
         if progress_callback is not None:
             progress_callback(
                 1.0,
-                f"Complete: {successful_nets}/{total_nets} nets routed in {total_elapsed:.1f}s",
+                f"Complete: {connected_nets}/{total_nets} nets routed in {total_elapsed:.1f}s",
                 False,
             )
 
