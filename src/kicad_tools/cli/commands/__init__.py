@@ -25,6 +25,7 @@ from .decisions import run_decisions_command
 from .estimate import run_estimate_command
 from .footprint import run_footprint_command
 from .impedance import run_impedance_command
+from .ipc import run_ipc_command
 from .library import run_lib_command
 from .manufacturer import run_mfr_command
 from .mcp import run_mcp_command
@@ -123,6 +124,8 @@ __all__ = [
     "run_spec_command",
     # Impedance
     "run_impedance_command",
+    # IPC
+    "run_ipc_command",
     # MCP
     "run_mcp_command",
     # Native build

@@ -64,6 +64,7 @@ from .commands import (
     run_impedance_command,
     run_init_command,
     run_interactive_command,
+    run_ipc_command,
     run_lib_command,
     run_mcp_command,
     run_mfr_command,
@@ -412,6 +413,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "mcp":
         return run_mcp_command(args)
+
+    elif args.command == "ipc":
+        return run_ipc_command(args)
 
     elif args.command == "init":
         return run_init_command(args)

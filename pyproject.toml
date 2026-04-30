@@ -103,6 +103,10 @@ datasheet = [
 placement = [
     "cmaes>=0.12.0",
 ]
+# KiCad IPC API client (live instance interaction, KiCad 9.0+)
+ipc = [
+    "pynng>=0.8.0",
+]
 # MCP server for AI agent integration
 mcp = [
     "fastmcp>=2.0,<3",
