@@ -123,6 +123,82 @@ class Part:
             return self.prices[0].unit_price if self.prices else None
         return max(applicable, key=lambda p: p.quantity).unit_price
 
+    def to_composed(self) -> "ComposedPart":
+        """
+        Project this flat supplier ``Part`` into a ``ComposedPart``.
+
+        Creates a minimal Entity with two passive pins (suitable for
+        two-terminal passives).  For ICs / multi-pin parts the caller
+        should replace the entity with a richer definition.
+
+        Returns:
+            A ``ComposedPart`` populated from this part's fields.
+        """
+        from .composition import (
+            ComposedPart,
+            Entity,
+            PinDirection,
+            Unit,
+            UnitPin,
+        )
+
+        # Build a generic two-pin unit as a default
+        unit = Unit(
+            id=f"{self.lcsc_part}-unit",
+            name=self.description or self.lcsc_part,
+            pins=[
+                UnitPin(name="1", number="1", direction=PinDirection.PASSIVE),
+                UnitPin(name="2", number="2", direction=PinDirection.PASSIVE),
+            ],
+        )
+        entity = Entity(
+            id=f"{self.lcsc_part}-entity",
+            name=self.description or self.lcsc_part,
+            units=[unit],
+        )
+
+        # Map Part fields into parametric dict
+        params: dict[str, str] = {}
+        if self.value:
+            params["value"] = self.value
+        if self.tolerance:
+            params["tolerance"] = self.tolerance
+        if self.voltage_rating:
+            params["voltage"] = self.voltage_rating
+        if self.power_rating:
+            params["power"] = self.power_rating
+        if self.temperature_range:
+            params["temperature_range"] = self.temperature_range
+        # Include any extra specs
+        params.update(self.specs)
+
+        tags: list[str] = []
+        if self.category != PartCategory.OTHER:
+            tags.append(self.category.value)
+        if self.is_basic:
+            tags.append("jlcpcb-basic")
+        if self.is_preferred:
+            tags.append("jlcpcb-preferred")
+        if self.package_type == PackageType.SMD:
+            tags.append("smd")
+        elif self.package_type == PackageType.THROUGH_HOLE:
+            tags.append("through-hole")
+
+        return ComposedPart(
+            id=self.lcsc_part,
+            entity=entity,
+            package=self.package,
+            category=self.category.value,
+            mpn=self.mfr_part,
+            manufacturer=self.manufacturer,
+            description=self.description,
+            params=params,
+            tags=tags,
+            lcsc_part=self.lcsc_part,
+            datasheet_url=self.datasheet_url,
+            created_at=self.fetched_at,
+        )
+
     def __str__(self) -> str:
         return f"{self.lcsc_part}: {self.description}"
 
