@@ -81,6 +81,7 @@ class TwoPhaseRouter:
         per_net_timeout: float | None = None,
         initial_routes: list[Route] | None = None,
         max_iterations: int = 20,
+        patience: int = 2,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -97,6 +98,8 @@ class TwoPhaseRouter:
                 so they participate in rip-up/reroute (Issue #2294).
             max_iterations: Maximum rip-up-and-reroute iterations for the
                 Phase 2 detailed negotiated routing loop (default: 20).
+            patience: Minimum number of non-improving iterations before
+                early termination is considered (Issue #2317, default: 2).
 
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
@@ -250,6 +253,7 @@ class TwoPhaseRouter:
                 per_net_timeout=per_net_timeout,
                 initial_routes=initial_routes,
                 max_iterations=max_iterations,
+                patience=patience,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -297,6 +301,7 @@ class TwoPhaseRouter:
         per_net_timeout: float | None = None,
         initial_routes: list[Route] | None = None,
         max_iterations: int = 20,
+        patience: int = 2,
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing.
 
@@ -304,8 +309,12 @@ class TwoPhaseRouter:
             initial_routes: Pre-existing routes (e.g. escape routes) to seed
                 into ``net_routes`` so they participate in rip-up/reroute
                 instead of being permanently reserved (Issue #2294).
+            patience: Minimum number of non-improving iterations before
+                early termination is considered (Issue #2317). Passed as
+                ``min_iterations`` to ``should_terminate_early()``.
         """
         from ..algorithms import NegotiatedRouter
+        from ..algorithms.negotiated import should_terminate_early
 
         if corridor_penalty is None:
             corridor_penalty = self.rules.cost_corridor_deviation
@@ -358,6 +367,9 @@ class TwoPhaseRouter:
 
         overflow = self.grid.get_total_overflow()
         flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
+
+        # Issue #2317: Track overflow history for early-stop detection.
+        overflow_history: list[int] = [overflow]
 
         # Issue #2305: Track best routing state across iterations.
         # Overflow can oscillate during rip-up-and-reroute; if timeout or
@@ -423,6 +435,9 @@ class TwoPhaseRouter:
                 overflow = self.grid.get_total_overflow()
                 flush_print(f"  Iteration {iteration} complete: overflow={overflow}")
 
+                # Issue #2317: Record overflow for early-stop detection.
+                overflow_history.append(overflow)
+
                 # Issue #2305: Snapshot state when overflow improves
                 if overflow < best_overflow:
                     best_overflow = overflow
@@ -432,6 +447,19 @@ class TwoPhaseRouter:
 
                 if overflow == 0:
                     flush_print(f"  Converged at iteration {iteration}!")
+                    break
+
+                # Issue #2317: Early-stop when overflow regresses or
+                # stagnates across iterations.  Reuses the battle-tested
+                # ``should_terminate_early()`` from the negotiated router
+                # (Issues #633, #1823, #2295, #2297).
+                if should_terminate_early(
+                    overflow_history, iteration, min_iterations=patience
+                ):
+                    flush_print(
+                        f"  Early stop: overflow not improving "
+                        f"(best={best_overflow})"
+                    )
                     break
 
         # Issue #2305: Restore best state if the final iteration is worse
