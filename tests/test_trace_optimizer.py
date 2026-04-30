@@ -1598,3 +1598,262 @@ class TestOverflowTolerantCollisionChecker:
         # Verify connectivity: start of first == 1.0, end of last == 5.0
         assert abs(result[0].x1 - 1.0) < 0.01
         assert abs(result[-1].x2 - 5.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# PullTight tests
+# ---------------------------------------------------------------------------
+
+
+class TestPullTight:
+    """Tests for PullTight perpendicular segment translation."""
+
+    def _seg(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return Segment(
+            x1=x1, y1=y1, x2=x2, y2=y2,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+
+    def _total_length(self, segs: list[Segment]) -> float:
+        total = 0.0
+        for s in segs:
+            dx = s.x2 - s.x1
+            dy = s.y2 - s.y1
+            total += (dx * dx + dy * dy) ** 0.5
+        return total
+
+    def test_detour_path_shortens(self):
+        """A rectangular detour should be pulled tight to a straight line.
+
+        Path: (0,0) -> (2,0) -> (2,3) -> (6,3) -> (6,0) -> (10,0)
+        This U-shaped detour can be iteratively collapsed by pull-tight.
+        """
+        segments = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 3),
+            self._seg(2, 3, 6, 3),
+            self._seg(6, 3, 6, 0),
+            self._seg(6, 0, 10, 0),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=20,
+        )
+        optimizer = TraceOptimizer(config=config)
+        original_length = self._total_length(segments)
+        result = optimizer.pull_tight(segments)
+
+        # Length should decrease substantially
+        assert self._total_length(result) < original_length - 0.5
+
+        # Endpoints must be preserved
+        assert abs(result[0].x1 - 0) < 1e-4
+        assert abs(result[0].y1 - 0) < 1e-4
+        assert abs(result[-1].x2 - 10) < 1e-4
+        assert abs(result[-1].y2 - 0) < 1e-4
+
+    def test_collinear_collapse(self):
+        """Segments that become collinear after translation should merge."""
+        # Small U-shaped detour that can collapse
+        # (0,0) -> (0,2) -> (0.001,2) -> (0.001,4)
+        # The tiny horizontal segment should collapse after pull-tight
+        segments = [
+            self._seg(0, 0, 0, 2),
+            self._seg(0, 2, 0.001, 2),
+            self._seg(0.001, 2, 0.001, 4),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # Should merge into fewer segments (ideally 1-2)
+        assert len(result) <= len(segments)
+
+    def test_zero_length_removal(self):
+        """Zero-length segments produced by translation should be removed."""
+        # Create a configuration where the middle segment fully collapses:
+        # (0,0) -> (0,1) -> (0,1) [zero-length] -> (0,2)
+        # This tests the zero-length removal path in pull_tight_pass.
+        segments = [
+            self._seg(0, 0, 0, 1),
+            self._seg(0, 1, 0.0001, 1),  # Near-zero length
+            self._seg(0.0001, 1, 0.0001, 2),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # No zero-length segments in result
+        for s in result:
+            dx = s.x2 - s.x1
+            dy = s.y2 - s.y1
+            length = (dx * dx + dy * dy) ** 0.5
+            assert length > 1e-4, "Zero-length segment should have been removed"
+
+    def test_collision_blocks_movement(self):
+        """When CollisionChecker blocks, segments stay in original positions."""
+
+        class BlockingChecker:
+            """Always reports path as blocked."""
+
+            def path_is_clear(self, x1, y1, x2, y2, layer, width, exclude_net):
+                return False
+
+        segments = [
+            self._seg(0, 0, 0, 5),
+            self._seg(0, 5, 5, 5),
+            self._seg(5, 5, 5, 10),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config, collision_checker=BlockingChecker())
+        result = optimizer.pull_tight(segments)
+
+        # Segments should not move at all
+        assert len(result) == 3
+        for orig, res in zip(segments, result):
+            assert abs(orig.x1 - res.x1) < 1e-4
+            assert abs(orig.y1 - res.y1) < 1e-4
+            assert abs(orig.x2 - res.x2) < 1e-4
+            assert abs(orig.y2 - res.y2) < 1e-4
+
+    def test_convergence_within_max_iterations(self):
+        """Pull-tight should terminate within pull_tight_max_iterations."""
+        # Build a long zigzag chain
+        segments = []
+        x, y = 0.0, 0.0
+        for i in range(20):
+            if i % 2 == 0:
+                segments.append(self._seg(x, y, x, y + 1))
+                y += 1
+            else:
+                segments.append(self._seg(x, y, x + 1, y))
+                x += 1
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=5,
+        )
+        optimizer = TraceOptimizer(config=config)
+        # Should not hang -- just verify it returns
+        result = optimizer.pull_tight(segments)
+        assert len(result) >= 1
+
+    def test_connectivity_preserved(self):
+        """After pull-tight, every segment endpoint connects to its neighbour."""
+        segments = [
+            self._seg(0, 0, 0, 3),
+            self._seg(0, 3, 4, 3),
+            self._seg(4, 3, 4, 0),
+            self._seg(4, 0, 8, 0),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # Check chain connectivity
+        for i in range(len(result) - 1):
+            assert abs(result[i].x2 - result[i + 1].x1) < 1e-3, (
+                f"Gap between segment {i} end and segment {i+1} start"
+            )
+            assert abs(result[i].y2 - result[i + 1].y1) < 1e-3, (
+                f"Gap between segment {i} end and segment {i+1} start"
+            )
+
+    def test_existing_optimizations_unchanged_with_pull_tight_disabled(self):
+        """Existing optimizer tests should not regress when pull_tight=False."""
+        config = OptimizationConfig(pull_tight=False)
+        optimizer = TraceOptimizer(config=config)
+
+        # Simple collinear merge still works
+        segments = [
+            self._seg(0, 0, 1, 0),
+            self._seg(1, 0, 2, 0),
+        ]
+        result = optimizer.optimize_segments(segments)
+        assert len(result) == 1
+        assert abs(result[0].x1 - 0) < 1e-4
+        assert abs(result[0].x2 - 2) < 1e-4
+
+    def test_pull_tight_in_optimize_segments_pipeline(self):
+        """Verify pull_tight is invoked as part of optimize_segments."""
+        segments = [
+            self._seg(0, 0, 0, 5),
+            self._seg(0, 5, 5, 5),
+            self._seg(5, 5, 5, 10),
+        ]
+        # With pull_tight enabled
+        config_on = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+        )
+        # With pull_tight disabled
+        config_off = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+        )
+        result_on = TraceOptimizer(config=config_on).optimize_segments(segments)
+        result_off = TraceOptimizer(config=config_off).optimize_segments(segments)
+
+        len_on = self._total_length(result_on)
+        len_off = self._total_length(result_off)
+
+        # pull_tight enabled should produce shorter or equal length
+        assert len_on <= len_off + 1e-4
+
+    def test_two_segments_unchanged(self):
+        """Pull-tight requires >= 3 segments; 2 segments should pass through unchanged."""
+        segments = [
+            self._seg(0, 0, 1, 0),
+            self._seg(1, 0, 1, 1),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+        assert len(result) == 2

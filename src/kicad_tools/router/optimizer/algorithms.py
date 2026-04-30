@@ -11,10 +11,15 @@ from .geometry import (
     is_90_degree_corner,
     is_connected,
     is_zigzag,
+    perpendicular_direction,
+    project_point_onto_line,
     same_direction,
     segment_direction,
+    segment_length,
     shorten_segment_end,
     shorten_segment_start,
+    total_length,
+    translate_segment,
 )
 
 
@@ -569,3 +574,172 @@ def _restore_terminal_endpoints(
             )
 
     return segments
+
+
+# ---------------------------------------------------------------------------
+# PullTight post-processing
+# ---------------------------------------------------------------------------
+
+
+def pull_tight_pass(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool] | None = None,
+) -> list[Segment]:
+    """Translate interior segments perpendicular to their direction to shorten total chain length.
+
+    For each interior segment S(i) (between S(i-1) and S(i+1)):
+    1. Compute the perpendicular direction of S(i).
+    2. Binary-search for the maximum safe displacement toward the direct
+       S(i-1)-to-S(i+1) line, validating each candidate with *path_is_clear*.
+    3. If displacement reduces total chain length, update S(i) and adjust
+       connection points on its neighbours.
+
+    After translating, newly-collinear segments are merged and zero-length
+    segments are removed.
+
+    The pass iterates until no segment moves more than *config.tolerance* or
+    *config.pull_tight_max_iterations* is reached.
+
+    Args:
+        segments: Ordered chain of connected segments (single chain).
+        config: Optimization configuration.
+        path_is_clear: Optional collision-check callback.
+
+    Returns:
+        Optimised list of segments (may be shorter).
+    """
+    if len(segments) < 3:
+        return list(segments)
+
+    result = list(segments)
+    max_iters = config.pull_tight_max_iterations
+    tol = config.tolerance
+
+    for _iteration in range(max_iters):
+        moved = False
+
+        i = 1
+        while i < len(result) - 1:
+            prev = result[i - 1]
+            curr = result[i]
+            nxt = result[i + 1]
+
+            # Perpendicular direction of the current segment
+            perp_x, perp_y = perpendicular_direction(curr, tol)
+            if perp_x == 0.0 and perp_y == 0.0:
+                i += 1
+                continue
+
+            # Project the midpoint of curr onto the line from the start of
+            # prev to the end of nxt (the "ideal" straight-line path).
+            mid_x = (curr.x1 + curr.x2) / 2
+            mid_y = (curr.y1 + curr.y2) / 2
+            proj_x, proj_y = project_point_onto_line(
+                mid_x, mid_y, prev.x1, prev.y1, nxt.x2, nxt.y2
+            )
+
+            # Desired displacement vector (toward the projected point)
+            disp_x = proj_x - mid_x
+            disp_y = proj_y - mid_y
+
+            # Component of displacement along the perpendicular direction
+            # (the only direction we allow translation)
+            perp_component = disp_x * perp_x + disp_y * perp_y
+
+            if abs(perp_component) < tol:
+                i += 1
+                continue
+
+            # Binary search for the maximum safe displacement
+            best_displacement = 0.0
+            lo, hi = 0.0, abs(perp_component)
+            sign = 1.0 if perp_component > 0 else -1.0
+
+            for _bs in range(16):  # ~1e-5 precision after 16 steps
+                mid_disp = (lo + hi) / 2
+                dx = sign * perp_x * mid_disp
+                dy = sign * perp_y * mid_disp
+
+                # Build candidate segments: translated curr + adjusted neighbours
+                cand_curr = translate_segment(curr, dx, dy)
+
+                cand_prev = Segment(
+                    x1=prev.x1, y1=prev.y1,
+                    x2=cand_curr.x1, y2=cand_curr.y1,
+                    width=prev.width, layer=prev.layer,
+                    net=prev.net, net_name=prev.net_name,
+                )
+                cand_nxt = Segment(
+                    x1=cand_curr.x2, y1=cand_curr.y2,
+                    x2=nxt.x2, y2=nxt.y2,
+                    width=nxt.width, layer=nxt.layer,
+                    net=nxt.net, net_name=nxt.net_name,
+                )
+
+                # Check clearance of all three candidate segments
+                clear = True
+                if path_is_clear is not None:
+                    clear = (
+                        path_is_clear(cand_prev)
+                        and path_is_clear(cand_curr)
+                        and path_is_clear(cand_nxt)
+                    )
+
+                if clear:
+                    best_displacement = mid_disp
+                    lo = mid_disp
+                else:
+                    hi = mid_disp
+
+            if best_displacement < tol:
+                i += 1
+                continue
+
+            # Apply the best displacement
+            dx = sign * perp_x * best_displacement
+            dy = sign * perp_y * best_displacement
+
+            new_curr = translate_segment(curr, dx, dy)
+
+            # Compute old and new total length for the three-segment window
+            old_len = (
+                segment_length(prev)
+                + segment_length(curr)
+                + segment_length(nxt)
+            )
+
+            new_prev = Segment(
+                x1=prev.x1, y1=prev.y1,
+                x2=new_curr.x1, y2=new_curr.y1,
+                width=prev.width, layer=prev.layer,
+                net=prev.net, net_name=prev.net_name,
+            )
+            new_nxt = Segment(
+                x1=new_curr.x2, y1=new_curr.y2,
+                x2=nxt.x2, y2=nxt.y2,
+                width=nxt.width, layer=nxt.layer,
+                net=nxt.net, net_name=nxt.net_name,
+            )
+            new_len = (
+                segment_length(new_prev)
+                + segment_length(new_curr)
+                + segment_length(new_nxt)
+            )
+
+            if new_len < old_len - tol:
+                result[i - 1] = new_prev
+                result[i] = new_curr
+                result[i + 1] = new_nxt
+                moved = True
+
+            i += 1
+
+        # Post-pass: merge collinear segments and remove zero-length ones
+        result = merge_collinear(result, config, path_is_clear)
+        result = [s for s in result if segment_length(s) > tol]
+
+        if not moved:
+            break
+
+    return result

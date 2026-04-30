@@ -21,6 +21,13 @@ class OptimizationConfig:
     compress_staircase: bool = True
     """Compress staircase patterns (alternating horizontal/diagonal) into optimal paths."""
 
+    pull_tight: bool = True
+    """Enable PullTight post-processing: translate interior segments perpendicular
+    to their direction to shorten total chain length."""
+
+    pull_tight_max_iterations: int = 10
+    """Maximum number of PullTight iterations before stopping."""
+
     minimize_vias: bool = True
     """Enable post-routing via minimization."""
 
