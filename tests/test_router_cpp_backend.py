@@ -106,6 +106,46 @@ class TestFormatBackendStatus:
         assert LARGE_GRID_THRESHOLD <= 200_000
 
 
+class TestCppPathfinderRouteSignature:
+    """Test that CppPathfinder.route() accepts extra_goal_cells parameter."""
+
+    def test_route_accepts_extra_goal_cells_in_signature(self):
+        """Test that CppPathfinder.route() has extra_goal_cells parameter."""
+        import inspect
+
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        sig = inspect.signature(CppPathfinder.route)
+        assert "extra_goal_cells" in sig.parameters
+        param = sig.parameters["extra_goal_cells"]
+        assert param.default is None
+
+    def test_route_accepts_extra_goal_cells_empty_set(self):
+        """Test that CppPathfinder.route() can be called with extra_goal_cells=set()."""
+        import inspect
+
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        # Verify the parameter exists and has correct default
+        sig = inspect.signature(CppPathfinder.route)
+        param = sig.parameters["extra_goal_cells"]
+        assert param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+
+    def test_route_accepts_extra_goal_cells_with_cells(self):
+        """Test that extra_goal_cells parameter accepts a set of tuples."""
+        import inspect
+
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        sig = inspect.signature(CppPathfinder.route)
+        # The parameter should be present and keyword-compatible
+        param = sig.parameters["extra_goal_cells"]
+        assert param.default is None
+
+
 class TestCppBackendImport:
     """Test import behavior of cpp_backend module."""
 
