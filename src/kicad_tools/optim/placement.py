@@ -201,8 +201,23 @@ class PlacementOptimizer:
         """
         fixed_refs = set(fixed_refs or [])
 
-        # Try to extract board outline from Edge.Cuts layer
-        board = cls._extract_board_outline(pcb)
+        # Try Shapely-based geometry first, fall back to legacy parsing
+        board = None
+        try:
+            from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+
+            if has_shapely():
+                try:
+                    board_geom = BoardGeometry.from_pcb(pcb)
+                    board = board_geom.to_optim_polygon()
+                    logger.debug("Using Shapely-based board geometry engine")
+                except (ValueError, Exception) as exc:
+                    logger.debug("Shapely geometry failed (%s), falling back", exc)
+        except ImportError:
+            pass
+
+        if board is None:
+            board = cls._extract_board_outline(pcb)
 
         if board is None:
             # Fall back to estimating from component positions.

@@ -20,10 +20,13 @@ bounding boxes (AABBs).
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from .cost import BoardOutline
 from .vector import ComponentDef, PlacedComponent
+
+if TYPE_CHECKING:
+    from kicad_tools.pcb.board_geometry import BoardGeometry
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -196,6 +199,48 @@ def compute_boundary_violation(
 
         # Out-of-bounds area = total component area - area inside board
         violation = total_area - inside_area
+        if violation > 0.0:
+            total += violation
+
+    return total
+
+
+def compute_boundary_violation_shapely(
+    placements: Sequence[PlacedComponent],
+    component_defs: Sequence[ComponentDef],
+    board_geometry: BoardGeometry,
+) -> float:
+    """Compute total out-of-bounds area using Shapely polygon containment.
+
+    Like :func:`compute_boundary_violation`, but uses a Shapely-backed
+    :class:`~kicad_tools.pcb.board_geometry.BoardGeometry` for accurate
+    non-rectangular board shapes.
+
+    Args:
+        placements: Placed components with positions, rotations, and sides.
+        component_defs: Static component definitions (same order as
+            *placements*).
+        board_geometry: Shapely-based board geometry.
+
+    Returns:
+        Total out-of-bounds area in mm^2.  Returns ``0.0`` when all
+        components are fully within the board.
+
+    Raises:
+        ValueError: If *placements* and *component_defs* have different
+            lengths.
+    """
+    n = len(placements)
+    if n != len(component_defs):
+        raise ValueError(f"placements has {n} items but component_defs has {len(component_defs)}")
+
+    total = 0.0
+
+    for comp, comp_def in zip(placements, component_defs, strict=True):
+        box_min_x, box_min_y, box_max_x, box_max_y = _aabb(comp, comp_def)
+        violation = board_geometry.compute_boundary_violation(
+            box_min_x, box_min_y, box_max_x, box_max_y
+        )
         if violation > 0.0:
             total += violation
 

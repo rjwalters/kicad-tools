@@ -31,9 +31,13 @@ from .footprints import (
     get_footprint_pads,
     get_library,
 )
+from .board_geometry import BoardGeometry, has_shapely
 from .layout import PCBLayout
 
 __all__ = [
+    # Board geometry
+    "BoardGeometry",
+    "has_shapely",
     # Editor
     "Point",
     "Track",

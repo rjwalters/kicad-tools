@@ -85,6 +85,10 @@ kicad-fab-rules = "kicad_tools.cli.fab_rules_cmd:main"
 kicad-project-clean = "kicad_tools.cli.clean_cmd:main"
 
 [project.optional-dependencies]
+# Shapely-based board geometry engine
+geometry = [
+    "shapely>=2.0",
+]
 # Incremental DRC with R-tree spatial indexing
 drc = [
     "rtree>=1.0",

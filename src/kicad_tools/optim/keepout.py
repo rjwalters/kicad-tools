@@ -363,8 +363,20 @@ def create_keepout_from_board_edge(
 
     outline = board_outline
     if outline is None and pcb is not None:
-        # Try to extract from PCB Edge.Cuts
-        outline = _extract_board_outline(pcb)
+        # Try Shapely-based geometry first, fall back to legacy
+        try:
+            from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+
+            if has_shapely():
+                try:
+                    board_geom = BoardGeometry.from_pcb(pcb)
+                    outline = board_geom.to_optim_polygon()
+                except (ValueError, Exception):
+                    pass
+        except ImportError:
+            pass
+        if outline is None:
+            outline = _extract_board_outline(pcb)
 
     if outline is None:
         return None

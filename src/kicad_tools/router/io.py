@@ -2547,6 +2547,22 @@ def load_pcb_for_routing(
         all_ys = [p[1] for seg in edge_segments for p in seg]
         router._board_bbox = (min(all_xs), min(all_ys), max(all_xs), max(all_ys))
 
+    # Attach Shapely-based board geometry when available (Issue #2340).
+    # This enables accurate non-rectangular edge clearance checking.
+    try:
+        from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+
+        if has_shapely():
+            from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+            _schema_pcb = SchemaPCB.load(pcb_path)
+            try:
+                router._board_geometry = BoardGeometry.from_pcb(_schema_pcb)
+            except (ValueError, Exception):
+                pass
+    except ImportError:
+        pass
+
     # Apply edge clearance if specified
     if edge_clearance is not None and edge_clearance > 0:
         # Store on router so EscapeRouter can clamp escape points (Issue #2136)
