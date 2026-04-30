@@ -51,6 +51,14 @@ Note:
 """
 
 from .cache import PartsCache, get_default_cache_path
+from .composition import (
+    ComposedPart,
+    ComposedPartStore,
+    Entity,
+    PinDirection,
+    Unit,
+    UnitPin,
+)
 from .importer import (
     ImportOptions,
     ImportResult,
@@ -83,6 +91,13 @@ __all__ = [
     # Cache
     "PartsCache",
     "get_default_cache_path",
+    # Composition
+    "ComposedPart",
+    "ComposedPartStore",
+    "Entity",
+    "PinDirection",
+    "Unit",
+    "UnitPin",
     # Models
     "Part",
     "PartPrice",
