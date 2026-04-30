@@ -70,6 +70,7 @@ from .commands import (
     run_mfr_command,
     run_optimize_command,
     run_optimize_placement_command,
+    run_panel_command,
     run_parts_command,
     run_pcb_command,
     run_pipeline_command,
@@ -419,6 +420,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "init":
         return run_init_command(args)
+
+    elif args.command == "panel":
+        return run_panel_command(args)
 
     elif args.command == "pipeline":
         return run_pipeline_command(args)
