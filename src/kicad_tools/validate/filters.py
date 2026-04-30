@@ -28,6 +28,7 @@ Example TOML configuration::
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, Union
@@ -77,9 +78,7 @@ class ViolationFilter:
     comment: str = ""
 
     # Compiled regex cache (populated on first use)
-    _compiled: dict[str, re.Pattern[str]] = field(
-        default_factory=dict, repr=False, compare=False
-    )
+    _compiled: dict[str, re.Pattern[str]] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.action not in VALID_ACTIONS:
@@ -88,16 +87,19 @@ class ViolationFilter:
                 f"must be one of {', '.join(sorted(VALID_ACTIONS))}"
             )
         # Pre-compile all patterns to catch regex errors early
-        for attr in ("type_pattern", "message_pattern", "component_pattern",
-                      "net_pattern", "sheet_pattern"):
+        for attr in (
+            "type_pattern",
+            "message_pattern",
+            "component_pattern",
+            "net_pattern",
+            "sheet_pattern",
+        ):
             value = getattr(self, attr)
             if value is not None:
                 try:
                     self._compiled[attr] = re.compile(value, re.IGNORECASE)
                 except re.error as exc:
-                    raise FilterConfigError(
-                        f"Invalid regex in {attr}: {value!r} -- {exc}"
-                    ) from exc
+                    raise FilterConfigError(f"Invalid regex in {attr}: {value!r} -- {exc}") from exc
 
     def _match_pattern(self, attr: str, values: list[str]) -> bool:
         """Check if compiled pattern for *attr* matches any value in *values*.
@@ -227,9 +229,10 @@ class FilterEngine:
 # TOML config parsing helpers
 # ---------------------------------------------------------------------------
 
-def parse_filters_from_config(config_data: dict[str, Any]) -> tuple[
-    list[ViolationFilter], list[ViolationFilter]
-]:
+
+def parse_filters_from_config(
+    config_data: dict[str, Any],
+) -> tuple[list[ViolationFilter], list[ViolationFilter]]:
     """Parse DRC and ERC filter lists from raw TOML config data.
 
     Args:
@@ -261,19 +264,19 @@ def _parse_filter_list(section: dict[str, Any], label: str) -> list[ViolationFil
                 f"[{label}.filters] entry {i} must be a table, got {type(entry).__name__}"
             )
         try:
-            filters.append(ViolationFilter(
-                type_pattern=entry.get("type_pattern"),
-                message_pattern=entry.get("message_pattern"),
-                component_pattern=entry.get("component_pattern"),
-                net_pattern=entry.get("net_pattern"),
-                sheet_pattern=entry.get("sheet_pattern"),
-                action=entry.get("action", "ignore"),
-                comment=entry.get("comment", ""),
-            ))
+            filters.append(
+                ViolationFilter(
+                    type_pattern=entry.get("type_pattern"),
+                    message_pattern=entry.get("message_pattern"),
+                    component_pattern=entry.get("component_pattern"),
+                    net_pattern=entry.get("net_pattern"),
+                    sheet_pattern=entry.get("sheet_pattern"),
+                    action=entry.get("action", "ignore"),
+                    comment=entry.get("comment", ""),
+                )
+            )
         except FilterConfigError as exc:
-            raise FilterConfigError(
-                f"[{label}.filters] entry {i}: {exc}"
-            ) from exc
+            raise FilterConfigError(f"[{label}.filters] entry {i}: {exc}") from exc
 
     return filters
 
@@ -300,9 +303,7 @@ def load_filters_from_toml(path: str) -> tuple[list[ViolationFilter], list[Viola
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
-            raise FilterConfigError(
-                "tomli package required for Python < 3.11: pip install tomli"
-            )
+            raise FilterConfigError("tomli package required for Python < 3.11: pip install tomli")
 
     file_path = _Path(path)
     if not file_path.exists():
@@ -394,20 +395,27 @@ def _get_sheet(v: AnyViolation) -> str:
 def _reclassify(v: AnyViolation, new_severity: str) -> AnyViolation:
     """Return a copy of *v* with its severity changed to *new_severity*.
 
-    For frozen dataclasses (ValidateViolation), creates a new instance.
-    For mutable dataclasses, mutates in place and returns the same object.
+    Always creates a new object so that the original violation is never
+    mutated.  This is required by the contract of
+    ``DRCReport.apply_filters()`` and ``ERCReport.apply_filters()`` which
+    promise to return a new, independent report.
     """
     if isinstance(v, DRCReportViolation):
         from kicad_tools.core.types import Severity
-        v.severity = Severity.from_string(new_severity)
-        return v
+
+        new_v = copy.copy(v)
+        new_v.severity = Severity.from_string(new_severity)
+        return new_v
     elif isinstance(v, ERCViolation):
         from kicad_tools.core.types import ERCSeverity
-        v.severity = ERCSeverity.from_string(new_severity)
-        return v
+
+        new_v = copy.copy(v)
+        new_v.severity = ERCSeverity.from_string(new_severity)
+        return new_v
     elif isinstance(v, ValidateViolation):
         # Frozen dataclass -- need a new instance
         from dataclasses import asdict
+
         d = asdict(v)
         d["severity"] = new_severity
         # Convert tuples back from lists (asdict converts tuples to lists)

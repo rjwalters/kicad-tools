@@ -28,6 +28,7 @@ from kicad_tools.validate.violations import DRCViolation as ValidateViolation
 # Helper factories
 # ---------------------------------------------------------------------------
 
+
 def _drc_violation(
     type_str: str = "clearance",
     message: str = "Clearance violation",
@@ -82,6 +83,7 @@ def _validate_violation(
 # ViolationFilter construction
 # ---------------------------------------------------------------------------
 
+
 class TestViolationFilterConstruction:
     def test_default_action_is_ignore(self):
         f = ViolationFilter()
@@ -114,6 +116,7 @@ class TestViolationFilterConstruction:
 # ---------------------------------------------------------------------------
 # ViolationFilter.matches -- DRC violations
 # ---------------------------------------------------------------------------
+
 
 class TestDRCFilterMatching:
     def test_match_type_pattern(self):
@@ -181,6 +184,7 @@ class TestDRCFilterMatching:
 # ViolationFilter.matches -- ERC violations
 # ---------------------------------------------------------------------------
 
+
 class TestERCFilterMatching:
     def test_match_type_pattern(self):
         f = ViolationFilter(type_pattern="single_global_label")
@@ -201,6 +205,7 @@ class TestERCFilterMatching:
 # ---------------------------------------------------------------------------
 # ViolationFilter.matches -- Validate violations (frozen dataclass)
 # ---------------------------------------------------------------------------
+
 
 class TestValidateFilterMatching:
     def test_match_rule_id(self):
@@ -223,6 +228,7 @@ class TestValidateFilterMatching:
 # FilterEngine
 # ---------------------------------------------------------------------------
 
+
 class TestFilterEngine:
     def test_empty_filters_pass_all_through(self):
         engine = FilterEngine([])
@@ -233,9 +239,11 @@ class TestFilterEngine:
         assert result.raw_count == 2
 
     def test_ignore_action(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="silk_overlap", action="ignore"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="silk_overlap", action="ignore"),
+            ]
+        )
         violations = [
             _drc_violation(type_str="silk_overlap"),
             _drc_violation(type_str="clearance"),
@@ -246,9 +254,11 @@ class TestFilterEngine:
         assert result.kept[0].type_str == "clearance"
 
     def test_warning_reclassification(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="courtyard_overlap", action="warning"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="courtyard_overlap", action="warning"),
+            ]
+        )
         v = _drc_violation(type_str="courtyard_overlap", severity=Severity.ERROR)
         result = engine.apply([v])
         assert result.kept_count == 1
@@ -256,9 +266,11 @@ class TestFilterEngine:
         assert result.kept[0].severity == Severity.WARNING
 
     def test_error_reclassification(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="silk_overlap", action="error"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="silk_overlap", action="error"),
+            ]
+        )
         v = _drc_violation(type_str="silk_overlap", severity=Severity.WARNING)
         result = engine.apply([v])
         assert result.kept_count == 1
@@ -266,9 +278,11 @@ class TestFilterEngine:
         assert result.kept[0].severity == Severity.ERROR
 
     def test_erc_severity_reclassification(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="single_global_label", action="warning"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="single_global_label", action="warning"),
+            ]
+        )
         v = _erc_violation(type_str="single_global_label", severity=ERCSeverity.ERROR)
         result = engine.apply([v])
         assert result.kept_count == 1
@@ -277,9 +291,11 @@ class TestFilterEngine:
 
     def test_validate_violation_reclassification(self):
         """Frozen ValidateViolation gets a new instance with changed severity."""
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="clearance_pad_pad", action="warning"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="clearance_pad_pad", action="warning"),
+            ]
+        )
         v = _validate_violation(rule_id="clearance_pad_pad", severity="error")
         result = engine.apply([v])
         assert result.kept_count == 1
@@ -288,10 +304,12 @@ class TestFilterEngine:
         assert v.severity == "error"
 
     def test_first_matching_rule_wins(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="silk_overlap", action="ignore"),
-            ViolationFilter(type_pattern="silk.*", action="warning"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="silk_overlap", action="ignore"),
+                ViolationFilter(type_pattern="silk.*", action="warning"),
+            ]
+        )
         v = _drc_violation(type_str="silk_overlap")
         result = engine.apply([v])
         # First rule should win: ignore
@@ -299,10 +317,12 @@ class TestFilterEngine:
         assert result.kept_count == 0
 
     def test_filter_result_counts(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="silk_overlap", action="ignore"),
-            ViolationFilter(type_pattern="courtyard", action="warning"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="silk_overlap", action="ignore"),
+                ViolationFilter(type_pattern="courtyard", action="warning"),
+            ]
+        )
         violations = [
             _drc_violation(type_str="silk_overlap"),
             _drc_violation(type_str="courtyard_overlap"),
@@ -325,6 +345,7 @@ class TestFilterEngine:
 # ---------------------------------------------------------------------------
 # TOML config parsing
 # ---------------------------------------------------------------------------
+
 
 class TestConfigParsing:
     def test_parse_drc_filters(self):
@@ -380,23 +401,17 @@ class TestConfigParsing:
         assert erc_filters == []
 
     def test_invalid_action_in_config(self):
-        config = {
-            "drc": {"filters": [{"action": "discard"}]}
-        }
+        config = {"drc": {"filters": [{"action": "discard"}]}}
         with pytest.raises(FilterConfigError):
             parse_filters_from_config(config)
 
     def test_invalid_regex_in_config(self):
-        config = {
-            "drc": {"filters": [{"type_pattern": "[bad regex"}]}
-        }
+        config = {"drc": {"filters": [{"type_pattern": "[bad regex"}]}}
         with pytest.raises(FilterConfigError):
             parse_filters_from_config(config)
 
     def test_default_action_is_ignore(self):
-        config = {
-            "drc": {"filters": [{"type_pattern": "silk_overlap"}]}
-        }
+        config = {"drc": {"filters": [{"type_pattern": "silk_overlap"}]}}
         drc_filters, _ = parse_filters_from_config(config)
         assert drc_filters[0].action == "ignore"
 
@@ -404,6 +419,7 @@ class TestConfigParsing:
 # ---------------------------------------------------------------------------
 # TOML file loading
 # ---------------------------------------------------------------------------
+
 
 class TestLoadFiltersFromToml:
     def test_load_valid_toml(self, tmp_path):
@@ -440,6 +456,7 @@ class TestLoadFiltersFromToml:
 # DRCReport.apply_filters integration
 # ---------------------------------------------------------------------------
 
+
 class TestDRCReportApplyFilters:
     def test_apply_filters_returns_new_report(self):
         report = DRCReport(
@@ -473,6 +490,7 @@ class TestDRCReportApplyFilters:
 # ERCReport.apply_filters integration
 # ---------------------------------------------------------------------------
 
+
 class TestERCReportApplyFilters:
     def test_apply_filters_returns_new_report(self):
         report = ERCReport(
@@ -494,6 +512,7 @@ class TestERCReportApplyFilters:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     def test_no_component_refs_fails_component_filter(self):
         """If component_pattern is set but no refs found, filter does not match."""
@@ -507,11 +526,59 @@ class TestEdgeCases:
         v = _drc_violation()
         assert not f.matches(v)
 
+    def test_reclassify_does_not_mutate_original_drc_violation(self):
+        """Reclassifying a DRC violation must not change the original object."""
+        original = _drc_violation(type_str="courtyard_overlap", severity=Severity.ERROR)
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="courtyard_overlap", action="warning"),
+            ]
+        )
+        result = engine.apply([original])
+        assert result.kept[0].severity == Severity.WARNING
+        # The original violation must still have ERROR severity
+        assert original.severity == Severity.ERROR
+        # The returned violation must be a different object
+        assert result.kept[0] is not original
+
+    def test_reclassify_does_not_mutate_original_erc_violation(self):
+        """Reclassifying an ERC violation must not change the original object."""
+        original = _erc_violation(type_str="single_global_label", severity=ERCSeverity.ERROR)
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="single_global_label", action="warning"),
+            ]
+        )
+        result = engine.apply([original])
+        assert result.kept[0].severity == ERCSeverity.WARNING
+        # The original violation must still have ERROR severity
+        assert original.severity == ERCSeverity.ERROR
+        # The returned violation must be a different object
+        assert result.kept[0] is not original
+
+    def test_reclassify_does_not_mutate_original_in_report(self):
+        """DRCReport.apply_filters must not mutate original report violations."""
+        v = _drc_violation(type_str="courtyard_overlap", severity=Severity.ERROR)
+        report = DRCReport(
+            source_file="test.kicad_pcb",
+            created_at=None,
+            pcb_name="test",
+            violations=[v],
+        )
+        filters = [ViolationFilter(type_pattern="courtyard_overlap", action="warning")]
+        filtered = report.apply_filters(filters)
+        # Filtered report has warning severity
+        assert filtered.violations[0].severity == Severity.WARNING
+        # Original report still has error severity
+        assert report.violations[0].severity == Severity.ERROR
+
     def test_multiple_rules_ignore_all(self):
-        engine = FilterEngine([
-            ViolationFilter(type_pattern="silk_overlap", action="ignore"),
-            ViolationFilter(type_pattern="clearance", action="ignore"),
-        ])
+        engine = FilterEngine(
+            [
+                ViolationFilter(type_pattern="silk_overlap", action="ignore"),
+                ViolationFilter(type_pattern="clearance", action="ignore"),
+            ]
+        )
         violations = [
             _drc_violation(type_str="silk_overlap"),
             _drc_violation(type_str="clearance"),
