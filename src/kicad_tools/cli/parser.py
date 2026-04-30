@@ -177,6 +177,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_mcp_parser(subparsers)
     _add_ipc_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_panel_parser(subparsers)
     _add_pipeline_parser(subparsers)
     _add_create_pcb_parser(subparsers)
     _add_build_parser(subparsers)
@@ -4367,6 +4368,119 @@ def _add_init_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_panel_parser(subparsers) -> None:
+    """Add panel subcommand parser for board panelization."""
+    panel_parser = subparsers.add_parser(
+        "panel",
+        help="Create manufacturing panels from board PCBs",
+        description=(
+            "Panelize a board into a manufacturing panel with configurable "
+            "grid layout, breakaway tabs, mousebite/V-cut separation, "
+            "tooling holes, and fiducial marks."
+        ),
+    )
+    panel_parser.add_argument(
+        "panel_input",
+        metavar="INPUT",
+        help="Path to source .kicad_pcb file",
+    )
+    panel_parser.add_argument(
+        "-o",
+        "--output",
+        dest="panel_output",
+        default=None,
+        help="Output panel PCB file path (default: <input>_panel.kicad_pcb)",
+    )
+    panel_parser.add_argument(
+        "--rows",
+        dest="panel_rows",
+        type=int,
+        default=2,
+        help="Number of board rows (default: 2)",
+    )
+    panel_parser.add_argument(
+        "--cols",
+        dest="panel_cols",
+        type=int,
+        default=2,
+        help="Number of board columns (default: 2)",
+    )
+    panel_parser.add_argument(
+        "--spacing",
+        dest="panel_spacing",
+        type=float,
+        default=2.0,
+        help="Gap between boards in mm (default: 2.0)",
+    )
+    panel_parser.add_argument(
+        "--cut",
+        dest="panel_cut",
+        choices=["mousebite", "vcut"],
+        default="mousebite",
+        help="Separation method (default: mousebite)",
+    )
+    panel_parser.add_argument(
+        "--tab-width",
+        dest="panel_tab_width",
+        type=float,
+        default=3.0,
+        help="Tab width in mm (default: 3.0)",
+    )
+    panel_parser.add_argument(
+        "--tab-count",
+        dest="panel_tab_count",
+        type=int,
+        default=3,
+        help="Number of tabs per edge (default: 3)",
+    )
+    panel_parser.add_argument(
+        "--mousebite-diameter",
+        dest="panel_mousebite_diameter",
+        type=float,
+        default=0.5,
+        help="Mousebite hole diameter in mm (default: 0.5)",
+    )
+    panel_parser.add_argument(
+        "--mousebite-spacing",
+        dest="panel_mousebite_spacing",
+        type=float,
+        default=0.8,
+        help="Mousebite hole spacing in mm (default: 0.8)",
+    )
+    panel_parser.add_argument(
+        "--frame",
+        dest="panel_frame",
+        action="store_true",
+        help="Add a frame (rail) around the panel",
+    )
+    panel_parser.add_argument(
+        "--frame-width",
+        dest="panel_frame_width",
+        type=float,
+        default=5.0,
+        help="Frame rail width in mm (default: 5.0)",
+    )
+    panel_parser.add_argument(
+        "--frame-space",
+        dest="panel_frame_space",
+        type=float,
+        default=2.0,
+        help="Gap between board and frame in mm (default: 2.0)",
+    )
+    panel_parser.add_argument(
+        "--tooling-holes",
+        dest="panel_tooling_holes",
+        action="store_true",
+        help="Add tooling holes to the panel frame",
+    )
+    panel_parser.add_argument(
+        "--fiducials",
+        dest="panel_fiducials",
+        action="store_true",
+        help="Add fiducial marks to the panel frame",
     )
 
 

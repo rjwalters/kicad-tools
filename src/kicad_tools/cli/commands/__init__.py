@@ -31,6 +31,7 @@ from .manufacturer import run_mfr_command
 from .mcp import run_mcp_command
 from .native import run_build_native_command
 from .optimize_placement import run_optimize_placement_command
+from .panel import run_panel_command
 from .parts import run_parts_command
 from .pcb import run_pcb_command
 from .pipeline import run_pipeline_command
@@ -132,6 +133,8 @@ __all__ = [
     "run_build_native_command",
     # Run
     "run_run_command",
+    # Panel
+    "run_panel_command",
     # Pipeline
     "run_pipeline_command",
     # Sync
