@@ -17,6 +17,7 @@ Usage:
 """
 
 from .footprint import Footprint, GraphicArc, GraphicCircle, GraphicLine, GraphicRect, Pad
+from .dsl import parse_footprint_dsl
 from .generators import (
     create_bga,
     create_bga_standard,
@@ -32,6 +33,8 @@ from .generators import (
 )
 
 __all__ = [
+    # DSL parser
+    "parse_footprint_dsl",
     # Core classes
     "Footprint",
     "Pad",
