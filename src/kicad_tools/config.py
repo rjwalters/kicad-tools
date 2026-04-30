@@ -32,7 +32,8 @@ USER_CONFIG_PATH = Path.home() / ".config" / "kicad-tools" / "config.toml"
 KNOWN_KEYS = {
     "defaults": {"format", "manufacturer", "verbose", "quiet"},
     "display": {"units", "precision_mm", "precision_mils"},
-    "drc": {"strict", "layers"},
+    "drc": {"strict", "layers", "filters"},
+    "erc": {"filters"},
     "export": {"output_dir", "include_dnp"},
     "route": {
         "strategy",

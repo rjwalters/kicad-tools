@@ -19,6 +19,7 @@ from .violations import DRCResults
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.filters import ViolationFilter
 
 
 class DRCChecker:
@@ -79,11 +80,20 @@ class DRCChecker:
         profile = get_profile(manufacturer)
         self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz)
 
-    def check_all(self) -> DRCResults:
+    def check_all(
+        self,
+        filters: "list[ViolationFilter] | None" = None,
+    ) -> DRCResults:
         """Run all DRC checks.
 
+        Args:
+            filters: Optional list of :class:`ViolationFilter` rules.  When
+                provided, matching violations are suppressed or reclassified
+                and the ``suppressed_count`` field is populated.
+
         Returns:
-            DRCResults containing all violations found
+            DRCResults containing all violations found (after filtering,
+            if filters are provided).
         """
         results = DRCResults()
 
@@ -96,6 +106,15 @@ class DRCChecker:
         results.merge(self.check_footprint_placement())
         results.merge(self.check_netlist())
         results.merge(self.check_zones())
+
+        # Apply filters if provided
+        if filters:
+            from kicad_tools.validate.filters import FilterEngine
+
+            engine = FilterEngine(filters)
+            filter_result = engine.apply(results.violations)
+            results.suppressed_count += filter_result.ignored_count
+            results.violations = filter_result.kept
 
         return results
 

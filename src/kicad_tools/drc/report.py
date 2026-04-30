@@ -76,6 +76,33 @@ class DRCReport:
                     break
         return result
 
+    def apply_filters(
+        self,
+        filters: "list[ViolationFilter]",
+    ) -> "DRCReport":
+        """Return a new report with violations filtered/reclassified.
+
+        Args:
+            filters: List of :class:`ViolationFilter` rules to apply.
+
+        Returns:
+            A new :class:`DRCReport` containing only the kept violations
+            (those not suppressed by ``action="ignore"`` rules).  Violations
+            matched by ``action="warning"`` or ``action="error"`` rules have
+            their severity reclassified in-place.
+        """
+        from kicad_tools.validate.filters import FilterEngine, ViolationFilter
+
+        engine = FilterEngine(filters)
+        result = engine.apply(self.violations)
+        return DRCReport(
+            source_file=self.source_file,
+            created_at=self.created_at,
+            pcb_name=self.pcb_name,
+            violations=result.kept,
+            footprint_errors=self.footprint_errors,
+        )
+
     def summary(self) -> dict:
         """Generate a summary of the report."""
         by_type = self.violations_by_type()
