@@ -174,6 +174,31 @@ class DesignRules:
     constraint_pad_count_weight: float = 0.5  # Weight for number of pads in net
     constraint_congestion_weight: float = 5.0  # Weight for nets in congested areas
 
+    @property
+    def max_clearance(self) -> float:
+        """Return the maximum clearance across all configured clearance values.
+
+        This is used for conservative R-tree envelope inflation (Issue #2335).
+        The inflated envelopes ensure that any segment within clearance distance
+        of an indexed segment will be returned by an intersection query,
+        eliminating per-query clearance arithmetic.
+
+        The maximum is taken across:
+        - Default trace_clearance
+        - Per-component clearances (component_clearances dict)
+        - Fine-pitch clearance (if configured)
+        - Via clearance
+
+        Returns:
+            Maximum clearance value in mm.
+        """
+        clearances = [self.trace_clearance, self.via_clearance]
+        if self.component_clearances:
+            clearances.extend(self.component_clearances.values())
+        if self.fine_pitch_clearance is not None:
+            clearances.append(self.fine_pitch_clearance)
+        return max(clearances)
+
     def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
         """Get the clearance to use for a specific component.
 
