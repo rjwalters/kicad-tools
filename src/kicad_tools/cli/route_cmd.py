@@ -215,6 +215,7 @@ _interrupt_state = {
     "output_path": None,
     "pcb_path": None,
     "quiet": False,
+    "best_completed_attempt": False,
 }
 
 
@@ -258,17 +259,22 @@ def _save_partial_results() -> bool:
         route_sexp = router.to_sexp()
 
         if route_sexp:
-            # Create partial output filename
-            partial_path = output_path.with_stem(output_path.stem + "_partial")
+            # When the interrupt state holds a best *completed* attempt from
+            # adaptive-rules routing, write to the main output path (not
+            # _partial) because the result is a full routing pass.
+            if _interrupt_state.get("best_completed_attempt"):
+                save_path = output_path
+            else:
+                save_path = output_path.with_stem(output_path.stem + "_partial")
 
             # Insert routes before final closing parenthesis
             output_content = _insert_sexp_before_closing(original_content, route_sexp)
 
-            partial_path.write_text(output_content)
+            save_path.write_text(output_content)
 
             if not quiet:
                 stats = router.get_statistics()
-                print(f"\n  Partial results saved to: {partial_path}")
+                print(f"\n  Partial results saved to: {save_path}")
                 print(f"    Nets routed: {stats['nets_routed']}")
                 print(f"    Segments: {stats['segments']}")
                 print(f"    Vias: {stats['vias']}")
@@ -1279,6 +1285,16 @@ def route_with_rule_relaxation(
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
 
+    # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["router"] = None
+    _interrupt_state["interrupted"] = False
+    _interrupt_state["best_completed_attempt"] = False
+    prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
+    prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
+
     for tier in tiers:
         if not quiet:
             flush_print("=" * 60)
@@ -1400,6 +1416,9 @@ def route_with_rule_relaxation(
         # Track best result
         if best_result is None or completion > best_result.completion:
             best_result = result
+            # Update interrupt state so signal handler saves the best attempt
+            _interrupt_state["router"] = result.router
+            _interrupt_state["best_completed_attempt"] = True
 
         # Report attempt result
         status = "SUCCESS" if result.success else "INSUFFICIENT - relaxing rules"
@@ -1411,6 +1430,11 @@ def route_with_rule_relaxation(
         if result.success:
             successful_result = result
             break
+
+    # Restore original signal handlers
+    signal.signal(signal.SIGINT, prev_sigint)
+    signal.signal(signal.SIGTERM, prev_sigterm)
+    _interrupt_state["best_completed_attempt"] = False
 
     # Handle results
     if not quiet:
@@ -1717,6 +1741,16 @@ def route_with_combined_escalation(
     successful_result: RuleRelaxationResult | None = None
     results_matrix: dict[tuple[int, int], float] = {}  # (tier, layers) -> completion
 
+    # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["router"] = None
+    _interrupt_state["interrupted"] = False
+    _interrupt_state["best_completed_attempt"] = False
+    prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
+    prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
+
     # 2D search: prioritize fewer layers first, then stricter rules
     for layer_count, layer_stack in layer_configs:
         for tier in tiers:
@@ -1839,6 +1873,9 @@ def route_with_combined_escalation(
             # Track best result
             if best_result is None or completion > best_result.completion:
                 best_result = result
+                # Update interrupt state so signal handler saves the best attempt
+                _interrupt_state["router"] = result.router
+                _interrupt_state["best_completed_attempt"] = True
 
             # Check for success (first success wins - minimum config)
             if result.success:
@@ -1848,6 +1885,11 @@ def route_with_combined_escalation(
         # If we found a successful config at this layer count, stop
         if successful_result:
             break
+
+    # Restore original signal handlers
+    signal.signal(signal.SIGINT, prev_sigint)
+    signal.signal(signal.SIGTERM, prev_sigterm)
+    _interrupt_state["best_completed_attempt"] = False
 
     # Print results matrix
     if not quiet:
