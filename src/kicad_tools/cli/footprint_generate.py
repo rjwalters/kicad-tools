@@ -301,8 +301,72 @@ def _output_footprint(fp, args) -> int:
         return 0
 
 
+def _try_dsl_generate(argv: list[str]) -> int | None:
+    """Try to interpret the first positional argument as a DSL spec string.
+
+    Returns exit code if handled, None if not a DSL string.
+    """
+    from kicad_tools.library.dsl import parse_footprint_dsl
+
+    # Known subcommands that should NOT be treated as DSL strings
+    known_subcommands = {"soic", "qfp", "qfn", "chip", "sot", "dip", "pin-header"}
+
+    # Find the first positional argument (skip flags)
+    dsl_spec = None
+    remaining = []
+    found_positional = False
+    for arg in argv:
+        if not found_positional and not arg.startswith("-") and arg not in known_subcommands:
+            dsl_spec = arg
+            found_positional = True
+        else:
+            remaining.append(arg)
+
+    if dsl_spec is None:
+        return None
+
+    # Parse remaining flags for output options
+    dsl_parser = argparse.ArgumentParser(prog="kct footprint generate <dsl-spec>")
+    dsl_parser.add_argument("-o", "--output", help="Output file path")
+    dsl_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON"
+    )
+    dsl_parser.add_argument("--prefix", help="Component prefix (R, C, L)")
+    dsl_parser.add_argument("--name", help="Custom footprint name")
+
+    try:
+        dsl_args = dsl_parser.parse_args(remaining)
+    except SystemExit:
+        return 1
+
+    try:
+        fp = parse_footprint_dsl(dsl_spec)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Use a namespace compatible with _output_footprint
+    dsl_args.json = dsl_args.json
+    return _output_footprint(fp, dsl_args)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for footprint generate command."""
+    # Try DSL shorthand first (e.g., "kct footprint generate soic8")
+    if argv is not None and argv:
+        dsl_result = _try_dsl_generate(argv)
+        if dsl_result is not None:
+            return dsl_result
+    elif argv is None:
+        # When called from sys.argv, check sys.argv[1:]
+        import sys as _sys
+
+        real_argv = _sys.argv[1:]
+        if real_argv:
+            dsl_result = _try_dsl_generate(real_argv)
+            if dsl_result is not None:
+                return dsl_result
+
     parser = argparse.ArgumentParser(
         prog="kct footprint generate",
         description="Generate parametric KiCad footprints",
