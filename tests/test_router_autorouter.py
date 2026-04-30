@@ -271,7 +271,8 @@ class TestAutorouter:
         )
 
         # Issue #1295: Pour nets (is_pour_net=True) return priority 99
-        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
         assert priority == 99  # Pour net pushed to back
 
     def test_get_net_priority_with_signal_net_class(self):
@@ -286,8 +287,8 @@ class TestAutorouter:
             ],
         )
 
-        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
-        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
         assert priority == 2  # Clock net has priority 2
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -303,8 +304,8 @@ class TestAutorouter:
             ],
         )
 
-        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
-        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
         assert priority == 10  # Default low priority
         assert distance == 0.0  # Single pad has no distance
 
