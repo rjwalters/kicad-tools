@@ -726,6 +726,21 @@ class EscapeRouter:
         if self.edge_clearance is not None and self.board_bounds is not None:
             escapes = self._apply_edge_clearance(escapes)
 
+        # Issue #2350: Warn when an entire package gets 0 escapes.
+        # Silent failure makes it very hard to diagnose routing problems.
+        if not escapes and package.pin_count > 0:
+            logger.warning(
+                "Escape routing for %s (%s, %d pins, %.2fmm pitch): "
+                "0 pins escaped -- all escapes failed clearance validation. "
+                "Consider setting fine_pitch_clearance in DesignRules or "
+                "adding a component_clearances override for %s.",
+                package.ref,
+                package.package_type.name,
+                package.pin_count,
+                package.pin_pitch,
+                package.ref,
+            )
+
         return escapes
 
     def _apply_edge_clearance(self, escapes: list[EscapeRoute]) -> list[EscapeRoute]:
@@ -1244,10 +1259,37 @@ class EscapeRouter:
 
         # Issue #2319: Use per-component clearance (respects fine_pitch_clearance)
         # instead of the raw trace_clearance everywhere.
+        # Issue #2350: When fine_pitch_clearance is not configured in DesignRules,
+        # auto-derive a clearance for fine-pitch packages based on pin pitch.
+        # This method is only called for SSOP/TSSOP (confirmed fine-pitch), so we
+        # can safely infer a tighter clearance when the user hasn't set one.
         ref = pads[0].ref if pads else ""
         effective_clearance = self.rules.get_clearance_for_component(
             ref, pin_pitch=package.pin_pitch,
         )
+
+        # If get_clearance_for_component returned the default trace_clearance
+        # (because fine_pitch_clearance was None), derive a workable clearance
+        # from the pad geometry.  For a 0.65mm pitch SSOP with 0.35mm pads the
+        # copper gap is (0.65 - 0.35) / 2 = 0.15mm; we use 80% of the
+        # copper-to-copper gap to leave manufacturing margin.
+        if (
+            self.rules.fine_pitch_clearance is None
+            and ref not in self.rules.component_clearances
+            and package.pin_pitch < self.rules.fine_pitch_threshold
+        ):
+            # Estimate pad width along the row axis
+            pad_widths = [min(p.width, p.height) for p in pads[:4]]
+            avg_pad_width = sum(pad_widths) / len(pad_widths) if pad_widths else 0.3
+            copper_gap = package.pin_pitch - avg_pad_width
+            derived_clearance = copper_gap * 0.8
+            if derived_clearance < effective_clearance:
+                logger.info(
+                    "Fine-pitch auto-clearance for %s: %.3fmm "
+                    "(derived from %.2fmm pitch, %.2fmm pad width)",
+                    ref, derived_clearance, package.pin_pitch, avg_pad_width,
+                )
+                effective_clearance = derived_clearance
 
         # Issue #1778: Use min_trace_width for escape segments in fine-pitch
         # packages. The escape segments are short and only need to clear the
@@ -1492,17 +1534,18 @@ class EscapeRouter:
         pads: list[Pad],
         min_clearance: float,
     ) -> bool:
-        """Check whether *seg* violates clearance against neighboring pads.
+        """Check whether *seg* violates clearance against pads in the row.
 
-        Only checks the immediate neighbors (pad_index-1 and pad_index+1) in
-        the row, since those are the pads most likely to be violated.  The
-        segment's own pad (at pad_index) is skipped because the segment
-        originates from it.
+        Issue #2350: Checks ALL pads in the row, not just immediate neighbors.
+        On fine-pitch packages (e.g. 20-pin SSOP), a lateral escape may
+        violate clearance against pad[i+2] while only pad[i+1] was previously
+        checked.  The segment's own pad (at pad_index) is skipped because the
+        segment originates from it.
 
-        Returns True if any neighbor pad is violated.
+        Returns True if any pad in the row is violated.
         """
-        for neighbor_idx in (pad_index - 1, pad_index + 1):
-            if neighbor_idx < 0 or neighbor_idx >= len(pads):
+        for neighbor_idx in range(len(pads)):
+            if neighbor_idx == pad_index:
                 continue
             neighbor = pads[neighbor_idx]
             # Only check pads on the same layer as the segment
