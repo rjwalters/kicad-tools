@@ -11,6 +11,7 @@ from kicad_tools.schematic.blocks import (
     BuckConverter,
     CANTransceiver,
     CircuitBlock,
+    ComposedCircuitBlock,
     CrystalOscillator,
     CurrentSenseShunt,
     DebugHeader,
@@ -55,6 +56,7 @@ from kicad_tools.schematic.blocks import (
     create_usb_power,
     create_usb_type_c,
     create_voltage_divider,
+    match_ports,
 )
 
 
@@ -3813,3 +3815,407 @@ class TestMotorControlFactoryFunctions:
         sense = create_current_sense(mock_schematic, x=100, y=100, with_amplifier=True, gain=50)
         assert sense.has_amplifier is True
         assert sense.gain == 50
+
+
+# ---------------------------------------------------------------------------
+# Helpers for composition tests
+# ---------------------------------------------------------------------------
+
+
+def _make_block(ports_dict: dict[str, Port]) -> CircuitBlock:
+    """Create a CircuitBlock with the given typed ports."""
+    block = CircuitBlock()
+    for name, tp in ports_dict.items():
+        block.ports[name] = tp.pos()
+        block.typed_ports[name] = tp
+    return block
+
+
+class TestSeriesComposition:
+    """Tests for the ``&`` (series) composition operator."""
+
+    def test_series_composition_basic(self):
+        """Two blocks composed with &: output wires to input, external ports exposed."""
+        left = _make_block(
+            {
+                "VIN": Port(name="VIN", x=0, y=0, direction="input"),
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=20, y=0, direction="input"),
+                "VOUT": Port(name="VOUT", x=30, y=0, direction="output"),
+            }
+        )
+        composed = left & right
+        assert isinstance(composed, ComposedCircuitBlock)
+        # VOUT of left wires to VIN of right via alias match
+        assert len(composed._wired_pairs) == 1
+        src, tgt = composed._wired_pairs[0]
+        assert src.name == "VOUT"
+        assert tgt.name == "VIN"
+        # External ports: VIN from left, VOUT from right
+        assert "VIN" in composed.ports
+        assert "VOUT" in composed.ports
+
+    def test_series_port_matching_by_name(self):
+        """Output port VOUT auto-wires to input port VIN via alias."""
+        left = _make_block(
+            {
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=20, y=0, direction="input"),
+            }
+        )
+        composed = left & right
+        assert len(composed._wired_pairs) == 1
+        assert composed._wired_pairs[0][0].name == "VOUT"
+        assert composed._wired_pairs[0][1].name == "VIN"
+        # No external ports (all wired)
+        assert len(composed.ports) == 0
+
+    def test_series_port_matching_by_direction(self):
+        """Output-to-input pairing works even when names differ."""
+        left = _make_block(
+            {
+                "SIG_A": Port(name="SIG_A", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "SIG_B": Port(name="SIG_B", x=20, y=0, direction="input"),
+            }
+        )
+        composed = left & right
+        # Should pair by direction compatibility
+        assert len(composed._wired_pairs) == 1
+
+    def test_series_no_matching_ports_raises_no_error(self):
+        """Composing blocks with no matching ports results in all ports exposed."""
+        left = _make_block(
+            {
+                "A": Port(name="A", x=0, y=0, direction="input"),
+            }
+        )
+        right = _make_block(
+            {
+                "B": Port(name="B", x=10, y=0, direction="input"),
+            }
+        )
+        composed = left & right
+        # No pairings (both are inputs)
+        assert len(composed._wired_pairs) == 0
+        # Both ports exposed
+        assert "A" in composed.ports
+        assert "B" in composed.ports
+
+    def test_series_multiple_matching_ports(self):
+        """Multiple compatible pairs are all matched."""
+        left = _make_block(
+            {
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+                "GND": Port(name="GND", x=10, y=10, direction="passive"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=20, y=0, direction="input"),
+                "GND": Port(name="GND", x=20, y=10, direction="passive"),
+            }
+        )
+        composed = left & right
+        # VOUT->VIN alias + GND->GND name match
+        assert len(composed._wired_pairs) == 2
+
+
+class TestParallelComposition:
+    """Tests for the ``|`` (parallel) composition operator."""
+
+    def test_parallel_composition_basic(self):
+        """Two blocks composed with |: shared inputs, combined outputs."""
+        left = _make_block(
+            {
+                "VIN": Port(name="VIN", x=0, y=0, direction="input"),
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=0, y=20, direction="input"),
+                "VOUT": Port(name="VOUT", x=10, y=20, direction="output"),
+            }
+        )
+        composed = left | right
+        assert isinstance(composed, ComposedCircuitBlock)
+        # VIN is shared (same name, same direction)
+        assert "VIN" in composed.ports
+        # VOUT is disambiguated (both blocks have the same name)
+        # _block_label strips "Block" suffix: CircuitBlock -> Circuit
+        assert "Circuit.VOUT" in composed.ports or "VOUT" in composed.ports
+
+    def test_parallel_shared_inputs(self):
+        """Matching input port names become shared."""
+        left = _make_block(
+            {
+                "VCC": Port(name="VCC", x=0, y=0, direction="power"),
+                "SIG": Port(name="SIG", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VCC": Port(name="VCC", x=0, y=20, direction="power"),
+                "SIG": Port(name="SIG", x=10, y=20, direction="output"),
+            }
+        )
+        composed = left | right
+        # VCC shared (power = input-like)
+        assert "VCC" in composed.ports
+        # Only one VCC port exposed
+        vcc_count = sum(1 for k in composed.ports if "VCC" in k)
+        assert vcc_count == 1
+
+
+class TestChainedComposition:
+    """Tests for chaining composition operators."""
+
+    def test_chained_series(self):
+        """(a & b) & c works correctly."""
+        a = _make_block(
+            {
+                "IN": Port(name="IN", x=0, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=10, y=0, direction="output"),
+            }
+        )
+        b = _make_block(
+            {
+                "IN": Port(name="IN", x=20, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=30, y=0, direction="output"),
+            }
+        )
+        c = _make_block(
+            {
+                "IN": Port(name="IN", x=40, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=50, y=0, direction="output"),
+            }
+        )
+        composed = (a & b) & c
+        assert isinstance(composed, ComposedCircuitBlock)
+        # a & b wires OUT->IN, (a&b) & c also wires OUT->IN
+        assert "IN" in composed.ports  # from a
+        assert "OUT" in composed.ports  # from c
+
+    def test_mixed_composition(self):
+        """(a & b) | c expression produces a composed block."""
+        a = _make_block(
+            {
+                "IN": Port(name="IN", x=0, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=10, y=0, direction="output"),
+            }
+        )
+        b = _make_block(
+            {
+                "IN": Port(name="IN", x=20, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=30, y=0, direction="output"),
+            }
+        )
+        c = _make_block(
+            {
+                "IN": Port(name="IN", x=40, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=50, y=0, direction="output"),
+            }
+        )
+        composed = (a & b) | c
+        assert isinstance(composed, ComposedCircuitBlock)
+        assert isinstance(composed.left, ComposedCircuitBlock)
+
+
+class TestComposedBlockPortAccess:
+    """Tests for port access on composed blocks."""
+
+    def test_port_lookup(self):
+        """port() and get_typed_port() work on composed blocks."""
+        left = _make_block(
+            {
+                "VIN": Port(name="VIN", x=0, y=0, direction="input"),
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=20, y=0, direction="input"),
+                "VOUT": Port(name="VOUT", x=30, y=0, direction="output"),
+            }
+        )
+        composed = left & right
+        # VIN exposed from left
+        assert composed.port("VIN") == (0, 0)
+        tp = composed.get_typed_port("VIN")
+        assert tp.direction == "input"
+
+    def test_port_not_found_on_composed(self):
+        """KeyError for missing port on composed block."""
+        left = _make_block(
+            {"A": Port(name="A", x=0, y=0, direction="input")}
+        )
+        right = _make_block(
+            {"B": Port(name="B", x=10, y=0, direction="input")}
+        )
+        composed = left & right
+        with pytest.raises(KeyError):
+            composed.port("MISSING")
+
+    def test_children_property(self):
+        """children property returns the two child blocks."""
+        a = _make_block({"X": Port(name="X", x=0, y=0)})
+        b = _make_block({"Y": Port(name="Y", x=10, y=0)})
+        composed = a & b
+        assert composed.children == (a, b)
+
+
+class TestComposedBlockRealize:
+    """Tests for realize() placing components and drawing wires."""
+
+    def test_realize_series(self):
+        """realize() calls add_wire for matched pairs."""
+        left = _make_block(
+            {
+                "VOUT": Port(name="VOUT", x=10, y=0, direction="output"),
+            }
+        )
+        right = _make_block(
+            {
+                "VIN": Port(name="VIN", x=20, y=0, direction="input"),
+            }
+        )
+        composed = left & right
+
+        sch = Mock()
+        sch.add_wire = Mock()
+        composed.realize(sch, x=0, y=0)
+
+        # Should draw wire between VOUT and VIN
+        assert sch.add_wire.call_count == 1
+
+    def test_realize_parallel(self):
+        """realize() for parallel updates child positions."""
+        left = _make_block(
+            {"A": Port(name="A", x=0, y=0, direction="input")}
+        )
+        right = _make_block(
+            {"A": Port(name="A", x=0, y=0, direction="input")}
+        )
+        composed = left | right
+
+        sch = Mock()
+        composed.realize(sch, x=50, y=50)
+
+        # Right block should be offset vertically
+        assert right.y == 50 + ComposedCircuitBlock.PARALLEL_GAP
+
+    def test_realize_nested(self):
+        """realize() works for nested composed blocks."""
+        a = _make_block(
+            {
+                "OUT": Port(name="OUT", x=10, y=0, direction="output"),
+            }
+        )
+        b = _make_block(
+            {
+                "IN": Port(name="IN", x=20, y=0, direction="input"),
+                "OUT": Port(name="OUT", x=30, y=0, direction="output"),
+            }
+        )
+        c = _make_block(
+            {
+                "IN": Port(name="IN", x=40, y=0, direction="input"),
+            }
+        )
+        composed = (a & b) & c
+
+        sch = Mock()
+        sch.add_wire = Mock()
+        composed.realize(sch, x=0, y=0)
+
+        # Two wires: OUT->IN in (a&b), and OUT->IN in ((a&b)&c)
+        assert sch.add_wire.call_count == 2
+
+
+class TestMatchPorts:
+    """Tests for the match_ports() helper function."""
+
+    def test_exact_name_match(self):
+        """Ports with identical names are matched."""
+        source = {"GND": Port(name="GND", x=0, y=0, direction="passive")}
+        target = {"GND": Port(name="GND", x=10, y=0, direction="passive")}
+        pairs = match_ports(source, target)
+        assert len(pairs) == 1
+        assert pairs[0][0].name == "GND"
+        assert pairs[0][1].name == "GND"
+
+    def test_alias_match(self):
+        """VOUT on source matches VIN on target via alias."""
+        source = {"VOUT": Port(name="VOUT", x=0, y=0, direction="output")}
+        target = {"VIN": Port(name="VIN", x=10, y=0, direction="input")}
+        pairs = match_ports(source, target)
+        assert len(pairs) == 1
+
+    def test_direction_match(self):
+        """Output-to-input pairing by direction when names differ."""
+        source = {"SIG_OUT": Port(name="SIG_OUT", x=0, y=0, direction="output")}
+        target = {"SIG_IN": Port(name="SIG_IN", x=10, y=0, direction="input")}
+        pairs = match_ports(source, target)
+        assert len(pairs) == 1
+
+    def test_no_match_same_direction(self):
+        """Two input ports do not match."""
+        source = {"A": Port(name="A", x=0, y=0, direction="input")}
+        target = {"B": Port(name="B", x=10, y=0, direction="input")}
+        pairs = match_ports(source, target)
+        assert len(pairs) == 0
+
+    def test_bidirectional_matching(self):
+        """Bidirectional ports match with passive ports."""
+        source = {"SDA": Port(name="SDA", x=0, y=0, direction="bidirectional")}
+        target = {"SDA": Port(name="SDA", x=10, y=0, direction="passive")}
+        pairs = match_ports(source, target)
+        assert len(pairs) == 1
+
+
+class TestPortMatchingTypeWarning:
+    """Tests for type mismatch warnings during composition."""
+
+    def test_interface_mismatch_generates_warning(self):
+        """Composing ports with mismatched interface types produces warnings."""
+        from kicad_tools.intent.types import InterfaceCategory
+        from kicad_tools.schematic.blocks.interfaces import DataPort, PowerPort
+
+        left = _make_block(
+            {
+                "POWER": PowerPort(
+                    name="POWER",
+                    x=0,
+                    y=0,
+                    direction="output",
+                    voltage_min=3.0,
+                    voltage_max=3.6,
+                ),
+            }
+        )
+        right = _make_block(
+            {
+                "POWER": DataPort(
+                    name="POWER",
+                    x=10,
+                    y=0,
+                    direction="input",
+                    protocol="spi",
+                ),
+            }
+        )
+        composed = left & right
+        # Should have warnings about power-to-data mismatch
+        assert len(composed.warnings) > 0
