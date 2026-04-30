@@ -165,6 +165,22 @@ __all__ = [
 ]
 
 
+def _format_pad_ref(pad: "Pad") -> str:
+    """Return a human-readable identifier for *pad*.
+
+    Issue #2329: Steiner-tree branch points have empty ``ref`` and ``pin``
+    fields which previously produced the cryptic ``.`` string in failure
+    diagnostics.  This helper falls back to coordinate-based identification
+    when the component reference is missing.
+    """
+    if pad.ref and pad.pin:
+        return f"{pad.ref}.{pad.pin}"
+    if pad.ref:
+        return pad.ref
+    # Steiner point or other synthetic pad — identify by position
+    return f"steiner@({pad.x:.3f},{pad.y:.3f})"
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -1150,9 +1166,9 @@ class Autorouter:
             # Collect all off-grid pads to report them together
             off_grid_pads: list[str] = []
             if src_dist > grid_threshold:
-                off_grid_pads.append(f"{source_pad.ref}.{source_pad.pin} off by {src_dist:.3f}mm")
+                off_grid_pads.append(f"{_format_pad_ref(source_pad)} off by {src_dist:.3f}mm")
             if tgt_dist > grid_threshold:
-                off_grid_pads.append(f"{target_pad.ref}.{target_pad.pin} off by {tgt_dist:.3f}mm")
+                off_grid_pads.append(f"{_format_pad_ref(target_pad)} off by {tgt_dist:.3f}mm")
 
             if off_grid_pads:
                 failure_cause = FailureCause.PIN_ACCESS
@@ -1167,7 +1183,7 @@ class Autorouter:
                         grid=self.grid,
                         pad_x=source_pad.x,
                         pad_y=source_pad.y,
-                        pad_ref=f"{source_pad.ref}.{source_pad.pin}",
+                        pad_ref=_format_pad_ref(source_pad),
                         pad_net=net,
                         layer=src_layer,
                         net_names=self.net_names,
@@ -1179,7 +1195,7 @@ class Autorouter:
                         grid=self.grid,
                         pad_x=target_pad.x,
                         pad_y=target_pad.y,
-                        pad_ref=f"{target_pad.ref}.{target_pad.pin}",
+                        pad_ref=_format_pad_ref(target_pad),
                         pad_net=net,
                         layer=tgt_layer,
                         net_names=self.net_names,
@@ -1242,8 +1258,14 @@ class Autorouter:
             failure = RoutingFailure(
                 net=net,
                 net_name=net_name,
-                source_pad=(source_pad.ref, source_pad.pin),
-                target_pad=(target_pad.ref, target_pad.pin),
+                source_pad=(
+                    source_pad.ref or f"steiner@({source_pad.x:.3f},{source_pad.y:.3f})",
+                    source_pad.pin or "",
+                ),
+                target_pad=(
+                    target_pad.ref or f"steiner@({target_pad.x:.3f},{target_pad.y:.3f})",
+                    target_pad.pin or "",
+                ),
                 source_coords=source_coords,
                 target_coords=target_coords,
                 blocking_nets=blocking_nets,
@@ -1255,7 +1277,17 @@ class Autorouter:
             self.routing_failures.append(failure)
 
         if use_mst and len(pad_objs) > 2:
-            new_routes = mst_router.route_net(pad_objs, mark_route, record_failure)
+            # Issue #2329: Disable Steiner tree decomposition for nets with
+            # off-grid pads.  RSMT Steiner points inherit off-grid coordinates
+            # (the median of terminal positions), creating virtual pads that
+            # the sub-grid prepass doesn't know about and the A* pathfinder
+            # cannot reach.  Plain MST connects real pads directly, avoiding
+            # the off-grid Steiner point failure mode.
+            has_off_grid = self._net_has_off_grid_pads(net)
+            new_routes = mst_router.route_net(
+                pad_objs, mark_route, record_failure,
+                use_steiner=not has_off_grid,
+            )
         else:
             new_routes = mst_router.route_net_star(pad_objs, mark_route, record_failure)
 
@@ -1419,9 +1451,15 @@ class Autorouter:
         Issue #1020: Nets connecting to fine-pitch components or with many pads
         are more constrained and should be routed first. Higher score = more constrained.
 
+        Issue #2329: Nets with off-grid pads (pads that don't align to the
+        routing grid) receive a priority boost so they route before on-grid
+        nets.  Off-grid pads require sub-grid escape routes and have fewer
+        viable paths, making them more constrained.
+
         The score is computed as:
         - Fine-pitch component connections: 10.0 / pitch for each pad on a fine-pitch IC
         - Pad count penalty: 0.5 per pad (more pads = more routing constraints)
+        - Off-grid pad boost: fine_pitch_weight if any pad is off-grid
 
         Args:
             net_id: The net ID to calculate constraint score for.
@@ -1452,7 +1490,47 @@ class Autorouter:
         # More pads = more routing constraints
         score += len(pad_keys) * pad_count_weight
 
+        # Issue #2329: Off-grid pad boost — nets with pads that don't align to
+        # the routing grid are more constrained because they need sub-grid escape
+        # routes and have fewer viable paths.  Route them first so they get
+        # first pick of grid resources before on-grid nets consume corridors.
+        grid_threshold = self.grid.resolution / 10
+        for pad_key in pad_keys:
+            pad = self.pads.get(pad_key)
+            if pad is None:
+                continue
+            gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+            snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+            offset = max(abs(pad.x - snap_x), abs(pad.y - snap_y))
+            if offset > grid_threshold:
+                # Significant boost: off-grid pads are heavily constrained.
+                # Use fine_pitch_weight as the base magnitude so the boost is
+                # comparable to fine-pitch scoring and large enough to move
+                # the net ahead of unconstrained same-tier nets.
+                score += fine_pitch_weight
+                break  # One off-grid pad is enough to boost the whole net
+
         return score
+
+    def _net_has_off_grid_pads(self, net_id: int) -> bool:
+        """Return True if any pad in *net_id* is off the routing grid.
+
+        Issue #2329: Used by :meth:`_get_net_priority` to promote nets with
+        off-grid pads to complexity tier 0 so they route before unconstrained
+        nets and get first pick of grid resources.
+        """
+        grid_threshold = self.grid.resolution / 10
+        pad_keys = self.nets.get(net_id, [])
+        for pad_key in pad_keys:
+            pad = self.pads.get(pad_key)
+            if pad is None:
+                continue
+            gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+            snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+            offset = max(abs(pad.x - snap_x), abs(pad.y - snap_y))
+            if offset > grid_threshold:
+                return True
+        return False
 
     def _is_pour_net(self, net_id: int) -> bool:
         """Check if a net is a pour net (e.g. GND, VCC) that should be skipped.
@@ -1562,10 +1640,15 @@ class Autorouter:
         Nets in congested regions are routed first (higher congestion = lower
         sort value) to reserve resources while the grid is uncrowded.
 
+        Issue #2329: Off-grid pads (pads that don't snap to the routing grid)
+        now boost the constraint score, ensuring nets with such pads route
+        before unconstrained nets.  This prevents on-grid nets from consuming
+        corridors that off-grid pads need for their escape routes.
+
         The resulting ordering for signal nets is:
         - Clock/diff-pair (class priority 2) > Digital (4) > Debug (5) > Default (10)
         - Within each class: simple 2-pin short > complex multi-pin/long-span
-        - Within each tier: fine-pitch constrained > unconstrained
+        - Within each tier: fine-pitch / off-grid constrained > unconstrained
         - Within same constraint: congested > uncongested
         """
         net_name = self.net_names.get(net_id, "")
@@ -1584,7 +1667,12 @@ class Autorouter:
 
         # Issue #1295: Complexity tier — simple 2-pin short nets (tier 0) before
         # multi-pin or long-span nets (tier 1).
+        # Issue #2329: Nets with off-grid pads are promoted to tier 0 regardless
+        # of pad count, because off-grid pads are heavily constrained and need
+        # first pick of grid resources before on-grid nets block their corridors.
         complexity_tier = 0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
+        if complexity_tier == 1 and self._net_has_off_grid_pads(net_id):
+            complexity_tier = 0
 
         # Issue #2278: Pre-route RUDY congestion score (negated so higher = route first)
         estimator = self._ensure_congestion_estimator()
@@ -2040,8 +2128,14 @@ class Autorouter:
         failure = RoutingFailure(
             net=net,
             net_name=net_name,
-            source_pad=(source_pad.ref, source_pad.pin),
-            target_pad=(target_pad.ref, target_pad.pin),
+            source_pad=(
+                source_pad.ref or f"steiner@({source_pad.x:.3f},{source_pad.y:.3f})",
+                source_pad.pin or "",
+            ),
+            target_pad=(
+                target_pad.ref or f"steiner@({target_pad.x:.3f},{target_pad.y:.3f})",
+                target_pad.pin or "",
+            ),
             source_coords=source_coords,
             target_coords=target_coords,
             blocking_nets=set(blocking_nets),
