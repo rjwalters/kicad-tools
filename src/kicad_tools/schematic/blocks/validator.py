@@ -157,3 +157,106 @@ class ConnectionValidator:
             return True
         compatible = self.COMPATIBLE_PROTOCOLS.get(source_proto, set())
         return target_proto in compatible
+
+
+# ---------------------------------------------------------------------------
+# Direction compatibility matrix for port matching
+# ---------------------------------------------------------------------------
+
+_DIRECTION_COMPATIBLE: dict[str, set[str]] = {
+    "output": {"input", "passive", "bidirectional"},
+    "input": {"output", "passive", "bidirectional"},
+    "bidirectional": {"input", "output", "passive", "bidirectional"},
+    "passive": {"input", "output", "passive", "bidirectional", "power"},
+    "power": {"power", "passive"},
+}
+
+
+def _directions_compatible(a_dir: str, b_dir: str) -> bool:
+    """Return True if two port directions can be wired together."""
+    return b_dir in _DIRECTION_COMPATIBLE.get(a_dir, set())
+
+
+def match_ports(
+    source_ports: dict[str, Port],
+    target_ports: dict[str, Port],
+) -> list[tuple[Port, Port, list[ConnectionWarning]]]:
+    """Find compatible port pairings between two blocks.
+
+    Matching priority:
+      1. Exact name match (e.g. ``VOUT`` -> ``VIN`` is *not* a name match;
+         ``VOUT`` -> ``VOUT`` *is*).  Output-name aliases are also tried:
+         ``VOUT`` on the source will attempt ``VIN`` on the target.
+      2. Direction compatibility (output-to-input, etc.)
+      3. Interface type match (same ``interface`` category).
+
+    Each port participates in at most one pairing.
+
+    Args:
+        source_ports: Typed ports of the upstream (left / top) block.
+        target_ports: Typed ports of the downstream (right / bottom) block.
+
+    Returns:
+        List of ``(source_port, target_port, warnings)`` tuples.
+    """
+    validator = ConnectionValidator()
+
+    # Build a mutable pool of available target ports
+    available_targets: dict[str, Port] = dict(target_ports)
+    paired: list[tuple[Port, Port, list[ConnectionWarning]]] = []
+
+    # Common output->input name aliases
+    _ALIASES: dict[str, str] = {
+        "VOUT": "VIN",
+        "OUT": "IN",
+        "TX": "RX",
+        "DOUT": "DIN",
+        "MOSI": "MISO",
+    }
+
+    # Pass 1: exact name or alias match
+    for s_name, s_port in list(source_ports.items()):
+        # Try exact name first
+        if s_name in available_targets:
+            t_port = available_targets.pop(s_name)
+            warnings = validator.validate_connection(s_port, t_port)
+            paired.append((s_port, t_port, warnings))
+            continue
+        # Try alias
+        alias = _ALIASES.get(s_name)
+        if alias and alias in available_targets:
+            t_port = available_targets.pop(alias)
+            warnings = validator.validate_connection(s_port, t_port)
+            paired.append((s_port, t_port, warnings))
+
+    # Collect already-paired source names
+    paired_source_names = {p[0].name for p in paired}
+
+    # Pass 2: direction + interface match for remaining ports
+    for s_name, s_port in source_ports.items():
+        if s_name in paired_source_names:
+            continue
+        best: Port | None = None
+        best_score = -1
+        for t_name, t_port in list(available_targets.items()):
+            if not _directions_compatible(s_port.direction, t_port.direction):
+                continue
+            score = 0
+            # Prefer same interface category
+            if s_port.interface is not None and s_port.interface == t_port.interface:
+                score += 2
+            # Prefer same interface_type
+            if (
+                s_port.interface_type is not None
+                and s_port.interface_type == t_port.interface_type
+            ):
+                score += 1
+            if score > best_score:
+                best_score = score
+                best = t_port
+        if best is not None:
+            available_targets.pop(best.name)
+            warnings = validator.validate_connection(s_port, best)
+            paired.append((s_port, best, warnings))
+
+    return paired

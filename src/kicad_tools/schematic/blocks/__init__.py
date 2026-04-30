@@ -39,7 +39,7 @@ from .analog import (
     create_temperature_sense,
     create_voltage_sense,
 )
-from .base import CircuitBlock, Port
+from .base import CircuitBlock, ComposedCircuitBlock, Port
 
 # Indicator blocks
 from .indicators import LEDIndicator, create_power_led, create_status_led
@@ -129,19 +129,21 @@ from .timing import (
     create_mclk_oscillator,
 )
 
-# Connection validation
-from .validator import ConnectionValidator, ConnectionWarning, WarningSeverity
+# Connection validation and port matching
+from .validator import ConnectionValidator, ConnectionWarning, WarningSeverity, match_ports
 
 __all__ = [
     # Base classes
     "Port",
     "CircuitBlock",
+    "ComposedCircuitBlock",
     # Typed ports and validation
     "PowerPort",
     "DataPort",
     "ConnectionValidator",
     "ConnectionWarning",
     "WarningSeverity",
+    "match_ports",
     # Indicators
     "LEDIndicator",
     "create_power_led",
