@@ -175,6 +175,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
+    _add_ipc_parser(subparsers)
     _add_init_parser(subparsers)
     _add_pipeline_parser(subparsers)
     _add_create_pcb_parser(subparsers)
@@ -4236,6 +4237,73 @@ def _add_mcp_parser(subparsers) -> None:
         "-n",
         action="store_true",
         help="Show what would be written without making changes",
+    )
+
+
+def _add_ipc_parser(subparsers) -> None:
+    """Add IPC subcommand parser for live KiCad instance interaction."""
+    ipc_parser = subparsers.add_parser(
+        "ipc",
+        help="Interact with a running KiCad instance via IPC API (KiCad 9.0+)",
+        description=(
+            "Connect to a running KiCad instance via its IPC API (protobuf over NNG). "
+            "Requires KiCad 9.0+ and the ipc optional dependency: pip install 'kicad-tools[ipc]'"
+        ),
+    )
+    ipc_subparsers = ipc_parser.add_subparsers(dest="ipc_command", help="IPC subcommands")
+
+    # ipc status subcommand
+    status_parser = ipc_subparsers.add_parser(
+        "status",
+        help="Show KiCad IPC connection status",
+        description="Discover running KiCad instances and report their IPC status.",
+    )
+    status_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+
+    # ipc connect subcommand
+    connect_parser = ipc_subparsers.add_parser(
+        "connect",
+        help="Test connection to a running KiCad instance",
+        description="Attempt to connect to a running KiCad instance and report the result.",
+    )
+    connect_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+
+    # ipc push-routes subcommand
+    push_parser = ipc_subparsers.add_parser(
+        "push-routes",
+        help="Push routed tracks from a PCB file to a running KiCad instance",
+        description=(
+            "Read tracks and vias from a .kicad_pcb file and push them to "
+            "a running KiCad instance via IPC. All items are created in a "
+            "single undo transaction."
+        ),
+    )
+    push_parser.add_argument(
+        "pcb",
+        help="Path to .kicad_pcb file containing the routing solution",
+    )
+    push_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+    push_parser.add_argument(
+        "--net",
+        "-n",
+        help="Only push tracks/vias for a specific net name",
+    )
+    push_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be pushed without actually connecting to KiCad",
     )
 
 
