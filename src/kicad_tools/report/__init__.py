@@ -17,13 +17,14 @@ from __future__ import annotations
 
 from kicad_tools.report.collector import ReportDataCollector
 from kicad_tools.report.figures import FigureEntry, ReportFigureGenerator
-from kicad_tools.report.renderers import render_html, render_pdf
+from kicad_tools.report.renderers import render_html, render_interactive_html, render_pdf
 
 __all__ = [
     "FigureEntry",
     "ReportDataCollector",
     "ReportFigureGenerator",
     "render_html",
+    "render_interactive_html",
     "render_pdf",
 ]
 

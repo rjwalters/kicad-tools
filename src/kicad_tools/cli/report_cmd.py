@@ -82,6 +82,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip auto-collection; generate skeleton report (legacy behavior)",
     )
 
+    # --- Interactive DRC report sub-command ---
+    int_parser = sub.add_parser(
+        "interactive",
+        help="Generate an interactive HTML DRC report with PCB visualization",
+    )
+    int_parser.add_argument(
+        "input",
+        help="Path to .kicad_pcb file",
+    )
+    int_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output HTML file path (default: <input_stem>_interactive.html)",
+    )
+    int_parser.add_argument(
+        "--project-name",
+        default=None,
+        help="Project display name (default: PCB filename stem)",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.report_subcommand:
@@ -90,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.report_subcommand == "generate":
         return _run_generate(args)
+
+    if args.report_subcommand == "interactive":
+        return _run_interactive(args)
 
     return 0
 
@@ -416,3 +440,46 @@ def _load_data_dir(data_dir_str: str) -> dict:
                 result["git_hash"] = meta["git_hash"]
 
     return result
+
+
+def _run_interactive(args: argparse.Namespace) -> int:
+    """Execute the ``interactive`` sub-command."""
+    input_path = Path(args.input)
+
+    # Resolve .kicad_pro to .kicad_pcb
+    if input_path.suffix == ".kicad_pro":
+        input_path = input_path.with_suffix(".kicad_pcb")
+
+    if not input_path.exists():
+        print(f"Error: PCB file not found: {input_path}", file=sys.stderr)
+        return 1
+
+    if input_path.suffix != ".kicad_pcb":
+        print(
+            f"Error: expected .kicad_pcb file, got {input_path.suffix}",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = (
+        Path(args.output) if args.output else input_path.with_name(
+            f"{input_path.stem}_interactive.html"
+        )
+    )
+
+    try:
+        from kicad_tools.report.interactive import render_interactive_html
+
+        print(f"Generating interactive report for {input_path} ...")
+        html = render_interactive_html(
+            pcb_path=input_path,
+            project_name=args.project_name,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(html, encoding="utf-8")
+        print(f"Interactive report written to {output_path}")
+        return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1

@@ -2,7 +2,8 @@
 
 Provides functions to render Markdown content (from ReportGenerator) into
 self-contained HTML documents with embedded CSS and base64-encoded images,
-and optionally to PDF via weasyprint.
+and optionally to PDF via weasyprint.  Also provides interactive HTML
+reports with embedded PCB visualization via :func:`render_interactive_html`.
 """
 
 from __future__ import annotations
@@ -307,3 +308,35 @@ def _wrap_html(body: str, css: str, title: str = "KiCad Design Report") -> str:
 {body}
 </body>
 </html>"""
+
+
+def render_interactive_html(
+    pcb_path: "Path",
+    drc_violations: "list[dict] | None" = None,
+    project_name: str | None = None,
+    date: str | None = None,
+) -> str:
+    """Generate a self-contained interactive HTML report.
+
+    Delegates to :func:`kicad_tools.report.interactive.render_interactive_html`.
+    See that function for full documentation.
+
+    Args:
+        pcb_path: Path to ``.kicad_pcb`` file.
+        drc_violations: Optional pre-computed DRC violations.
+        project_name: Project display name.
+        date: Report date string.
+
+    Returns:
+        Complete HTML document string.
+    """
+    from kicad_tools.report.interactive import (
+        render_interactive_html as _render,
+    )
+
+    return _render(
+        pcb_path=pcb_path,
+        drc_violations=drc_violations,
+        project_name=project_name,
+        date=date,
+    )

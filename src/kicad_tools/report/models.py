@@ -88,6 +88,11 @@ class ReportData:
     """Layer stackup: [{name, type, thickness_mm, material}].
     Filtered to copper, dielectric, and mask layers."""
 
+    pcb_geometry: dict | None = None
+    """PCB geometry data for interactive reports: {board_outline, bounds,
+    footprints, segments, vias, layers}.  Populated by
+    :func:`~kicad_tools.report.pcb_data.extract_pcb_data`."""
+
     notes: str = ""
     """Free-form notes section content."""
 

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="kicad-tools interactive report">
+<title>{{ title }}</title>
+<style>
+{{ css }}
+</style>
+</head>
+<body>
+<header>
+    <h1>{{ title }}</h1>
+    <span class="stats" id="report-stats"></span>
+</header>
+<div class="main-container">
+    <div class="viewer-panel">
+        <canvas id="pcb-canvas"></canvas>
+        <div class="viewer-controls">
+            <button onclick="zoomIn()" title="Zoom In">+</button>
+            <button onclick="zoomOut()" title="Zoom Out">&minus;</button>
+            <button onclick="zoomFit()" title="Fit to View">&#8596;</button>
+        </div>
+        <div class="layer-controls" id="layer-controls"></div>
+        <div class="coord-display" id="coord-display">X: 0.00 mm  Y: 0.00 mm</div>
+    </div>
+    <div class="violation-panel">
+        <h2>DRC Violations</h2>
+        <div class="violation-filter">
+            <select id="violation-filter">
+                <option value="all">All Types</option>
+            </select>
+        </div>
+        <div class="violation-list" id="violation-list"></div>
+    </div>
+</div>
+<script>
+{{ pcb_data_script }}
+{{ drc_data_script }}
+{{ report_meta_script }}
+</script>
+<script>
+{{ js }}
+</script>
+</body>
+</html>
