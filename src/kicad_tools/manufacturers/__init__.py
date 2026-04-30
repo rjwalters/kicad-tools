@@ -33,6 +33,7 @@ from .base import (
     load_rotation_corrections,
     match_rotation_correction,
 )
+from .dru_generator import generate_dru
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
 from .oshpark import OSHPARK_PROFILE
@@ -53,6 +54,7 @@ __all__ = [
     "load_design_rules_from_yaml",
     "load_rotation_corrections",
     "match_rotation_correction",
+    "generate_dru",
     # Profiles (for direct access)
     "FLASHPCB_PROFILE",
     "JLCPCB_PROFILE",

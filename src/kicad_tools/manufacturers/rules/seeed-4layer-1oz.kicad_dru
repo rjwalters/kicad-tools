@@ -1,17 +1,29 @@
 (version 1)
-(rule "Trace Width"
+(rule "Trace Width - Seeed Fusion"
+  (condition "A.Type == 'track'")
   (constraint track_width (min 0.1524mm)))
-(rule "Clearance"
+(rule "Clearance - Seeed Fusion"
   (constraint clearance (min 0.1524mm)))
-(rule "Via Drill"
+(rule "Via Drill - Seeed Fusion"
+  (condition "A.Type == 'via'")
   (constraint hole_size (min 0.3mm)))
-(rule "Via Diameter"
+(rule "Via Diameter - Seeed Fusion"
+  (condition "A.Type == 'via'")
   (constraint via_diameter (min 0.6mm)))
-(rule "Annular Ring"
+(rule "Annular Ring - Seeed Fusion"
   (constraint annular_width (min 0.15mm)))
-(rule "Copper to Edge"
+(rule "Copper to Edge - Seeed Fusion"
   (constraint edge_clearance (min 0.5mm)))
-(rule "Hole to Edge"
-  (constraint hole_to_hole (min 0.5mm)))
-(rule "Silkscreen Width"
-  (constraint silk_clearance (min 0.15mm)))
+(rule "Hole to Edge - Seeed Fusion"
+  (condition "A.Type == 'via' || A.Type == 'pad'")
+  (constraint hole_clearance (min 0.5mm)))
+(rule "Silkscreen Width - Seeed Fusion"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_thickness (min 0.15mm)))
+(rule "Silkscreen Height - Seeed Fusion"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_height (min 0.8mm)))
+(rule "Solder Mask Clearance - Seeed Fusion"
+  (constraint solder_mask_margin (min 0.05mm)))
+(rule "Solder Mask Dam - Seeed Fusion"
+  (constraint physical_hole_clearance (min 0.1mm)))
