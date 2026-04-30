@@ -1431,6 +1431,18 @@ def route_with_rule_relaxation(
             successful_result = result
             break
 
+        # Early termination: skip remaining tiers when completion regresses
+        if not getattr(args, "no_early_stop", False) and best_result is not None:
+            if completion < best_result.completion:
+                if not quiet:
+                    flush_print(
+                        f"\n  Early stop: tier {tier.tier + 1} completion "
+                        f"({completion * 100:.0f}%) is worse than best "
+                        f"({best_result.completion * 100:.0f}%) — "
+                        f"skipping remaining tiers"
+                    )
+                break
+
     # Restore original signal handlers
     signal.signal(signal.SIGINT, prev_sigint)
     signal.signal(signal.SIGTERM, prev_sigterm)
@@ -1753,6 +1765,7 @@ def route_with_combined_escalation(
 
     # 2D search: prioritize fewer layers first, then stricter rules
     for layer_count, layer_stack in layer_configs:
+        best_completion_for_layer: float | None = None
         for tier in tiers:
             if not quiet:
                 flush_print(
@@ -1877,10 +1890,28 @@ def route_with_combined_escalation(
                 _interrupt_state["router"] = result.router
                 _interrupt_state["best_completed_attempt"] = True
 
+            # Track best completion for this layer config
+            if best_completion_for_layer is None or completion > best_completion_for_layer:
+                best_completion_for_layer = completion
+
             # Check for success (first success wins - minimum config)
             if result.success:
                 successful_result = result
                 break
+
+            # Early termination: skip remaining tiers when completion regresses
+            # within this layer config
+            if not getattr(args, "no_early_stop", False):
+                if best_completion_for_layer is not None and completion < best_completion_for_layer:
+                    if not quiet:
+                        flush_print(
+                            f"\n  Early stop: {layer_count}L tier {tier.tier} "
+                            f"completion ({completion * 100:.0f}%) is worse than "
+                            f"best for {layer_count}L "
+                            f"({best_completion_for_layer * 100:.0f}%) — "
+                            f"skipping remaining tiers for {layer_count}L"
+                        )
+                    break
 
         # If we found a successful config at this layer count, stop
         if successful_result:
@@ -2504,6 +2535,16 @@ def main(argv: list[str] | None = None) -> int:
             "Tries progressively relaxed trace widths and clearances "
             "until routing succeeds or manufacturer limits are reached. "
             "Reports which rules were relaxed and warns if minimum tolerances used."
+        ),
+    )
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help=(
+            "Disable early termination of adaptive-rules tier search. "
+            "By default, if a tier routes fewer nets than the best prior "
+            "attempt, remaining tiers are skipped. Use this flag to force "
+            "all tiers to run (useful for debugging or benchmarking)."
         ),
     )
     parser.add_argument(
