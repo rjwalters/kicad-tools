@@ -3687,6 +3687,12 @@ def main(argv: list[str] | None = None) -> int:
                 if not quiet:
                     print(f"  Warning: Failed to cache result: {e}")
 
+    # Get pre-optimization statistics (also used in the no-optimize path
+    # below so the segment/via summary print does not raise
+    # UnboundLocalError when --no-optimize is set).
+    pre_segments = sum(len(r.segments) for r in router.routes)
+    pre_vias = sum(len(r.vias) for r in router.routes)
+
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if not args.no_optimize and router.routes:
         from kicad_tools.router.optimizer import (
@@ -3697,10 +3703,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if not quiet:
             print("\n--- Optimizing traces ---")
-
-        # Get pre-optimization statistics
-        pre_segments = sum(len(r.segments) for r in router.routes)
-        pre_vias = sum(len(r.vias) for r in router.routes)
 
         # Configure and run optimizer
         opt_config = OptimizationConfig(

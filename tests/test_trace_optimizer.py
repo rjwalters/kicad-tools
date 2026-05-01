@@ -7,6 +7,7 @@ from kicad_tools.router import (
     GridCollisionChecker,
     Layer,
     OptimizationConfig,
+    Route,
     RoutingGrid,
     Segment,
     TraceOptimizer,
@@ -955,8 +956,15 @@ class TestMultiChainOptimization:
             if seg.x1 > 15:
                 assert seg.x2 > 10, "Segment from chain 2 should not reach chain 1"
 
-    def test_t_junction_single_chain(self, optimizer):
-        """Test that a T-junction (3 segments meeting at a point) forms one chain."""
+    def test_t_junction_split_into_branches(self, optimizer):
+        """Test that a T-junction is split into one sub-chain per branch.
+
+        Each arm of a T/Y junction is a linear path that the downstream
+        optimisers can safely process; merging arms into a single
+        "chain" caused the optimiser to drop branches and disconnect
+        pads (issue #2389).  ``sort_into_chains`` therefore splits at
+        any vertex of degree >= 3.
+        """
         # T-junction: segments meet at (5, 0)
         segments = [
             self.make_segment(0, 0, 5, 0),  # Left arm
@@ -966,9 +974,14 @@ class TestMultiChainOptimization:
 
         chains = optimizer._sort_into_chains(segments)
 
-        # All segments are connected, should be one chain
-        assert len(chains) == 1
-        assert len(chains[0]) == 3
+        # All three arms are split off as separate sub-chains.
+        assert len(chains) == 3
+        # Total segments preserved.
+        assert sum(len(c) for c in chains) == 3
+        # Every chain is a single-segment branch (length 1) since the
+        # only branch endpoint that isn't a leaf is the junction.
+        for chain in chains:
+            assert len(chain) == 1
 
     def test_endpoints_preserved_after_optimization(self, optimizer):
         """Test that chain endpoints are preserved after optimization."""
@@ -1857,3 +1870,193 @@ class TestPullTight:
         optimizer = TraceOptimizer(config=config)
         result = optimizer.pull_tight(segments)
         assert len(result) == 2
+
+
+class TestYJunctionConnectivityPreserved:
+    """Issue #2389: optimiser must not disconnect pads on Y/T-junction nets.
+
+    Reproduces the failing scenario from board 01 (voltage divider) where a
+    3-pad VOUT net with a T-junction in the middle ended up with one pad
+    dropped from the optimised segment graph, producing a "PARTIAL: Routed
+    1/3 signal nets" warning.  The fix is two-fold:
+
+    1. ``sort_into_chains`` splits at junction vertices so each branch is
+       optimised as a true linear path.
+    2. ``TraceOptimizer.optimize_route`` runs a connectivity-preserving
+       guard and reverts to pre-optimisation segments if any pad-like
+       endpoint becomes unreachable.
+
+    These tests verify the guard upholds connectivity end-to-end, which is
+    the user-visible acceptance criterion.
+    """
+
+    @staticmethod
+    def _seg(
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        net: int = 1,
+    ) -> Segment:
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name="VOUT",
+        )
+
+    @staticmethod
+    def _build_pad_graph(
+        segments: list[Segment], tolerance: float = 1e-3
+    ) -> dict[tuple[float, float], set[tuple[float, float]]]:
+        """Build an adjacency map keyed on (x, y) for connectivity checks."""
+        from collections import defaultdict
+
+        def key(x: float, y: float) -> tuple[float, float]:
+            # Snap to a tolerance-sized grid so endpoints near each other
+            # share a key.
+            return (round(x / tolerance) * tolerance, round(y / tolerance) * tolerance)
+
+        adj: dict[tuple[float, float], set[tuple[float, float]]] = defaultdict(set)
+        for seg in segments:
+            a = key(seg.x1, seg.y1)
+            b = key(seg.x2, seg.y2)
+            adj[a].add(b)
+            adj[b].add(a)
+        return adj
+
+    @classmethod
+    def _all_pads_reachable(
+        cls,
+        segments: list[Segment],
+        pads: list[tuple[float, float]],
+        tolerance: float = 1e-3,
+    ) -> bool:
+        """True if every pad is in the same connected component of segments."""
+        adj = cls._build_pad_graph(segments, tolerance)
+
+        def key(x: float, y: float) -> tuple[float, float]:
+            return (round(x / tolerance) * tolerance, round(y / tolerance) * tolerance)
+
+        pad_keys = [key(*p) for p in pads]
+        # Every pad must appear as a vertex.
+        if not all(k in adj for k in pad_keys):
+            return False
+        # BFS from first pad and ensure all others are reachable.
+        start = pad_keys[0]
+        visited = {start}
+        queue = [start]
+        while queue:
+            node = queue.pop()
+            for n in adj[node]:
+                if n not in visited:
+                    visited.add(n)
+                    queue.append(n)
+        return all(k in visited for k in pad_keys)
+
+    def test_y_junction_preserves_connectivity(self):
+        """A 3-pad Y-shaped route stays connected after full optimisation.
+
+        Geometry mirrors the failing VOUT net on board 01: three pads
+        connected through a single T-junction.  All three pads must be
+        reachable from each other in the optimised segment graph.
+        """
+        # Three pads: A (left), B (right), C (below); T-junction at (5, 0).
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+
+        # Build a Y-shape with a couple of intermediate kinks so the
+        # collinear-merge / pull-tight passes have something to chew on
+        # (a single segment per arm would already be optimal and would
+        # not stress the optimiser).
+        segments = [
+            # Arm A: (0,0) -> (2,0) -> (5,0)
+            self._seg(*pad_a, 2.0, 0.0),
+            self._seg(2.0, 0.0, *junction),
+            # Arm B: (5,0) -> (7,0) -> (10,0)
+            self._seg(*junction, 7.0, 0.0),
+            self._seg(7.0, 0.0, *pad_b),
+            # Arm C: (5,0) -> (5,2) -> (5,5)
+            self._seg(*junction, 5.0, 2.0),
+            self._seg(5.0, 2.0, *pad_c),
+        ]
+
+        # Sanity check: pre-optimisation connectivity is sound.
+        assert self._all_pads_reachable(segments, [pad_a, pad_b, pad_c])
+
+        route = Route(net=1, net_name="VOUT", segments=segments, vias=[])
+        optimizer = TraceOptimizer()
+        result = optimizer.optimize_route(route)
+
+        assert self._all_pads_reachable(
+            result.segments, [pad_a, pad_b, pad_c]
+        ), (
+            "All three pads of a Y-shaped route must remain connected "
+            "after optimisation (issue #2389)."
+        )
+
+    def test_y_junction_chains_split_at_junction(self):
+        """Verify chains are split at the junction vertex itself."""
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+        segments = [
+            self._seg(*pad_a, *junction),
+            self._seg(*junction, *pad_b),
+            self._seg(*junction, *pad_c),
+        ]
+
+        optimizer = TraceOptimizer()
+        chains = optimizer._sort_into_chains(segments)
+
+        # Three arms => three sub-chains.
+        assert len(chains) == 3
+        # Each sub-chain endpoints touch either a leaf or the junction.
+        leaves = {pad_a, pad_b, pad_c}
+        for chain in chains:
+            endpoints = {chain[0].start, chain[-1].end}
+            # One endpoint is a leaf, the other is the junction.
+            assert (endpoints & leaves), (
+                "Each branch should terminate at one of the pad leaves"
+            )
+            assert junction in endpoints
+
+    def test_optimizer_guard_reverts_if_branch_dropped(self):
+        """If a hostile optimiser drops a branch, the guard must revert.
+
+        Constructs a route, monkey-patches ``optimize_segments`` to return
+        only the first segment (simulating the original branch-dropping
+        bug), and checks that ``optimize_route`` still returns a fully
+        connected segment graph -- it must fall back to the original
+        segments rather than silently disconnect a pad.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+        segments = [
+            self._seg(*pad_a, *junction),
+            self._seg(*junction, *pad_b),
+            self._seg(*junction, *pad_c),
+        ]
+        route = Route(net=1, net_name="VOUT", segments=segments, vias=[])
+
+        optimizer = TraceOptimizer()
+        # Force optimize_segments to drop two of the three branches.
+        optimizer.optimize_segments = lambda segs: segs[:1]  # type: ignore[assignment]
+
+        result = optimizer.optimize_route(route)
+
+        # Guard must have reverted to the original three segments so all
+        # pads remain reachable from one another.
+        assert self._all_pads_reachable(
+            result.segments, [pad_a, pad_b, pad_c]
+        ), "Guard failed to revert when branches were dropped"
+        assert len(result.segments) == 3
