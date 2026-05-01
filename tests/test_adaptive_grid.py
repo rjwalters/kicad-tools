@@ -687,3 +687,212 @@ class TestMultiResolutionGridPlanDataclass:
         assert "U1" in summary
         assert "0.0500mm" in summary
         assert "100,000" in summary
+
+
+class TestIssue2387FinePitchThresholdEpsilon:
+    """Regression tests for issue #2387: TQFP-32 with strictly 0.8mm pitch
+    must trip the fine-pitch threshold (was silently missed by `<` test).
+    """
+
+    def test_strict_08mm_pitch_detected(self):
+        """A component with exactly 0.8mm pitch trips the fine-pitch threshold.
+
+        Before the fix, ``pitch < 0.8`` only fired by accident on TQFP-32 due
+        to float drift on the diagonal-distance pitch calculation.
+        """
+        # Build a 4-pad strip at exactly 0.8mm pitch
+        pads = {
+            ("U1", str(i + 1)): make_pad(
+                x=1.0 + 0.8 * i, y=1.0, net=i + 1, ref="U1", pin=str(i + 1),
+            )
+            for i in range(4)
+        }
+        result = identify_fine_pitch_components(
+            pads,
+            coarse_resolution=0.1,
+            fine_pitch_threshold=0.8,
+        )
+        assert "U1" in result, (
+            "Strict 0.8mm pitch must trip the 0.8mm threshold (issue #2387)"
+        )
+
+    def test_strict_05mm_pitch_detected_at_05mm_threshold(self):
+        """0.5mm pitch trips a 0.5mm threshold (epsilon margin only)."""
+        pads = {
+            ("U1", "1"): make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),
+            ("U1", "2"): make_pad(x=1.5, y=1.0, net=2, ref="U1", pin="2"),
+        }
+        result = identify_fine_pitch_components(
+            pads,
+            coarse_resolution=0.1,
+            fine_pitch_threshold=0.5,
+        )
+        assert "U1" in result
+
+    def test_pitch_clearly_above_threshold_not_detected(self):
+        """A 0.85mm pitch above the 0.8mm threshold is still skipped."""
+        pads = {
+            ("J1", "1"): make_pad(x=1.0, y=1.0, net=1, ref="J1", pin="1"),
+            ("J1", "2"): make_pad(x=1.85, y=1.0, net=2, ref="J1", pin="2"),
+        }
+        result = identify_fine_pitch_components(
+            pads,
+            coarse_resolution=0.1,
+            fine_pitch_threshold=0.8,
+        )
+        # Epsilon is 1e-6, so 0.85mm is firmly outside the threshold
+        assert "J1" not in result
+
+
+class TestIssue2387FinePitchEscapeFailure:
+    """Regression tests for issue #2387: hard-fail when 0/N pads escape.
+
+    When auto-grid selects a coarse resolution incompatible with a
+    fine-pitch component's pad geometry, the entire escape pass produces
+    zero successful escapes for that component.  Routing should hard-fail
+    with an actionable error rather than continue a doomed pass.
+    """
+
+    def test_failure_class_attributes(self):
+        """FinePitchEscapeFailure carries actionable diagnostic info."""
+        from kicad_tools.router.adaptive_grid import FinePitchEscapeFailure
+
+        err = FinePitchEscapeFailure(
+            component_ref="U1",
+            attempted_pads=32,
+            suggested_grid=0.1,
+            pitch=0.8,
+        )
+        assert err.component_ref == "U1"
+        assert err.attempted_pads == 32
+        assert err.suggested_grid == 0.1
+        assert err.pitch == 0.8
+        assert "U1" in str(err)
+        assert "0/32" in str(err)
+        assert "0.1" in str(err)
+        assert "--grid" in str(err)
+
+    def test_suggested_grid_for_pitch_picks_pad_aligned(self):
+        """_suggested_grid_for_pitch returns a grid that divides the pitch."""
+        from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
+
+        # 0.8mm pitch -> 0.1mm divides evenly
+        assert AdaptiveGridRouter._suggested_grid_for_pitch(0.8) == 0.1
+        # 0.65mm pitch -> 0.05mm divides evenly
+        assert AdaptiveGridRouter._suggested_grid_for_pitch(0.65) == 0.05
+        # 0.5mm pitch -> 0.05mm or 0.1mm divides evenly
+        assert AdaptiveGridRouter._suggested_grid_for_pitch(0.5) in (0.1, 0.05)
+        # None pitch -> safe default
+        assert AdaptiveGridRouter._suggested_grid_for_pitch(None) == 0.05
+
+    def test_raise_when_all_escapes_fail_for_component(self):
+        """If every off-grid pad on a fine-pitch component fails to escape,
+        FinePitchEscapeFailure is raised with the component ref.
+        """
+        from kicad_tools.router.adaptive_grid import (
+            AdaptiveGridRouter,
+            FinePitchEscapeFailure,
+        )
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.subgrid import (
+            SubGridAnalysis,
+            SubGridPad,
+            SubGridResult,
+        )
+
+        grid, rules = make_grid_and_rules()
+        router = AdaptiveGridRouter(grid, rules)
+
+        # Build a synthetic SubGridResult where U1 has 32 off-grid pads
+        # attempted and 32 in failed_pads — all escapes failed.
+        u1_pads = [
+            Pad(
+                x=1.0 + 0.8 * i, y=1.0, width=0.5, height=1.5,
+                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+            )
+            for i in range(32)
+        ]
+        sgp_list = [
+            SubGridPad(
+                pad=p,
+                grid_x=0,
+                grid_y=0,
+                offset_x=0.05,
+                offset_y=0.0,
+                snap_x=p.x,
+                snap_y=p.y,
+            )
+            for p in u1_pads
+        ]
+        analysis = SubGridAnalysis(
+            off_grid_pads=sgp_list,
+            on_grid_pads=[],
+            grid_resolution=0.065,
+        )
+        result = SubGridResult(
+            analysis=analysis,
+            failed_pads=u1_pads,  # all 32 failed
+        )
+        with pytest.raises(FinePitchEscapeFailure) as exc_info:
+            router._raise_if_component_fully_failed(result, {"U1": 0.005})
+        assert exc_info.value.component_ref == "U1"
+        assert exc_info.value.attempted_pads == 32
+        assert exc_info.value.suggested_grid > 0.0
+
+    def test_no_raise_when_some_escapes_succeed(self):
+        """If at least one pad on a component escapes, no exception."""
+        from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.subgrid import (
+            SubGridAnalysis,
+            SubGridPad,
+            SubGridResult,
+        )
+
+        grid, rules = make_grid_and_rules()
+        router = AdaptiveGridRouter(grid, rules)
+        u1_pads = [
+            Pad(
+                x=1.0 + 0.8 * i, y=1.0, width=0.5, height=1.5,
+                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+            )
+            for i in range(4)
+        ]
+        sgp_list = [
+            SubGridPad(
+                pad=p,
+                grid_x=0,
+                grid_y=0,
+                offset_x=0.05,
+                offset_y=0.0,
+                snap_x=p.x,
+                snap_y=p.y,
+            )
+            for p in u1_pads
+        ]
+        analysis = SubGridAnalysis(
+            off_grid_pads=sgp_list,
+            on_grid_pads=[],
+            grid_resolution=0.1,
+        )
+        # Only 2 out of 4 failed; 2 escaped — should NOT raise.
+        result = SubGridResult(
+            analysis=analysis,
+            failed_pads=u1_pads[:2],
+        )
+        router._raise_if_component_fully_failed(result, {"U1": 0.05})
+        # Reaching here without exception is the assertion
+
+    def test_no_raise_when_no_off_grid_pads(self):
+        """An empty analysis (no off-grid pads attempted) does not raise."""
+        from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
+        from kicad_tools.router.subgrid import SubGridAnalysis, SubGridResult
+
+        grid, rules = make_grid_and_rules()
+        router = AdaptiveGridRouter(grid, rules)
+        analysis = SubGridAnalysis(
+            off_grid_pads=[], on_grid_pads=[], grid_resolution=0.1,
+        )
+        result = SubGridResult(analysis=analysis, failed_pads=[])
+        router._raise_if_component_fully_failed(result, {})
+        # No exception expected

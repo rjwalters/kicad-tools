@@ -2887,12 +2887,16 @@ def main(argv: list[str] | None = None) -> int:
                 multi_res_plan = compute_multi_resolution_plan(
                     pads=full_pads,
                     clearance=args.clearance,
+                    board_width=board_width,
+                    board_height=board_height,
                 )
             except Exception:
                 # Fall back: try with pad positions (won't have ref info)
                 multi_res_plan = compute_multi_resolution_plan(
                     pads=pad_positions,
                     clearance=args.clearance,
+                    board_width=board_width,
+                    board_height=board_height,
                 )
 
         if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
@@ -3660,7 +3664,28 @@ def main(argv: list[str] | None = None) -> int:
             if not quiet:
                 print("\n\n⚠ Routing interrupted!")
         except Exception as e:
-            print(f"Error during routing: {e}", file=sys.stderr)
+            # Provide actionable guidance when escape routing detected a
+            # doomed coarse grid (issue #2387).
+            try:
+                from kicad_tools.router.adaptive_grid import (
+                    FinePitchEscapeFailure,
+                )
+            except Exception:
+                FinePitchEscapeFailure = None  # type: ignore[assignment]
+            if (
+                FinePitchEscapeFailure is not None
+                and isinstance(e, FinePitchEscapeFailure)
+            ):
+                print(
+                    f"Error during routing: {e}",
+                    file=sys.stderr,
+                )
+                print(
+                    f"  Suggested fix: rerun with --grid {e.suggested_grid:.4f}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error during routing: {e}", file=sys.stderr)
             # Still try to save partial results on error
             if router.routes:
                 _save_partial_results()

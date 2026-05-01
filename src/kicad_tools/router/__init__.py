@@ -108,6 +108,7 @@ from .grid import RoutingGrid
 from .adaptive_grid import (
     AdaptiveGridResult,
     AdaptiveGridRouter,
+    FinePitchEscapeFailure,
     identify_fine_pitch_components,
 )
 from .subgrid import (
@@ -510,6 +511,7 @@ __all__ = [
     # Adaptive Grid Routing (Issue #1135)
     "AdaptiveGridRouter",
     "AdaptiveGridResult",
+    "FinePitchEscapeFailure",
     "identify_fine_pitch_components",
     # Routing Cache (Issue #1071)
     "RoutingCache",
