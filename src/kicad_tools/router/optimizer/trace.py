@@ -248,12 +248,25 @@ class TraceOptimizer:
         before optimization. This prevents optimization from creating
         shortcuts between unconnected parts of the route.
 
+        A connectivity-preserving guard runs after optimisation: if the
+        optimised segment graph fails to reach every pad-like endpoint of
+        the input route, the original (pre-optimisation) segments are
+        retained instead.  This protects against optimiser bugs on
+        Y/T-junction multi-pad nets (issue #2389) and serves as a safety
+        net for future optimiser changes.
+
         Args:
             route: Route to optimize.
 
         Returns:
             New Route with optimized segments and minimized vias.
         """
+        # Capture pad-like endpoints (degree-1 vertices) on the input
+        # segments so we can verify connectivity is preserved after
+        # optimisation.  We use the same per-layer grouping the optimiser
+        # uses, since vias bridge layers separately.
+        pre_endpoints = _collect_terminal_endpoints(route.segments)
+
         # Group segments by layer for optimization
         segments_by_layer: dict[Layer, list[Segment]] = {}
         for seg in route.segments:
@@ -266,6 +279,19 @@ class TraceOptimizer:
         for _layer, segs in segments_by_layer.items():
             optimized = self.optimize_segments(segs)
             optimized_segments.extend(optimized)
+
+        # Connectivity-preserving guard: if optimisation dropped any
+        # pad-like endpoint from the segment graph, revert to the
+        # pre-optimisation segments for this route.  This protects
+        # against branch-dropping bugs in chain sorting and downstream
+        # linearisation passes.
+        if not _endpoints_preserved(
+            pre_endpoints,
+            optimized_segments,
+            list(route.vias),
+            tolerance=self.config.tolerance,
+        ):
+            optimized_segments = list(route.segments)
 
         # Create route with optimized segments
         optimized_route = Route(
@@ -411,3 +437,103 @@ class TraceOptimizer:
     def reset_via_stats(self) -> None:
         """Reset via optimization statistics."""
         self._via_optimizer.reset_stats()
+
+
+# ---------------------------------------------------------------------------
+# Connectivity-preserving guard helpers (issue #2389)
+# ---------------------------------------------------------------------------
+
+
+def _vertex_key(x: float, y: float, layer: Layer, tolerance: float) -> tuple[int, int, int]:
+    """Quantise (x, y, layer) so neighbouring endpoints share a key."""
+    if tolerance <= 0:
+        qx = int(round(x * 1e9))
+        qy = int(round(y * 1e9))
+    else:
+        qx = int(round(x / tolerance))
+        qy = int(round(y / tolerance))
+    return (qx, qy, int(layer.value))
+
+
+def _collect_terminal_endpoints(
+    segments: list[Segment], tolerance: float = 1e-4
+) -> set[tuple[int, int, int]]:
+    """Return the per-layer degree-1 vertices in a segment list.
+
+    These are the "pad-like" endpoints of a route: points where exactly one
+    segment terminates.  Interior junction or chain-internal vertices have
+    degree >= 2 and are excluded.
+    """
+    counts: dict[tuple[int, int, int], int] = {}
+    for seg in segments:
+        for x, y in (seg.start, seg.end):
+            k = _vertex_key(x, y, seg.layer, tolerance)
+            counts[k] = counts.get(k, 0) + 1
+    return {k for k, c in counts.items() if c == 1}
+
+
+def _endpoints_preserved(
+    pre_endpoints: set[tuple[int, int, int]],
+    optimized_segments: list[Segment],
+    vias: list,
+    tolerance: float = 1e-4,
+) -> bool:
+    """Verify every pre-optimisation pad-like endpoint is reachable.
+
+    Builds a connectivity graph from ``optimized_segments`` (and the route's
+    vias, which bridge layers at a shared (x, y)) and confirms that every
+    vertex in ``pre_endpoints`` is present and lies in a single connected
+    component.  Returns True if connectivity is preserved, False otherwise.
+
+    The check is conservative: missing keys, or splitting endpoints across
+    multiple components, both fail.
+    """
+    if not pre_endpoints:
+        return True
+
+    # Build adjacency between vertex keys.  Each segment contributes an
+    # edge between its two endpoints on its layer.  Each via contributes
+    # edges between (x, y) on every layer it spans.
+    adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+
+    def add_edge(a: tuple[int, int, int], b: tuple[int, int, int]) -> None:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    for seg in optimized_segments:
+        a = _vertex_key(seg.x1, seg.y1, seg.layer, tolerance)
+        b = _vertex_key(seg.x2, seg.y2, seg.layer, tolerance)
+        add_edge(a, b)
+
+    for via in vias:
+        # Vias have an (x, y) and a tuple of two layers.  A via connects
+        # the same (x, y) across both layers.
+        try:
+            via_layers = via.layers
+            via_x = via.x
+            via_y = via.y
+        except AttributeError:
+            continue
+        if not via_layers or len(via_layers) < 2:
+            continue
+        a = _vertex_key(via_x, via_y, via_layers[0], tolerance)
+        b = _vertex_key(via_x, via_y, via_layers[1], tolerance)
+        add_edge(a, b)
+
+    # Every pre-optimisation endpoint must appear in the adjacency map.
+    if not pre_endpoints.issubset(adjacency.keys()):
+        return False
+
+    # All pre-optimisation endpoints must lie in the same connected
+    # component (BFS from one of them).
+    start = next(iter(pre_endpoints))
+    visited: set[tuple[int, int, int]] = {start}
+    queue = [start]
+    while queue:
+        node = queue.pop()
+        for neighbor in adjacency.get(node, ()):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(neighbor)
+
+    return pre_endpoints.issubset(visited)
