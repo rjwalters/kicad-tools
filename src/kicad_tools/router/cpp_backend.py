@@ -24,6 +24,8 @@ import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from .grid import RoutingGrid
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
@@ -215,6 +217,10 @@ class CppGrid:
         self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
         # Routable layer indices (all layers by default, refined by from_routing_grid)
         self._routable_layers: list[int] = list(range(layers))
+        # Reference to original Python grid (set by from_routing_grid for
+        # post-route validation and pad_blocked lookups during relaxed
+        # blocker identification, see find_blocking_nets_relaxed).
+        self._py_grid: RoutingGrid | None = None
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
@@ -251,6 +257,15 @@ class CppGrid:
     def index_to_layer(self, index: int) -> int:
         """Convert grid index to Layer enum value."""
         return self._index_to_layer.get(index, index)
+
+    def layer_to_index(self, layer_enum_value: int) -> int:
+        """Map Layer enum value to grid index.
+
+        Mirrors :meth:`RoutingGrid.layer_to_index` for parity. Falls back
+        to identity mapping when the enum value is not in the mapping
+        (e.g. a CppGrid built without ``from_routing_grid``).
+        """
+        return self._layer_to_index.get(layer_enum_value, layer_enum_value)
 
     def get_routable_indices(self) -> list[int]:
         """Get indices of routable layers (matching RoutingGrid interface)."""
@@ -630,6 +645,137 @@ class CppPathfinder:
                 gy += sy
 
         return blocking_nets
+
+    def find_blocking_nets_relaxed(
+        self,
+        start: Pad,
+        end: Pad,
+        saved_blocked: np.ndarray,
+        saved_net: np.ndarray,
+        per_net_timeout: float | None = None,
+    ) -> set[int]:
+        """Find blocking nets using relaxed A* (Issue #2274 / #2386).
+
+        Python-side mirror of :meth:`Router.find_blocking_nets_relaxed` for
+        the C++ backend. Re-uses the existing C++ ``route`` path; only the
+        segment-walking and original-grid lookup happens in Python.
+
+        Runs A* with routed-net obstacles temporarily removed (the caller is
+        responsible for invoking this inside a
+        ``grid.temporarily_unblock_routed_nets()`` context manager). If a
+        path is found, examines the *original* blocked/net arrays to
+        determine which routed nets occupy cells along that path.
+
+        Args:
+            start: Source pad.
+            end: Destination pad.
+            saved_blocked: The *original* blocked array before unblocking
+                (numpy bool 3D: layers x rows x cols).
+            saved_net: The *original* net array before unblocking
+                (numpy int32 3D: layers x rows x cols).
+            per_net_timeout: Optional timeout for the relaxed A* search.
+
+        Returns:
+            Set of routed-net IDs whose cells lie along the relaxed path.
+        """
+        # 1. Run C++ A* with negotiated_mode and zero present-cost to find a
+        #    relaxed path. Grid has been unblocked by the caller's
+        #    temporarily_unblock_routed_nets() context.
+        route = self.route(
+            start,
+            end,
+            negotiated_mode=True,
+            present_cost_factor=0.0,
+            per_net_timeout=per_net_timeout,
+        )
+        if route is None:
+            return set()
+
+        blocking: set[int] = set()
+        source_net = start.net
+
+        # Compute trace half-width in cells (mirrors pathfinder.py:117).
+        # CppPathfinder doesn't currently cache _trace_half_width_cells,
+        # so compute it here on demand.
+        trace_half_width_cells = max(
+            1,
+            math.ceil(
+                round(
+                    (self._rules.trace_width / 2 + self._rules.trace_clearance)
+                    / self._grid.resolution,
+                    6,
+                )
+            ),
+        )
+
+        # _pad_blocked lookup requires the original Python RoutingGrid.
+        # CppGrid.from_routing_grid stores it on self._py_grid. If the
+        # CppGrid was built without a Python source, fall back to False
+        # (slightly looser, but safe -- at worst a few extra blockers).
+        py_grid = getattr(self._grid, "_py_grid", None)
+
+        def _pad_blocked_at(layer_idx: int, cy: int, cx: int) -> bool:
+            if py_grid is None:
+                return False
+            return bool(py_grid._pad_blocked[layer_idx, cy, cx])
+
+        # 2. Walk every cell along every segment of the relaxed path and
+        #    check the *original* (saved) blocked/net arrays to find which
+        #    routed nets occupied those cells.
+        for seg in route.segments:
+            gx1, gy1 = self._grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self._grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self._grid.layer_to_index(seg.layer.value)
+
+            # Walk segment cells (Bresenham)
+            dx = abs(gx2 - gx1)
+            dy = abs(gy2 - gy1)
+            sx = 1 if gx1 < gx2 else -1
+            sy = 1 if gy1 < gy2 else -1
+            err = dx - dy
+            gx, gy = gx1, gy1
+            while True:
+                # Check this cell and clearance envelope
+                for cdy in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                    for cdx in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                        cx, cy = gx + cdx, gy + cdy
+                        if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
+                            was_blocked = bool(saved_blocked[layer_idx, cy, cx])
+                            orig_net = int(saved_net[layer_idx, cy, cx])
+                            if (
+                                was_blocked
+                                and orig_net != 0
+                                and orig_net != source_net
+                                and not _pad_blocked_at(layer_idx, cy, cx)
+                            ):
+                                blocking.add(orig_net)
+
+                if gx == gx2 and gy == gy2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    gx += sx
+                if e2 < dx:
+                    err += dx
+                    gy += sy
+
+        # 3. Also check via locations on every layer
+        for via in route.vias:
+            vgx, vgy = self._grid.world_to_grid(via.x, via.y)
+            for layer_idx in range(self._grid.num_layers):
+                if 0 <= vgx < self._grid.cols and 0 <= vgy < self._grid.rows:
+                    was_blocked = bool(saved_blocked[layer_idx, vgy, vgx])
+                    orig_net = int(saved_net[layer_idx, vgy, vgx])
+                    if (
+                        was_blocked
+                        and orig_net != 0
+                        and orig_net != source_net
+                        and not _pad_blocked_at(layer_idx, vgy, vgx)
+                    ):
+                        blocking.add(orig_net)
+
+        return blocking
 
 
 def create_hybrid_router(
