@@ -704,6 +704,49 @@ def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
     return new_content
 
 
+def _print_power_stall_suggestions(
+    stalled_nets: list[str],
+    layer_count: int,
+    pcb_arg: str,
+) -> None:
+    """Print actionable suggestions for a power-net stall (Issue #2388).
+
+    Surfaces concrete remediation flags naming the stalled nets so users
+    can pick the appropriate workaround instead of being told the router
+    timed out.
+
+    Args:
+        stalled_nets: Names of the power/pour nets that stalled.
+        layer_count: Layer count used for the failing attempt.
+        pcb_arg: The original PCB argument the user passed (for echoing
+            in suggested commands).
+    """
+    if not stalled_nets:
+        return
+    nets_csv = ", ".join(stalled_nets)
+    # Default zone-layer assignment: GND on B.Cu, others on F.Cu.
+    pour_assignments = []
+    for n in stalled_nets:
+        if n.upper() in {"GND", "VSS", "AGND", "DGND", "PGND", "GROUND"}:
+            pour_assignments.append(f"{n}:B.Cu")
+        else:
+            pour_assignments.append(f"{n}:F.Cu")
+    pour_arg = ",".join(pour_assignments)
+
+    print()
+    print(
+        f"Routing did not complete: {nets_csv} could not be routed on "
+        f"{layer_count} layer(s)."
+    )
+    print("Suggestions:")
+    print(f"  1. Add copper zones for power nets:  --power-nets \"{pour_arg}\"")
+    print("  2. Increase layer count:              --layers 4 (or --max-layers 6)")
+    print(
+        f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)"
+    )
+    print()
+
+
 def _auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
@@ -878,10 +921,37 @@ def route_with_layer_escalation(
     best_result: LayerEscalationResult | None = None
     successful_result: LayerEscalationResult | None = None
 
+    # Issue #2388: Track power-net stall across escalation attempts.  When
+    # a 2-layer attempt aborts due to power-net stall, the next attempt
+    # is biased toward a stack with dedicated planes for those nets, and
+    # we auto-extend skip_nets with the plane nets so the router relies
+    # on the plane connections instead of routing power as signals.
+    last_power_stall_nets: list[str] = []
+
     for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
+        # Issue #2388: When the previous attempt stalled on power nets and
+        # this stack provides dedicated planes for them, auto-skip those
+        # plane nets so the router doesn't try to route them as signals.
+        attempt_skip_nets = list(skip_nets)
+        plane_nets_in_stack = {
+            lyr.plane_net for lyr in layer_stack.plane_layers if lyr.plane_net
+        }
+        if last_power_stall_nets and plane_nets_in_stack:
+            auto_plane_skip = [
+                n for n in last_power_stall_nets
+                if n in plane_nets_in_stack and n not in attempt_skip_nets
+            ]
+            if auto_plane_skip:
+                attempt_skip_nets.extend(auto_plane_skip)
+                if not quiet:
+                    flush_print(
+                        f"  Auto-skipping {', '.join(auto_plane_skip)} "
+                        "(connected via dedicated plane(s) in this stack)"
+                    )
+
         if not quiet:
             flush_print("=" * 60)
-            flush_print(f"Attempt {attempt_num}: {layer_count} layers")
+            flush_print(f"Attempt {attempt_num}: {layer_count} layers ({layer_stack.name})")
             flush_print("=" * 60)
 
         # Load PCB with this layer stack
@@ -889,7 +959,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
-                    skip_nets=skip_nets,
+                    skip_nets=attempt_skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
                     layer_stack=layer_stack,
@@ -985,6 +1055,19 @@ def route_with_layer_escalation(
         if best_result is None or completion > best_result.completion:
             best_result = result
 
+        # Issue #2388: Record any power-net stall for the next attempt's
+        # bias logic.  ``power_stall_nets`` is populated by
+        # ``route_all_negotiated`` when the early-abort heuristic fires.
+        if getattr(router, "power_stall_abort", False):
+            last_power_stall_nets = list(getattr(router, "power_stall_nets", []))
+            if not quiet and last_power_stall_nets:
+                flush_print(
+                    f"  Power-net stall on this attempt: "
+                    f"{', '.join(last_power_stall_nets)}"
+                )
+        else:
+            last_power_stall_nets = []
+
         # Report attempt result
         status = "SUCCESS" if result.success else "INSUFFICIENT - escalating"
         if not quiet:
@@ -1020,9 +1103,23 @@ def route_with_layer_escalation(
                 f"Warning: Did not achieve {args.min_completion * 100:.0f}% completion "
                 f"on any layer count (max: {args.max_layers})"
             )
+            # Issue #2388: Surface actionable suggestions when escalation
+            # exhausted because of a power-net stall.
+            if last_power_stall_nets:
+                _print_power_stall_suggestions(
+                    last_power_stall_nets,
+                    final_result.layer_count,
+                    args.pcb,
+                )
     else:
         if not quiet:
             print("Error: No routing attempts succeeded")
+            if last_power_stall_nets:
+                _print_power_stall_suggestions(
+                    last_power_stall_nets,
+                    args.max_layers,
+                    args.pcb,
+                )
         return 1
 
     # Optimize traces
@@ -2499,11 +2596,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--auto-layers",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Automatically escalate layer count on routing failure. "
-            "Tries 2 → 4 → 6 layers until routing succeeds or max is reached. "
-            "Reports minimum viable layer count for the design."
+            "Automatically escalate layer count on routing failure "
+            "(default: enabled). Tries 2 → 4 → 6 layers until routing "
+            "succeeds or --max-layers is reached. Reports minimum viable "
+            "layer count for the design. The first attempt is still "
+            "2-layer, so 2-layer-solvable boards pay no extra cost. "
+            "Use --no-auto-layers to disable and route at a fixed layer "
+            "count (whatever --layers specifies, or auto-detected)."
         ),
     )
     parser.add_argument(
@@ -2794,14 +2896,25 @@ def main(argv: list[str] | None = None) -> int:
         # Default to 3 passes when --auto-fix is used without explicit --auto-fix-passes
         args.auto_fix_passes = 3
 
-    # Validate --auto-layers is not used with explicit --layers
+    # Issue #2388: --auto-layers is now enabled by default.  When --layers
+    # is explicitly set, silently disable auto-escalation so existing
+    # users of --layers see no behavior change.  Only raise an error if
+    # the user *explicitly* typed both --auto-layers and --layers
+    # (a true conflict in intent).
+    _argv_for_detect = argv if argv is not None else sys.argv
+    explicit_auto_layers = "--auto-layers" in _argv_for_detect
     if args.auto_layers and args.layers != "auto":
-        print(
-            f"Error: --auto-layers cannot be used with --layers {args.layers}.\n"
-            "Use --auto-layers alone, or use --layers to specify a fixed layer count.",
-            file=sys.stderr,
-        )
-        return 1
+        if explicit_auto_layers:
+            print(
+                f"Error: --auto-layers cannot be used with --layers {args.layers}.\n"
+                "Use --auto-layers alone, or use --layers to specify a "
+                "fixed layer count (and pass --no-auto-layers to silence "
+                "this error).",
+                file=sys.stderr,
+            )
+            return 1
+        # --layers was explicit but --auto-layers was the default; honor --layers.
+        args.auto_layers = False
 
     # Validate --adaptive-rules is not used with explicit --layers (unless also using --auto-layers)
     if args.adaptive_rules and args.layers != "auto" and not args.auto_layers:
@@ -4071,6 +4184,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             if drc_ran and drc_errors > 0:
                 print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+
+            # Issue #2388: When the negotiated loop bailed out due to a
+            # power-net stall, surface actionable suggestions naming the
+            # specific stalled nets and recommended remediation flags.
+            if getattr(router, "power_stall_abort", False):
+                _print_power_stall_suggestions(
+                    list(getattr(router, "power_stall_nets", [])),
+                    layer_stack.num_layers,
+                    args.pcb,
+                )
 
             # Show comprehensive routing summary with successes, failures, and suggestions
             # Use JSON format if requested

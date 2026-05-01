@@ -199,8 +199,12 @@ def run_route_command(args) -> int:
         sub_argv.append("--force")
     if getattr(args, "no_optimize", False):
         sub_argv.append("--no-optimize")
-    if getattr(args, "auto_layers", False):
-        sub_argv.append("--auto-layers")
+    # Issue #2388: --auto-layers is now enabled by default.  Forward only
+    # the user's explicit choice (so the default takes effect when neither
+    # is passed and --no-auto-layers is honored when disabled).
+    auto_layers_attr = getattr(args, "auto_layers", True)
+    if auto_layers_attr is False:
+        sub_argv.append("--no-auto-layers")
     if getattr(args, "max_layers", 6) != 6:
         sub_argv.extend(["--max-layers", str(args.max_layers)])
     if getattr(args, "min_completion", 0.95) != 0.95:

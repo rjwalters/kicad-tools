@@ -13,8 +13,10 @@ import pytest
 class TestLayerEscalationCLIParameters:
     """Tests for --auto-layers parameter handling in route command."""
 
-    def test_auto_layers_parameter_passed_when_set(self):
-        """auto-layers parameter is passed when specified."""
+    def test_auto_layers_default_not_forwarded(self):
+        """auto-layers is the default (Issue #2388) so it is NOT forwarded
+        to the underlying CLI when set to True; --no-auto-layers IS
+        forwarded when explicitly disabled."""
         from kicad_tools.cli.commands.routing import run_route_command
 
         args = SimpleNamespace(
@@ -36,7 +38,7 @@ class TestLayerEscalationCLIParameters:
             layers="auto",
             force=False,
             no_optimize=False,
-            auto_layers=True,
+            auto_layers=True,  # default value
             max_layers=6,
             min_completion=0.95,
         )
@@ -46,7 +48,45 @@ class TestLayerEscalationCLIParameters:
             run_route_command(args)
 
             call_args = mock_main.call_args[0][0]
-            assert "--auto-layers" in call_args
+            # Default value: do not forward (the underlying CLI also defaults to True).
+            assert "--auto-layers" not in call_args
+            assert "--no-auto-layers" not in call_args
+
+    def test_no_auto_layers_forwarded_when_disabled(self):
+        """--no-auto-layers is forwarded when auto_layers=False (Issue #2388)."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid=0.25,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,  # user explicitly disabled
+            max_layers=6,
+            min_completion=0.95,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--no-auto-layers" in call_args
+            assert "--auto-layers" not in call_args
 
     def test_max_layers_parameter_passed_when_not_default(self):
         """max-layers parameter is passed when different from default 6."""

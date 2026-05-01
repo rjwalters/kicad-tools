@@ -2178,10 +2178,13 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument(
         "--auto-layers",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Automatically escalate layer count on routing failure. "
-            "Tries 2 -> 4 -> 6 layers until routing succeeds or max is reached."
+            "Automatically escalate layer count on routing failure "
+            "(default: enabled). Tries 2 -> 4 -> 6 layers until routing "
+            "succeeds or --max-layers is reached. Use --no-auto-layers "
+            "to disable and route at a fixed layer count."
         ),
     )
     route_parser.add_argument(

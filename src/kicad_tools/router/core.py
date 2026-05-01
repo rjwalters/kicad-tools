@@ -59,6 +59,7 @@ from .failure_analysis import (
 )
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
+from .net_class import NetClass, classify_from_name
 from .length import LengthTracker, LengthViolation
 from .output import format_failed_nets_summary
 from .parallel import (
@@ -437,6 +438,16 @@ class Autorouter:
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
+
+        # Power-net stall abort tracking (Issue #2388).
+        # Set to True by the negotiated routing loop when it bails out
+        # because all stalled nets are power/pour nets and overflow has
+        # plateaued.  Populated with the names of the stalled power nets
+        # so the CLI can surface actionable suggestions (e.g. enable
+        # --power-nets zones, escalate layers) instead of spinning until
+        # timeout.
+        self.power_stall_abort: bool = False
+        self.power_stall_nets: list[str] = []
 
         # Fine-grid routing count (updated by route_all_multi_resolution)
         self.fine_grid_nets_count: int = 0
@@ -1767,6 +1778,33 @@ class Autorouter:
         net_class = self.net_class_map.get(net_name)
         return bool(net_class and net_class.is_pour_net)
 
+    def _is_power_net_by_class(self, net_id: int) -> bool:
+        """Check if a net is classified as power or ground by its name.
+
+        Issue #2388: Used by the negotiated-loop early-abort heuristic to
+        identify when stalled nets are all power/pour nets that the router
+        cannot resolve as signal traces.  Such nets typically need either
+        copper zones (``--power-nets``) or dedicated planes
+        (``--auto-layers``).
+
+        Unlike :meth:`_is_pour_net`, this also returns True for power/ground
+        nets that lack zones (i.e. nets in ``_pour_nets_without_zones``),
+        because those are precisely the nets the early-abort heuristic
+        targets.
+
+        Args:
+            net_id: The net ID to check.
+
+        Returns:
+            True if the net name pattern matches POWER or GROUND
+            classification, False otherwise.
+        """
+        net_name = self.net_names.get(net_id, "")
+        if not net_name:
+            return False
+        net_class = classify_from_name(net_name)
+        return net_class in (NetClass.POWER, NetClass.GROUND)
+
     def _ensure_congestion_estimator(self) -> CongestionEstimator:
         """Build the pre-route congestion estimator if not already computed.
 
@@ -3046,6 +3084,44 @@ class Autorouter:
                     )
                     stalled_nets.clear()
                     net_ripup_stall.clear()
+
+                # Issue #2388: Early-abort heuristic for power-net stalls.
+                # If every currently stalled net is a power/pour net, AND
+                # overflow has been flat for at least 2 iterations, the
+                # negotiated loop cannot make further progress (the residual
+                # congestion comes entirely from power nets the router has
+                # already given up rerouting).  Bail out with a clear
+                # diagnostic so the CLI can surface actionable suggestions
+                # (e.g. --power-nets, --auto-layers) instead of spinning
+                # until --timeout.
+                if (
+                    stalled_nets
+                    and len(overflow_history) >= 2
+                    and overflow_history[-1] == overflow_history[-2]
+                    and all(
+                        self._is_pour_net(n) or self._is_power_net_by_class(n)
+                        for n in stalled_nets
+                    )
+                ):
+                    stall_names = sorted(
+                        self.net_names.get(n, f"Net_{n}") for n in stalled_nets
+                    )
+                    self.power_stall_abort = True
+                    self.power_stall_nets = stall_names
+                    flush_print(
+                        f"\n  Power-net stall detected: {len(stalled_nets)} stalled "
+                        f"net(s) are all power/pour nets and overflow has plateaued "
+                        f"at {overflow_history[-1]}."
+                    )
+                    flush_print(
+                        f"  Stalled nets: {', '.join(stall_names)}"
+                    )
+                    flush_print(
+                        "  Aborting iteration loop to avoid spin-wait. "
+                        "Try --auto-layers (dedicated planes) or "
+                        "--power-nets (copper zones) to resolve this."
+                    )
+                    break
 
                 if use_targeted_ripup:
                     # Targeted rip-up: for each conflicting net, find its specific blockers
