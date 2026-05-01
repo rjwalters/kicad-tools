@@ -880,12 +880,20 @@ def auto_select_grid_resolution(
     # Sort candidates from coarsest to finest
     candidates = sorted(candidates, reverse=True)
 
-    # Calculate minimum resolution for DRC compliance
+    # Calculate minimum resolution for DRC compliance fallback when nothing
+    # else fits.  A grid <= clearance is sufficient: per-axis quantisation
+    # error is at most resolution/2, and the negotiated router enforces
+    # actual edge-to-edge clearance during pathing — so pad alignment, not
+    # the half-clearance quantisation worst case, is the dominant signal
+    # (issue #2387).
     min_resolution = clearance / 2
 
-    # Filter candidates: must be DRC-compliant (grid <= clearance/2 so that
-    # worst-case grid-quantisation error never exceeds half the clearance)
-    valid_candidates = [c for c in candidates if c <= clearance / 2]
+    # Filter candidates: must be DRC-compliant (grid <= clearance is
+    # sufficient because the router enforces edge-to-edge clearance
+    # directly).  Previously this used clearance/2 which excluded pad-aligned
+    # grids like 0.1mm at clearance=0.15mm and forced selection of finer,
+    # misaligned grids that placed most pads off-grid (issue #2387).
+    valid_candidates = [c for c in candidates if c <= clearance]
 
     if not valid_candidates:
         # All candidates are too coarse, use minimum DRC-compliant resolution

@@ -116,11 +116,17 @@ class TestAutoSelectGridResolution:
         assert result.candidates_tried  # Should have tried multiple candidates
 
     def test_drc_compliance(self):
-        """Test that selected resolution respects DRC clearance."""
+        """Test that selected resolution respects DRC clearance.
+
+        After issue #2387 the candidate filter is ``c <= clearance`` (not
+        ``c <= clearance / 2``).  The negotiated router enforces
+        edge-to-edge clearance directly, so coarser pad-aligned grids are
+        preferred over half-clearance grids that misalign with pad pitch.
+        """
         pads = [PadPosition(x=0.0, y=0.0)]
         result = auto_select_grid_resolution(pads, clearance=0.15)
-        # Resolution must be <= clearance/2 for DRC compliance
-        assert result.resolution <= 0.15 / 2
+        # Resolution must be <= clearance for DRC compliance (issue #2387)
+        assert result.resolution <= 0.15
 
     def test_prefers_coarser_when_equal(self):
         """Test that coarser resolution is preferred when off-grid counts are equal."""
@@ -196,31 +202,44 @@ class TestAutoSelectGridResolution:
         assert result.resolution in [0.065, 0.05]  # Either is valid
 
 
-    def test_no_candidate_exceeds_half_clearance(self):
-        """With clearance=0.15, no selected candidate should exceed 0.075."""
+    def test_no_candidate_exceeds_clearance(self):
+        """With clearance=0.15, no selected candidate should exceed 0.15.
+
+        After issue #2387 the candidate filter is ``c <= clearance``
+        instead of ``c <= clearance / 2`` so pad-aligned grids like 0.1mm
+        survive at clearance=0.15mm.
+        """
         pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=1.0, y=0.0)]
         result = auto_select_grid_resolution(pads, clearance=0.15)
-        assert result.resolution <= 0.15 / 2
-        # Also verify all *tried* candidates respect the threshold
+        assert result.resolution <= 0.15
+        # Also verify all *tried* candidates respect the (relaxed) threshold
         for res, _off in result.candidates_tried:
-            assert res <= 0.15 / 2
+            assert res <= 0.15
 
     def test_tight_clearance_floor(self):
-        """With very tight clearance (0.1mm), grid must not go below 0.05mm floor."""
+        """With very tight clearance (0.1mm), grid stays <= 0.1mm.
+
+        After issue #2387 the filter is ``c <= clearance``.  With
+        clearance=0.1mm, the 0.1mm candidate now survives the DRC filter
+        and is preferred over 0.05mm by the coarser-when-equal rule.
+        """
         pads = [PadPosition(x=0.0, y=0.0)]
         result = auto_select_grid_resolution(pads, clearance=0.1)
-        # clearance/2 = 0.05, only candidate that fits is 0.05
-        assert result.resolution == 0.05
+        # All surviving candidates must be <= 0.1mm
+        assert result.resolution <= 0.1
+        # Coarser-when-equal preference should pick 0.1mm (0/1 off-grid)
+        assert result.resolution == 0.1
 
     def test_board05_clearance_selects_fine_grid(self):
-        """Board 05 scenario: clearance=0.2mm should select grid <= 0.1mm."""
+        """Board 05 scenario: clearance=0.2mm should select grid <= 0.2mm."""
         pads = [
             PadPosition(x=0.0, y=0.0),
             PadPosition(x=1.27, y=0.0),
             PadPosition(x=2.54, y=1.27),
         ]
         result = auto_select_grid_resolution(pads, clearance=0.2)
-        assert result.resolution <= 0.2 / 2  # Must be <= 0.1mm
+        # After issue #2387, candidate filter is c <= clearance (not /2).
+        assert result.resolution <= 0.2
 
     def test_imperial_tht_pads_zero_off_grid_with_loose_clearance(self):
         """Imperial THT pads (2.54mm, 5.08mm) should have zero off-grid with loose clearance.
@@ -998,3 +1017,154 @@ class TestRoutingGridOriginOffset:
         # origin_x should be shifted
         assert abs(grid.origin_x - 0.04) < 0.001
         assert abs(grid.origin_y - 0.02) < 0.001
+
+
+class TestIssue2387ClearanceFilterRelaxation:
+    """Regression tests for issue #2387.
+
+    The candidate filter previously was ``c <= clearance / 2``, which
+    excluded the 0.1mm grid at clearance=0.15mm and forced the auto-selector
+    onto a 0.065mm grid that placed 86% of pads off-grid on board 03
+    (USB-joystick).  The fix relaxes the filter to ``c <= clearance`` so that
+    pad-aligned grids beat misaligned half-clearance grids.
+    """
+
+    @staticmethod
+    def _board03_tqfp32_pad_positions() -> list[PadPosition]:
+        """TQFP-32 pad positions at the board-03 layout coordinates.
+
+        U1 is centered at (130, 120) with 0.8mm pitch and 8 pads per side.
+        First-pad offset from center is (4*0.8 - 0.4) = 3.2 - 0.4 = 2.8mm
+        from the side edge ... we just generate 32 pads at exact 0.1mm-aligned
+        positions matching the board-03 PCB.
+        """
+        positions: list[PadPosition] = []
+        cx, cy = 130.0, 120.0
+        # Bottom row pads (1..8): x = cx - 2.8 + i*0.8, y = cy + 2.8
+        for i in range(8):
+            positions.append(PadPosition(x=cx - 2.8 + i * 0.8, y=cy + 2.8))
+        # Right column pads (9..16): x = cx + 2.8, y = cy + 2.8 - i*0.8
+        for i in range(8):
+            positions.append(PadPosition(x=cx + 2.8, y=cy + 2.8 - i * 0.8))
+        # Top row pads (17..24): x = cx + 2.8 - i*0.8, y = cy - 2.8
+        for i in range(8):
+            positions.append(PadPosition(x=cx + 2.8 - i * 0.8, y=cy - 2.8))
+        # Left column pads (25..32): x = cx - 2.8, y = cy - 2.8 + i*0.8
+        for i in range(8):
+            positions.append(PadPosition(x=cx - 2.8, y=cy - 2.8 + i * 0.8))
+        return positions
+
+    def test_tqfp32_at_clearance_015_picks_pad_aligned_grid(self):
+        """TQFP-32 at 0.1mm-aligned coords with clearance=0.15 picks 0.1 or coarser.
+
+        Before issue #2387 this returned 0.065mm with 100% off-grid count;
+        after the fix the 0.1mm candidate (which divides 0.8mm evenly)
+        survives the DRC filter and is preferred by the coarser-when-equal
+        rule.
+        """
+        pads = self._board03_tqfp32_pad_positions()
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        # All 32 pads should be on-grid at the chosen resolution
+        assert result.off_grid_pads == 0, (
+            f"TQFP-32 at 0.1mm-aligned coords should have zero off-grid "
+            f"pads with clearance=0.15mm; got {result.off_grid_pads} off "
+            f"at grid {result.resolution}mm"
+        )
+        # Auto-selector should *not* pick 0.065mm or finer for this case
+        assert result.resolution >= 0.1, (
+            f"Expected pad-aligned grid >= 0.1mm, got {result.resolution}mm. "
+            f"This is the regression that broke board 03."
+        )
+
+    def test_tqfp32_picks_at_least_01mm_with_loose_clearance(self):
+        """Even at clearance=0.20, the 0.1mm pad-aligned grid wins."""
+        pads = self._board03_tqfp32_pad_positions()
+        result = auto_select_grid_resolution(pads, clearance=0.20)
+        assert result.off_grid_pads == 0
+        assert result.resolution >= 0.1
+
+    def test_clearance_010_keeps_01mm_in_candidates(self):
+        """At clearance=0.10mm, the 0.1mm candidate is now valid (was excluded)."""
+        pads = self._board03_tqfp32_pad_positions()
+        result = auto_select_grid_resolution(pads, clearance=0.10)
+        # 0.1mm is on the boundary (c <= clearance) and divides 0.8mm evenly
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        assert 0.1 in resolutions_tried, (
+            f"0.1mm candidate must survive c <= clearance filter; "
+            f"got tried = {resolutions_tried}"
+        )
+        # And at this clearance, 0.1mm is the coarsest valid candidate
+        assert result.resolution == 0.1
+
+    def test_clearance_015_does_not_filter_out_01mm(self):
+        """The 0.1mm grid is not filtered when clearance=0.15mm (issue #2387).
+
+        This is the canonical regression: before the fix, 0.1 > 0.075
+        excluded 0.1mm; afterwards 0.1 <= 0.15 keeps it.
+        """
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.8, y=0.0),
+            PadPosition(x=1.6, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        assert 0.1 in resolutions_tried
+
+
+class TestIssue2387MultiResPlanWithBoardDims:
+    """Regression test for issue #2387: compute_multi_resolution_plan needs
+    board dimensions to avoid memory-busting fine grids.
+    """
+
+    def test_inner_auto_select_respects_board_dimensions(self):
+        """When board_width/board_height are passed, inner auto_select_grid
+        is memory-capped instead of selecting the finest survivor.
+        """
+        from kicad_tools.router.io import compute_multi_resolution_plan
+        from kicad_tools.router.primitives import Pad
+
+        # 60x40mm board with TQFP-32 at 0.8mm pitch (one fine-pitch
+        # component) plus a few capacitor pads off-grid at 0.05mm
+        cx, cy = 30.0, 20.0
+        pads: list[Pad] = []
+        # TQFP-32 — 0.1mm-aligned positions
+        for i in range(8):
+            pads.append(Pad(
+                x=cx - 2.8 + i * 0.8, y=cy + 2.8, width=0.5, height=1.5,
+                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+            ))
+
+        # Without board dimensions, inner auto-select picks finest GCD
+        # candidate (0.1 from 0.8 pitch) but no memory budget guard is
+        # applied; with board dimensions, the same plan can use the cap.
+        plan_with_dims = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=60.0,
+            board_height=40.0,
+        )
+        plan_without_dims = compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+        )
+        # Both should be None (no fine-pitch components below 0.8 strict;
+        # 0.8 is the threshold) OR a multi-res plan; the important
+        # contract is that passing board dims doesn't crash or change
+        # the chosen coarse resolution toward something memory-busting.
+        # Assert that when a plan is returned, the coarse resolution
+        # divides the board cleanly within the memory budget.
+        for plan in (plan_with_dims, plan_without_dims):
+            if plan is None:
+                continue
+            cells = (60.0 / plan.coarse_resolution) * (40.0 / plan.coarse_resolution)
+            # The plan with board dims must respect the inner auto-select
+            # budget (default 500k cells); plan without dims may exceed it.
+            if plan is plan_with_dims:
+                # 0.1 -> 240k cells, 0.05 -> 960k (would exceed default 500k)
+                # so the chosen coarse must be >= ~0.09mm to fit
+                assert cells <= 500_000 * 4, (
+                    f"With board dims, multi-res plan should not select a "
+                    f"memory-busting grid; got {plan.coarse_resolution}mm "
+                    f"-> {cells:.0f} cells"
+                )

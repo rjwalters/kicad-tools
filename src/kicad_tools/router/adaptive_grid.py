@@ -54,6 +54,47 @@ from .subgrid import SubGridRouter, SubGridResult, compute_subgrid_resolution
 logger = logging.getLogger(__name__)
 
 
+class FinePitchEscapeFailure(RuntimeError):
+    """Raised when a fine-pitch component's pads cannot escape the coarse grid.
+
+    When *zero* pads on a fine-pitch component reach a valid coarse-grid point,
+    the configured coarse grid is incompatible with the component's pad
+    geometry — typically because auto-grid selected a resolution that does
+    not divide the pad pitch.  Continuing the routing pass would waste time
+    and almost certainly produce no usable output (issue #2387).
+
+    Attributes:
+        component_ref: Component reference designator (e.g. "U1")
+        attempted_pads: How many pads the escape router tried
+        suggested_grid: A grid resolution likely to succeed (mm)
+        pitch: Minimum pin pitch detected for the component (mm)
+    """
+
+    def __init__(
+        self,
+        component_ref: str,
+        attempted_pads: int,
+        suggested_grid: float,
+        pitch: float | None = None,
+        message: str | None = None,
+    ):
+        self.component_ref = component_ref
+        self.attempted_pads = attempted_pads
+        self.suggested_grid = suggested_grid
+        self.pitch = pitch
+
+        if message is None:
+            pitch_str = f"{pitch:.3f}mm pitch" if pitch is not None else "fine-pitch"
+            message = (
+                f"Escape routing failed: 0/{attempted_pads} pads on {component_ref} "
+                f"({pitch_str}) reached the coarse grid. The selected grid resolution "
+                f"is incompatible with this component's pad geometry. "
+                f"Try rerunning with --grid {suggested_grid:.4f} (or a coarser pad-aligned "
+                f"grid such as 0.1 / 0.05) to align the routing grid with the pad pitch."
+            )
+        super().__init__(message)
+
+
 @dataclass
 class AdaptiveGridResult:
     """Result of adaptive grid routing.
@@ -186,12 +227,16 @@ def identify_fine_pitch_components(
     pitches = _compute_component_pitches(pads)
     fine_components: dict[str, float] = {}
 
+    # Use <= with a small epsilon so a TQFP-32 with truly orthogonal 0.8mm
+    # pitch trips the threshold (otherwise float drift on the diagonal-sum
+    # pitch calculation determines whether it fires).  See issue #2387.
+    threshold = fine_pitch_threshold + 1e-6
     for ref, pitch in pitches.items():
-        if pitch < fine_pitch_threshold:
+        if pitch <= threshold:
             fine_res = compute_subgrid_resolution(pitch, coarse_resolution)
             fine_components[ref] = fine_res
             logger.debug(
-                "Component %s: pitch=%.3fmm (< %.1fmm threshold), "
+                "Component %s: pitch=%.3fmm (<= %.1fmm threshold), "
                 "fine grid=%.4fmm",
                 ref, pitch, fine_pitch_threshold, fine_res,
             )
@@ -333,7 +378,98 @@ class AdaptiveGridRouter:
                 subgrid_result.unblocked_count,
             )
 
+        # Hard-fail check (issue #2387): if *any* fine-pitch component had
+        # off-grid pads attempted but zero successful escapes, the coarse
+        # grid is doomed — abort routing with an actionable error rather
+        # than continuing a hopeless pass.
+        self._raise_if_component_fully_failed(
+            subgrid_result, fine_components,
+        )
+
         return subgrid_result, escape_routes, fine_components
+
+    def _raise_if_component_fully_failed(
+        self,
+        subgrid_result: SubGridResult,
+        fine_components: dict[str, float],
+    ) -> None:
+        """Raise FinePitchEscapeFailure if any fine-pitch component had 0 escapes.
+
+        Counts pads per component from the analysis (off-grid pads attempted)
+        and the failed_pads list (failures).  When attempted > 0 and
+        attempted == failed for a single component, escape routing produced
+        nothing usable for that component and the routing pass cannot
+        succeed.  Recommends a grid based on the component's minimum pitch.
+        """
+        if subgrid_result.analysis is None:
+            return
+
+        # Count pads attempted per component (off-grid pads from analysis)
+        attempted_by_ref: dict[str, int] = {}
+        for sgp in subgrid_result.analysis.off_grid_pads:
+            ref = sgp.pad.ref or "<unknown>"
+            attempted_by_ref[ref] = attempted_by_ref.get(ref, 0) + 1
+
+        # Count pads that failed per component
+        failed_by_ref: dict[str, int] = {}
+        for pad in subgrid_result.failed_pads:
+            ref = pad.ref or "<unknown>"
+            failed_by_ref[ref] = failed_by_ref.get(ref, 0) + 1
+
+        for ref, attempted in attempted_by_ref.items():
+            if attempted == 0:
+                continue
+            failed = failed_by_ref.get(ref, 0)
+            if failed < attempted:
+                continue  # at least one pad escaped; not a doomed pass
+            # 0/attempted escaped — derive a recommendation from pitch
+            pitch = self._component_pitch_for(ref, subgrid_result)
+            suggested = self._suggested_grid_for_pitch(pitch)
+            raise FinePitchEscapeFailure(
+                component_ref=ref,
+                attempted_pads=attempted,
+                suggested_grid=suggested,
+                pitch=pitch,
+            )
+
+    @staticmethod
+    def _component_pitch_for(
+        ref: str,
+        subgrid_result: SubGridResult,
+    ) -> float | None:
+        """Recover the minimum pad pitch for a component from the analysis."""
+        if subgrid_result.analysis is None:
+            return None
+        comp_pads = [
+            sgp.pad for sgp in subgrid_result.analysis.off_grid_pads
+            if sgp.pad.ref == ref
+        ]
+        if len(comp_pads) < 2:
+            return None
+        min_pitch = float("inf")
+        for i, p1 in enumerate(comp_pads):
+            for p2 in comp_pads[i + 1:]:
+                dist = math.hypot(p1.x - p2.x, p1.y - p2.y)
+                if dist > 0.001:
+                    min_pitch = min(min_pitch, dist)
+        return None if min_pitch == float("inf") else min_pitch
+
+    @staticmethod
+    def _suggested_grid_for_pitch(pitch: float | None) -> float:
+        """Suggest a grid resolution that should divide the component pitch.
+
+        Picks the coarsest reasonable grid that divides ``pitch`` evenly,
+        falling back to 0.05mm when no pitch information is available.
+        """
+        if pitch is None or pitch <= 0:
+            return 0.05
+        # Try a small set of pad-aligned candidates from coarsest to finest
+        for candidate in (0.1, 0.05, 0.025, 0.02, 0.01):
+            ratio = pitch / candidate
+            if abs(ratio - round(ratio)) < 1e-3 and round(ratio) >= 1:
+                return candidate
+        # Fallback: pitch / 10, clamped to at least 0.005mm
+        return max(pitch / 10.0, 0.005)
 
     def _phase2_channel_routing(
         self,
