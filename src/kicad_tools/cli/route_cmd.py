@@ -912,12 +912,14 @@ def route_with_layer_escalation(
         flush_print()
 
     # Configure design rules
+    fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
     rules = DesignRules(
         grid_resolution=args.grid,
         trace_width=args.trace_width,
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
+        fine_pitch_clearance=fine_pitch_cl,
     )
 
     # Parse skip nets
@@ -1435,12 +1437,14 @@ def route_with_rule_relaxation(
             flush_print("=" * 60)
 
         # Configure design rules for this tier
+        fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
         rules = DesignRules(
             grid_resolution=args.grid,
             trace_width=tier.trace_width,
             trace_clearance=tier.clearance,
             via_drill=tier.via_drill,
             via_diameter=tier.via_diameter,
+            fine_pitch_clearance=fine_pitch_cl,
         )
 
         # Load PCB
@@ -1907,12 +1911,14 @@ def route_with_combined_escalation(
                 )
 
             # Configure design rules for this tier
+            fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
             rules = DesignRules(
                 grid_resolution=args.grid,
                 trace_width=tier.trace_width,
                 trace_clearance=tier.clearance,
                 via_drill=tier.via_drill,
                 via_diameter=tier.via_diameter,
+                fine_pitch_clearance=fine_pitch_cl,
             )
 
             # Load PCB
@@ -2393,6 +2399,16 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.15,
         help="Trace clearance in mm (default: 0.15)",
+    )
+    parser.add_argument(
+        "--fine-pitch-clearance",
+        type=float,
+        default=None,
+        help=(
+            "Clearance for fine-pitch components (pitch < 0.8mm) in mm. "
+            "When set, SSOP/QFP/QFN packages automatically use this reduced "
+            "clearance to allow traces between pins. Example: --fine-pitch-clearance 0.08"
+        ),
     )
     parser.add_argument(
         "--via-drill",
@@ -3229,6 +3245,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Configure design rules
     grid_origin_offset = getattr(args, "_grid_origin_offset", (0.0, 0.0))
+    fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
     rules = DesignRules(
         grid_resolution=args.grid,
         grid_origin_offset=grid_origin_offset,
@@ -3236,6 +3253,7 @@ def main(argv: list[str] | None = None) -> int:
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
+        fine_pitch_clearance=fine_pitch_cl,
     )
 
     # Import progress helpers

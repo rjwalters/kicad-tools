@@ -2122,6 +2122,16 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
+    route_parser.add_argument(
+        "--fine-pitch-clearance",
+        type=float,
+        default=None,
+        help=(
+            "Clearance for fine-pitch components (pitch < 0.8mm) in mm. "
+            "Allows escape routing between SSOP/QFP/QFN pins. "
+            "Example: --fine-pitch-clearance 0.08"
+        ),
+    )
     route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
