@@ -23,14 +23,19 @@ class FakeTier:
     via_diameter: float = 0.6
 
 
-def _make_fake_router(nets_routed: int, nets_total: int = 20):
+def _make_fake_router(nets_routed: int, nets_total: int = 20,
+                      segments: int = 0, vias: int = 0):
     """Create a mock router that reports the given routing stats."""
     router = MagicMock()
     router.nets = {i: [1, 2] for i in range(1, nets_total + 1)}
     router.grid = MagicMock(width=50, height=50)
     router.routes = []
     router._pour_nets_without_zones = set()
-    router.get_statistics.return_value = {"nets_routed": nets_routed}
+    router.get_statistics.return_value = {
+        "nets_routed": nets_routed,
+        "segments": segments,
+        "vias": vias,
+    }
     return router
 
 
@@ -347,3 +352,193 @@ class TestCombinedEscalationEarlyStop:
 
         # Only 2 attempts: 2L tier 0 + 2L tier 1 (regression detected)
         assert router_idx[0] == 2
+
+
+class TestIsBetterResult:
+    """Unit tests for _is_better_result tiebreaker helper (Issue #2397)."""
+
+    def test_higher_completion_wins(self):
+        """When completions differ, higher completion wins regardless of segments."""
+        from kicad_tools.cli.route_cmd import (
+            RuleRelaxationResult,
+            _is_better_result,
+        )
+
+        better = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=10, nets_to_route=20,
+            completion=0.5, success=False, layer_count=2,
+            stats={"segments": 5, "vias": 0},
+        )
+        worse = RuleRelaxationResult(
+            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
+            via_diameter=0.6, tier_description="moderate", router=None,
+            net_map={}, nets_routed=5, nets_to_route=20,
+            completion=0.25, success=False, layer_count=2,
+            stats={"segments": 100, "vias": 20},
+        )
+
+        assert _is_better_result(better, worse) is True
+        assert _is_better_result(worse, better) is False
+
+    def test_tied_completion_more_segments_wins(self):
+        """When completion ties, result with more segments wins."""
+        from kicad_tools.cli.route_cmd import (
+            RuleRelaxationResult,
+            _is_better_result,
+        )
+
+        more_segments = RuleRelaxationResult(
+            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
+            via_diameter=0.6, tier_description="moderate", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 50, "vias": 3},
+        )
+        fewer_segments = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 10, "vias": 1},
+        )
+
+        assert _is_better_result(more_segments, fewer_segments) is True
+        assert _is_better_result(fewer_segments, more_segments) is False
+
+    def test_tied_completion_and_segments_more_vias_wins(self):
+        """When completion and segments tie, result with more vias wins."""
+        from kicad_tools.cli.route_cmd import (
+            RuleRelaxationResult,
+            _is_better_result,
+        )
+
+        more_vias = RuleRelaxationResult(
+            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
+            via_diameter=0.6, tier_description="moderate", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 50, "vias": 10},
+        )
+        fewer_vias = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 50, "vias": 2},
+        )
+
+        assert _is_better_result(more_vias, fewer_vias) is True
+        assert _is_better_result(fewer_vias, more_vias) is False
+
+    def test_full_cascade_fewer_layers_wins(self):
+        """When completion, segments, and vias all tie, fewer layers wins."""
+        from kicad_tools.cli.route_cmd import (
+            RuleRelaxationResult,
+            _is_better_result,
+        )
+
+        fewer_layers = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 50, "vias": 5},
+        )
+        more_layers = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=4,
+            stats={"segments": 50, "vias": 5},
+        )
+
+        assert _is_better_result(fewer_layers, more_layers) is True
+        assert _is_better_result(more_layers, fewer_layers) is False
+
+    def test_none_stats_handled_gracefully(self):
+        """Results with None stats use 0 defaults for tiebreaker fields."""
+        from kicad_tools.cli.route_cmd import (
+            RuleRelaxationResult,
+            _is_better_result,
+        )
+
+        with_stats = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats={"segments": 10, "vias": 1},
+        )
+        no_stats = RuleRelaxationResult(
+            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
+            via_diameter=0.6, tier_description="user", router=None,
+            net_map={}, nets_routed=0, nets_to_route=20,
+            completion=0.0, success=False, layer_count=2,
+            stats=None,
+        )
+
+        assert _is_better_result(with_stats, no_stats) is True
+        assert _is_better_result(no_stats, with_stats) is False
+
+    def test_layer_escalation_result_works(self):
+        """_is_better_result works with LayerEscalationResult too."""
+        from kicad_tools.cli.route_cmd import (
+            LayerEscalationResult,
+            _is_better_result,
+        )
+
+        better = LayerEscalationResult(
+            layer_count=2, layer_stack=None, router=None, net_map={},
+            nets_routed=0, nets_to_route=20, completion=0.0, success=False,
+            stats={"segments": 30, "vias": 5},
+        )
+        worse = LayerEscalationResult(
+            layer_count=4, layer_stack=None, router=None, net_map={},
+            nets_routed=0, nets_to_route=20, completion=0.0, success=False,
+            stats={"segments": 10, "vias": 1},
+        )
+
+        assert _is_better_result(better, worse) is True
+        assert _is_better_result(worse, better) is False
+
+
+class TestTiebreakerInRuleRelaxation:
+    """Integration: verify tiebreaker selects best result in rule relaxation."""
+
+    def test_early_stop_does_not_trigger_on_tied_completion(self):
+        """When all completions are 0.0, early-stop should not trigger."""
+        from kicad_tools.cli.route_cmd import route_with_rule_relaxation
+
+        tiers = [
+            FakeTier(0, "user", 0.2, 0.15),
+            FakeTier(1, "moderate", 0.15, 0.127),
+            FakeTier(2, "aggressive", 0.127, 0.1),
+        ]
+
+        # All tie at 0% completion
+        routers = [
+            _make_fake_router(0, 20, segments=10),
+            _make_fake_router(0, 20, segments=20),
+            _make_fake_router(0, 20, segments=30),
+        ]
+        router_idx = [0]
+
+        def fake_load_pcb(*args, **kwargs):
+            r = routers[router_idx[0]]
+            router_idx[0] += 1
+            return r, {"net1": 1}
+
+        args = _make_args()  # early_stop enabled (default)
+
+        with _patches_for_relaxation(tiers, fake_load_pcb):
+            route_with_rule_relaxation(
+                pcb_path=MagicMock(),
+                output_path=MagicMock(),
+                args=args,
+                quiet=True,
+            )
+
+        # All 3 tiers should run (no regression in completion, all 0.0)
+        assert router_idx[0] == 3
