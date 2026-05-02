@@ -118,26 +118,43 @@ class ZoneGenerator:
         gen.save("board_with_zones.kicad_pcb")
     """
 
-    def __init__(self, pcb: PCB, doc: SExp | None = None):
+    def __init__(
+        self,
+        pcb: PCB,
+        doc: SExp | None = None,
+        edge_clearance: float | None = None,
+    ):
         """Initialize zone generator.
 
         Args:
             pcb: Parsed PCB object
             doc: Raw S-expression document (for modification)
+            edge_clearance: If set, inset the auto-derived board outline
+                by this many mm so zone copper does not extend to the
+                board edge.  Only affects the automatic board-outline
+                boundary; explicit ``boundary`` arguments to
+                :meth:`add_zone` are never modified.
         """
         self._pcb = pcb
         self._doc = doc
+        self._edge_clearance = edge_clearance
         self._zones: list[GeneratedZone] = []
         self._warnings: list[ZoneOverlapWarning] = []
         self._board_outline: list[tuple[float, float]] | None = None
         self._applied = False
 
     @classmethod
-    def from_pcb(cls, path: str | Path) -> ZoneGenerator:
+    def from_pcb(
+        cls,
+        path: str | Path,
+        edge_clearance: float | None = None,
+    ) -> ZoneGenerator:
         """Load PCB and create zone generator.
 
         Args:
             path: Path to .kicad_pcb file
+            edge_clearance: Optional edge clearance in mm (see
+                :meth:`__init__` for details).
 
         Returns:
             ZoneGenerator instance
@@ -145,7 +162,7 @@ class ZoneGenerator:
         path = Path(path)
         pcb = PCB.load(str(path))
         doc = parse_file(path)
-        return cls(pcb, doc)
+        return cls(pcb, doc, edge_clearance=edge_clearance)
 
     @property
     def pcb(self) -> PCB:
@@ -158,6 +175,10 @@ class ZoneGenerator:
 
         Uses cached outline if available, otherwise extracts from PCB.
         Falls back to a default rectangle if no Edge.Cuts layer found.
+
+        When *edge_clearance* was set at construction time, the outline
+        is inset by that distance using Shapely's ``buffer(-clearance)``
+        so that zone copper does not extend to the board edge.
 
         Zone boundaries written to the PCB file must be in sheet-absolute
         coordinates. ``get_board_outline()`` returns board-relative coords,
@@ -174,7 +195,58 @@ class ZoneGenerator:
             else:
                 # Fallback: create outline from board bounds
                 self._board_outline = self._estimate_board_bounds()
+
+            # Apply edge clearance inset if configured
+            if self._edge_clearance and self._edge_clearance > 0:
+                try:
+                    self._board_outline = self._inset_polygon(
+                        self._board_outline, self._edge_clearance
+                    )
+                except ImportError:
+                    import warnings
+
+                    warnings.warn(
+                        "shapely is required for edge_clearance inset "
+                        "(install with: pip install kicad-tools[geometry]). "
+                        "Zone boundary will use exact board outline.",
+                        stacklevel=2,
+                    )
         return self._board_outline
+
+    @staticmethod
+    def _inset_polygon(
+        coords: list[tuple[float, float]],
+        distance: float,
+    ) -> list[tuple[float, float]]:
+        """Shrink a polygon inward by *distance* mm using Shapely.
+
+        If the inset collapses the polygon (e.g. very thin peninsulas),
+        returns the original coordinates unchanged.
+        """
+        from shapely.geometry import Polygon
+
+        poly = Polygon(coords)
+        inset = poly.buffer(-distance)
+
+        if inset.is_empty:
+            # Collapsed polygon -- fall back to original
+            return coords
+
+        # buffer() may return a MultiPolygon if thin regions collapse;
+        # keep only the largest polygon.
+        if inset.geom_type == "MultiPolygon":
+            inset = max(inset.geoms, key=lambda g: g.area)
+
+        # Extract exterior coordinates (Shapely repeats the first point
+        # at the end; drop the duplicate).
+        exterior_coords = list(inset.exterior.coords)
+        if (
+            len(exterior_coords) > 1
+            and exterior_coords[0] == exterior_coords[-1]
+        ):
+            exterior_coords = exterior_coords[:-1]
+
+        return [(round(x, 6), round(y, 6)) for x, y in exterior_coords]
 
     def _estimate_board_bounds(self) -> list[tuple[float, float]]:
         """Estimate board bounds from component positions.
@@ -636,6 +708,7 @@ def _assign_layers_for_pour_nets(
 def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
     pour_nets: list[tuple[str, "NetClass"]],
+    edge_clearance: float | None = None,
 ) -> int:
     """Create zones for power and ground nets on a PCB.
 
@@ -658,12 +731,15 @@ def auto_create_zones_for_pour_nets(
         pcb_path: Path to .kicad_pcb file (modified in place)
         pour_nets: List of (net_name, NetClass) tuples identifying
             which nets need zones
+        edge_clearance: Optional edge clearance in mm.  When set, the
+            auto-derived board outline is inset by this distance so that
+            zone copper does not extend to the board edge.
 
     Returns:
         Number of zones created
     """
     pcb_path = Path(pcb_path)
-    gen = ZoneGenerator.from_pcb(pcb_path)
+    gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
 
     copper_layer_count = len(gen.pcb.copper_layers)
     assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets)
