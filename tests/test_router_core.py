@@ -3736,3 +3736,77 @@ class TestPowerNetStallAbort:
         assert elapsed < 30.0, (
             f"Routing took {elapsed:.1f}s -- early-abort did not engage"
         )
+
+
+class TestEscalationStateReset:
+    """Tests for Issue #2396: Autorouter.reset_attempt_state().
+
+    The method documents the invariant that between layer-escalation
+    attempts, no router state from the prior attempt influences the
+    next.  Today this is a no-op (the orchestrator creates a fresh
+    Autorouter per attempt), but the method prevents silent regression.
+    """
+
+    def test_reset_clears_power_stall_abort(self):
+        """reset_attempt_state clears power_stall_abort to False."""
+        router = Autorouter(width=50.0, height=40.0)
+        router.power_stall_abort = True
+        router.reset_attempt_state()
+        assert router.power_stall_abort is False
+
+    def test_reset_clears_power_stall_nets(self):
+        """reset_attempt_state clears power_stall_nets to empty list."""
+        router = Autorouter(width=50.0, height=40.0)
+        router.power_stall_nets = ["+3.3V", "GND"]
+        router.reset_attempt_state()
+        assert router.power_stall_nets == []
+
+    def test_reset_clears_routing_failures(self):
+        """reset_attempt_state clears routing_failures to empty list."""
+        router = Autorouter(width=50.0, height=40.0)
+        router.routing_failures.append(
+            RoutingFailure(net=1, net_name="TEST", source_pad=("U1", "1"), target_pad=("U1", "2"), reason="TEST_FAILURE")
+        )
+        router.reset_attempt_state()
+        assert router.routing_failures == []
+
+    def test_reset_clears_perturbation_magnitude(self):
+        """reset_attempt_state zeroes _perturbation_magnitude."""
+        router = Autorouter(width=50.0, height=40.0)
+        router._perturbation_magnitude = 0.5
+        router.reset_attempt_state()
+        assert router._perturbation_magnitude == 0.0
+
+    def test_reset_clears_congestion_estimator(self):
+        """reset_attempt_state sets _congestion_estimator to None."""
+        router = Autorouter(width=50.0, height=40.0)
+        router._congestion_estimator = "sentinel"
+        router.reset_attempt_state()
+        assert router._congestion_estimator is None
+
+    def test_reset_all_fields_at_once(self):
+        """Mutate all fields, call reset, assert all back to defaults."""
+        router = Autorouter(width=50.0, height=40.0)
+        router.power_stall_abort = True
+        router.power_stall_nets = ["+3.3V", "GND"]
+        router.routing_failures.append(
+            RoutingFailure(net=1, net_name="TEST", source_pad=("U1", "1"), target_pad=("U1", "2"), reason="TEST")
+        )
+        router._perturbation_magnitude = 0.3
+        router._congestion_estimator = "sentinel"
+
+        router.reset_attempt_state()
+
+        assert router.power_stall_abort is False
+        assert router.power_stall_nets == []
+        assert router.routing_failures == []
+        assert router._perturbation_magnitude == 0.0
+        assert router._congestion_estimator is None
+
+    def test_reset_is_idempotent(self):
+        """Calling reset_attempt_state twice is safe."""
+        router = Autorouter(width=50.0, height=40.0)
+        router.power_stall_abort = True
+        router.reset_attempt_state()
+        router.reset_attempt_state()
+        assert router.power_stall_abort is False

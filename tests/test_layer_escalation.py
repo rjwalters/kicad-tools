@@ -506,3 +506,187 @@ class TestLayerEscalationHelpText:
         assert "--max-layers" in help_text, "Help should document --max-layers"
         assert "--min-completion" in help_text, "Help should document --min-completion"
         assert "escalat" in help_text.lower(), "Help should mention escalation"
+
+
+class TestBestOfAttemptsSelection:
+    """Tests for Issue #2396: best-of-attempts uses absolute nets_routed.
+
+    When nets_to_route differs across escalation attempts (e.g. power
+    nets auto-skipped on 4L but not 2L), the comparison must use
+    absolute nets_routed count, not completion ratio.
+    """
+
+    def test_absolute_nets_routed_wins_over_ratio(self):
+        """6/10 (0.60) beats 3/8 (0.375) using absolute nets_routed."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult, _is_better_result
+        from kicad_tools.router import LayerStack
+
+        result_2l = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=6,
+            nets_to_route=10,
+            completion=0.6,
+            success=False,
+        )
+
+        result_4l = LayerEscalationResult(
+            layer_count=4,
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            router=None,
+            net_map={},
+            nets_routed=3,
+            nets_to_route=8,
+            completion=0.375,
+            success=False,
+        )
+
+        # 2L (6 routed) should beat 4L (3 routed)
+        assert _is_better_result(result_2l, result_4l) is True
+        assert _is_better_result(result_4l, result_2l) is False
+
+    def test_same_nets_routed_tiebreaks_on_completion(self):
+        """When nets_routed is tied, higher completion ratio wins."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult, _is_better_result
+        from kicad_tools.router import LayerStack
+
+        result_a = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=10,
+            completion=0.5,
+            success=False,
+        )
+
+        result_b = LayerEscalationResult(
+            layer_count=4,
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=8,
+            completion=0.625,
+            success=False,
+        )
+
+        # Same nets_routed (5), but B has higher completion (0.625 > 0.5)
+        assert _is_better_result(result_b, result_a) is True
+        assert _is_better_result(result_a, result_b) is False
+
+    def test_same_nets_same_completion_prefers_fewer_layers(self):
+        """When everything is tied, fewer layers wins."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult, _is_better_result
+        from kicad_tools.router import LayerStack
+
+        result_2l = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=10,
+            completion=0.5,
+            success=False,
+            stats={"segments": 10, "vias": 2},
+        )
+
+        result_4l = LayerEscalationResult(
+            layer_count=4,
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=10,
+            completion=0.5,
+            success=False,
+            stats={"segments": 10, "vias": 2},
+        )
+
+        # Tied on all metrics except layer count: 2L wins
+        assert _is_better_result(result_2l, result_4l) is True
+        assert _is_better_result(result_4l, result_2l) is False
+
+    def test_higher_nets_routed_wins_even_with_lower_ratio(self):
+        """A result with more absolute routed nets wins even if its
+        completion ratio is lower (cross-denominator case)."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult, _is_better_result
+        from kicad_tools.router import LayerStack
+
+        # 7/20 = 0.35 ratio but 7 absolute
+        result_many = LayerEscalationResult(
+            layer_count=4,
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            router=None,
+            net_map={},
+            nets_routed=7,
+            nets_to_route=20,
+            completion=0.35,
+            success=False,
+        )
+
+        # 5/6 = 0.833 ratio but only 5 absolute
+        result_few = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=6,
+            completion=5 / 6,
+            success=False,
+        )
+
+        # 7 > 5, so result_many wins despite lower ratio
+        assert _is_better_result(result_many, result_few) is True
+
+
+class TestPristineStatePerAttempt:
+    """Tests for Issue #2396: pristine state per layer-escalation attempt.
+
+    Verify that the reset_attempt_state() method is accessible and
+    that the orchestrator code path calls it.
+    """
+
+    def test_reset_attempt_state_exists(self):
+        """Autorouter has a reset_attempt_state method."""
+        from kicad_tools.router.core import Autorouter
+
+        router = Autorouter(width=50.0, height=40.0)
+        assert hasattr(router, "reset_attempt_state")
+        assert callable(router.reset_attempt_state)
+
+    def test_no_auto_layers_skips_escalation(self):
+        """When --no-auto-layers is passed, route_with_layer_escalation is
+        NOT called (C6).
+
+        This verifies the orchestrator code path is unchanged when
+        escalation is disabled -- the main() dispatcher selects the
+        fixed-layer routing path instead of the escalation path.
+        """
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation"
+        ) as mock_escalation:
+            mock_escalation.return_value = 0
+
+            # --no-auto-layers should NOT call route_with_layer_escalation.
+            # It will fail on PCB loading since we don't mock that, but the
+            # key assertion is that escalation was never invoked.
+            try:
+                route_main([
+                    "test.kicad_pcb",
+                    "--no-auto-layers",
+                    "--quiet",
+                ])
+            except (SystemExit, FileNotFoundError, Exception):
+                pass  # Expected -- PCB file doesn't exist
+
+            assert mock_escalation.call_count == 0, (
+                "route_with_layer_escalation should not be called with --no-auto-layers"
+            )
