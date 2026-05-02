@@ -3173,6 +3173,16 @@ class Autorouter:
                     stalled_nets.clear()
                     net_ripup_stall.clear()
 
+                # Issue #2413: Early termination when no nets remain to rip up.
+                # All conflicting nets have been excluded by the stall detector,
+                # so further iterations cannot make progress.
+                if not nets_to_reroute:
+                    flush_print(
+                        f"  No nets to rip up, terminating at iteration "
+                        f"{iteration}/{max_iterations} ({elapsed_str()})"
+                    )
+                    break
+
                 # Issue #2388: Early-abort heuristic for power-net stalls.
                 # If every currently stalled net is a power/pour net, AND
                 # overflow has been flat for at least 2 iterations, the

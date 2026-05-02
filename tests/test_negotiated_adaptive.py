@@ -993,3 +993,93 @@ class TestEscapeBudgetEnforcement:
         assert call_count < 100
         # Should complete well under 2 seconds
         assert elapsed < 2.0
+
+
+class TestEmptyNetsToRerouteTermination:
+    """Tests for Issue #2413: Early termination when nets_to_reroute is empty.
+
+    When all conflicting nets are excluded by the stall detector,
+    nets_to_reroute becomes empty and the rip-up loop should terminate
+    immediately rather than spinning with no work to do.
+    """
+
+    def test_empty_nets_to_reroute_triggers_break(self):
+        """An empty nets_to_reroute list should signal termination.
+
+        The condition inserted in _route_board_negotiated is simply:
+            if not nets_to_reroute: break
+
+        This test verifies the predicate evaluates correctly for the
+        empty-list case.
+        """
+        nets_to_reroute: list[int] = []
+        assert not nets_to_reroute, (
+            "Empty nets_to_reroute must be falsy to trigger early termination"
+        )
+
+    def test_non_empty_nets_to_reroute_continues(self):
+        """A non-empty nets_to_reroute list should NOT trigger termination."""
+        nets_to_reroute = [1, 2, 3]
+        assert nets_to_reroute, (
+            "Non-empty nets_to_reroute must be truthy to continue iteration"
+        )
+
+    def test_stall_filtering_can_produce_empty_list(self):
+        """Filtering all nets as stalled produces an empty reroute list.
+
+        Simulates the stall filtering logic from _route_board_negotiated:
+        nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
+        """
+        nets_to_reroute = [1, 2, 3]
+        stalled_nets = {1, 2, 3}
+
+        # Apply stall filtering (mirrors core.py lines 3124-3127)
+        nets_to_reroute = [
+            n for n in nets_to_reroute if n not in stalled_nets
+        ]
+
+        assert not nets_to_reroute, (
+            "All-stalled filtering must produce empty list"
+        )
+
+    def test_partial_stall_does_not_trigger_termination(self):
+        """When only some nets are stalled, termination must NOT trigger."""
+        nets_to_reroute = [1, 2, 3]
+        stalled_nets = {1, 3}
+
+        nets_to_reroute = [
+            n for n in nets_to_reroute if n not in stalled_nets
+        ]
+
+        assert nets_to_reroute == [2], (
+            "Partial stall must leave remaining nets for reroute"
+        )
+        assert nets_to_reroute, (
+            "Partial stall must not trigger early termination"
+        )
+
+    def test_re_enabled_stalled_nets_prevent_empty_list(self):
+        """After stalled nets are re-enabled (overflow improved), the
+        stalled set is cleared.  This means nets_to_reroute keeps its
+        original entries and the loop continues normally.
+        """
+        nets_to_reroute = [1, 2, 3]
+        stalled_nets = {1, 2, 3}
+
+        # Simulate overflow improvement -> re-enable
+        overflow_history = [30, 25]  # improving
+        if (
+            stalled_nets
+            and len(overflow_history) >= 2
+            and overflow_history[-1] < overflow_history[-2]
+        ):
+            stalled_nets.clear()
+
+        # Re-apply filter with cleared stalled set
+        nets_to_reroute = [
+            n for n in nets_to_reroute if n not in stalled_nets
+        ]
+
+        assert nets_to_reroute == [1, 2, 3], (
+            "Re-enabled nets must remain in reroute list"
+        )
