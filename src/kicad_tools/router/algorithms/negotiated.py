@@ -13,6 +13,7 @@ Adaptive parameter tuning (Issue #633) improves convergence by:
 from __future__ import annotations
 
 import random
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -934,6 +935,8 @@ class NegotiatedRouter:
         present_cost_factor: float,
         mark_route_callback: callable,
         strategy_index: int = 0,
+        per_net_timeout: float | None = None,
+        escape_budget: float | None = None,
     ) -> tuple[bool, int, int]:
         """Try escape strategies when router is stuck oscillating.
 
@@ -951,6 +954,10 @@ class NegotiatedRouter:
             present_cost_factor: Current congestion cost factor
             mark_route_callback: Callback to mark routes on the grid
             strategy_index: Index of strategy to start from (cycles through available)
+            per_net_timeout: Wall-clock timeout in seconds for each per-net A*
+                search within escape strategies (Issue #2415)
+            escape_budget: Wall-clock budget in seconds for the entire escape
+                attempt across all strategies (Issue #2415). None means no limit.
 
         Returns:
             Tuple of (success, overflow, strategies_tried) where success indicates
@@ -965,8 +972,14 @@ class NegotiatedRouter:
 
         num_strategies = len(strategies)
         strategies_tried = 0
+        escape_start = time.time()
 
         for i in range(num_strategies):
+            # Check escape budget before starting each strategy
+            if escape_budget is not None:
+                if time.time() - escape_start >= escape_budget:
+                    break
+
             idx = (strategy_index + i) % num_strategies
             strategy = strategies[idx]
             strategies_tried += 1
@@ -979,12 +992,15 @@ class NegotiatedRouter:
                 net_order=net_order,
                 present_cost_factor=present_cost_factor,
                 mark_route_callback=mark_route_callback,
+                per_net_timeout=per_net_timeout,
+                escape_budget_start=escape_start,
+                escape_budget=escape_budget,
             )
 
             if success:
                 return True, new_overflow, strategies_tried
 
-        # All strategies exhausted without success
+        # All strategies exhausted (or budget expired) without success
         current_overflow = overflow_history[-1] if overflow_history else 0
         return False, current_overflow, strategies_tried
 
@@ -997,6 +1013,9 @@ class NegotiatedRouter:
         net_order: list[int],
         present_cost_factor: float,
         mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: shuffle the net order randomly.
 
@@ -1023,10 +1042,17 @@ class NegotiatedRouter:
         rerouted_count = 0
         expected_count = 0
         for net in shuffled:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
-                routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
+                routes = self.route_net_negotiated(
+                    net_pads, boosted_cost, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
                 if routes:
                     net_routes[net] = routes
                     rerouted_count += 1
@@ -1051,6 +1077,9 @@ class NegotiatedRouter:
         net_order: list[int],
         present_cost_factor: float,
         mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: reverse the net order.
 
@@ -1075,10 +1104,17 @@ class NegotiatedRouter:
         rerouted_count = 0
         expected_count = 0
         for net in reversed_order:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
-                routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
+                routes = self.route_net_negotiated(
+                    net_pads, boosted_cost, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
                 if routes:
                     net_routes[net] = routes
                     rerouted_count += 1
@@ -1103,6 +1139,9 @@ class NegotiatedRouter:
         net_order: list[int],
         present_cost_factor: float,
         mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: rip up and reroute a random subset of nets.
 
@@ -1128,10 +1167,17 @@ class NegotiatedRouter:
         rerouted_count = 0
         expected_count = 0
         for net in subset:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
-                routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
+                routes = self.route_net_negotiated(
+                    net_pads, boosted_cost, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
                 if routes:
                     net_routes[net] = routes
                     rerouted_count += 1
@@ -1156,6 +1202,9 @@ class NegotiatedRouter:
         net_order: list[int],
         present_cost_factor: float,
         mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: rip up ALL nets and reroute in alternative order.
 
@@ -1187,10 +1236,15 @@ class NegotiatedRouter:
         boosted_cost = present_cost_factor * 1.5
         rerouted_count = 0
         for net in reorder:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 routes = self.route_net_negotiated(
-                    net_pads, boosted_cost, mark_route_callback
+                    net_pads, boosted_cost, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
                 )
                 if routes:
                     net_routes[net] = routes
