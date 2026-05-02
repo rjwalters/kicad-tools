@@ -1450,8 +1450,9 @@ class TestEscapeRouteRipupEligibility:
             autorouter.route_with_escape()
             mock_prepass.assert_called_once()
 
-    def test_route_with_escape_passes_initial_routes_to_two_phase(self, autorouter):
-        """Escape routes are passed as initial_routes to route_all_two_phase."""
+    def test_route_with_escape_does_not_pass_initial_routes(self, autorouter):
+        """Escape routes are NOT passed as initial_routes; main routing connects
+        to escape endpoints via virtual pad overrides instead."""
         from unittest.mock import MagicMock, patch
 
         autorouter.add_component(
@@ -1479,8 +1480,7 @@ class TestEscapeRouteRipupEligibility:
             autorouter.route_with_escape()
             mock_two_phase.assert_called_once()
             call_kwargs = mock_two_phase.call_args[1]
-            assert "initial_routes" in call_kwargs
-            assert call_kwargs["initial_routes"] == [fake_escape]
+            assert "initial_routes" not in call_kwargs
 
     def test_two_phase_initial_routes_seeded_into_net_routes(self, rules):
         """Initial routes are seeded into the negotiated router's net_routes."""

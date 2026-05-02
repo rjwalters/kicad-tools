@@ -449,6 +449,14 @@ class Autorouter:
         self.power_stall_abort: bool = False
         self.power_stall_nets: list[str] = []
 
+        # Issue #2401: Escape endpoint pad overrides.
+        # After escape routing, pads that have successful escape routes are
+        # replaced by virtual pads at the escape endpoint coordinates.  The
+        # main routing pipeline (RSMT + A*) then routes between escape
+        # endpoints instead of original pad centers, avoiding conflicts with
+        # escape stub segments.
+        # Maps (ref, pin) -> virtual Pad at escape endpoint.
+        self._escape_pad_overrides: dict[tuple[str, str], Pad] = {}
         # Fine-grid routing count (updated by route_all_multi_resolution)
         self.fine_grid_nets_count: int = 0
 
@@ -1170,7 +1178,13 @@ class Autorouter:
         if len(pads_for_routing) < 2:
             return routes
 
-        pad_objs = [self.pads[p] for p in pads_for_routing]
+        # Issue #2401: Substitute escaped pads with virtual pads at escape
+        # endpoints so RSMT + A* route between escape endpoints, not original
+        # pad centers.
+        pad_objs = [
+            self._escape_pad_overrides.get(p, self.pads[p])
+            for p in pads_for_routing
+        ]
 
         # Issue #2336: Try sub-problem pattern cache before A* search.
         # Compute a position/rotation-invariant signature and check for a
@@ -2333,7 +2347,12 @@ class Autorouter:
         if len(pads_for_routing) < 2:
             return routes
 
-        pad_objs = [self.pads[p] for p in pads_for_routing]
+        # Issue #2401: Substitute escaped pads with virtual pads at escape
+        # endpoints.
+        pad_objs = [
+            self._escape_pad_overrides.get(p, self.pads[p])
+            for p in pads_for_routing
+        ]
 
         # Route MST edges in order (shortest first)
         # The mst_edges contain indices into the original pad list
@@ -2842,7 +2861,12 @@ class Autorouter:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
                 if len(pads_for_routing) >= 2:
-                    pads_by_net[net] = [self.pads[p] for p in pads_for_routing]
+                    # Issue #2401: Substitute escaped pads with virtual pads
+                    # at escape endpoints.
+                    pads_by_net[net] = [
+                        self._escape_pad_overrides.get(p, self.pads[p])
+                        for p in pads_for_routing
+                    ]
 
         def check_timeout() -> bool:
             """Check if timeout has been reached."""
@@ -3789,7 +3813,13 @@ class Autorouter:
         if len(pads_for_routing) < 2:
             return routes
 
-        pad_objs = [self.pads[p] for p in pads_for_routing]
+        # Issue #2401: Substitute escaped pads with virtual pads at escape
+        # endpoints so RSMT + A* route between escape endpoints, not original
+        # pad centers.
+        pad_objs = [
+            self._escape_pad_overrides.get(p, self.pads[p])
+            for p in pads_for_routing
+        ]
         neg_router = NegotiatedRouter(
             self.grid, self.router, self.rules, self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
@@ -4067,7 +4097,13 @@ class Autorouter:
         if len(pads_for_routing) < 2:
             return routes
 
-        pad_objs = [self.pads[p] for p in pads_for_routing]
+        # Issue #2401: Substitute escaped pads with virtual pads at escape
+        # endpoints so RSMT + A* route between escape endpoints, not original
+        # pad centers.
+        pad_objs = [
+            self._escape_pad_overrides.get(p, self.pads[p])
+            for p in pads_for_routing
+        ]
         neg_router = NegotiatedRouter(
             self.grid, self.router, self.rules, self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
@@ -5421,9 +5457,39 @@ class Autorouter:
             # Track these routes
             self.routes.extend(routes)
 
+            # Issue #2401: Build virtual pads at escape endpoints so the
+            # main routing pipeline routes between escape endpoints instead
+            # of original pad centers.  Also mark escape nets as protected
+            # so their stub segments are not ripped up.
+            for escape in escapes:
+                pad = escape.pad
+                pad_key = (pad.ref, pad.pin)
+                if pad_key in self.pads:
+                    ep_x, ep_y = escape.escape_point
+                    virtual_pad = Pad(
+                        x=ep_x,
+                        y=ep_y,
+                        width=pad.width,
+                        height=pad.height,
+                        net=pad.net,
+                        net_name=pad.net_name,
+                        layer=escape.escape_layer,
+                        ref=pad.ref,
+                        pin=pad.pin,
+                        through_hole=pad.through_hole,
+                        drill=pad.drill,
+                    )
+                    self._escape_pad_overrides[pad_key] = virtual_pad
+
             print(
                 f"  Escape routes: {package.ref} ({package.package_type.name})"
                 f" - {len(escapes)} pins escaped"
+            )
+
+        if self._escape_pad_overrides:
+            print(
+                f"  Escape endpoint overrides: {len(self._escape_pad_overrides)} pads "
+                f"remapped to escape endpoints"
             )
 
         return all_routes
@@ -5488,16 +5554,17 @@ class Autorouter:
         print("\n--- Phase 2: Main Routing ---")
 
         if use_negotiated:
-            # Issue #2294: Pass escape routes as initial_routes so the
-            # two-phase router's rip-up loop can displace them when they
-            # block higher-priority nets.  Without this, escape routes
-            # are permanently reserved on the grid and cannot be rerouted.
+            # Issue #2401: Escape routes are now permanent infrastructure.
+            # The main routing pipeline routes between escape endpoints
+            # (virtual pads), not original pad centers, so escape stubs
+            # naturally connect without blocking.  Do NOT pass escape
+            # routes as initial_routes -- they must be preserved on the
+            # grid as fixed segments.
             main_routes = self.route_all_two_phase(
                 use_negotiated=True,
                 corridor_width_factor=2.0,
                 progress_callback=progress_callback,
                 timeout=timeout,
-                initial_routes=escape_routes,
             )
         else:
             main_routes = self.route_all(
@@ -6050,7 +6117,12 @@ class Autorouter:
             if len(pads_keys) < 2:
                 continue
 
-            pad_objs = [self.pads[p] for p in pads_keys if p in self.pads]
+            # Issue #2401: Substitute escaped pads with virtual pads at
+            # escape endpoints.
+            pad_objs = [
+                self._escape_pad_overrides.get(p, self.pads[p])
+                for p in pads_keys if p in self.pads
+            ]
             if len(pad_objs) < 2:
                 continue
 
@@ -6276,8 +6348,12 @@ class Autorouter:
                 if len(pads) < 2:
                     continue
 
-                # Get pad objects
-                pad_objs = [self.pads[p] for p in pads]
+                # Issue #2401: Substitute escaped pads with virtual pads at
+                # escape endpoints.
+                pad_objs = [
+                    self._escape_pad_overrides.get(p, self.pads[p])
+                    for p in pads
+                ]
 
                 # Create negotiated router with relaxed rules
                 neg_router = NegotiatedRouter(
