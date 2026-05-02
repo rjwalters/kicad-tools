@@ -138,59 +138,6 @@ class TestEscapePadOverrides:
             assert virtual_pad.ref == original_pad.ref
             assert virtual_pad.pin == original_pad.pin
 
-    def test_escape_protected_nets_populated(self):
-        """Nets with escape routes are added to _escape_protected_nets."""
-        from kicad_tools.router.core import Autorouter
-
-        rules = DesignRules(
-            trace_width=0.2,
-            trace_clearance=0.2,
-            via_drill=0.3,
-            via_diameter=0.6,
-        )
-
-        router = Autorouter(width=30.0, height=30.0, rules=rules)
-
-        pads = []
-        net = 1
-        for i in range(10):
-            pads.append({
-                "x": 10.0 + i * 0.65,
-                "y": 13.0,
-                "width": 0.3,
-                "height": 0.8,
-                "net": net,
-                "net_name": f"NET_{net}",
-                "layer": Layer.F_CU,
-                "number": str(i + 1),
-            })
-            net += 1
-        for i in range(10):
-            pads.append({
-                "x": 10.0 + i * 0.65,
-                "y": 17.0,
-                "width": 0.3,
-                "height": 0.8,
-                "net": net,
-                "net_name": f"NET_{net}",
-                "layer": Layer.F_CU,
-                "number": str(i + 11),
-            })
-            net += 1
-
-        router.add_component("U1", pads)
-
-        dense = router.detect_dense_packages()
-        if not dense:
-            pytest.skip("Package not detected as dense")
-
-        router.generate_escape_routes(dense)
-
-        assert len(router._escape_protected_nets) > 0, (
-            "Expected escape protected nets to be populated"
-        )
-
-
 class TestRSMTUsesEscapeEndpoints:
     """Test that build_rsmt uses virtual pad positions."""
 

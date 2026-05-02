@@ -457,9 +457,6 @@ class Autorouter:
         # escape stub segments.
         # Maps (ref, pin) -> virtual Pad at escape endpoint.
         self._escape_pad_overrides: dict[tuple[str, str], Pad] = {}
-        # Nets whose escape route segments should not be ripped up.
-        self._escape_protected_nets: set[int] = set()
-
         # Fine-grid routing count (updated by route_all_multi_resolution)
         self.fine_grid_nets_count: int = 0
 
@@ -5419,7 +5416,6 @@ class Autorouter:
                         drill=pad.drill,
                     )
                     self._escape_pad_overrides[pad_key] = virtual_pad
-                    self._escape_protected_nets.add(pad.net)
 
             print(
                 f"  Escape routes: {package.ref} ({package.package_type.name})"
