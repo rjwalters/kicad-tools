@@ -1435,6 +1435,15 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             width = float(size_match.group(1)) if size_match else 0.3
             height = float(size_match.group(2)) if size_match else 0.3
 
+            # Rotate pad dimensions to PCB space (same fix as load_pcb_for_routing)
+            pad_rot_match = re.search(
+                r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block
+            )
+            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
+            total_rot = (fp_rot + pad_rot) % 360
+            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
+                width, height = height, width
+
             # Extract net
             net_match = re.search(r"\(net\s+(\d+)", pad_block)
             net_num = int(net_match.group(1)) if net_match else 0
@@ -2466,6 +2475,19 @@ def load_pcb_for_routing(
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
+
+            # Also extract per-pad rotation if present
+            pad_rot_match = re.search(
+                r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block
+            )
+            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
+
+            # Rotate pad dimensions to PCB space.  The combined rotation
+            # of footprint + pad determines whether width/height swap.
+            total_rot = (fp_rot + pad_rot) % 360
+            # At 90° or 270° the pad's width and height axes swap
+            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
+                pad_w, pad_h = pad_h, pad_w
 
             pads.append(
                 {
