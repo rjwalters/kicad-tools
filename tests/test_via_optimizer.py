@@ -397,3 +397,109 @@ class TestOptimizationWithValidation:
         assert stats.vias_before == 1
         # Via count after depends on whether optimization was applied
         assert stats.vias_after >= 0
+
+
+class TestViaConnectivityPreservation:
+    """Test that via minimization preserves multi-layer pad connectivity."""
+
+    def test_required_via_not_removed_when_pads_on_both_layers(self):
+        """A via connecting pads on F.Cu and B.Cu must not be removed.
+
+        Scenario: pad on F.Cu at (0,0) -- seg F.Cu --> via at (5,0) -- seg B.Cu --> pad on B.Cu at (10,0).
+        The via is the only connection between layers; removing it disconnects
+        the B.Cu pad.  The optimizer must keep it.
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # The via MUST be retained -- removing it would disconnect the B.Cu pad.
+        assert len(result.vias) == 1, (
+            "Required via was removed, breaking layer connectivity"
+        )
+
+    def test_redundant_via_still_removed_when_pads_on_same_layer(self):
+        """A via between same-layer pads is redundant and should be removed.
+
+        Scenario: pad on F.Cu at (0,0) -- seg F.Cu --> via at (1,0) -- seg B.Cu --> via at (2,0) -- seg F.Cu --> pad at (3,0).
+        The down-up via pair is redundant because both endpoints are on F.Cu.
+        Vias are placed within the via_pair_threshold (2.0 mm).
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=1, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=1, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=1, y1=0, x2=2, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=2, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=2, y1=0, x2=3, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2])
+        result = optimizer.optimize_route(route)
+
+        # Both vias should be removable (via pair elimination).
+        assert len(result.vias) < 2, (
+            "Redundant via pair was not removed"
+        )
+
+    def test_partial_via_removal_with_three_vias(self):
+        """In a route with 3 vias, only redundant ones should be removed.
+
+        Scenario: F.Cu pad -> via1(F->B) -> B.Cu segment -> via2(B->F) -> F.Cu segment -> via3(F->B) -> B.Cu pad.
+        via1+via2 form a redundant pair (down-up), but via3 is required for
+        the B.Cu pad.  Only via1+via2 should be removed.
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=2, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=2, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=2, y1=0, x2=4, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=4, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=4, y1=0, x2=8, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via3 = Via(x=8, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg4 = Segment(x1=8, y1=0, x2=12, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(
+            net=1,
+            net_name="Net1",
+            segments=[seg1, seg2, seg3, seg4],
+            vias=[via1, via2, via3],
+        )
+        result = optimizer.optimize_route(route)
+
+        # via3 must be kept (connects to B.Cu pad at (12,0))
+        assert len(result.vias) >= 1, "All vias removed -- B.Cu pad disconnected"
+
+        # Check layer connectivity is valid
+        errors = optimizer.validate_layer_connectivity(result)
+        assert len(errors) == 0, f"Layer connectivity errors: {errors}"
+
+
+class TestEndpointsPreservedAfterViaMinimization:
+    """Test that _endpoints_preserved guard in TraceOptimizer catches via-induced disconnects."""
+
+    def test_trace_optimizer_preserves_multi_layer_connectivity(self):
+        """TraceOptimizer.optimize_route must not break multi-layer pad connectivity.
+
+        This is the end-to-end test through TraceOptimizer, verifying that
+        the _endpoints_preserved guard runs after via minimization.
+        """
+        config = OptimizationConfig(minimize_vias=True)
+        optimizer = TraceOptimizer(config=config)
+
+        # Pad on F.Cu at (0,0), pad on B.Cu at (10,0), connected by via at (5,0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # The via must remain -- the B.Cu pad would be disconnected without it
+        assert len(result.vias) >= 1, (
+            "TraceOptimizer removed required via, breaking layer connectivity"
+        )

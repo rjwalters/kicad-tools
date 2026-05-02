@@ -24,6 +24,96 @@ if TYPE_CHECKING:
     pass
 
 
+def _via_removal_preserves_connectivity(
+    segments: list[Segment],
+    vias: list[Via],
+    candidate_via: Via,
+    seg_before: Segment,
+    seg_after: Segment,
+    alt_path: list[Segment],
+    tolerance: float = 1e-4,
+) -> bool:
+    """Check whether removing *candidate_via* preserves pad connectivity.
+
+    Computes the degree-1 (pad-like) terminal endpoints from the
+    *current* segment+via graph, then simulates the removal (drop
+    ``candidate_via``, ``seg_before``, ``seg_after``; add ``alt_path``)
+    and verifies every original terminal is still reachable in a single
+    connected component of the hypothetical graph.
+
+    The key insight is that terminals are identified on the *pre-removal*
+    graph.  If a pad exists on B.Cu, its vertex must still be present and
+    connected after the removal even though the hypothetical graph may no
+    longer contain any B.Cu segments.
+    """
+
+    def _key(x: float, y: float, layer: Layer) -> tuple[int, int, int]:
+        if tolerance <= 0:
+            qx = int(round(x * 1e9))
+            qy = int(round(y * 1e9))
+        else:
+            qx = int(round(x / tolerance))
+            qy = int(round(y / tolerance))
+        return (qx, qy, int(layer.value))
+
+    # --- Identify terminals on the CURRENT (pre-removal) graph. ---
+    pre_counts: dict[tuple[int, int, int], int] = {}
+    for seg in segments:
+        for x, y in (seg.start, seg.end):
+            k = _key(x, y, seg.layer)
+            pre_counts[k] = pre_counts.get(k, 0) + 1
+    terminals = {k for k, c in pre_counts.items() if c == 1}
+
+    if len(terminals) < 2:
+        return True  # Nothing to disconnect
+
+    # --- Build the hypothetical segment list after the removal. ---
+    hyp_segments: list[Segment] = []
+    for seg in segments:
+        if seg is seg_before or seg is seg_after:
+            continue
+        hyp_segments.append(seg)
+    hyp_segments.extend(alt_path)
+
+    hyp_vias: list[Via] = [v for v in vias if v is not candidate_via]
+
+    # --- Build adjacency graph of the hypothetical state. ---
+    adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+
+    def _add(a: tuple[int, int, int], b: tuple[int, int, int]) -> None:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    for seg in hyp_segments:
+        a = _key(seg.x1, seg.y1, seg.layer)
+        b = _key(seg.x2, seg.y2, seg.layer)
+        _add(a, b)
+
+    for via in hyp_vias:
+        if not via.layers or len(via.layers) < 2:
+            continue
+        a = _key(via.x, via.y, via.layers[0])
+        b = _key(via.x, via.y, via.layers[1])
+        _add(a, b)
+
+    # Every original terminal must still exist in the hypothetical graph.
+    if not terminals.issubset(adjacency.keys()):
+        return False
+
+    # All terminals must lie in the same connected component (BFS).
+    start = next(iter(terminals))
+    visited: set[tuple[int, int, int]] = {start}
+    queue = [start]
+    while queue:
+        node = queue.pop()
+        for nbr in adjacency.get(node, ()):
+            if nbr not in visited:
+                visited.add(nbr)
+                queue.append(nbr)
+
+    return terminals.issubset(visited)
+
+
 @dataclass
 class ViaContext:
     """Context for a via within a route.
@@ -380,12 +470,23 @@ class ViaOptimizer:
             )
 
             if alt_path:
-                # Apply the optimization
-                self._apply_single_via_removal(
-                    ctx, seg_before, seg_after, alt_path, segments, vias, route
-                )
-                removed += 1
-                continue
+                # Verify removing this via preserves pad connectivity
+                if _via_removal_preserves_connectivity(
+                    segments,
+                    vias,
+                    ctx.via,
+                    seg_before,
+                    seg_after,
+                    alt_path,
+                    tolerance=self.config.tolerance,
+                ):
+                    self._apply_single_via_removal(
+                        ctx, seg_before, seg_after, alt_path, segments, vias, route
+                    )
+                    removed += 1
+                    continue
+                # Connectivity would break on the 'before' layer -- fall
+                # through to try the 'after' layer instead.
 
             # Try on the 'after' layer
             alt_path = self._find_same_layer_path(
@@ -400,10 +501,19 @@ class ViaOptimizer:
             )
 
             if alt_path:
-                self._apply_single_via_removal(
-                    ctx, seg_before, seg_after, alt_path, segments, vias, route
-                )
-                removed += 1
+                if _via_removal_preserves_connectivity(
+                    segments,
+                    vias,
+                    ctx.via,
+                    seg_before,
+                    seg_after,
+                    alt_path,
+                    tolerance=self.config.tolerance,
+                ):
+                    self._apply_single_via_removal(
+                        ctx, seg_before, seg_after, alt_path, segments, vias, route
+                    )
+                    removed += 1
 
         return removed
 
