@@ -457,6 +457,111 @@ class TestUpdatePcbLayerStackupPowerLayers:
         assert '(0 "F.Cu"' in result
 
 
+class TestLayerStackupParenBalance:
+    """Tests for Issue #2416: S-expression syntax error from unbalanced parens.
+
+    Realistic KiCad PCB files include non-copper layers (B.SilkS, Edge.Cuts,
+    etc.) in the (layers ...) block. The old regex only matched through the
+    first inner entry's closing paren, orphaning the rest and producing
+    unbalanced parentheses.
+    """
+
+    REALISTIC_2L_PCB = """\
+(kicad_pcb
+  (version 20240101)
+  (generator "kicad")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user "B.Mask")
+    (39 "F.Mask" user "F.Mask")
+    (44 "Edge.Cuts" user)
+    (45 "Margin" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+)"""
+
+    def test_2_to_4_balanced_parens(self):
+        """Upgrading 2L to 4L with non-copper layers produces balanced parens."""
+        from kicad_tools.cli.route_cmd import (
+            _validate_sexp_parentheses,
+            update_pcb_layer_stackup,
+        )
+
+        result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
+
+        assert _validate_sexp_parentheses(result), (
+            "Output has unbalanced parentheses"
+        )
+        assert '"In1.Cu"' in result
+        assert '"In2.Cu"' in result
+        assert '"F.Cu"' in result
+        assert '"B.Cu"' in result
+
+    def test_2_to_6_balanced_parens(self):
+        """Upgrading 2L to 6L with non-copper layers produces balanced parens."""
+        from kicad_tools.cli.route_cmd import (
+            _validate_sexp_parentheses,
+            update_pcb_layer_stackup,
+        )
+
+        result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 6)
+
+        assert _validate_sexp_parentheses(result), (
+            "Output has unbalanced parentheses"
+        )
+        assert '"In1.Cu"' in result
+        assert '"In4.Cu"' in result
+
+    def test_non_copper_layers_preserved_after_upgrade(self):
+        """Non-copper layers (SilkS, Edge.Cuts, Fab, etc.) survive the upgrade."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
+
+        for layer_name in [
+            "B.Adhes", "F.Adhes", "B.Paste", "F.Paste",
+            "B.SilkS", "F.SilkS", "B.Mask", "F.Mask",
+            "Edge.Cuts", "Margin", "B.CrtYd", "F.CrtYd",
+            "B.Fab", "F.Fab",
+        ]:
+            assert layer_name in result, (
+                f"Non-copper layer {layer_name!r} was lost during upgrade"
+            )
+
+    def test_content_outside_layers_block_preserved(self):
+        """Content after the (layers ...) block is not corrupted."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
+
+        assert '(net 0 "")' in result
+        assert '(net 1 "VCC")' in result
+
+    def test_non_copper_entries_with_extra_fields(self):
+        """Layer entries with extra string fields (e.g. user "B.Adhesive")
+        are preserved correctly."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
+
+        # Entries with display name strings should survive
+        assert "B.Adhesive" in result
+        assert "F.Silkscreen" in result
+        assert "B.Courtyard" in result
+
+
 class TestLayerEscalationResult:
     """Tests for LayerEscalationResult dataclass."""
 

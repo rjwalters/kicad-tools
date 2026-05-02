@@ -711,39 +711,52 @@ def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
     if target_layers not in layer_defs:
         return pcb_content
 
-    # Find and replace the layers section
-    # KiCad format: (layers (0 "F.Cu" signal) ... )
-    layers_pattern = re.compile(
-        r'(\(layers\s+)([^)]*"(?:F\.Cu|B\.Cu|In\d+\.Cu)"[^)]*\s*)+(\))',
-        re.DOTALL,
-    )
-
-    def replace_layers(match):
-        # Build new layers content
-        new_layers = "\n    ".join(layer_defs[target_layers])
-        return f"(layers\n    {new_layers}\n  )"
-
     # Check if we need to update — count ALL copper layers regardless of type
     # (signal, power, mixed, etc.) not just those marked "signal"
     current_layers = len(re.findall(r'\(\d+\s+"[^"]*\.Cu"\s+\w+', pcb_content))
     if current_layers >= target_layers:
         return pcb_content
 
-    # Try to find and replace the layers section
+    # Match the entire (layers ...) block including all inner entries.
+    # Each inner entry is e.g. (0 "F.Cu" signal) or (44 "Edge.Cuts" user "Edge.Cuts").
+    # The pattern matches from "(layers" through each "(...)" entry to the
+    # block-closing ")".
+    layers_pattern = re.compile(
+        r'\(layers\s*\n(\s+\(\d+\s+"[^"]+"\s+\w+[^)]*\)\s*\n)+\s*\)',
+        re.MULTILINE,
+    )
+
+    # Non-copper layer entry pattern (e.g. B.SilkS, Edge.Cuts, F.Fab)
+    non_copper_re = re.compile(
+        r'(\s*\(\d+\s+"(?!.*\.Cu")[^"]+"\s+\w+[^)]*\))',
+    )
+
+    def replace_layers(match):
+        matched_text = match.group(0)
+        # Extract non-copper layer entries from the original block
+        non_copper_entries = non_copper_re.findall(matched_text)
+        # Build new layers content with copper layers
+        new_layers = "\n    ".join(layer_defs[target_layers])
+        # Append non-copper layers after copper layers
+        if non_copper_entries:
+            non_copper_lines = "\n".join(
+                entry.strip() for entry in non_copper_entries
+            )
+            return f"(layers\n    {new_layers}\n    {non_copper_lines}\n  )"
+        return f"(layers\n    {new_layers}\n  )"
+
     new_content = layers_pattern.sub(replace_layers, pcb_content)
 
-    # If the pattern didn't match, try a more permissive pattern
-    if new_content == pcb_content:
-        # Alternative pattern for different KiCad versions
-        alt_pattern = re.compile(
-            r'\(layers\s*\n(\s+\(\d+\s+"[^"]+"\s+\w+[^)]*\)\s*\n)+\s*\)',
-            re.MULTILINE,
+    # Validate output has balanced parentheses to catch regressions early
+    if not _validate_sexp_parentheses(new_content):
+        import warnings
+
+        warnings.warn(
+            "update_pcb_layer_stackup produced unbalanced parentheses; "
+            "returning original content unchanged",
+            stacklevel=2,
         )
-        new_layers_content = "\n    ".join(layer_defs[target_layers])
-        new_content = alt_pattern.sub(
-            f"(layers\n    {new_layers_content}\n  )",
-            pcb_content,
-        )
+        return pcb_content
 
     return new_content
 
