@@ -621,14 +621,14 @@ def _assign_layers_for_pour_nets(
                 if i == 0:
                     assignments.append((net_name, "In2.Cu", 0))
                 else:
-                    assignments.append((net_name, "F.Cu", i - 1))
+                    assignments.append((net_name, "F.Cu", i))
     else:
         # 2-layer board
         for net_name, _ in ground_nets:
             assignments.append((net_name, "B.Cu", 1))
 
-        for net_name, _ in power_nets:
-            assignments.append((net_name, "F.Cu", 0))
+        for i, (net_name, _) in enumerate(power_nets):
+            assignments.append((net_name, "F.Cu", len(power_nets) - i))
 
     return assignments
 
@@ -644,12 +644,15 @@ def auto_create_zones_for_pour_nets(
 
     For 2-layer boards:
     - GROUND nets get a zone on B.Cu with priority 1
-    - POWER nets get a zone on F.Cu with priority 0
+    - POWER nets get zones on F.Cu with descending priorities
+      (first power net gets highest priority) so overlapping zones
+      on the same layer coexist without undefined fill order
 
     For 4-layer boards:
     - GROUND nets get a zone on In1.Cu with priority 1
     - First POWER net gets a zone on In2.Cu with priority 0
-    - Additional POWER nets get zones on F.Cu
+    - Additional POWER nets get zones on F.Cu with distinct
+      non-zero priorities
 
     Args:
         pcb_path: Path to .kicad_pcb file (modified in place)

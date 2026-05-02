@@ -580,7 +580,7 @@ class TestAssignLayersForPourNets:
         assert result == [("GND", "B.Cu", 1)]
 
     def test_2_layer_power_on_fcu(self):
-        """2-layer board: power nets go on F.Cu."""
+        """2-layer board: single power net goes on F.Cu with priority 1."""
         from kicad_tools.router.net_class import NetClass
 
         result = _assign_layers_for_pour_nets(
@@ -588,7 +588,29 @@ class TestAssignLayersForPourNets:
             [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)],
         )
         assert ("GND", "B.Cu", 1) in result
-        assert ("+3.3V", "F.Cu", 0) in result
+        assert ("+3.3V", "F.Cu", 1) in result
+
+    def test_2_layer_multiple_power_nets(self):
+        """2-layer board: multiple power nets get descending priorities on F.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            2,
+            [
+                ("GND", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+                ("+1.8V", NetClass.POWER),
+            ],
+        )
+        assert ("GND", "B.Cu", 1) in result
+        # 3 power nets get descending priorities: 3, 2, 1
+        assert ("+3.3V", "F.Cu", 3) in result
+        assert ("+5V", "F.Cu", 2) in result
+        assert ("+1.8V", "F.Cu", 1) in result
+        # All priorities must be distinct
+        fcu_priorities = [p for _, l, p in result if l == "F.Cu"]
+        assert len(fcu_priorities) == len(set(fcu_priorities))
 
     def test_4_layer_ground_on_in1cu(self):
         """4-layer board: GND goes on In1.Cu."""
@@ -625,7 +647,7 @@ class TestAssignLayersForPourNets:
         )
         assert ("GND", "In1.Cu", 1) in result
         assert ("+3.3V", "In2.Cu", 0) in result
-        assert ("+5V", "F.Cu", 0) in result
+        assert ("+5V", "F.Cu", 1) in result
 
     def test_4_layer_three_power_nets(self):
         """4-layer board: three power nets -- first on In2.Cu, rest on F.Cu."""
@@ -642,9 +664,9 @@ class TestAssignLayersForPourNets:
         )
         assert ("GND", "In1.Cu", 1) in result
         assert ("+3.3V", "In2.Cu", 0) in result
-        # Additional power nets go on F.Cu with increasing priority index
-        assert ("+5V", "F.Cu", 0) in result
-        assert ("+1.8V", "F.Cu", 1) in result
+        # Additional power nets go on F.Cu with non-zero priorities
+        assert ("+5V", "F.Cu", 1) in result
+        assert ("+1.8V", "F.Cu", 2) in result
 
 
 class TestAutoCreateZones4Layer:
