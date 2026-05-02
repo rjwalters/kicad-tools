@@ -610,6 +610,10 @@ class SExp:
             "local",
             # Symbol types
             "symbols",
+            # Mirror/axis values
+            "x",
+            "y",
+            "xy",
             # Other
             "allow_missing_courtyard",
             "allow_soldermask_bridges",
