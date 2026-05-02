@@ -54,9 +54,7 @@ def _make_pcb(
         parts.append(f'  (net {nid} "{name}")\n')
 
     # Single dummy footprint with pads
-    parts.append(
-        '  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n'
-    )
+    parts.append('  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n')
     for idx, (nid, name) in enumerate(pad_nets):
         x_off = idx * 2.0
         parts.append(
@@ -209,6 +207,9 @@ class TestAutoPourIfMissing:
 
     def test_edge_clearance_insets_zone_boundary(self, tmp_path: Path):
         """Zone boundary is inset from board edge when edge_clearance is set."""
+        pytest.importorskip(
+            "shapely", reason="shapely required for edge clearance tests"
+        )
         import re
 
         from kicad_tools.router.auto_pour import auto_pour_if_missing
@@ -220,9 +221,7 @@ class TestAutoPourIfMissing:
         pcb_path = tmp_path / "test.kicad_pcb"
         pcb_path.write_text(pcb)
 
-        count, names = auto_pour_if_missing(
-            pcb_path, edge_clearance=0.3
-        )
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
 
         assert count == 1
         assert names == ["GND"]
@@ -230,9 +229,7 @@ class TestAutoPourIfMissing:
         # Parse zone polygon coordinates from the written file
         text = pcb_path.read_text()
         # Extract xy coordinates from the zone polygon
-        xy_matches = re.findall(
-            r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text
-        )
+        xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
         assert len(xy_matches) > 0, "No zone polygon coordinates found"
 
         # Board edge is 0..50 in both X and Y (from _PCB_FOOTER).
@@ -240,21 +237,24 @@ class TestAutoPourIfMissing:
         # at least 0.3mm inward from the edges.
         for x_str, y_str in xy_matches:
             x, y = float(x_str), float(y_str)
-            assert x >= 0.3 - 0.01, (
-                f"X coord {x} too close to left edge (expected >= 0.3)"
-            )
-            assert x <= 49.7 + 0.01, (
-                f"X coord {x} too close to right edge (expected <= 49.7)"
-            )
-            assert y >= 0.3 - 0.01, (
-                f"Y coord {y} too close to top edge (expected >= 0.3)"
-            )
-            assert y <= 49.7 + 0.01, (
-                f"Y coord {y} too close to bottom edge (expected <= 49.7)"
-            )
+            assert (
+                x >= 0.3 - 0.01
+            ), f"X coord {x} too close to left edge (expected >= 0.3)"
+            assert (
+                x <= 49.7 + 0.01
+            ), f"X coord {x} too close to right edge (expected <= 49.7)"
+            assert (
+                y >= 0.3 - 0.01
+            ), f"Y coord {y} too close to top edge (expected >= 0.3)"
+            assert (
+                y <= 49.7 + 0.01
+            ), f"Y coord {y} too close to bottom edge (expected <= 49.7)"
 
     def test_no_edge_clearance_uses_exact_outline(self, tmp_path: Path):
         """Without edge_clearance, zone boundary matches board edge exactly."""
+        pytest.importorskip(
+            "shapely", reason="shapely required for edge clearance tests"
+        )
         import re
 
         from kicad_tools.router.auto_pour import auto_pour_if_missing
@@ -272,9 +272,7 @@ class TestAutoPourIfMissing:
         text = pcb_path.read_text()
         # Zone polygon should include coordinates at or very near the
         # board edge (0 and 50).
-        xy_matches = re.findall(
-            r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text
-        )
+        xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
         xs = [float(x) for x, _ in xy_matches]
         ys = [float(y) for _, y in xy_matches]
 
