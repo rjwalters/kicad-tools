@@ -25,6 +25,7 @@ def show_routing_summary(
     current_strategy: str = "basic",
     pcb_file: str | None = None,
     nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
 ) -> None:
     """Show comprehensive routing summary with successes, failures, and suggestions.
 
@@ -123,7 +124,10 @@ def show_routing_summary(
         print(f"Routing Incomplete{connectivity_pct}")
     else:
         print("Routing Complete!")
-    print(f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)")
+    routed_line = f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)"
+    if single_pad_count:
+        routed_line += f" -- {single_pad_count} single-pad net(s) excluded"
+    print(routed_line)
 
     # Show partially-connected nets (have segments but not all pads connected)
     if partially_connected_nets:
@@ -481,6 +485,7 @@ def get_routing_diagnostics_json(
     nets_to_route: int,
     current_strategy: str = "basic",
     nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -495,6 +500,8 @@ def get_routing_diagnostics_json(
         nets_to_route_ids: Optional set of net IDs targeted for routing
             (multi-pad signal nets).  When provided, ``routed_net_ids`` is
             filtered to this set so numerator and denominator are consistent.
+        single_pad_count: Number of single-pad nets excluded from routing.
+            Shown in the summary for diagnostic clarity.
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -717,8 +724,7 @@ def get_routing_diagnostics_json(
             }
         )
 
-    result_dict: dict = {
-        "summary": {
+    summary_dict: dict = {
             "nets_requested": nets_to_route,
             "nets_routed": len(routed_net_ids),
             "nets_failed": len(unrouted_ids),
@@ -726,7 +732,13 @@ def get_routing_diagnostics_json(
             if nets_to_route > 0
             else 0,
             "has_disconnected_islands": has_disconnected_islands,
-        },
+    }
+    if single_pad_count:
+        summary_dict["single_pad_nets"] = single_pad_count
+        summary_dict["total_nets_on_board"] = nets_to_route + single_pad_count
+
+    result_dict: dict = {
+        "summary": summary_dict,
         "failure_breakdown": dict(failures_by_cause),
         "successful_routes": successful_routes,
         "failed_routes": failed_routes,
@@ -743,6 +755,7 @@ def print_routing_diagnostics_json(
     nets_to_route: int,
     current_strategy: str = "basic",
     nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -753,10 +766,12 @@ def print_routing_diagnostics_json(
         current_strategy: The routing strategy that was used. Suggestions will
             exclude this strategy since the user already tried it.
         nets_to_route_ids: Optional set of net IDs targeted for routing.
+        single_pad_count: Number of single-pad nets excluded from routing.
     """
     diagnostics = get_routing_diagnostics_json(
         router, net_map, nets_to_route, current_strategy=current_strategy,
         nets_to_route_ids=nets_to_route_ids,
+        single_pad_count=single_pad_count,
     )
     print(json.dumps(diagnostics, indent=2))
 

@@ -1334,6 +1334,7 @@ def route_with_layer_escalation(
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
                 nets_to_route_ids=_multi_pad_ids,
+                single_pad_count=getattr(final_result, "single_pad_count", 0),
             )
 
     if final_result.success:
@@ -1807,6 +1808,7 @@ def route_with_rule_relaxation(
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
                 nets_to_route_ids=_multi_pad_ids,
+                single_pad_count=getattr(final_result, "single_pad_count", 0),
             )
 
     if final_result.success:
@@ -2319,6 +2321,7 @@ def route_with_combined_escalation(
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
                 nets_to_route_ids=_multi_pad_ids,
+                single_pad_count=getattr(final_result, "single_pad_count", 0),
             )
 
     if final_result.success:
@@ -4342,6 +4345,7 @@ def main(argv: list[str] | None = None) -> int:
                     nets_to_route,
                     current_strategy=args.strategy,
                     nets_to_route_ids=multi_pad_net_ids,
+                    single_pad_count=len(single_pad_nets),
                 )
             else:
                 # Verbose mode shows detailed path analysis for each failure
@@ -4355,6 +4359,7 @@ def main(argv: list[str] | None = None) -> int:
                     current_strategy=args.strategy,
                     pcb_file=args.pcb,
                     nets_to_route_ids=multi_pad_net_ids,
+                    single_pad_count=len(single_pad_nets),
                 )
 
     # Save partial results on clean partial exit (not just SIGINT)
