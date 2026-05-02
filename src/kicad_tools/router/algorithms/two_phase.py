@@ -142,6 +142,23 @@ class TwoPhaseRouter:
             )
         net_order = signal_nets
 
+        # Filter out single-pad nets — they are trivially connected and
+        # should not inflate the "nets routed" count.  This mirrors the
+        # filter in core.py:1082.
+        single_pad_nets = []
+        multi_pad_nets = []
+        for n in net_order:
+            if len(self.nets.get(n, [])) < 2:
+                single_pad_nets.append(n)
+            else:
+                multi_pad_nets.append(n)
+        if single_pad_nets:
+            flush_print(
+                f"  Skipping {len(single_pad_nets)} single-pad net(s) "
+                "(trivially connected)"
+            )
+        net_order = multi_pad_nets
+
         total_nets = len(net_order)
 
         if total_nets == 0:
