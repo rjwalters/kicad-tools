@@ -927,6 +927,12 @@ def route_with_layer_escalation(
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
+    # Auto-create copper pours for power nets (before skip detection)
+    if getattr(args, "auto_pour", True):
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        auto_pour_if_missing(pcb_path, quiet=quiet)
+
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
@@ -1373,6 +1379,12 @@ def route_with_rule_relaxation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-create copper pours for power nets (before skip detection)
+    if getattr(args, "auto_pour", True):
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        auto_pour_if_missing(pcb_path, quiet=quiet)
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
@@ -1839,6 +1851,12 @@ def route_with_combined_escalation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-create copper pours for power nets (before skip detection)
+    if getattr(args, "auto_pour", True):
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        auto_pour_if_missing(pcb_path, quiet=quiet)
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
@@ -2648,6 +2666,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
     parser.add_argument(
+        "--auto-pour",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Automatically create copper pour zones for power-classified "
+            "nets (GND, VCC, etc.) when the input PCB has none "
+            "(default: enabled). Use --no-auto-pour to disable."
+        ),
+    )
+    parser.add_argument(
         "--auto-layers",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -3167,6 +3195,12 @@ def main(argv: list[str] | None = None) -> int:
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-create copper pours for power nets (before skip detection)
+    if getattr(args, "auto_pour", True):
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        auto_pour_if_missing(pcb_path, quiet=args.quiet)
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
