@@ -1666,6 +1666,25 @@ class Autorouter:
         """
         self._perturbation_magnitude = 0.0
 
+    def reset_attempt_state(self) -> None:
+        """Reset per-attempt mutable state to pristine defaults (Issue #2396).
+
+        Called by the layer-escalation orchestrator at the start of each
+        attempt, immediately after ``load_pcb_for_routing()`` creates a
+        fresh ``Autorouter``.  Today this is a no-op because the
+        orchestrator already creates a new instance per attempt, but this
+        method documents the contract: *between escalation attempts, no
+        router state from the prior attempt influences the next.*
+
+        Clearing these fields defensively prevents silent regression if
+        future refactors reuse an ``Autorouter`` across attempts.
+        """
+        self.power_stall_abort = False
+        self.power_stall_nets = []
+        self.routing_failures = []
+        self._perturbation_magnitude = 0.0
+        self._congestion_estimator = None
+
     def _calculate_constraint_score(self, net_id: int) -> float:
         """Calculate a constraint score for a net based on routing difficulty.
 
@@ -3039,8 +3058,19 @@ class Autorouter:
                 # rip-up sets.  This prevents high-pad-count decoupling nets
                 # (e.g., C11-2 with 16 pads) from consuming ~200s per
                 # iteration on fruitless A* searches.
+                #
+                # Issue #2396: Nets that completely failed to route (not in
+                # net_routes) should not accumulate stall counts -- they
+                # have no overflow to improve.  Only nets that ARE routed
+                # but pass through overused cells should be stall-tracked.
                 current_overflow = self.grid.get_total_overflow()
+                failed_net_ids = set(failed_nets_to_recover)
                 for net in nets_to_reroute:
+                    if net in failed_net_ids:
+                        # Issue #2396: Skip stall tracking for unrouted nets.
+                        # They failed entirely and need fresh attempts, not
+                        # stall-based exclusion.
+                        continue
                     prev = net_prev_overflow.get(net)
                     if prev is not None:
                         if current_overflow >= prev:
@@ -3071,6 +3101,40 @@ class Autorouter:
                     nets_to_reroute = [
                         n for n in nets_to_reroute if n not in stalled_nets
                     ]
+
+                # Issue #2396: When overflow is 0 but nets remain unrouted,
+                # the rip-up loop has no overflow signal to act on.  Force
+                # a fresh A* attempt for each unrouted net with an elevated
+                # present_factor to encourage exploration of alternative
+                # paths.  This directly addresses the 4L 3/8 plateau
+                # observed in board 04.
+                if (
+                    current_overflow == 0
+                    and failed_net_ids
+                    and not timed_out
+                ):
+                    recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
+                    recovered = 0
+                    for fn in list(failed_net_ids):
+                        if fn in stalled_nets or fn in net_routes:
+                            continue
+                        routes = self._route_net_negotiated(
+                            fn, recovery_factor, per_net_timeout=per_net_timeout
+                        )
+                        if routes:
+                            net_routes[fn] = routes
+                            recovered += 1
+                            for route in routes:
+                                self.grid.mark_route_usage(route)
+                                self.routes.append(route)
+                    if recovered > 0:
+                        flush_print(
+                            f"  Zero-overflow recovery: routed {recovered}/{len(failed_net_ids)} "
+                            f"previously-failed net(s) with elevated cost"
+                        )
+                        # Recompute overflow after recovery
+                        current_overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
 
                 # If overflow improves globally, give stalled nets another
                 # chance -- their blockage may have cleared.

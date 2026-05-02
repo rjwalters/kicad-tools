@@ -638,15 +638,25 @@ def _is_better_result(
 ) -> bool:
     """Compare routing results with tiebreaking on connectivity metrics.
 
-    The cascade is: completion > segments > vias > fewer layers.
-    When completions are tied (e.g. both 0.0), secondary metrics from the
-    router statistics break the tie so that the configuration with the most
-    routing progress wins (Issue #2397).
+    Issue #2396: The primary comparison uses **absolute nets_routed** rather
+    than completion ratio.  When ``nets_to_route`` differs across escalation
+    attempts (e.g. power nets auto-skipped on 4L but not 2L), comparing
+    ratios produces misleading results: 6/10 (0.60) vs 3/8 (0.375) looks
+    like a clear win for 2L, but the raw ratio comparison used to use
+    ``completion`` which could disagree when denominators differ.  Using
+    absolute counts ensures we always keep the attempt that routed the most
+    nets, breaking ties by completion ratio, then segments, vias, and layer
+    count.
     """
+    # Primary: absolute nets routed (cross-denominator safe)
+    if candidate.nets_routed != best.nets_routed:
+        return candidate.nets_routed > best.nets_routed
+
+    # Tied on absolute count: use completion ratio as tiebreaker
     if candidate.completion != best.completion:
         return candidate.completion > best.completion
 
-    # Tie on completion -- use stats-based tiebreakers
+    # Tie on completion -- use stats-based tiebreakers (Issue #2397)
     c_stats = candidate.stats or {}
     b_stats = best.stats or {}
 
@@ -1008,6 +1018,12 @@ def route_with_layer_escalation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #2396: Ensure pristine per-attempt state.  Today this is a
+        # no-op (load_pcb_for_routing creates a fresh Autorouter) but it
+        # documents the contract and prevents silent regression if future
+        # refactors reuse an Autorouter across attempts.
+        router.reset_attempt_state()
+
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
 
@@ -1088,9 +1104,15 @@ def route_with_layer_escalation(
             stats=stats,
         )
 
-        # Track best result (Issue #2397: use tiebreaker cascade)
+        # Track best result (Issue #2396: absolute nets_routed comparison)
         if best_result is None or _is_better_result(result, best_result):
             best_result = result
+            if not quiet:
+                flush_print(
+                    f"  Best result so far: {best_result.layer_count}L with "
+                    f"{best_result.nets_routed}/{best_result.nets_to_route} "
+                    f"({best_result.completion:.0%})"
+                )
 
         # Issue #2388: Record any power-net stall for the next attempt's
         # bias logic.  ``power_stall_nets`` is populated by
@@ -1550,7 +1572,7 @@ def route_with_rule_relaxation(
             stats=stats,
         )
 
-        # Track best result (Issue #2397: use tiebreaker cascade)
+        # Track best result (Issue #2396: absolute nets_routed comparison)
         if best_result is None or _is_better_result(result, best_result):
             best_result = result
             # Update interrupt state so signal handler saves the best attempt
@@ -2023,7 +2045,7 @@ def route_with_combined_escalation(
                 stats=stats,
             )
 
-            # Track best result (Issue #2397: use tiebreaker cascade)
+            # Track best result (Issue #2396: absolute nets_routed comparison)
             if best_result is None or _is_better_result(result, best_result):
                 best_result = result
                 # Update interrupt state so signal handler saves the best attempt
