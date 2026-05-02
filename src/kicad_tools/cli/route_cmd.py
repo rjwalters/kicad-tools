@@ -610,6 +610,7 @@ class LayerEscalationResult:
     completion: float
     success: bool
     stats: dict | None = None
+    overflow: int = 0
 
 
 @dataclass
@@ -986,6 +987,10 @@ def route_with_layer_escalation(
     best_result: LayerEscalationResult | None = None
     successful_result: LayerEscalationResult | None = None
 
+    # Issue #2412: Track previous attempt metrics for early termination
+    prev_nets_routed: int | None = None
+    prev_overflow: int | None = None
+
     # Issue #2388: Track power-net stall across escalation attempts.  When
     # a 2-layer attempt aborts due to power-net stall, the next attempt
     # is biased toward a stack with dedicated planes for those nets, and
@@ -1110,6 +1115,9 @@ def route_with_layer_escalation(
         nets_routed = stats["nets_routed"]
         completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
 
+        # Issue #2412: Capture overflow for early termination detection
+        overflow = int(router.grid.get_total_overflow())
+
         # Create result
         result = LayerEscalationResult(
             layer_count=layer_count,
@@ -1121,6 +1129,7 @@ def route_with_layer_escalation(
             completion=completion,
             success=completion >= args.min_completion,
             stats=stats,
+            overflow=overflow,
         )
 
         # Track best result (Issue #2396: absolute nets_routed comparison)
@@ -1132,6 +1141,45 @@ def route_with_layer_escalation(
                     f"{best_result.nets_routed}/{best_result.nets_to_route} "
                     f"({best_result.completion:.0%})"
                 )
+
+        # Issue #2412: Early termination — zero overflow means failures
+        # are placement/topology issues, not congestion.  Adding layers
+        # cannot help when there is no congestion to relieve.
+        if overflow == 0 and nets_routed < nets_to_route:
+            if not quiet:
+                flush_print(
+                    "  Escalation stopped: failures are not congestion-related (overflow=0)"
+                )
+            # Report attempt result before breaking
+            if not quiet:
+                flush_print(
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
+                    f"({completion * 100:.0f}%)"
+                )
+                flush_print("  Status: INSUFFICIENT - early stop (zero overflow)")
+            break
+
+        # Issue #2412: Early termination — stagnation detection.  If adding
+        # layers did not improve nets_routed or reduce overflow, further
+        # escalation is unlikely to help.
+        if (
+            prev_nets_routed is not None
+            and nets_routed <= prev_nets_routed
+            and overflow >= prev_overflow
+        ):
+            if not quiet:
+                flush_print("  Escalation stopped: no improvement after adding layers")
+            # Report attempt result before breaking
+            if not quiet:
+                flush_print(
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
+                    f"({completion * 100:.0f}%)"
+                )
+                flush_print("  Status: INSUFFICIENT - early stop (stagnation)")
+            break
+
+        prev_nets_routed = nets_routed
+        prev_overflow = overflow
 
         # Issue #2388: Record any power-net stall for the next attempt's
         # bias logic.  ``power_stall_nets`` is populated by

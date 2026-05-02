@@ -750,6 +750,237 @@ class TestBestOfAttemptsSelection:
         assert _is_better_result(result_many, result_few) is True
 
 
+class TestEarlyTermination:
+    """Tests for Issue #2412: early termination when escalation cannot help.
+
+    Two cases:
+    1. Zero overflow with incomplete routing (topology/placement issue)
+    2. Stagnation (consecutive attempts yield identical results)
+    """
+
+    def _make_mock_router(self, nets_routed, nets_to_route, overflow):
+        """Create a mock router that returns predictable results."""
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
+        router.grid.width = 50.0
+        router.grid.height = 40.0
+        router.grid.get_total_overflow.return_value = overflow
+        router.get_statistics.return_value = {
+            "nets_routed": nets_routed,
+            "segments": 10,
+            "vias": 2,
+        }
+        router.power_stall_abort = False
+        router._pour_nets_without_zones = set()
+        # Provide real float values for rules attributes used by drc_nudge
+        router.rules.via_diameter = 0.6
+        router.rules.min_drill_clearance = 0.0
+        router.rules.trace_width = 0.2
+        router.rules.trace_clearance = 0.15
+        return router
+
+    def _make_args(self, **overrides):
+        """Create minimal args for route_with_layer_escalation."""
+        defaults = dict(
+            backend="python",
+            grid=0.25,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            fine_pitch_clearance=None,
+            skip_nets=None,
+            auto_pour=False,
+            max_layers=6,
+            min_completion=0.95,
+            strategy="negotiated",
+            verbose=False,
+            force=False,
+            timeout=60,
+            iterations=3,
+            per_net_timeout=None,
+            batch_routing=False,
+            high_performance=False,
+            hierarchical=False,
+            perturbation=True,
+            two_phase=False,
+            multi_resolution=False,
+            edge_clearance=0.25,
+            escape_routing=None,
+            no_optimize=True,
+            dry_run=True,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_zero_overflow_stops_early(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """When overflow=0 but nets are incomplete, escalation stops immediately."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Router: 2/3 nets routed, zero overflow
+        router = self._make_mock_router(nets_routed=2, nets_to_route=3, overflow=0)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # Should stop after 1 attempt (zero overflow => no point escalating)
+        assert call_count == 1, (
+            f"Expected 1 attempt (zero-overflow early stop), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_stagnation_stops_early(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """When consecutive attempts produce identical results, escalation stops."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Router: 2/3 nets routed, some overflow, same every time
+        router = self._make_mock_router(nets_routed=2, nets_to_route=3, overflow=5)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # Should stop after 2 attempts (stagnation: 2nd == 1st)
+        assert call_count == 2, (
+            f"Expected 2 attempts (stagnation early stop), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_improvement_continues_escalation(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """When each attempt improves, all configurations are tried."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Each attempt improves: more nets routed, less overflow
+        attempt_results = [
+            (1, 5, 20),  # 2L: 1/5 routed, overflow=20
+            (2, 5, 15),  # 4L sig_gnd_pwr_sig: 2/5, overflow=15
+            (3, 5, 10),  # 4L all_signal: 3/5, overflow=10
+            (4, 5, 5),   # 6L: 4/5, overflow=5
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            nets_routed, nets_to_route, overflow = attempt_results[call_count]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # All 4 configs tried because each improves
+        assert call_count == 4, (
+            f"Expected 4 attempts (continuous improvement), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_success_still_stops_loop(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """When routing succeeds, the loop still exits (not broken by early-stop)."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # First attempt: all nets routed with some overflow
+        router = self._make_mock_router(nets_routed=3, nets_to_route=3, overflow=2)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args()
+        args.min_completion = 0.95  # 3/3 = 100% >= 95%
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                with patch("kicad_tools.router.show_routing_summary"):
+                    with patch("kicad_tools.cli.route_cmd.run_post_route_drc", return_value=False):
+                        result = route_with_layer_escalation(
+                            pcb, out, args, quiet=True
+                        )
+
+        assert call_count == 1, (
+            f"Expected 1 attempt (success on first try), got {call_count}"
+        )
+
+    def test_overflow_field_on_result(self):
+        """LayerEscalationResult stores the overflow field."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult
+        from kicad_tools.router import LayerStack
+
+        result = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=10,
+            completion=0.5,
+            success=False,
+            overflow=42,
+        )
+
+        assert result.overflow == 42
+
+    def test_overflow_field_defaults_to_zero(self):
+        """LayerEscalationResult overflow defaults to 0 for backward compat."""
+        from kicad_tools.cli.route_cmd import LayerEscalationResult
+        from kicad_tools.router import LayerStack
+
+        result = LayerEscalationResult(
+            layer_count=2,
+            layer_stack=LayerStack.two_layer(),
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=10,
+            completion=0.5,
+            success=False,
+        )
+
+        assert result.overflow == 0
+
+
 class TestPristineStatePerAttempt:
     """Tests for Issue #2396: pristine state per layer-escalation attempt.
 
