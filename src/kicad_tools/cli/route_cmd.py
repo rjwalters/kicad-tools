@@ -609,6 +609,7 @@ class LayerEscalationResult:
     nets_to_route: int
     completion: float
     success: bool
+    stats: dict | None = None
 
 
 @dataclass
@@ -628,6 +629,39 @@ class RuleRelaxationResult:
     completion: float
     success: bool
     layer_count: int = 2  # May be set by layer escalation integration
+    stats: dict | None = None
+
+
+def _is_better_result(
+    candidate: "LayerEscalationResult | RuleRelaxationResult",
+    best: "LayerEscalationResult | RuleRelaxationResult",
+) -> bool:
+    """Compare routing results with tiebreaking on connectivity metrics.
+
+    The cascade is: completion > segments > vias > fewer layers.
+    When completions are tied (e.g. both 0.0), secondary metrics from the
+    router statistics break the tie so that the configuration with the most
+    routing progress wins (Issue #2397).
+    """
+    if candidate.completion != best.completion:
+        return candidate.completion > best.completion
+
+    # Tie on completion -- use stats-based tiebreakers
+    c_stats = candidate.stats or {}
+    b_stats = best.stats or {}
+
+    c_segments = c_stats.get("segments", 0)
+    b_segments = b_stats.get("segments", 0)
+    if c_segments != b_segments:
+        return c_segments > b_segments
+
+    c_vias = c_stats.get("vias", 0)
+    b_vias = b_stats.get("vias", 0)
+    if c_vias != b_vias:
+        return c_vias > b_vias
+
+    # Still tied: prefer fewer layers (simpler board)
+    return candidate.layer_count < best.layer_count
 
 
 def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
@@ -1049,10 +1083,11 @@ def route_with_layer_escalation(
             nets_to_route=nets_to_route,
             completion=completion,
             success=completion >= args.min_completion,
+            stats=stats,
         )
 
-        # Track best result
-        if best_result is None or completion > best_result.completion:
+        # Track best result (Issue #2397: use tiebreaker cascade)
+        if best_result is None or _is_better_result(result, best_result):
             best_result = result
 
         # Issue #2388: Record any power-net stall for the next attempt's
@@ -1508,10 +1543,11 @@ def route_with_rule_relaxation(
             completion=completion,
             success=completion >= args.min_completion,
             layer_count=layer_stack.num_layers,
+            stats=stats,
         )
 
-        # Track best result
-        if best_result is None or completion > best_result.completion:
+        # Track best result (Issue #2397: use tiebreaker cascade)
+        if best_result is None or _is_better_result(result, best_result):
             best_result = result
             # Update interrupt state so signal handler saves the best attempt
             _interrupt_state["router"] = result.router
@@ -1978,10 +2014,11 @@ def route_with_combined_escalation(
                 completion=completion,
                 success=completion >= args.min_completion,
                 layer_count=layer_count,
+                stats=stats,
             )
 
-            # Track best result
-            if best_result is None or completion > best_result.completion:
+            # Track best result (Issue #2397: use tiebreaker cascade)
+            if best_result is None or _is_better_result(result, best_result):
                 best_result = result
                 # Update interrupt state so signal handler saves the best attempt
                 _interrupt_state["router"] = result.router
