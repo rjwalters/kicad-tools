@@ -437,6 +437,21 @@ class TestSExpSerialization:
             assert f'"{keyword}"' not in result, f"{keyword} should not be quoted"
             assert keyword in result
 
+    def test_mirror_values_unquoted(self):
+        """Mirror axis values x, y, xy must be bare symbols, not quoted strings.
+
+        KiCad 10 expects (mirror x) not (mirror "x"). The serializer must
+        treat these single-letter axis identifiers as unquoted keywords.
+        Regression test for issue #2385.
+        """
+        for axis in ["x", "y", "xy"]:
+            mirror_node = SExp.list("mirror", axis)
+            result = serialize_sexp(mirror_node)
+            assert f'"{axis}"' not in result, (
+                f"mirror value '{axis}' should not be quoted, got: {result}"
+            )
+            assert f"(mirror {axis})" == result
+
 
 class TestSExpFileIO:
     """Tests for file I/O functions."""
