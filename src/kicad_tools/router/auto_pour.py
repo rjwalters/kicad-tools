@@ -23,6 +23,7 @@ def auto_pour_if_missing(
     pcb_path: Path,
     *,
     quiet: bool = False,
+    edge_clearance: float | None = None,
 ) -> tuple[int, list[str]]:
     """Auto-create copper pours for power-classified nets that lack zones.
 
@@ -33,6 +34,9 @@ def auto_pour_if_missing(
     Args:
         pcb_path: Path to .kicad_pcb file (modified **in place**).
         quiet: Suppress informational output.
+        edge_clearance: Optional edge clearance in mm.  When set, zone
+            boundaries are inset from the board edge by this distance
+            to avoid copper-to-edge DRC violations.
 
     Returns:
         Tuple of ``(zones_created, pour_net_names)`` where
@@ -111,7 +115,9 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 5. Create zones via the shared generator
     # ------------------------------------------------------------------
-    count = auto_create_zones_for_pour_nets(pcb_path, new_pour_nets)
+    count = auto_create_zones_for_pour_nets(
+        pcb_path, new_pour_nets, edge_clearance=edge_clearance
+    )
 
     names = [name for name, _ in new_pour_nets]
     if not quiet and count > 0:

@@ -941,7 +941,11 @@ def route_with_layer_escalation(
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
-        auto_pour_if_missing(pcb_path, quiet=quiet)
+        auto_pour_if_missing(
+            pcb_path,
+            quiet=quiet,
+            edge_clearance=getattr(args, "edge_clearance", None),
+        )
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
@@ -1406,7 +1410,11 @@ def route_with_rule_relaxation(
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
-        auto_pour_if_missing(pcb_path, quiet=quiet)
+        auto_pour_if_missing(
+            pcb_path,
+            quiet=quiet,
+            edge_clearance=getattr(args, "edge_clearance", None),
+        )
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
@@ -1878,7 +1886,11 @@ def route_with_combined_escalation(
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
-        auto_pour_if_missing(pcb_path, quiet=quiet)
+        auto_pour_if_missing(
+            pcb_path,
+            quiet=quiet,
+            edge_clearance=getattr(args, "edge_clearance", None),
+        )
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
@@ -3222,7 +3234,11 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
-        auto_pour_if_missing(pcb_path, quiet=args.quiet)
+        auto_pour_if_missing(
+            pcb_path,
+            quiet=args.quiet,
+            edge_clearance=getattr(args, "edge_clearance", None),
+        )
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
