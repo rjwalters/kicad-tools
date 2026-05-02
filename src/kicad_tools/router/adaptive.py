@@ -34,6 +34,7 @@ class RoutingResult:
     iterations_used: int
     statistics: dict
     routing_failures: list[RoutingFailure] = field(default_factory=list)
+    single_pad_count: int = 0
 
     @property
     def success_rate(self) -> float:
@@ -219,10 +220,15 @@ class AdaptiveAutorouter:
         """Check if routing has converged.
 
         Convergence criteria:
-        1. All nets routed (nets_routed == nets_requested)
+        1. All multi-pad nets routed (nets_routed == nets_requested)
         2. No overflow (no resource conflicts)
+
+        Single-pad nets are excluded because they have no endpoints to
+        connect and can never produce routes.
         """
-        nets_requested = len([n for n in router.nets if n != 0])
+        nets_requested = len(
+            [n for n, pads in router.nets.items() if n != 0 and len(pads) >= 2]
+        )
         nets_routed = len({r.net for r in router.routes if r.net != 0})
 
         return nets_routed >= nets_requested and overflow == 0
@@ -249,11 +255,18 @@ class AdaptiveAutorouter:
             # Create fresh autorouter with this layer stack
             router = self._create_autorouter(stack)
 
-            # Count nets to route
-            nets_requested = len([n for n in router.nets if n != 0])
+            # Count nets to route (exclude single-pad nets that can never be routed)
+            all_nonzero = [n for n in router.nets if n != 0]
+            single_pad_nets = [
+                n for n in all_nonzero if len(router.nets.get(n, [])) < 2
+            ]
+            nets_requested = len(all_nonzero) - len(single_pad_nets)
+            single_pad_count = len(single_pad_nets)
 
             if self.verbose:
                 print(f"  Nets to route: {nets_requested}")
+                if single_pad_count:
+                    print(f"  Single-pad nets excluded: {single_pad_count}")
                 print(f"  Routable layers: {stack.get_routable_indices()}")
 
             # Attempt routing
@@ -282,6 +295,7 @@ class AdaptiveAutorouter:
                 iterations_used=iterations,
                 statistics=router.get_statistics(),
                 routing_failures=getattr(router, "routing_failures", []),
+                single_pad_count=single_pad_count,
             )
             self._autorouter = router
 
