@@ -3448,6 +3448,14 @@ class Autorouter:
                         def mark_route_targeted(route: Route) -> None:
                             self._mark_route(route)
 
+                        # Issue #2415: Compute escape budget from remaining time
+                        escape_budget = None
+                        if timeout is not None:
+                            remaining = timeout - (time.time() - start_time)
+                            escape_budget = min(60.0, remaining * 0.25)
+                            if escape_budget <= 0:
+                                escape_budget = 0.0
+
                         success, new_overflow, tried = neg_router.escape_local_minimum(
                             overflow_history=overflow_history,
                             net_routes=net_routes,
@@ -3457,6 +3465,8 @@ class Autorouter:
                             present_cost_factor=present_factor,
                             mark_route_callback=mark_route_targeted,
                             strategy_index=escape_strategy_index,
+                            per_net_timeout=per_net_timeout,
+                            escape_budget=escape_budget,
                         )
                         escape_strategy_index += tried
 
@@ -3702,6 +3712,14 @@ class Autorouter:
                     def mark_route(route: Route) -> None:
                         self._mark_route(route)
 
+                    # Issue #2415: Compute escape budget from remaining time
+                    escape_budget = None
+                    if timeout is not None:
+                        remaining = timeout - (time.time() - start_time)
+                        escape_budget = min(60.0, remaining * 0.25)
+                        if escape_budget <= 0:
+                            escape_budget = 0.0
+
                     success, new_overflow, tried = neg_router.escape_local_minimum(
                         overflow_history=overflow_history,
                         net_routes=net_routes,
@@ -3711,6 +3729,8 @@ class Autorouter:
                         present_cost_factor=present_factor,
                         mark_route_callback=mark_route,
                         strategy_index=escape_strategy_index,
+                        per_net_timeout=per_net_timeout,
+                        escape_budget=escape_budget,
                     )
                     escape_strategy_index += tried
 

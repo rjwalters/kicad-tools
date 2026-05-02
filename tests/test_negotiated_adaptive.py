@@ -821,3 +821,175 @@ class TestShouldTerminateEarlyLowOverflow:
             should_terminate_early(history, iteration=7, min_iterations=5, unrouted_count=2)
             is False
         )
+
+
+class TestEscapeBudgetEnforcement:
+    """Tests for escape strategy timeout enforcement (Issue #2415)."""
+
+    def test_escape_budget_expires_returns_early(self):
+        """escape_local_minimum with a tiny budget should return quickly."""
+        import time
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # Each strategy sleeps 0.1s to simulate work, budget is 0.001s
+        def slow_strategy(**kwargs):
+            time.sleep(0.1)
+            return False, 10
+
+        neg._escape_shuffle_order = MagicMock(side_effect=slow_strategy)
+        neg._escape_reverse_order = MagicMock(side_effect=slow_strategy)
+        neg._escape_random_subset = MagicMock(side_effect=slow_strategy)
+        neg._escape_full_reorder = MagicMock(side_effect=slow_strategy)
+
+        start = time.time()
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=0,
+            per_net_timeout=1.0,
+            escape_budget=0.001,
+        )
+        elapsed = time.time() - start
+
+        assert success is False
+        # Should have tried at most 2 strategies (first runs, then budget
+        # check fires before second or shortly after)
+        assert tried <= 2
+        # Total wall time should be well under 1 second
+        assert elapsed < 1.0
+
+    def test_per_net_timeout_propagated_to_route_net_negotiated(self):
+        """per_net_timeout should be passed through to route_net_negotiated."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_grid.find_overused_cells.return_value = {(0, 0, 0)}
+        mock_grid.get_total_overflow.return_value = 5
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+        neg.find_nets_through_overused_cells = MagicMock(return_value=[1, 2])
+        neg.rip_up_nets = MagicMock()
+
+        # Mock route_net_negotiated to capture the per_net_timeout arg
+        captured_timeouts = []
+
+        def mock_route(pad_objs, cost, callback, per_net_timeout=None):
+            captured_timeouts.append(per_net_timeout)
+            return []
+
+        neg.route_net_negotiated = mock_route
+
+        neg._escape_shuffle_order(
+            overflow_history=[10, 10],
+            net_routes={1: [], 2: []},
+            routes_list=[],
+            pads_by_net={1: [MagicMock(), MagicMock()], 2: [MagicMock(), MagicMock()]},
+            net_order=[1, 2],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            per_net_timeout=3.5,
+        )
+
+        # Every call should have received per_net_timeout=3.5
+        assert len(captured_timeouts) == 2
+        assert all(t == 3.5 for t in captured_timeouts)
+
+    def test_escape_budget_none_preserves_existing_behavior(self):
+        """When escape_budget=None, all 4 strategies should be tried."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # All strategies fail
+        neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
+        neg._escape_reverse_order = MagicMock(return_value=(False, 10))
+        neg._escape_random_subset = MagicMock(return_value=(False, 10))
+        neg._escape_full_reorder = MagicMock(return_value=(False, 10))
+
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=0,
+            per_net_timeout=None,
+            escape_budget=None,
+        )
+
+        assert success is False
+        assert tried == 4
+        assert neg._escape_shuffle_order.call_count == 1
+        assert neg._escape_reverse_order.call_count == 1
+        assert neg._escape_random_subset.call_count == 1
+        assert neg._escape_full_reorder.call_count == 1
+
+    def test_budget_expires_mid_strategy_returns_false(self):
+        """When budget expires during a strategy, escape returns without hanging."""
+        import time
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_grid.find_overused_cells.return_value = {(0, 0, 0)}
+        mock_grid.get_total_overflow.return_value = 10
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # Create many nets so the budget expires mid-loop
+        many_nets = list(range(100))
+        neg.find_nets_through_overused_cells = MagicMock(return_value=many_nets)
+        neg.rip_up_nets = MagicMock()
+
+        call_count = 0
+
+        def slow_route(pad_objs, cost, callback, per_net_timeout=None):
+            nonlocal call_count
+            call_count += 1
+            time.sleep(0.01)  # 10ms per net
+            return []
+
+        neg.route_net_negotiated = slow_route
+
+        pads_by_net = {n: [MagicMock(), MagicMock()] for n in many_nets}
+
+        start = time.time()
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={n: [] for n in many_nets},
+            routes_list=[],
+            pads_by_net=pads_by_net,
+            net_order=many_nets,
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=0,
+            per_net_timeout=1.0,
+            escape_budget=0.05,  # 50ms budget
+        )
+        elapsed = time.time() - start
+
+        assert success is False
+        # Should have routed far fewer than 100 nets
+        assert call_count < 100
+        # Should complete well under 2 seconds
+        assert elapsed < 2.0
