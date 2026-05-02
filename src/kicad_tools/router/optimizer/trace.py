@@ -305,6 +305,24 @@ class TraceOptimizer:
         if self.config.minimize_vias:
             optimized_route = self._via_optimizer.optimize_route(optimized_route)
 
+        # Re-run the connectivity-preserving guard after via minimization
+        # so that via removals that break pad connectivity are caught and
+        # the entire route is reverted to pre-optimisation state.  The
+        # earlier guard (above) only checks segment optimisation; this one
+        # covers via-induced disconnects (issue #2402).
+        if not _endpoints_preserved(
+            pre_endpoints,
+            list(optimized_route.segments),
+            list(optimized_route.vias),
+            tolerance=self.config.tolerance,
+        ):
+            optimized_route = Route(
+                net=route.net,
+                net_name=route.net_name,
+                segments=list(route.segments),
+                vias=list(route.vias),
+            )
+
         return optimized_route
 
     def optimize_pcb(
