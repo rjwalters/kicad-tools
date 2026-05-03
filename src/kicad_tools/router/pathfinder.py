@@ -192,6 +192,14 @@ class Router:
         # Each entry is (x1, y1, x2, y2, layer_index, net_id) in grid coordinates.
         self._routed_segments: list[tuple[int, int, int, int, int, int]] = []
 
+        # Issue #2430: Grid-based spatial index for crossing detection.
+        # Built lazily at the start of each route() call when segments exist.
+        # Replaces O(S) linear scan with O(B) bucket lookup.
+        self._crossing_grid: dict[int, dict[tuple[int, int], list[int]]] | None = None
+        self._crossing_bucket_size: int = 8
+        self._crossing_grid_cols: int = 0
+        self._crossing_grid_rows: int = 0
+
         # Issue #2325: Via placement diagnostic counters.
         # These track via placement attempts and rejections to help diagnose
         # zero-via routing failures on multi-layer boards.
@@ -413,6 +421,10 @@ class Router:
 
         Only counts crossings on the same layer with a different net.
 
+        Issue #2430: When a crossing grid index is available (built by
+        ``_build_crossing_grid``), uses spatial bucketing for O(B) lookup
+        instead of O(S) linear scan.
+
         Args:
             cx, cy: Current node grid coordinates (edge start).
             nx, ny: Neighbor node grid coordinates (edge end).
@@ -422,6 +434,12 @@ class Router:
         Returns:
             Number of crossing segments.
         """
+        # Fast path: use spatial grid index when available
+        if self._crossing_grid is not None:
+            return self._count_edge_crossings_indexed(
+                cx, cy, nx, ny, nlayer, current_net
+            )
+
         count = 0
         for sx1, sy1, sx2, sy2, seg_layer, seg_net in self._routed_segments:
             # Only same layer, different net
@@ -429,6 +447,101 @@ class Router:
                 continue
             if self._segments_intersect(cx, cy, nx, ny, sx1, sy1, sx2, sy2):
                 count += 1
+        return count
+
+    # ------------------------------------------------------------------
+    # Crossing grid spatial index (Issue #2430)
+    # ------------------------------------------------------------------
+
+    def _build_crossing_grid(self, bucket_size: int = 8) -> None:
+        """Build a grid-based spatial index for routed segments.
+
+        Partitions the grid into square buckets and stores segment indices
+        per bucket per layer.  ``_count_edge_crossings_indexed`` then only
+        checks segments whose buckets overlap the query edge's bounding box.
+
+        Args:
+            bucket_size: Side length of each bucket in grid cells.
+        """
+        self._crossing_bucket_size = bucket_size
+        cols_b = (self.grid.cols + bucket_size - 1) // bucket_size
+        rows_b = (self.grid.rows + bucket_size - 1) // bucket_size
+
+        # Dict[layer, Dict[(bx, by), List[int]]] where int = index into
+        # _routed_segments.
+        grid_idx: dict[int, dict[tuple[int, int], list[int]]] = {}
+
+        for seg_i, (sx1, sy1, sx2, sy2, seg_layer, _seg_net) in enumerate(
+            self._routed_segments
+        ):
+            bx1 = min(sx1, sx2) // bucket_size
+            by1 = min(sy1, sy2) // bucket_size
+            bx2 = max(sx1, sx2) // bucket_size
+            by2 = max(sy1, sy2) // bucket_size
+
+            bx1 = max(0, min(bx1, cols_b - 1))
+            by1 = max(0, min(by1, rows_b - 1))
+            bx2 = max(0, min(bx2, cols_b - 1))
+            by2 = max(0, min(by2, rows_b - 1))
+
+            layer_grid = grid_idx.setdefault(seg_layer, {})
+            for by in range(by1, by2 + 1):
+                for bx in range(bx1, bx2 + 1):
+                    layer_grid.setdefault((bx, by), []).append(seg_i)
+
+        self._crossing_grid = grid_idx
+        self._crossing_grid_cols = cols_b
+        self._crossing_grid_rows = rows_b
+
+    def _count_edge_crossings_indexed(
+        self,
+        cx: int,
+        cy: int,
+        nx: int,
+        ny: int,
+        nlayer: int,
+        current_net: int,
+    ) -> int:
+        """Count edge crossings using the spatial grid index.
+
+        Same semantics as ``_count_edge_crossings`` but O(B) where B is the
+        number of segments in overlapping buckets, instead of O(S) total.
+        """
+        assert self._crossing_grid is not None
+        bs = self._crossing_bucket_size
+
+        layer_grid = self._crossing_grid.get(nlayer)
+        if layer_grid is None:
+            return 0
+
+        # Compute bounding box of the edge in bucket coordinates
+        bx1 = min(cx, nx) // bs
+        by1 = min(cy, ny) // bs
+        bx2 = max(cx, nx) // bs
+        by2 = max(cy, ny) // bs
+
+        bx1 = max(0, bx1)
+        by1 = max(0, by1)
+        bx2 = min(bx2, self._crossing_grid_cols - 1)
+        by2 = min(by2, self._crossing_grid_rows - 1)
+
+        # Collect unique segment indices from overlapping buckets
+        seen: set[int] = set()
+        count = 0
+        for by in range(by1, by2 + 1):
+            for bx in range(bx1, bx2 + 1):
+                bucket = layer_grid.get((bx, by))
+                if bucket is None:
+                    continue
+                for seg_i in bucket:
+                    if seg_i in seen:
+                        continue
+                    seen.add(seg_i)
+                    sx1, sy1, sx2, sy2, _seg_layer, seg_net = self._routed_segments[seg_i]
+                    if seg_net == current_net:
+                        continue
+                    if self._segments_intersect(cx, cy, nx, ny, sx1, sy1, sx2, sy2):
+                        count += 1
         return count
 
     def _init_via_impact_scoring(self) -> None:
@@ -1438,8 +1551,45 @@ class Router:
 
         # A* setup
         open_set: list[AStarNode] = []
-        closed_set: set[tuple[int, int, int]] = set()
-        g_scores: dict[tuple[int, int, int], float] = {}
+
+        # Issue #2430: Use NumPy arrays for closed_set and g_scores to avoid
+        # Python dict/set overhead with 480K+ tuple keys.  Array indexing
+        # (closed_arr[layer, y, x]) is significantly faster than dict hashing.
+        closed_arr = np.zeros(
+            (self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.bool_
+        )
+        g_scores_arr = np.full(
+            (self.grid.num_layers, self.grid.rows, self.grid.cols),
+            np.inf,
+            dtype=np.float64,
+        )
+
+        # Issue #2430: Pre-compute expanded blocked bitmap so that
+        # _is_trace_blocked becomes a single array lookup per neighbor.
+        expanded_blocked = self.grid.compute_expanded_blocked(
+            net_trace_half_width_cells, start.net, allow_sharing
+        )
+
+        # Issue #2430: Build crossing grid index if routed segments exist.
+        if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+            self._build_crossing_grid()
+        else:
+            self._crossing_grid = None
+
+        # Issue #2430: Pre-compute zone blocking and zone cost arrays.
+        # Zone cells with a different net are blocked; same-net zones get
+        # a cost discount.  This replaces per-neighbor Python object access
+        # with direct NumPy lookups.
+        zone_blocked_arr = self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
+        zone_cost_arr = np.where(
+            self.grid._is_zone & (self.grid._net == start.net),
+            self.rules.cost_zone_same_net - 1.0,
+            np.where(
+                zone_blocked_arr,
+                100.0,
+                0.0,
+            ),
+        )
 
         # Create heuristic context - for PTH end pads, use closest routable layer
         # for heuristic estimation (the actual goal check will accept any)
@@ -1465,7 +1615,7 @@ class Router:
                     start_h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), heuristic_context)
                     start_node = AStarNode(start_h, 0, sgx, sgy, sl)
                     heapq.heappush(open_set, start_node)
-                    g_scores[(sgx, sgy, sl)] = 0
+                    g_scores_arr[sl, sgy, sgx] = 0
 
         # Issue #2330: Waypoint injection for off-grid start pad.
         # Inject the exact pad world position as a waypoint node with edges
@@ -1481,9 +1631,8 @@ class Router:
                     wp_g = edge_cost * self.rules.cost_straight
                     wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), heuristic_context)
                     wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, sl)
-                    neighbor_key = (gx, gy, sl)
-                    if neighbor_key not in g_scores or wp_g < g_scores[neighbor_key]:
-                        g_scores[neighbor_key] = wp_g
+                    if wp_g < g_scores_arr[sl, gy, gx]:
+                        g_scores_arr[sl, gy, gx] = wp_g
                         heapq.heappush(open_set, wp_node)
 
         # Issue #2330: Waypoint for off-grid end pad — used in goal check.
@@ -1517,11 +1666,10 @@ class Router:
                     break
 
             current = heapq.heappop(open_set)
-            current_key = (current.x, current.y, current.layer)
 
-            if current_key in closed_set:
+            if closed_arr[current.layer, current.y, current.x]:
                 continue
-            closed_set.add(current_key)
+            closed_arr[current.layer, current.y, current.x] = True
 
             # Goal check - accept any cell within end pad's metal area (Issue #956)
             # This handles off-grid pads where the center doesn't align with routing grid
@@ -1550,7 +1698,7 @@ class Router:
             # running the full A* to the target pad when a shorter connection to
             # the existing tree exists, dramatically reducing search time for
             # high-fanout nets (e.g., GNDD with 7+ components).
-            if extra_goal_cells and current_key in extra_goal_cells:
+            if extra_goal_cells and (current.x, current.y, current.layer) in extra_goal_cells:
                 # Create a synthetic end pad at the reached grid cell so
                 # _reconstruct_route can build a valid Route object.
                 wx, wy = self.grid.grid_to_world(current.x, current.y)
@@ -1664,9 +1812,8 @@ class Router:
                         # Allow routing through it - this is key for THT routing
                         pass
                     elif cell.net == 0:
-                        # No-net blocked cell - use full check for obstacles
-                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing,
-                                                  radius=net_trace_half_width_cells):
+                        # No-net blocked cell - use pre-computed expanded bitmap
+                        if expanded_blocked[nlayer, ny, nx]:
                             continue
                     else:
                         # Different net's blocked cell
@@ -1699,16 +1846,15 @@ class Router:
                         or is_exiting_end_pad
                     )
                     if not is_pad_exit_or_approach:
-                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing,
-                                                  radius=net_trace_half_width_cells):
+                        # Issue #2430: Use pre-computed expanded blocked bitmap
+                        if expanded_blocked[nlayer, ny, nx]:
                             continue
 
-                # Check zone blocking (other-net zones block routing)
-                if self._is_zone_blocked(nx, ny, nlayer, start.net):
+                # Issue #2430: Use pre-computed zone blocking array
+                if zone_blocked_arr[nlayer, ny, nx]:
                     continue
 
-                neighbor_key = (nx, ny, nlayer)
-                if neighbor_key in closed_set:
+                if closed_arr[nlayer, ny, nx]:
                     continue
 
                 # Calculate cost - use batch pre-computed values (Issue #963)
@@ -1726,8 +1872,8 @@ class Router:
                         nx, ny, nlayer, present_cost_factor
                     )
 
-                # Add zone cost (reduced for same-net zones)
-                zone_cost = self._get_zone_cost(nx, ny, nlayer, start.net)
+                # Issue #2430: Use pre-computed zone cost array
+                zone_cost = float(zone_cost_arr[nlayer, ny, nx])
 
                 # Add layer preference cost (Issue #625)
                 layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
@@ -1760,8 +1906,8 @@ class Router:
                     + corridor_cost
                 ) * cost_mult
 
-                if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
-                    g_scores[neighbor_key] = new_g
+                if new_g < g_scores_arr[nlayer, ny, nx]:
+                    g_scores_arr[nlayer, ny, nx] = new_g
                     h = self.heuristic.estimate(nx, ny, nlayer, new_direction, heuristic_context)
                     f = new_g + weight * h  # Weighted A*
 
@@ -1804,8 +1950,7 @@ class Router:
 
                 self._via_diag_eligible += 1
 
-                neighbor_key = (current.x, current.y, new_layer)
-                if neighbor_key in closed_set:
+                if closed_arr[new_layer, current.y, current.x]:
                     continue
 
                 # Via cost + congestion at new layer
@@ -1866,8 +2011,8 @@ class Router:
 
                 new_g = (current.g_score + via_incremental) * cost_mult
 
-                if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
-                    g_scores[neighbor_key] = new_g
+                if new_g < g_scores_arr[new_layer, current.y, current.x]:
+                    g_scores_arr[new_layer, current.y, current.x] = new_g
                     # Via doesn't change direction, use current direction
                     h = self.heuristic.estimate(
                         current.x, current.y, new_layer, current.direction, heuristic_context
