@@ -844,6 +844,93 @@ class TestAutorouterMonteCarlo:
         score = router._evaluate_solution([route])
         assert score > 0  # Should have positive score with routed net
 
+    def test_evaluate_solution_penalizes_drc(self, router):
+        """Test that DRC violations reduce the solution score."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        # Add two nets on separate components with pads close enough to
+        # cause clearance violations when routed through each other.
+        pads_a = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        pads_b = [
+            {"number": "1", "x": 15.0, "y": 9.9, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 15.0, "y": 10.1, "net": 2, "net_name": "NET2"},
+        ]
+        router.add_component("R1", pads_a)
+        router.add_component("R2", pads_b)
+
+        # Build routes – NET1 trace runs right through NET2 pads
+        seg1 = Segment(
+            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(
+            x1=15.0, y1=9.9, x2=15.0, y2=10.1, width=0.2, layer=Layer.F_CU, net=2
+        )
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        # Use MonteCarloRouter directly to test with explicit DRC counts.
+        total_nets = 2
+        mc = MonteCarloRouter(total_nets)
+
+        clean_score = mc.evaluate_solution([route1, route2], drc_violations=0)
+        dirty_score = mc.evaluate_solution([route1, route2], drc_violations=3)
+
+        # Each violation should subtract drc_weight (default 50) from score
+        assert dirty_score < clean_score
+        assert clean_score - dirty_score == pytest.approx(3 * 50.0)
+
+    def test_evaluate_solution_drc_weight_configurable(self, router):
+        """Test that drc_weight parameter changes the penalty magnitude."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        seg = Segment(
+            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+
+        mc = MonteCarloRouter(1)
+
+        score_w10 = mc.evaluate_solution([route], drc_violations=2, drc_weight=10.0)
+        score_w100 = mc.evaluate_solution([route], drc_violations=2, drc_weight=100.0)
+        score_clean = mc.evaluate_solution([route], drc_violations=0)
+
+        assert score_clean > score_w10 > score_w100
+        assert score_clean - score_w10 == pytest.approx(2 * 10.0)
+        assert score_clean - score_w100 == pytest.approx(2 * 100.0)
+
+    def test_evaluate_solution_zero_drc_unchanged(self, router):
+        """Test that zero DRC violations produce the same score as before."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        seg = Segment(
+            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+
+        mc = MonteCarloRouter(1)
+
+        # Explicit drc_violations=0 should match the default (no arg)
+        score_default = mc.evaluate_solution([route])
+        score_explicit = mc.evaluate_solution([route], drc_violations=0)
+
+        assert score_default == score_explicit
+
     def test_monte_carlo_sequential_execution(self, router):
         """Test Monte Carlo routing with sequential execution (num_workers=1)."""
         # Add two simple 2-pin nets

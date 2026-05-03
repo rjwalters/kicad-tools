@@ -133,16 +133,25 @@ class MonteCarloRouter:
             result.extend(nets)
         return result
 
-    def evaluate_solution(self, routes: list[Route]) -> float:
+    def evaluate_solution(
+        self, routes: list[Route], drc_violations: int = 0, drc_weight: float = 50.0
+    ) -> float:
         """Score a routing solution (higher = better).
 
         Scoring prioritizes:
         1. Completion rate (primary - weighted heavily)
-        2. Lower via count (secondary)
-        3. Shorter total length (tertiary)
+        2. DRC violation count (penalizes unmanufacturable solutions)
+        3. Lower via count (secondary)
+        4. Shorter total length (tertiary)
+
+        At the default ``drc_weight`` of 50, each DRC violation cancels
+        roughly one net completion (~50 points from ``completion_rate * 1000``
+        for each net in a typical design).
 
         Args:
             routes: List of routes in the solution
+            drc_violations: Number of DRC clearance violations in the solution
+            drc_weight: Penalty per DRC violation (default 50.0)
 
         Returns:
             Solution score (higher is better)
@@ -159,8 +168,14 @@ class MonteCarloRouter:
         )
 
         # Completion rate is most important (1000x weight)
+        # DRC violations penalized heavily to discourage unmanufacturable solutions
         # Penalize vias and length slightly
-        return completion_rate * 1000 - total_vias * 0.1 - total_length * 0.01
+        return (
+            completion_rate * 1000
+            - drc_violations * drc_weight
+            - total_vias * 0.1
+            - total_length * 0.01
+        )
 
 
 def run_monte_carlo(

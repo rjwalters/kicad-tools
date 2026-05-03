@@ -4484,9 +4484,28 @@ class Autorouter:
         return mc_router.shuffle_within_tiers(net_order, self._get_net_priority)
 
     def _evaluate_solution(self, routes: list[Route]) -> float:
-        """Score a routing solution (higher = better)."""
+        """Score a routing solution (higher = better).
+
+        Runs DRC validation and penalizes clearance violations so the
+        Monte Carlo optimizer avoids unmanufacturable solutions.
+        """
+        from .io import validate_routes
+
         mc_router = MonteCarloRouter(len([n for n in self.nets if n != 0]))
-        return mc_router.evaluate_solution(routes)
+
+        # Count DRC violations for the candidate solution.
+        # Temporarily set self.routes so validate_routes can inspect them.
+        saved_routes = self.routes
+        self.routes = routes
+        try:
+            violations = validate_routes(self)
+            drc_count = len(violations)
+        except Exception:
+            drc_count = 0
+        finally:
+            self.routes = saved_routes
+
+        return mc_router.evaluate_solution(routes, drc_violations=drc_count)
 
     def _serialize_for_parallel(self) -> dict:
         """Serialize router state for parallel worker processes.
