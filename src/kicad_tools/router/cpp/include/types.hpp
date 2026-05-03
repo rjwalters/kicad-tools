@@ -102,6 +102,48 @@ struct DesignRules {
     float cost_via = 10.0f;
     float cost_congestion = 5.0f;
     float congestion_threshold = 0.5f;
+    float min_drill_clearance = 0.102f;
+};
+
+// Pad info for geometric validation (Issue #2439)
+// Stores pad geometry needed for clearance checking without Python callbacks.
+struct PadInfo {
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    int net = 0;
+    int layer_idx = -1;         // -1 means through-hole (all layers)
+    uint32_t ref_hash = 0;      // FNV-1a hash of component reference
+    float clearance_override = 0.0f;  // Pre-computed clearance for this pad's component
+};
+
+// Stored segment for validation (Issue #2439)
+// Segments from completed routes, used for clearance checking.
+struct StoredSegment {
+    float x1, y1, x2, y2;
+    float width;
+    int layer_idx;
+    int net;
+};
+
+// Stored via for validation (Issue #2439)
+// Vias from completed routes, used for clearance checking.
+struct StoredVia {
+    float x, y;
+    float drill;
+    float diameter;
+    int net;
+};
+
+// Validation result (Issue #2439)
+// Returned by validate_route() with pass/fail and violation location.
+struct ValidationResult {
+    bool valid = true;
+    float min_clearance = std::numeric_limits<float>::infinity();
+    float violation_x = 0.0f;
+    float violation_y = 0.0f;
+    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill
 };
 
 }  // namespace router

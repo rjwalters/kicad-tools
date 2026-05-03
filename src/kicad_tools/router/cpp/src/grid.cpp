@@ -4,8 +4,10 @@
  */
 
 #include "grid.hpp"
+#include "geometry.hpp"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace router {
 
@@ -266,6 +268,243 @@ float Grid3D::memory_mb() const {
     size_t bytes = cells_.size() * sizeof(GridCell) +
                    congestion_.size() * sizeof(int);
     return static_cast<float>(bytes) / (1024 * 1024);
+}
+
+// -----------------------------------------------------------------------
+// Geometric validation (Issue #2439)
+// -----------------------------------------------------------------------
+
+void Grid3D::add_pad(float x, float y, float width, float height,
+                     int net, int layer_idx, uint32_t ref_hash,
+                     float clearance_override) {
+    pads_.push_back({x, y, width, height, net, layer_idx, ref_hash, clearance_override});
+}
+
+void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
+                                float width, int layer_idx, int net) {
+    stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net});
+}
+
+void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net) {
+    stored_vias_.push_back({x, y, drill, diameter, net});
+}
+
+void Grid3D::clear_validation_data() {
+    pads_.clear();
+    stored_segments_.clear();
+    stored_vias_.clear();
+}
+
+ValidationResult Grid3D::validate_route(
+    const std::vector<Segment>& segments,
+    const std::vector<Via>& vias,
+    int exclude_net,
+    const std::vector<uint32_t>& exclude_ref_hashes,
+    float trace_clearance,
+    float via_clearance,
+    float min_drill_clearance) const
+{
+    ValidationResult result;
+    result.valid = true;
+    result.min_clearance = std::numeric_limits<float>::infinity();
+
+    // Helper: check if a ref_hash is in the exclusion set
+    auto is_excluded_ref = [&](uint32_t ref_hash) -> bool {
+        for (auto h : exclude_ref_hashes) {
+            if (h == ref_hash) return true;
+        }
+        return false;
+    };
+
+    // ---------------------------------------------------------------
+    // 1. Validate segment clearance (port of grid.py:905-1118)
+    //    Each candidate segment vs all pads, stored segments, stored vias
+    // ---------------------------------------------------------------
+    for (const auto& seg : segments) {
+        float seg_half_width = seg.width / 2.0f;
+
+        // 1a. Segment vs pads
+        for (const auto& pad : pads_) {
+            // Skip same-net pads
+            if (pad.net == exclude_net) continue;
+
+            // Issue #1764: Skip pads on excluded components
+            if (is_excluded_ref(pad.ref_hash)) continue;
+
+            // Skip pads on different layers (unless through-hole: layer_idx == -1)
+            if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
+
+            // Per-component clearance (Issue #1016)
+            float required_clearance = pad.clearance_override;
+
+            // Pad radius: conservative, use larger dimension
+            float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+
+            // Point-to-segment distance
+            float dist = point_to_segment_distance(
+                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+
+            // Edge-to-edge clearance
+            float clearance = dist - seg_half_width - pad_radius;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < required_clearance) {
+                result.valid = false;
+                result.violation_x = pad.x;
+                result.violation_y = pad.y;
+                result.violation_type = 1;  // seg-pad
+                return result;
+            }
+        }
+
+        // 1b. Segment vs stored segments (brute-force, no R-tree in C++)
+        for (const auto& other : stored_segments_) {
+            // Skip same-net segments
+            if (other.net == exclude_net) continue;
+
+            // Skip segments on different layers
+            if (other.layer_idx != seg.layer) continue;
+
+            float dist = segment_to_segment_distance(
+                seg.x1, seg.y1, seg.x2, seg.y2,
+                other.x1, other.y1, other.x2, other.y2);
+
+            float clearance = dist - seg_half_width - other.width / 2.0f;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < trace_clearance) {
+                result.valid = false;
+                result.violation_x = (seg.x1 + seg.x2 + other.x1 + other.x2) / 4.0f;
+                result.violation_y = (seg.y1 + seg.y2 + other.y1 + other.y2) / 4.0f;
+                result.violation_type = 2;  // seg-seg
+                return result;
+            }
+        }
+
+        // 1c. Segment vs stored vias
+        for (const auto& sv : stored_vias_) {
+            if (sv.net == exclude_net) continue;
+
+            float via_radius = sv.diameter / 2.0f;
+            float dist = point_to_segment_distance(
+                sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
+
+            float clearance = dist - seg_half_width - via_radius;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < trace_clearance) {
+                result.valid = false;
+                result.violation_x = sv.x;
+                result.violation_y = sv.y;
+                result.violation_type = 3;  // seg-via
+                return result;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Validate via clearance (port of grid.py:1120-1192)
+    //    Each candidate via vs stored segments on all layers
+    // ---------------------------------------------------------------
+    for (const auto& via : vias) {
+        float via_radius = via.diameter / 2.0f;
+
+        // Via spans from layer_from to layer_to
+        int layer_lo = std::min(via.layer_from, via.layer_to);
+        int layer_hi = std::max(via.layer_from, via.layer_to);
+
+        for (const auto& seg : stored_segments_) {
+            if (seg.net == exclude_net) continue;
+
+            // Only check segments on layers the via spans
+            if (seg.layer_idx < layer_lo || seg.layer_idx > layer_hi) continue;
+
+            float seg_half_width = seg.width / 2.0f;
+            float dist = point_to_segment_distance(
+                via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
+
+            float clearance = dist - via_radius - seg_half_width;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < via_clearance) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 4;  // via-seg
+                return result;
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 3. Via-to-via clearance (port of grid.py:1194-1251)
+        //    Candidate via vs stored vias from different nets
+        // ---------------------------------------------------------------
+        for (const auto& sv : stored_vias_) {
+            if (sv.net == exclude_net) continue;
+
+            float dx = via.x - sv.x;
+            float dy = via.y - sv.y;
+            float distance = std::sqrt(dx * dx + dy * dy);
+            float existing_via_radius = sv.diameter / 2.0f;
+            float clearance = distance - via_radius - existing_via_radius;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < via_clearance) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 5;  // via-via
+                return result;
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 4. Same-net drill spacing (port of grid.py:1253-1317)
+        //    Candidate via vs stored vias from SAME net
+        // ---------------------------------------------------------------
+        float drill_radius = via.drill / 2.0f;
+        for (const auto& sv : stored_vias_) {
+            if (sv.net != exclude_net) continue;
+
+            // Skip self (exact same position)
+            float ddx = via.x - sv.x;
+            float ddy = via.y - sv.y;
+            if (std::abs(ddx) < 1e-6f && std::abs(ddy) < 1e-6f) continue;
+
+            float distance = std::sqrt(ddx * ddx + ddy * ddy);
+            float existing_drill_radius = sv.drill / 2.0f;
+            float clearance = distance - drill_radius - existing_drill_radius;
+
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+
+            if (clearance < min_drill_clearance) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 6;  // drill spacing
+                return result;
+            }
+        }
+    }
+
+    return result;
 }
 
 }  // namespace router
