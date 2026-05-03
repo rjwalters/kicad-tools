@@ -42,30 +42,95 @@ class MonteCarloRouter:
     ) -> list[int]:
         """Shuffle nets but preserve priority tier ordering.
 
+        Groups by (net_class_priority, complexity_tier) so that simple 2-pin
+        short nets and complex multi-pin/long-span nets within the same net
+        class are not mixed together.
+
         Args:
             net_order: Original net order
             get_priority: Function that takes net_id and returns priority tuple
-                (e.g., (priority, pad_count, distance))
+                where element 0 is net class priority and element 1 is
+                complexity tier.
 
         Returns:
             New net order with shuffled tiers
         """
-        # Group by priority tier (use first element of priority tuple)
-        tiers: dict[int, list[int]] = {}
+        # Group by (net_class_priority, complexity_tier)
+        tiers: dict[tuple[int, int], list[int]] = {}
         for net in net_order:
             priority_tuple = get_priority(net)
-            tier = priority_tuple[0]  # First element is the net class priority
-            if tier not in tiers:
-                tiers[tier] = []
-            tiers[tier].append(net)
+            key = (priority_tuple[0], priority_tuple[1])
+            if key not in tiers:
+                tiers[key] = []
+            tiers[key].append(net)
 
-        # Shuffle within each tier and reassemble
+        # Shuffle within each tier and reassemble in sorted key order
         result: list[int] = []
-        for priority in sorted(tiers.keys()):
-            tier_nets = tiers[priority].copy()
+        for key in sorted(tiers.keys()):
+            tier_nets = tiers[key].copy()
             random.shuffle(tier_nets)
             result.extend(tier_nets)
 
+        return result
+
+    def shuffle_with_promotions(
+        self,
+        net_order: list[int],
+        get_priority: callable,
+        promotion_rate: float = 0.2,
+    ) -> list[int]:
+        """Shuffle within (priority, complexity_tier) groups with cross-tier promotions.
+
+        Occasionally promotes tier-1 (complex/long-span) nets to tier-0
+        (simple/short) position within the same net class priority, biasing
+        exploration toward orderings where long-span nets get early corridor
+        access.
+
+        Cross-tier promotions never cross net class priority boundaries -- a
+        debug net (priority 5) is never promoted ahead of a clock net
+        (priority 2).
+
+        Args:
+            net_order: Original net order
+            get_priority: Function that takes net_id and returns priority tuple
+            promotion_rate: Probability of promoting each tier-1 net to tier 0
+                within the same net class priority (0.0 = no promotions,
+                1.0 = always promote)
+
+        Returns:
+            New net order with shuffled tiers and cross-tier promotions
+        """
+        # Group by (net_class_priority, complexity_tier)
+        groups: dict[tuple[int, int], list[int]] = {}
+        for net in net_order:
+            pt = get_priority(net)
+            key = (pt[0], pt[1])
+            groups.setdefault(key, []).append(net)
+
+        # Promote: move some tier-1 nets to tier-0 within same net class priority
+        priorities = {k[0] for k in groups}
+        for p in priorities:
+            src_key = (p, 1)
+            dst_key = (p, 0)
+            if src_key not in groups:
+                continue
+            promoted = []
+            remaining = []
+            for net in groups[src_key]:
+                if random.random() < promotion_rate:
+                    promoted.append(net)
+                else:
+                    remaining.append(net)
+            if promoted:
+                groups.setdefault(dst_key, []).extend(promoted)
+                groups[src_key] = remaining
+
+        # Shuffle within each group and reassemble in sorted key order
+        result: list[int] = []
+        for key in sorted(groups.keys()):
+            nets = groups[key].copy()
+            random.shuffle(nets)
+            result.extend(nets)
         return result
 
     def evaluate_solution(self, routes: list[Route]) -> float:
@@ -178,11 +243,14 @@ def run_monte_carlo(
 
             random.seed(base_seed + trial)
             autorouter._reset_for_new_trial()
-            net_order = (
-                base_order.copy()
-                if trial == 0
-                else autorouter._shuffle_within_tiers(base_order)
-            )
+            if trial == 0:
+                net_order = base_order.copy()
+            else:
+                # Increasing promotion rate over trials to broaden exploration
+                promotion_rate = min(0.1 + 0.05 * trial, 0.5)
+                net_order = autorouter._shuffle_within_tiers(
+                    base_order, promotion_rate=promotion_rate
+                )
             routes = (
                 autorouter.route_all_negotiated()
                 if use_negotiated
