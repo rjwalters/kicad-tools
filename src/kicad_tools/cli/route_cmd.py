@@ -1113,6 +1113,13 @@ def route_with_layer_escalation(
                 print(f"  Routing error: {e}")
             continue
 
+        # Issue #2426: Run cleanup before computing statistics so that the
+        # best-result selector compares post-cleanup connectivity counts —
+        # the same metric shown in the final summary.  cleanup_artifacts()
+        # is idempotent, so the subsequent call in _finalize_routes() is a
+        # safe no-op.
+        router.cleanup_artifacts()
+
         # Calculate completion — filter to multi-pad nets only (Issue #1643)
         multi_pad_net_ids = set(multi_pad_nets)
         stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
@@ -1630,6 +1637,10 @@ def route_with_rule_relaxation(
                 print(f"  Routing error: {e}")
             continue
 
+        # Issue #2426: Run cleanup before computing statistics so that the
+        # best-result selector compares post-cleanup connectivity counts.
+        router.cleanup_artifacts()
+
         # Calculate completion — filter to multi-pad nets only (Issue #1643)
         multi_pad_net_ids = set(multi_pad_nets)
         stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
@@ -2109,6 +2120,10 @@ def route_with_combined_escalation(
                     print(f"  Routing error: {e}")
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
+
+            # Issue #2426: Run cleanup before computing statistics so that
+            # the best-result selector compares post-cleanup connectivity.
+            router.cleanup_artifacts()
 
             # Calculate completion — filter to multi-pad nets only (Issue #1643)
             multi_pad_net_ids = set(multi_pad_nets)

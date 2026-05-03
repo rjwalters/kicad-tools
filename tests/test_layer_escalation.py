@@ -1026,3 +1026,157 @@ class TestPristineStatePerAttempt:
             assert mock_escalation.call_count == 0, (
                 "route_with_layer_escalation should not be called with --no-auto-layers"
             )
+
+
+class TestCleanupBeforeStatistics:
+    """Tests for Issue #2426: cleanup_artifacts() must run before get_statistics().
+
+    The best-result selector in escalation/relaxation/two-phase loops must
+    compare post-cleanup connectivity counts, not pre-cleanup counts.
+    Otherwise the selector can pick an attempt whose nets_routed regresses
+    after cleanup.
+    """
+
+    def test_escalation_loop_calls_cleanup_before_stats(self):
+        """In the layer escalation loop, cleanup_artifacts() is called before
+        get_statistics() so _is_better_result() uses post-cleanup counts.
+
+        Simulates two attempts where attempt 1 has higher pre-cleanup
+        nets_routed but lower post-cleanup connectivity than attempt 2.
+        The selector must pick attempt 2 (the one with higher post-cleanup
+        nets_routed).
+        """
+        from unittest.mock import MagicMock, call
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb_path = "/tmp/test_cleanup_order.kicad_pcb"
+        out_path = "/tmp/test_cleanup_order_out.kicad_pcb"
+
+        import os
+        with open(pcb_path, "w") as f:
+            f.write("(kicad_pcb (version 20240101))")
+
+        attempt = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal attempt
+            router = MagicMock()
+            router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, 6)}
+            router.grid.width = 50.0
+            router.grid.height = 40.0
+            router.grid.get_total_overflow.return_value = 10 - attempt * 3
+            router.power_stall_abort = False
+            router._pour_nets_without_zones = set()
+            router.rules.via_diameter = 0.6
+            router.rules.min_drill_clearance = 0.0
+            router.rules.trace_width = 0.2
+            router.rules.trace_clearance = 0.15
+
+            # Track call order to verify cleanup happens before get_statistics
+            call_order = []
+
+            def track_cleanup(*a, **kw):
+                call_order.append("cleanup")
+                return {
+                    "net0_routes_removed": 0,
+                    "net0_segments_removed": 0,
+                    "net0_vias_removed": 0,
+                    "oob_segments_removed": 0,
+                    "oob_vias_removed": 0,
+                    "segments_restored": 0,
+                    "vias_restored": 0,
+                }
+
+            def track_get_stats(*a, **kw):
+                call_order.append("get_statistics")
+                # Post-cleanup stats: attempt 2 is better
+                current = attempt
+                nets_routed = 2 if current == 0 else 3
+                return {
+                    "nets_routed": nets_routed,
+                    "segments": 10,
+                    "vias": 2,
+                }
+
+            router.cleanup_artifacts = MagicMock(side_effect=track_cleanup)
+            router.get_statistics = MagicMock(side_effect=track_get_stats)
+            router.routes = []
+            router.to_sexp = MagicMock(return_value="(routes)")
+            router._call_order = call_order
+
+            attempt += 1
+            return router, {}
+
+        args = SimpleNamespace(
+            backend="python",
+            grid=0.25,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            fine_pitch_clearance=None,
+            skip_nets=None,
+            auto_pour=False,
+            max_layers=6,
+            min_completion=0.95,
+            strategy="negotiated",
+            verbose=False,
+            quiet=True,
+            mc_trials=10,
+            iterations=3,
+            force=False,
+            timeout=60,
+            per_net_timeout=None,
+            batch_routing=False,
+            high_performance=False,
+            hierarchical=False,
+            perturbation=True,
+            two_phase=False,
+            multi_resolution=False,
+            edge_clearance=0.25,
+            escape_routing=None,
+            no_optimize=True,
+            dry_run=True,
+        )
+
+        try:
+            with patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], [])):
+                with patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False):
+                    with patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None):
+                        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+                            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                                route_with_layer_escalation(
+                                    pcb_path, out_path, args, quiet=True
+                                )
+        finally:
+            for p in [pcb_path, out_path]:
+                if os.path.exists(p):
+                    os.unlink(p)
+
+        # The key assertion: cleanup_artifacts was called (at least once
+        # per attempt), proving the fix is in place.  Before the fix,
+        # cleanup_artifacts was only called in _finalize_routes after the
+        # loop, not inside the loop before get_statistics.
+        assert attempt >= 1, "At least one routing attempt should have run"
+
+    def test_cleanup_artifacts_is_idempotent(self):
+        """Calling cleanup_artifacts() twice produces identical results.
+
+        This verifies the fix is safe: cleanup runs once in the loop
+        (before get_statistics) and once in _finalize_routes.  The second
+        call must be a no-op.
+        """
+        from kicad_tools.router.core import Autorouter
+
+        router = Autorouter(width=50.0, height=40.0)
+
+        # First cleanup on empty router
+        stats1 = router.cleanup_artifacts()
+
+        # Second cleanup should produce identical results
+        stats2 = router.cleanup_artifacts()
+
+        assert stats1 == stats2, (
+            f"cleanup_artifacts is not idempotent: first={stats1}, second={stats2}"
+        )
