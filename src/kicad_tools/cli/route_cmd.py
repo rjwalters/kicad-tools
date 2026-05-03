@@ -3892,7 +3892,18 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Define the Phase 2 routing function
                 def phase2_route_fn():
-                    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                    if args.strategy == "evolutionary":
+                        return router.route_all_evolutionary(
+                            pop_size=args.pop_size,
+                            generations=args.generations,
+                            verbose=args.verbose and not quiet,
+                        )
+                    elif args.strategy == "monte-carlo":
+                        return router.route_all_monte_carlo(
+                            num_trials=args.mc_trials,
+                            verbose=args.verbose and not quiet,
+                        )
+                    elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                         return router.route_all_two_phase(
                             use_negotiated=True,
                             corridor_width_factor=2.0,
