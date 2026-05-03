@@ -461,3 +461,72 @@ class TestIssue1285NetClassification:
 
         assert "NRST" in rules
         assert rules["NRST"].is_pour_net is False
+
+
+class TestIssue2431MotorPowerNets:
+    """Tests for motor/actuator power net classification (issue #2431).
+
+    VMOTOR and similar motor power net names must be classified as POWER
+    so that auto_pour_if_missing() creates zones for them instead of
+    attempting impractical trace-based MST routing across many pads.
+    """
+
+    def test_vmotor_classified_as_power(self):
+        """VMOTOR must be classified as POWER."""
+        assert classify_from_name("VMOTOR") == NetClass.POWER
+
+    def test_vmot_classified_as_power(self):
+        """VMOT (common abbreviation) must be classified as POWER."""
+        assert classify_from_name("VMOT") == NetClass.POWER
+
+    def test_vmain_classified_as_power(self):
+        """VMAIN must be classified as POWER."""
+        assert classify_from_name("VMAIN") == NetClass.POWER
+
+    def test_vpwr_classified_as_power(self):
+        """VPWR must be classified as POWER."""
+        assert classify_from_name("VPWR") == NetClass.POWER
+
+    def test_vdrive_classified_as_power(self):
+        """VDRIVE must be classified as POWER."""
+        assert classify_from_name("VDRIVE") == NetClass.POWER
+
+    def test_vact_classified_as_power(self):
+        """VACT (actuator power) must be classified as POWER."""
+        assert classify_from_name("VACT") == NetClass.POWER
+
+    def test_vsrv_classified_as_power(self):
+        """VSRV (servo power) must be classified as POWER."""
+        assert classify_from_name("VSRV") == NetClass.POWER
+
+    def test_vmotor_sense_not_classified_as_power(self):
+        """VMOTOR_SENSE is a sense/analog net and must NOT match as POWER.
+
+        The motor power pattern uses exact match to prevent misclassifying
+        sense or feedback nets that happen to share the VMOTOR prefix.
+        """
+        result = classify_from_name("VMOTOR_SENSE")
+        assert result != NetClass.POWER
+
+    def test_vmotor_fb_not_classified_as_power(self):
+        """VMOTOR_FB is a feedback net and must NOT match as POWER."""
+        result = classify_from_name("VMOTOR_FB")
+        assert result != NetClass.POWER
+
+    def test_vmotor_case_insensitive(self):
+        """Pattern matching is case-insensitive so Vmotor should also match."""
+        assert classify_from_name("Vmotor") == NetClass.POWER
+        assert classify_from_name("vmotor") == NetClass.POWER
+
+    def test_vmotor_classify_net_returns_power(self):
+        """classify_net() must return POWER for VMOTOR with adequate confidence."""
+        result = classify_net("VMOTOR")
+        assert result.net_class == NetClass.POWER
+        assert result.confidence >= 0.5
+
+    def test_vmotor_gets_pour_net_routing(self):
+        """VMOTOR must get is_pour_net=True from classify_and_apply_rules."""
+        net_names = {1: "VMOTOR"}
+        rules = classify_and_apply_rules(net_names)
+        assert "VMOTOR" in rules
+        assert rules["VMOTOR"].is_pour_net is True
