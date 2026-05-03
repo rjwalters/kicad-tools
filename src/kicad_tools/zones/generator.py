@@ -203,15 +203,87 @@ class ZoneGenerator:
                         self._board_outline, self._edge_clearance
                     )
                 except ImportError:
-                    import warnings
+                    # Shapely unavailable -- use pure-Python rect fallback
+                    # for axis-aligned rectangular outlines (covers the
+                    # majority of hobby/demo boards).
+                    if self._is_axis_aligned_rect(self._board_outline):
+                        self._board_outline = self._inset_rect(
+                            self._board_outline, self._edge_clearance
+                        )
+                    else:
+                        import warnings
 
-                    warnings.warn(
-                        "shapely is required for edge_clearance inset "
-                        "(install with: pip install kicad-tools[geometry]). "
-                        "Zone boundary will use exact board outline.",
-                        stacklevel=2,
-                    )
+                        warnings.warn(
+                            "shapely is required for edge_clearance inset "
+                            "on non-rectangular board outlines "
+                            "(install with: pip install kicad-tools[geometry]). "
+                            "Zone boundary will use exact board outline.",
+                            stacklevel=2,
+                        )
         return self._board_outline
+
+    @staticmethod
+    def _is_axis_aligned_rect(
+        coords: list[tuple[float, float]],
+    ) -> bool:
+        """Check whether *coords* form an axis-aligned rectangle.
+
+        Returns ``True`` when the polygon has exactly 4 unique vertices
+        whose bounding box matches the vertex coordinates (i.e. all
+        corners sit at the extremes of the bounding box).  Handles
+        closed polygons where the first point is repeated at the end.
+        """
+        # Strip closing duplicate if present
+        if len(coords) == 5 and coords[0] == coords[-1]:
+            coords = coords[:4]
+        if len(coords) != 4:
+            return False
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        # Width and height must be positive
+        if x_max - x_min < 1e-6 or y_max - y_min < 1e-6:
+            return False
+        # Every vertex must be at a corner of the bounding box
+        corners = {(x_min, y_min), (x_min, y_max), (x_max, y_min), (x_max, y_max)}
+        return all((round(x, 6), round(y, 6)) in corners for x, y in coords)
+
+    @staticmethod
+    def _inset_rect(
+        coords: list[tuple[float, float]],
+        distance: float,
+    ) -> list[tuple[float, float]]:
+        """Shrink an axis-aligned rectangle inward by *distance* mm.
+
+        Pure-Python fallback that does not require Shapely.  Returns the
+        original coordinates unchanged if the inset would collapse the
+        rectangle (width or height < 2 * distance).  Handles closed
+        polygons where the first point is repeated at the end.
+        """
+        # Strip closing duplicate if present
+        if len(coords) == 5 and coords[0] == coords[-1]:
+            coords = coords[:4]
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+
+        new_x_min = x_min + distance
+        new_x_max = x_max - distance
+        new_y_min = y_min + distance
+        new_y_max = y_max - distance
+
+        # Collapsed -- fall back to original
+        if new_x_min >= new_x_max or new_y_min >= new_y_max:
+            return coords
+
+        return [
+            (round(new_x_min, 6), round(new_y_min, 6)),
+            (round(new_x_max, 6), round(new_y_min, 6)),
+            (round(new_x_max, 6), round(new_y_max, 6)),
+            (round(new_x_min, 6), round(new_y_max, 6)),
+        ]
 
     @staticmethod
     def _inset_polygon(

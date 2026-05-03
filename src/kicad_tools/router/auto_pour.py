@@ -19,6 +19,102 @@ import re
 from pathlib import Path
 
 
+def _detect_uninset_zones(
+    pcb_path: Path,
+    edge_clearance: float,
+) -> set[str]:
+    """Return net names of zones whose boundaries lack edge clearance inset.
+
+    Loads the PCB via the schema layer to get zone polygons and the board
+    outline, then checks whether any zone polygon vertex sits within
+    ``edge_clearance`` of the board edge (with a small tolerance).
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    outline = pcb.get_board_outline()
+    if not outline:
+        return set()
+
+    ox, oy = pcb.board_origin
+
+    # Build board-edge bounding box from the outline
+    outline_xs = [p[0] for p in outline]
+    outline_ys = [p[1] for p in outline]
+    edge_x_min, edge_x_max = min(outline_xs), max(outline_xs)
+    edge_y_min, edge_y_max = min(outline_ys), max(outline_ys)
+
+    # Tolerance: vertices within (edge_clearance - epsilon) of the edge
+    # are considered un-inset.  We use half the clearance as threshold
+    # so that zones that were already inset (even partially) are not
+    # unnecessarily regenerated.
+    threshold = edge_clearance * 0.5
+
+    nets_needing_fix: set[str] = set()
+    for zone in pcb.zones:
+        net_name = zone.net_name
+        if not net_name:
+            continue
+        polygon = zone.polygon
+        if not polygon:
+            continue
+
+        for px, py in polygon:
+            # Convert from sheet-absolute to board-relative
+            bx = px - ox
+            by = py - oy
+            # Check distance to each edge of the bounding box
+            dist_left = bx - edge_x_min
+            dist_right = edge_x_max - bx
+            dist_top = by - edge_y_min
+            dist_bottom = edge_y_max - by
+            min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+            if min_dist < threshold:
+                nets_needing_fix.add(net_name)
+                break  # No need to check more vertices for this zone
+
+    return nets_needing_fix
+
+
+def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
+    """Remove zone definitions for the given net names from the PCB file.
+
+    Uses a regex-based approach to strip ``(zone ...)`` blocks whose
+    ``net_name`` or ``net`` attribute matches one of *net_names*.
+    """
+    pcb_text = pcb_path.read_text()
+
+    for net_name in net_names:
+        escaped = re.escape(net_name)
+        # KiCad 7/8: (zone ... (net_name "GND") ... )  -- top-level node
+        # KiCad 9:   (zone ... (net "GND") ... )        -- top-level node
+        # We match the entire (zone ...) block using a balanced-paren
+        # approach: find the opening "(zone" and count parens to find
+        # the matching close.
+        new_lines: list[str] = []
+        lines = pcb_text.split("\n")
+        skip_depth = 0
+        for line in lines:
+            if skip_depth > 0:
+                skip_depth += line.count("(") - line.count(")")
+                continue
+            # Detect start of a zone block for this net
+            if re.search(
+                rf'\(zone\s.*?\(net_name\s+"{escaped}"\)',
+                line,
+                re.DOTALL,
+            ) or re.search(
+                rf'\(zone\s[^)]*\(net\s+"{escaped}"\)',
+                line,
+            ):
+                skip_depth = line.count("(") - line.count(")")
+                continue
+            new_lines.append(line)
+        pcb_text = "\n".join(new_lines)
+
+    pcb_path.write_text(pcb_text)
+
+
 def auto_pour_if_missing(
     pcb_path: Path,
     *,
@@ -94,6 +190,9 @@ def auto_pour_if_missing(
 
     # ------------------------------------------------------------------
     # 4. Idempotency: filter out nets that already have zones
+    #    When edge_clearance is specified, also detect existing zones
+    #    whose boundaries match the board outline exactly (no inset)
+    #    and remove them so they can be regenerated with proper inset.
     # ------------------------------------------------------------------
     nets_with_zones: set[str] = set()
     # KiCad 7/8 format: (zone ... (net_name "GND") ...)
@@ -104,6 +203,26 @@ def auto_pour_if_missing(
     # KiCad 9 name-only format: (zone ... (net "GND") ...)
     for zm in re.finditer(r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', pcb_text):
         nets_with_zones.add(zm.group(1))
+
+    # When edge_clearance is specified, check whether existing zones
+    # have boundaries that lack proper inset from the board edge.
+    # If so, remove those zones so they are regenerated with inset.
+    nets_needing_reinset: set[str] = set()
+    if edge_clearance and edge_clearance > 0 and nets_with_zones:
+        nets_needing_reinset = _detect_uninset_zones(
+            pcb_path, edge_clearance
+        )
+        if nets_needing_reinset:
+            _remove_zones_for_nets(pcb_path, nets_needing_reinset)
+            # Re-read the file after removal
+            pcb_text = pcb_path.read_text()
+            nets_with_zones -= nets_needing_reinset
+            if not quiet:
+                print(
+                    f"Auto-pour: removing {len(nets_needing_reinset)} zone(s) "
+                    f"with insufficient edge clearance for "
+                    f"{', '.join(sorted(nets_needing_reinset))}"
+                )
 
     new_pour_nets = [
         (name, cls) for name, cls in pour_nets if name not in nets_with_zones
