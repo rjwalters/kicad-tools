@@ -206,10 +206,10 @@ class TestAutoPourIfMissing:
         assert names == []
 
     def test_edge_clearance_insets_zone_boundary(self, tmp_path: Path):
-        """Zone boundary is inset from board edge when edge_clearance is set."""
-        pytest.importorskip(
-            "shapely", reason="shapely required for edge clearance tests"
-        )
+        """Zone boundary is inset from board edge when edge_clearance is set.
+
+        Uses the pure-Python rect fallback so shapely is not required.
+        """
         import re
 
         from kicad_tools.router.auto_pour import auto_pour_if_missing
@@ -252,9 +252,6 @@ class TestAutoPourIfMissing:
 
     def test_no_edge_clearance_uses_exact_outline(self, tmp_path: Path):
         """Without edge_clearance, zone boundary matches board edge exactly."""
-        pytest.importorskip(
-            "shapely", reason="shapely required for edge clearance tests"
-        )
         import re
 
         from kicad_tools.router.auto_pour import auto_pour_if_missing
@@ -281,3 +278,51 @@ class TestAutoPourIfMissing:
         assert max(xs) >= 49.99, "Expected coordinate near right edge (x=50)"
         assert min(ys) <= 0.01, "Expected coordinate near top edge (y=0)"
         assert max(ys) >= 49.99, "Expected coordinate near bottom edge (y=50)"
+
+    def test_reinsets_existing_uninset_zones(self, tmp_path: Path):
+        """Existing zones at board edge are removed and recreated with inset.
+
+        When edge_clearance is specified and an existing zone's boundary
+        matches the board edge (no inset), auto_pour should remove it and
+        regenerate with proper inset.
+        """
+        import re
+
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        # Create a zone at the exact board edge (0..50)
+        zone_gnd = (
+            '(zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+            "(connect_pads (clearance 0.25)) "
+            "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+            "(polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))))"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "SDA")],
+            pad_nets=[(1, "GND"), (2, "SDA")],
+            zones=[zone_gnd],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(
+            pcb_path, edge_clearance=0.3
+        )
+
+        # GND zone should be regenerated (removed + recreated)
+        assert count == 1
+        assert "GND" in names
+
+        # Verify new zone boundary is inset from the board edge
+        text = pcb_path.read_text()
+        xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
+        assert len(xy_matches) > 0, "No zone polygon coordinates found"
+
+        for x_str, y_str in xy_matches:
+            x, y = float(x_str), float(y_str)
+            assert (
+                x >= 0.3 - 0.01
+            ), f"X coord {x} too close to left edge (expected >= 0.3)"
+            assert (
+                x <= 49.7 + 0.01
+            ), f"X coord {x} too close to right edge (expected <= 49.7)"
