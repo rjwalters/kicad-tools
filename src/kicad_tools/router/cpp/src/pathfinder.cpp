@@ -196,7 +196,9 @@ RouteResult Pathfinder::route(
     float present_cost_factor,
     float weight,
     int trace_radius_cells,
-    int via_radius_cells
+    int via_radius_cells,
+    const PadBounds& start_pad_bounds,
+    const PadBounds& end_pad_bounds
 ) {
     RouteResult result;
     result.net = net;
@@ -212,6 +214,35 @@ RouteResult Pathfinder::route(
     std::vector<int> valid_end_layers = end_layers.empty()
         ? std::vector<int>{end_layer} : end_layers;
 
+    // Issue #2427: Use pad bounds if provided, otherwise fall back to single-cell
+    // bounds matching the grid-snapped center (backward-compatible).
+    PadBounds sp = start_pad_bounds;
+    PadBounds ep = end_pad_bounds;
+    bool has_start_bounds = (sp.metal_gx1 != sp.metal_gx2 || sp.metal_gy1 != sp.metal_gy2
+                             || (sp.metal_gx1 == start_gx && sp.metal_gy1 == start_gy));
+    bool has_end_bounds = (ep.metal_gx1 != ep.metal_gx2 || ep.metal_gy1 != ep.metal_gy2
+                           || (ep.metal_gx1 == end_gx && ep.metal_gy1 == end_gy));
+    // If no bounds were passed (all zeros but not matching grid coords), create
+    // single-cell bounds at the grid-snapped position for uniform code paths.
+    if (!has_start_bounds && sp.metal_gx1 == 0 && sp.metal_gy1 == 0
+        && sp.metal_gx2 == 0 && sp.metal_gy2 == 0) {
+        sp.metal_gx1 = sp.metal_gx2 = start_gx;
+        sp.metal_gy1 = sp.metal_gy2 = start_gy;
+        sp.approach_gx1 = start_gx - 2;
+        sp.approach_gy1 = start_gy - 2;
+        sp.approach_gx2 = start_gx + 2;
+        sp.approach_gy2 = start_gy + 2;
+    }
+    if (!has_end_bounds && ep.metal_gx1 == 0 && ep.metal_gy1 == 0
+        && ep.metal_gx2 == 0 && ep.metal_gy2 == 0) {
+        ep.metal_gx1 = ep.metal_gx2 = end_gx;
+        ep.metal_gy1 = ep.metal_gy2 = end_gy;
+        ep.approach_gx1 = end_gx - 2;
+        ep.approach_gy1 = end_gy - 2;
+        ep.approach_gx2 = end_gx + 2;
+        ep.approach_gy2 = end_gy + 2;
+    }
+
     // A* data structures
     using PQ = std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>>;
     PQ open_set;
@@ -219,12 +250,23 @@ RouteResult Pathfinder::route(
     std::unordered_map<std::tuple<int, int, int>, float, GridPosHash> g_scores;
     std::vector<AStarNode> closed_list;  // For path reconstruction
 
-    // Initialize with start nodes (one per valid start layer)
-    for (int sl : valid_start_layers) {
-        float h = heuristic(start_gx, start_gy, sl, end_gx, end_gy, valid_end_layers[0]);
-        AStarNode start_node{h, 0.0f, start_gx, start_gy, sl, -1, false, 0, 0};
-        open_set.push(start_node);
-        g_scores[{start_gx, start_gy, sl}] = 0.0f;
+    // Issue #2427 Phase 1: Seed start nodes from ALL cells within start pad's
+    // metal area, not just the grid-snapped center. This handles off-grid pads
+    // where the center cell may be blocked by another net's clearance zone.
+    for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
+        for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
+            if (!grid_.is_valid(sgx, sgy, 0)) continue;
+            for (int sl : valid_start_layers) {
+                float h = heuristic(sgx, sgy, sl, end_gx, end_gy, valid_end_layers[0]);
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0};
+                auto key = std::make_tuple(sgx, sgy, sl);
+                auto it = g_scores.find(key);
+                if (it == g_scores.end() || 0.0f < it->second) {
+                    g_scores[key] = 0.0f;
+                    open_set.push(start_node);
+                }
+            }
+        }
     }
 
     int max_iterations = grid_.cols() * grid_.rows() * 4;
@@ -248,8 +290,15 @@ RouteResult Pathfinder::route(
         closed_list.push_back(current);
         last_nodes_explored_++;
 
-        // Goal check
-        if (current.x == end_gx && current.y == end_gy) {
+        // Issue #2427 Phase 1: Goal check - accept any cell within end pad's
+        // metal area bounds, not just the exact grid-snapped center cell.
+        // This handles off-grid pads where the center doesn't align with the
+        // routing grid (mirrors Python pathfinder behavior from Issue #956).
+        bool in_end_metal = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2
+        );
+        if (in_end_metal) {
             bool layer_ok = std::find(valid_end_layers.begin(), valid_end_layers.end(),
                                       current.layer) != valid_end_layers.end();
             if (layer_ok) {
@@ -259,6 +308,21 @@ RouteResult Pathfinder::route(
                 return result;
             }
         }
+
+        // Issue #2427 Phase 2: Pre-compute whether current node is within a
+        // pad's metal area (for pad exit relaxation, mirroring Issue #990).
+        bool is_exiting_start_pad = (
+            current.x >= sp.metal_gx1 && current.x <= sp.metal_gx2 &&
+            current.y >= sp.metal_gy1 && current.y <= sp.metal_gy2 &&
+            std::find(valid_start_layers.begin(), valid_start_layers.end(),
+                      current.layer) != valid_start_layers.end()
+        );
+        bool is_exiting_end_pad = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2 &&
+            std::find(valid_end_layers.begin(), valid_end_layers.end(),
+                      current.layer) != valid_end_layers.end()
+        );
 
         // Explore 2D neighbors
         for (const auto& [dx, dy, dlayer, cost_mult] : neighbors_2d_) {
@@ -281,21 +345,52 @@ RouteResult Pathfinder::route(
             // Check cell blocking
             const auto& cell = grid_.at(nx, ny, nlayer);
 
-            // Check if cell is near start/end pads (pad approach relaxation)
-            bool is_start = (nx == start_gx && ny == start_gy &&
-                std::find(valid_start_layers.begin(), valid_start_layers.end(), nlayer) !=
-                valid_start_layers.end());
-            bool is_end = (nx == end_gx && ny == end_gy &&
-                std::find(valid_end_layers.begin(), valid_end_layers.end(), nlayer) !=
-                valid_end_layers.end());
+            // Issue #2427 Phase 2: Geometry-derived approach zone and pad metal
+            // area checks (mirrors Python pathfinder Issues #1618, #990, #1764).
+            bool layer_in_start = std::find(valid_start_layers.begin(),
+                valid_start_layers.end(), nlayer) != valid_start_layers.end();
+            bool layer_in_end = std::find(valid_end_layers.begin(),
+                valid_end_layers.end(), nlayer) != valid_end_layers.end();
+
+            bool is_in_start_metal = (
+                nx >= sp.metal_gx1 && nx <= sp.metal_gx2 &&
+                ny >= sp.metal_gy1 && ny <= sp.metal_gy2 && layer_in_start
+            );
+            bool is_in_end_metal = (
+                nx >= ep.metal_gx1 && nx <= ep.metal_gx2 &&
+                ny >= ep.metal_gy1 && ny <= ep.metal_gy2 && layer_in_end
+            );
+
+            bool is_start_adjacent = (
+                nx >= sp.approach_gx1 && nx <= sp.approach_gx2 &&
+                ny >= sp.approach_gy1 && ny <= sp.approach_gy2 && layer_in_start
+            );
+            bool is_end_adjacent = (
+                nx >= ep.approach_gx1 && nx <= ep.approach_gx2 &&
+                ny >= ep.approach_gy1 && ny <= ep.approach_gy2 && layer_in_end
+            );
 
             if (cell.blocked) {
-                // Allow routing through start/end pad centers
-                if (is_start || is_end) {
-                    if (cell.net != net) continue;  // Wrong net
-                } else {
+                // Issue #1764: If neighbor is within pad metal area, always allow
+                if (is_in_start_metal || is_in_end_metal) {
+                    // Allow entry into own pad's metal area
+                } else if (cell.net == net) {
+                    // Same-net blocked cell (e.g., our THT pad area) - allow
+                } else if (cell.net == 0) {
+                    // No-net blocked cell - use full check
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells)) {
+                        continue;
+                    }
+                } else {
+                    // Different net's blocked cell
+                    // Issue #996/#990: When exiting a pad, allow entering clearance
+                    // zones (not actual pad copper) so A* can escape dense layouts.
+                    bool is_clearance_only = !cell.pad_blocked;
+                    bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
+                    if (is_clearance_only && is_pad_exit) {
+                        // Clearance zone cell while exiting pad - allow
+                    } else {
                         continue;
                     }
                 }
@@ -303,8 +398,12 @@ RouteResult Pathfinder::route(
                 // Issue #1702 Gap 1: Even when center cell is unblocked, check
                 // trace clearance. The trace has physical width and must not
                 // violate clearance to other nets within its radius. Skip this
-                // check near start/end pads to allow pad approach/exit.
-                if (!is_start && !is_end) {
+                // check near pads to allow pad approach/exit (Issue #990/#1618).
+                bool is_pad_exit_or_approach = (
+                    is_start_adjacent || is_end_adjacent ||
+                    is_exiting_start_pad || is_exiting_end_pad
+                );
+                if (!is_pad_exit_or_approach) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells)) {
                         continue;

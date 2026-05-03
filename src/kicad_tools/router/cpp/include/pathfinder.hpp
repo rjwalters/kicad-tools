@@ -35,7 +35,9 @@ public:
         float present_cost_factor = 0.0f,
         float weight = 1.0f,  // A* weight (1.0 = optimal, >1.0 = faster)
         int trace_radius_cells = 0,  // Per-net trace clearance radius (0 = use default)
-        int via_radius_cells = 0     // Per-net via clearance radius (0 = use default)
+        int via_radius_cells = 0,    // Per-net via clearance radius (0 = use default)
+        const PadBounds& start_pad_bounds = {},  // Start pad metal/approach bounds
+        const PadBounds& end_pad_bounds = {}     // End pad metal/approach bounds
     );
 
     // Configure routable layers (skip plane layers)

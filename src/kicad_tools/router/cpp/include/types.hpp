@@ -76,6 +76,18 @@ struct Neighbor {
     float cost_mult;
 };
 
+// Pad bounds in grid coordinates for metal area and approach zone
+struct PadBounds {
+    int metal_gx1 = 0;
+    int metal_gy1 = 0;
+    int metal_gx2 = 0;
+    int metal_gy2 = 0;
+    int approach_gx1 = 0;
+    int approach_gy1 = 0;
+    int approach_gx2 = 0;
+    int approach_gy2 = 0;
+};
+
 // Design rules (simplified for C++ core)
 struct DesignRules {
     float trace_width = 0.127f;

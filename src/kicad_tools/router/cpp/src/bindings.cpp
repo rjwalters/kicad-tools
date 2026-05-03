@@ -46,6 +46,18 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold);
 
+    // PadBounds struct
+    nb::class_<PadBounds>(m, "PadBounds")
+        .def(nb::init<>())
+        .def_rw("metal_gx1", &PadBounds::metal_gx1)
+        .def_rw("metal_gy1", &PadBounds::metal_gy1)
+        .def_rw("metal_gx2", &PadBounds::metal_gx2)
+        .def_rw("metal_gy2", &PadBounds::metal_gy2)
+        .def_rw("approach_gx1", &PadBounds::approach_gx1)
+        .def_rw("approach_gy1", &PadBounds::approach_gy1)
+        .def_rw("approach_gx2", &PadBounds::approach_gx2)
+        .def_rw("approach_gy2", &PadBounds::approach_gy2);
+
     // Segment struct
     nb::class_<Segment>(m, "Segment")
         .def(nb::init<>())
@@ -139,7 +151,9 @@ NB_MODULE(router_cpp, m) {
              "present_cost_factor"_a = 0.0f,
              "weight"_a = 1.0f,
              "trace_radius_cells"_a = 0,
-             "via_radius_cells"_a = 0)
+             "via_radius_cells"_a = 0,
+             "start_pad_bounds"_a = PadBounds{},
+             "end_pad_bounds"_a = PadBounds{})
         .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
