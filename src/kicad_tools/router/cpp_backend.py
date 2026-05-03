@@ -597,31 +597,81 @@ class CppPathfinder:
         # clearance violations that grid-based checking missed.
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is not None:
+            violation_location = None
+
             # Validate segment-to-obstacle clearance
-            for seg in route.segments:
-                is_valid, _clearance, _location = py_grid.validate_segment_clearance(
-                    seg, exclude_net=start.net
-                )
-                if not is_valid:
-                    return None
+            if violation_location is None:
+                for seg in route.segments:
+                    is_valid, _clearance, location = py_grid.validate_segment_clearance(
+                        seg, exclude_net=start.net
+                    )
+                    if not is_valid:
+                        violation_location = location
+                        break
 
             # Validate via-to-segment clearance
-            for via in route.vias:
-                is_valid, _clearance, _location = py_grid.validate_via_clearance(
-                    via, exclude_net=start.net
-                )
-                if not is_valid:
-                    return None
+            if violation_location is None:
+                for via in route.vias:
+                    is_valid, _clearance, location = py_grid.validate_via_clearance(
+                        via, exclude_net=start.net
+                    )
+                    if not is_valid:
+                        violation_location = location
+                        break
 
             # Validate via-to-via clearance
-            for via in route.vias:
-                is_valid, _clearance, _location = py_grid.validate_via_to_via_clearance(
-                    via, exclude_net=start.net
+            if violation_location is None:
+                for via in route.vias:
+                    is_valid, _clearance, location = py_grid.validate_via_to_via_clearance(
+                        via, exclude_net=start.net
+                    )
+                    if not is_valid:
+                        violation_location = location
+                        break
+
+            if violation_location is not None:
+                # Issue #2438: Feed violation location back as avoidance cost
+                # so subsequent routing attempts steer away from this area.
+                self._boost_avoidance_at(
+                    violation_location, trace_radius_cells
                 )
-                if not is_valid:
-                    return None
+                return None
 
         return route
+
+    def _boost_avoidance_at(
+        self,
+        location: tuple[float, float] | None,
+        trace_radius_cells: int,
+    ) -> None:
+        """Boost avoidance cost around a DRC violation location.
+
+        When post-route validation detects a clearance violation, this method
+        marks the region in the C++ grid so subsequent A* searches incur a
+        cost penalty and explore alternative paths.
+
+        Args:
+            location: (x, y) world coordinates of the violation, or None.
+            trace_radius_cells: Trace half-width in grid cells (used to
+                scale the avoidance radius).
+        """
+        if location is None:
+            return
+        vx, vy = float(location[0]), float(location[1])
+        gx, gy = self._grid._impl.world_to_grid(vx, vy)
+        # Boost on all layers since violations may affect via transitions
+        radius = max(1, trace_radius_cells * 3)
+        amount = 20.0
+        for layer in range(self._grid.num_layers):
+            self._grid._impl.boost_region_cost(gx, gy, layer, radius, amount)
+
+    def clear_avoidance_costs(self) -> None:
+        """Clear all avoidance costs from the grid.
+
+        Should be called after a net is fully routed (success or failure)
+        to prevent avoidance costs from polluting subsequent net routing.
+        """
+        self._grid._impl.clear_avoidance_costs()
 
     @property
     def iterations(self) -> int:

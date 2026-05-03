@@ -186,6 +186,30 @@ void Grid3D::update_congestion(int x, int y, int layer, int delta) {
     congestion_[idx] += delta;
 }
 
+void Grid3D::boost_region_cost(int center_x, int center_y, int layer,
+                               int radius_cells, float amount) {
+    int x1 = std::clamp(center_x - radius_cells, 0, cols_ - 1);
+    int y1 = std::clamp(center_y - radius_cells, 0, rows_ - 1);
+    int x2 = std::clamp(center_x + radius_cells, 0, cols_ - 1);
+    int y2 = std::clamp(center_y + radius_cells, 0, rows_ - 1);
+
+    for (int y = y1; y <= y2; ++y) {
+        for (int x = x1; x <= x2; ++x) {
+            // Chebyshev distance: max of dx, dy
+            int dist = std::max(std::abs(x - center_x), std::abs(y - center_y));
+            // Scale cost inversely with distance: full amount at center, tapering off
+            float scale = 1.0f - static_cast<float>(dist) / (radius_cells + 1);
+            at(x, y, layer).avoidance_cost += amount * scale;
+        }
+    }
+}
+
+void Grid3D::clear_avoidance_costs() {
+    for (auto& cell : cells_) {
+        cell.avoidance_cost = 0.0f;
+    }
+}
+
 void Grid3D::reset_usage() {
     for (auto& cell : cells_) {
         cell.usage_count = 0;

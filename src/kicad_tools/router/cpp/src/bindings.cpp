@@ -29,7 +29,8 @@ NB_MODULE(router_cpp, m) {
         .def_rw("is_obstacle", &GridCell::is_obstacle)
         .def_rw("is_zone", &GridCell::is_zone)
         .def_rw("pad_blocked", &GridCell::pad_blocked)
-        .def_rw("original_net", &GridCell::original_net);
+        .def_rw("original_net", &GridCell::original_net)
+        .def_rw("avoidance_cost", &GridCell::avoidance_cost);
 
     // DesignRules struct
     nb::class_<DesignRules>(m, "DesignRules")
@@ -116,6 +117,10 @@ NB_MODULE(router_cpp, m) {
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "clearance_cells"_a)
         .def("unmark_via", &Grid3D::unmark_via,
              "x"_a, "y"_a, "net"_a, "radius_cells"_a)
+        // DRC avoidance feedback
+        .def("boost_region_cost", &Grid3D::boost_region_cost,
+             "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)
+        .def("clear_avoidance_costs", &Grid3D::clear_avoidance_costs)
         // Congestion
         .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
         .def("update_congestion", &Grid3D::update_congestion,

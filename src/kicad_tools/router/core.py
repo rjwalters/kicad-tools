@@ -1410,6 +1410,11 @@ class Autorouter:
         if sub_sig is not None and new_routes and self._sub_problem_cache is not None:
             self._store_sub_problem(sub_sig, new_routes)
 
+        # Issue #2438: Clear DRC avoidance costs accumulated during this net's
+        # routing so they don't pollute subsequent nets.
+        if hasattr(self.router, "clear_avoidance_costs"):
+            self.router.clear_avoidance_costs()
+
         # Record routing decision if enabled
         if self.record_decisions and routes:
             self._record_routing_decision(net, routes)

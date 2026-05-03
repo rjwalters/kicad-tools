@@ -430,9 +430,12 @@ RouteResult Pathfinder::route(
                 negotiated_cost = grid_.get_negotiated_cost(nx, ny, nlayer, present_cost_factor);
             }
 
+            float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
+
             float new_g = current.g_score +
                           cost_mult * rules_.cost_straight +
-                          turn_cost + congestion_cost + negotiated_cost;
+                          turn_cost + congestion_cost + negotiated_cost +
+                          avoidance;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -466,7 +469,10 @@ RouteResult Pathfinder::route(
                     current.x, current.y, new_layer, present_cost_factor);
             }
 
-            float new_g = current.g_score + rules_.cost_via + congestion_cost + negotiated_cost;
+            float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
+
+            float new_g = current.g_score + rules_.cost_via + congestion_cost +
+                          negotiated_cost + avoidance;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
