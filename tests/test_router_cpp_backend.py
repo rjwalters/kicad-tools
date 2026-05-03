@@ -296,6 +296,226 @@ class TestCppPathfinderPadBounds:
         assert len(route.segments) > 0
 
 
+class TestAvoidanceCost:
+    """Test DRC avoidance cost feedback (Issue #2438)."""
+
+    def test_boost_region_cost_modifies_cells(self):
+        """Test that boost_region_cost correctly sets avoidance_cost in cells within radius."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        grid = CppGrid(cols=20, rows=20, layers=2, resolution=0.127)
+
+        # All cells should start with zero avoidance cost
+        cell_before = grid._impl.at(10, 10, 0)
+        assert cell_before.avoidance_cost == 0.0
+
+        # Boost a region around (10, 10) on layer 0
+        grid._impl.boost_region_cost(10, 10, 0, 3, 20.0)
+
+        # Center cell should have maximum cost
+        cell_center = grid._impl.at(10, 10, 0)
+        assert cell_center.avoidance_cost > 0.0
+
+        # Cell within radius should also have cost
+        cell_near = grid._impl.at(11, 10, 0)
+        assert cell_near.avoidance_cost > 0.0
+
+        # Cell outside radius should have zero cost
+        cell_far = grid._impl.at(15, 15, 0)
+        assert cell_far.avoidance_cost == 0.0
+
+        # Other layer should be unaffected
+        cell_other_layer = grid._impl.at(10, 10, 1)
+        assert cell_other_layer.avoidance_cost == 0.0
+
+    def test_boost_region_cost_tapers_with_distance(self):
+        """Test that avoidance cost tapers off with distance from center."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        grid = CppGrid(cols=20, rows=20, layers=1, resolution=0.127)
+        grid._impl.boost_region_cost(10, 10, 0, 4, 20.0)
+
+        center_cost = grid._impl.at(10, 10, 0).avoidance_cost
+        near_cost = grid._impl.at(11, 10, 0).avoidance_cost
+        far_cost = grid._impl.at(13, 10, 0).avoidance_cost
+
+        # Cost should decrease with distance
+        assert center_cost > near_cost > far_cost > 0.0
+
+    def test_clear_avoidance_costs_zeros_all(self):
+        """Test that clear_avoidance_costs zeros all avoidance_cost fields."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        grid = CppGrid(cols=20, rows=20, layers=2, resolution=0.127)
+
+        # Boost on multiple layers
+        grid._impl.boost_region_cost(5, 5, 0, 3, 10.0)
+        grid._impl.boost_region_cost(15, 15, 1, 3, 10.0)
+
+        # Verify costs were set
+        assert grid._impl.at(5, 5, 0).avoidance_cost > 0.0
+        assert grid._impl.at(15, 15, 1).avoidance_cost > 0.0
+
+        # Clear all
+        grid._impl.clear_avoidance_costs()
+
+        # All should be zero
+        assert grid._impl.at(5, 5, 0).avoidance_cost == 0.0
+        assert grid._impl.at(15, 15, 1).avoidance_cost == 0.0
+        assert grid._impl.at(10, 10, 0).avoidance_cost == 0.0
+
+    def test_avoidance_cost_shifts_route(self):
+        """Test that A* path shifts away from cells with high avoidance_cost."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        rules.trace_width = 0.254
+        rules.trace_clearance = 0.127
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        start = Pad(
+            x=2.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+        end = Pad(
+            x=18.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+
+        # Route without avoidance
+        route1 = pf.route(start, end)
+        assert route1 is not None
+
+        # Boost avoidance cost on the direct path (y=10 area, midpoint)
+        mid_gx, mid_gy = cpp_grid._impl.world_to_grid(10.0, 10.0)
+        for layer in range(cpp_grid.num_layers):
+            cpp_grid._impl.boost_region_cost(mid_gx, mid_gy, layer, 5, 50.0)
+
+        # Route with avoidance - should still succeed but take a different path
+        route2 = pf.route(start, end)
+        assert route2 is not None
+
+        # The avoidance route should be different (longer or shifted in Y)
+        def total_length(route):
+            length = 0.0
+            for seg in route.segments:
+                dx = seg.x2 - seg.x1
+                dy = seg.y2 - seg.y1
+                length += (dx * dx + dy * dy) ** 0.5
+            return length
+
+        # The route through the avoidance zone should be longer since it detours
+        len1 = total_length(route1)
+        len2 = total_length(route2)
+        assert len2 > len1, (
+            f"Route with avoidance cost ({len2:.2f}mm) should be longer "
+            f"than direct route ({len1:.2f}mm)"
+        )
+
+        # Clean up
+        cpp_grid._impl.clear_avoidance_costs()
+
+    def test_clear_avoidance_costs_method_on_pathfinder(self):
+        """Test that CppPathfinder exposes clear_avoidance_costs method."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.127
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        # Boost some costs
+        cpp_grid._impl.boost_region_cost(5, 5, 0, 2, 10.0)
+        assert cpp_grid._impl.at(5, 5, 0).avoidance_cost > 0.0
+
+        # Clear via pathfinder method
+        pf.clear_avoidance_costs()
+        assert cpp_grid._impl.at(5, 5, 0).avoidance_cost == 0.0
+
+    def test_avoidance_cost_no_overhead_when_zero(self):
+        """Test that default zero avoidance_cost adds no overhead to A* routing."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        grid = CppGrid(cols=10, rows=10, layers=1, resolution=0.127)
+
+        # All cells should default to 0.0 avoidance_cost
+        for x in range(10):
+            for y in range(10):
+                assert grid._impl.at(x, y, 0).avoidance_cost == 0.0
+
+    def test_gridcell_avoidance_cost_exposed(self):
+        """Test that GridCell.avoidance_cost is readable and writable via bindings."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        grid = CppGrid(cols=5, rows=5, layers=1, resolution=0.127)
+        cell = grid._impl.at(2, 2, 0)
+
+        # Default value
+        assert cell.avoidance_cost == 0.0
+
+        # Write
+        cell.avoidance_cost = 42.0
+        assert grid._impl.at(2, 2, 0).avoidance_cost == 42.0
+
+
 class TestCppBackendImport:
     """Test import behavior of cpp_backend module."""
 

@@ -18,6 +18,7 @@ struct GridCell {
     int32_t net = 0;
     int16_t usage_count = 0;
     float history_cost = 0.0f;
+    float avoidance_cost = 0.0f;
     bool is_obstacle = false;
     bool is_zone = false;
     bool pad_blocked = false;

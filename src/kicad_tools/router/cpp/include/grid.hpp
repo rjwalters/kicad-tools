@@ -72,6 +72,11 @@ public:
     float get_congestion(int x, int y, int layer) const;
     void update_congestion(int x, int y, int layer, int delta = 1);
 
+    // DRC avoidance feedback
+    void boost_region_cost(int center_x, int center_y, int layer,
+                           int radius_cells, float amount);
+    void clear_avoidance_costs();
+
     // Negotiated routing support
     void reset_usage();
     void increment_usage(int x, int y, int layer);
