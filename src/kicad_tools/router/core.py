@@ -299,6 +299,9 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     router.nets = {int(k): v for k, v in config["nets"].items()}
     router.net_names = {int(k): v for k, v in config["net_names"].items()}
 
+    # Restore pour-net overrides so _is_pour_net() returns correct results
+    router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
+
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
         net_order = base_order.copy()
@@ -4555,6 +4558,7 @@ class Autorouter:
             "pads_data": pads_data,
             "nets": {str(k): v for k, v in self.nets.items()},
             "net_names": {str(k): v for k, v in self.net_names.items()},
+            "pour_nets_without_zones": list(self._pour_nets_without_zones),
         }
 
     def route_all_monte_carlo(

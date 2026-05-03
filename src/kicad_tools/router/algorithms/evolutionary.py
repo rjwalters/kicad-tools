@@ -270,6 +270,9 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     router.nets = {int(k): v for k, v in config["nets"].items()}
     router.net_names = {int(k): v for k, v in config["net_names"].items()}
 
+    # Restore pour-net overrides so _is_pour_net() returns correct results
+    router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
+
     # Route using the chromosome's net order
     routes = router.route_all(net_order)
     total_nets = len([n for n in router.nets if n != 0])

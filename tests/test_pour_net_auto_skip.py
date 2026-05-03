@@ -885,3 +885,113 @@ class TestFilterPourNetsWithoutZones:
         assert "GND" in auto_skipped
         assert "+5V" in no_zone
         assert "+5V" not in auto_skipped
+
+
+# ===========================================================================
+# Tests for round-trip serialization of _pour_nets_without_zones (Issue #2454)
+# ===========================================================================
+
+
+class TestPourNetsWithoutZonesSerialization:
+    """Verify _pour_nets_without_zones survives serialization for parallel workers.
+
+    Issue #2454: _serialize_for_parallel() did not include
+    _pour_nets_without_zones, so worker processes created via
+    _run_monte_carlo_trial / _run_evolutionary_trial would see an empty
+    set, causing _is_pour_net() to incorrectly return True for nets that
+    should be routed as signals.
+    """
+
+    def _make_autorouter(self, pour_nets_without_zones=None):
+        """Create a minimal Autorouter with GND and GNDA nets."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        router = Autorouter(width=50, height=40)
+        net_names = {1: "GND", 2: "GNDA", 3: "SPI_CLK"}
+        net_class_map = classify_and_apply_rules(net_names)
+        router.net_class_map = net_class_map
+        router.net_names = net_names
+        router.nets = {1: [], 2: [], 3: []}
+        if pour_nets_without_zones is not None:
+            router._pour_nets_without_zones = pour_nets_without_zones
+        return router
+
+    def test_serialize_includes_pour_nets_without_zones(self) -> None:
+        """_serialize_for_parallel() includes pour_nets_without_zones key."""
+        router = self._make_autorouter(pour_nets_without_zones={"GND", "GNDA"})
+        config = router._serialize_for_parallel()
+
+        assert "pour_nets_without_zones" in config
+        assert set(config["pour_nets_without_zones"]) == {"GND", "GNDA"}
+
+    def test_serialize_empty_pour_nets_without_zones(self) -> None:
+        """Empty _pour_nets_without_zones serializes as empty list."""
+        router = self._make_autorouter()
+        config = router._serialize_for_parallel()
+
+        assert "pour_nets_without_zones" in config
+        assert config["pour_nets_without_zones"] == []
+
+    def test_roundtrip_pour_nets_without_zones(self) -> None:
+        """Reconstructed router preserves _pour_nets_without_zones."""
+        from kicad_tools.router.core import Autorouter
+
+        router = self._make_autorouter(pour_nets_without_zones={"GND"})
+        config = router._serialize_for_parallel()
+
+        # Simulate worker reconstruction
+        reconstructed = Autorouter(
+            width=config["width"],
+            height=config["height"],
+            origin_x=config["origin_x"],
+            origin_y=config["origin_y"],
+        )
+        reconstructed._pour_nets_without_zones = set(
+            config.get("pour_nets_without_zones", [])
+        )
+        reconstructed.net_names = {int(k): v for k, v in config["net_names"].items()}
+        reconstructed.net_class_map = config.get("net_class_map")
+
+        assert reconstructed._pour_nets_without_zones == {"GND"}
+
+    def test_is_pour_net_correct_after_roundtrip(self) -> None:
+        """_is_pour_net() returns correct results on a reconstructed router."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        router = self._make_autorouter(pour_nets_without_zones={"GNDA"})
+        config = router._serialize_for_parallel()
+
+        # Simulate worker reconstruction
+        reconstructed = Autorouter(
+            width=config["width"],
+            height=config["height"],
+            origin_x=config["origin_x"],
+            origin_y=config["origin_y"],
+        )
+        reconstructed.net_names = {int(k): v for k, v in config["net_names"].items()}
+        net_class_map = classify_and_apply_rules(reconstructed.net_names)
+        reconstructed.net_class_map = net_class_map
+        reconstructed.nets = {1: [], 2: [], 3: []}
+        reconstructed._pour_nets_without_zones = set(
+            config.get("pour_nets_without_zones", [])
+        )
+
+        # GNDA is in _pour_nets_without_zones -> should NOT be treated as pour
+        assert reconstructed._is_pour_net(2) is False
+        # GND is NOT in _pour_nets_without_zones -> should still be pour
+        assert reconstructed._is_pour_net(1) is True
+        # SPI_CLK is a signal net -> not pour
+        assert reconstructed._is_pour_net(3) is False
+
+    def test_backward_compat_missing_key(self) -> None:
+        """Config without pour_nets_without_zones key defaults to empty set."""
+        config = {"pour_nets_without_zones": None}  # simulate missing
+        result = set(config.get("pour_nets_without_zones") or [])
+        assert result == set()
+
+        # Also test truly missing key
+        config2 = {}
+        result2 = set(config2.get("pour_nets_without_zones", []))
+        assert result2 == set()
