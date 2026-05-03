@@ -29,9 +29,9 @@ from __future__ import annotations
 import math
 import os
 import random
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Protocol
 
 import numpy as np
 
@@ -58,7 +58,54 @@ __all__ = [
     "EvolutionaryPlacementOptimizer",
     "EvolutionaryConfig",
     "Individual",
+    "RoutingEvaluator",
 ]
+
+
+class RoutingEvaluator(Protocol):
+    """Protocol for routing-based routability evaluation.
+
+    Implementations receive the current component positions and return
+    a routing completion rate (0.0--1.0).  The evolutionary optimizer
+    calls this instead of the spacing proxy when a routing evaluator
+    is provided.
+
+    The evaluator is called with the components already moved to the
+    candidate positions, so implementations can read component state
+    directly from the optimizer's component list or use the provided
+    position dict.
+
+    Example::
+
+        class SimpleRoutingEvaluator:
+            def __init__(self, router_factory, pcb):
+                self._router_factory = router_factory
+                self._pcb = pcb
+
+            def evaluate_routability(self, positions, rotations):
+                router = self._router_factory()
+                routes = router.route_all()
+                total = len(router.nets) - 1  # exclude net 0
+                routed = len({r.net for r in routes if r.net != 0})
+                return routed / total if total > 0 else 1.0
+    """
+
+    def evaluate_routability(
+        self,
+        positions: dict[str, tuple[float, float]],
+        rotations: dict[str, float],
+    ) -> float:
+        """Evaluate routability of a candidate placement.
+
+        Args:
+            positions: Component reference to (x, y) position mapping.
+            rotations: Component reference to rotation (degrees) mapping.
+
+        Returns:
+            Routing completion rate from 0.0 (nothing routes) to 1.0
+            (all nets routed).
+        """
+        ...  # pragma: no cover
 
 
 @dataclass
@@ -411,6 +458,7 @@ class EvolutionaryPlacementOptimizer:
         self,
         board_outline: Polygon,
         config: EvolutionaryConfig | None = None,
+        routing_evaluator: RoutingEvaluator | None = None,
     ):
         """
         Initialize the evolutionary optimizer.
@@ -418,9 +466,18 @@ class EvolutionaryPlacementOptimizer:
         Args:
             board_outline: Polygon defining the board boundary
             config: Optimization parameters
+            routing_evaluator: Optional routing evaluator that replaces
+                the spacing-based routability proxy with actual routing
+                completion rate.  When provided, ``_estimate_routability``
+                calls the evaluator instead of computing average pairwise
+                spacing.  The evaluator is not picklable, so parallel
+                evaluation uses ``ThreadPoolExecutor`` instead of
+                ``ProcessPoolExecutor`` (the GIL is released during C++
+                routing calls, so threads still provide useful concurrency).
         """
         self.board_outline = board_outline
         self.config = config or EvolutionaryConfig()
+        self.routing_evaluator = routing_evaluator
         self.components: list[Component] = []
         self.springs: list[Spring] = []
         self.clusters: list[FunctionalCluster] = []
@@ -454,6 +511,7 @@ class EvolutionaryPlacementOptimizer:
         config: EvolutionaryConfig | None = None,
         fixed_refs: list[str] | None = None,
         enable_clustering: bool = False,
+        routing_evaluator: RoutingEvaluator | None = None,
     ) -> EvolutionaryPlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -466,13 +524,17 @@ class EvolutionaryPlacementOptimizer:
             config: Optimization parameters
             fixed_refs: List of reference designators for fixed components
             enable_clustering: If True, detect and preserve functional clusters
+            routing_evaluator: Optional routing evaluator for actual
+                routability scoring (replaces spacing proxy)
         """
         # Use PlacementOptimizer to extract components and nets
         physics_opt = PlacementOptimizer.from_pcb(
             pcb, fixed_refs=fixed_refs, enable_clustering=enable_clustering
         )
 
-        optimizer = cls(physics_opt.board_outline, config)
+        optimizer = cls(
+            physics_opt.board_outline, config, routing_evaluator=routing_evaluator
+        )
         optimizer.components = physics_opt.components
         optimizer.springs = physics_opt.springs
         optimizer.clusters = physics_opt.clusters
@@ -486,13 +548,22 @@ class EvolutionaryPlacementOptimizer:
         cls,
         physics_optimizer: PlacementOptimizer,
         config: EvolutionaryConfig | None = None,
+        routing_evaluator: RoutingEvaluator | None = None,
     ) -> EvolutionaryPlacementOptimizer:
         """
         Create evolutionary optimizer from an existing PlacementOptimizer.
 
         Useful for hybrid optimization workflows.
+
+        Args:
+            physics_optimizer: Existing placement optimizer to copy data from
+            config: Optimization parameters
+            routing_evaluator: Optional routing evaluator for actual
+                routability scoring (replaces spacing proxy)
         """
-        optimizer = cls(physics_optimizer.board_outline, config)
+        optimizer = cls(
+            physics_optimizer.board_outline, config, routing_evaluator=routing_evaluator
+        )
         optimizer.components = physics_optimizer.components
         optimizer.springs = physics_optimizer.springs
         optimizer.clusters = physics_optimizer.clusters
@@ -809,14 +880,68 @@ class EvolutionaryPlacementOptimizer:
 
     def _estimate_routability(self) -> float:
         """
-        Estimate routability based on component spacing and wire congestion.
+        Estimate routability based on routing evaluation or component spacing.
+
+        When a ``routing_evaluator`` is configured, delegates to it for
+        actual routing completion rate (scaled to 0--100).  Otherwise
+        falls back to the spacing-based proxy.
+
+        This method is called from ``_evaluate_fitness`` while components
+        are temporarily positioned at the candidate placement, so the
+        routing evaluator can read positions directly from the components.
 
         Returns a score from 0-100 where higher is better.
         """
         if not self.components:
             return 100.0
 
-        # Calculate average spacing between components
+        n = len(self.components)
+        if n < 2:
+            return 100.0
+
+        # Use routing evaluator when available
+        if self.routing_evaluator is not None:
+            return self._evaluate_routability_via_router()
+
+        return self._estimate_routability_spacing()
+
+    def _evaluate_routability_via_router(self) -> float:
+        """Evaluate routability using the configured routing evaluator.
+
+        Builds position/rotation dicts from current component state and
+        delegates to the routing evaluator.  The result (0.0--1.0
+        completion rate) is scaled to 0--100 to match the fitness
+        function's expected range.
+
+        Returns:
+            Routability score from 0 to 100.
+        """
+        positions: dict[str, tuple[float, float]] = {}
+        rotations: dict[str, float] = {}
+        for comp in self.components:
+            positions[comp.ref] = (comp.x, comp.y)
+            rotations[comp.ref] = comp.rotation
+
+        try:
+            completion_rate = self.routing_evaluator.evaluate_routability(
+                positions, rotations
+            )
+            # Clamp to [0, 1] and scale to [0, 100]
+            return max(0.0, min(1.0, completion_rate)) * 100.0
+        except Exception:
+            # Fall back to spacing proxy on routing failure
+            return self._estimate_routability_spacing()
+
+    def _estimate_routability_spacing(self) -> float:
+        """Spacing-based routability proxy (original implementation).
+
+        Computes average pairwise Euclidean distance between components
+        and scales linearly.  Used as fallback when no routing evaluator
+        is configured.
+
+        Returns:
+            Routability score from 0 to 100.
+        """
         n = len(self.components)
         if n < 2:
             return 100.0
@@ -1077,32 +1202,57 @@ class EvolutionaryPlacementOptimizer:
 
         Uses GPU acceleration when available and population is large enough.
         Falls back to ProcessPoolExecutor or sequential evaluation.
+
+        When a routing evaluator is configured, GPU and C++ fast-paths are
+        bypassed (the routing evaluator lives in Python and is not picklable)
+        and ThreadPoolExecutor is used instead of ProcessPoolExecutor since
+        the GIL is released during C++ routing calls.
         """
         pop_size = len(population)
+        has_routing_eval = self.routing_evaluator is not None
 
-        # Try GPU path first
-        if self._should_use_gpu(pop_size):
-            try:
-                fitness_values = self._evaluate_population_gpu(population)
+        # When routing evaluator is active, skip GPU and C++ paths
+        # because they use the spacing proxy internally
+        if not has_routing_eval:
+            # Try GPU path first
+            if self._should_use_gpu(pop_size):
+                try:
+                    fitness_values = self._evaluate_population_gpu(population)
+                    for ind, fitness in zip(population, fitness_values, strict=True):
+                        ind.fitness = fitness
+                    return
+                except Exception:
+                    # Fall through to CPU path on GPU error
+                    pass
+
+            # CPU path: parallel evaluation with process pool
+            if self.config.parallel and pop_size > 4:
+                ctx = self._create_evaluation_context()
+                max_workers = self.config.max_workers or os.cpu_count()
+
+                # Prepare work items as (individual, context) tuples
+                work_items = [(ind, ctx) for ind in population]
+
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fitness_values = list(executor.map(_evaluate_fitness_worker, work_items))
+
+                # Assign fitness values back to individuals
                 for ind, fitness in zip(population, fitness_values, strict=True):
                     ind.fitness = fitness
                 return
-            except Exception:
-                # Fall through to CPU path on GPU error
-                pass
 
-        # CPU path: parallel evaluation for larger populations
-        if self.config.parallel and pop_size > 4:
-            ctx = self._create_evaluation_context()
+        # When routing evaluator is active and parallel is enabled,
+        # use ThreadPoolExecutor (routing evaluator is not picklable,
+        # but GIL is released during C++ routing calls)
+        if has_routing_eval and self.config.parallel and pop_size > 4:
             max_workers = self.config.max_workers or os.cpu_count()
 
-            # Prepare work items as (individual, context) tuples
-            work_items = [(ind, ctx) for ind in population]
+            def _eval_one(ind: Individual) -> float:
+                return self._evaluate_fitness(ind)
 
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                fitness_values = list(executor.map(_evaluate_fitness_worker, work_items))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                fitness_values = list(executor.map(_eval_one, population))
 
-            # Assign fitness values back to individuals
             for ind, fitness in zip(population, fitness_values, strict=True):
                 ind.fitness = fitness
         else:
