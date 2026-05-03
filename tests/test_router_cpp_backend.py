@@ -146,6 +146,156 @@ class TestCppPathfinderRouteSignature:
         assert param.default is None
 
 
+class TestCppPathfinderPadBounds:
+    """Test pad metal area expansion and approach zone relaxation (Issue #2427)."""
+
+    def test_compute_pad_bounds_smd(self):
+        """Test _compute_pad_bounds for an SMD pad returns correct metal/approach grid bounds."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.127
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        # Create an SMD pad at a known position
+        pad = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.0,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+        )
+        bounds = pf._compute_pad_bounds(pad)
+
+        # Metal bounds should span the pad's copper area
+        assert bounds.metal_gx1 <= bounds.metal_gx2
+        assert bounds.metal_gy1 <= bounds.metal_gy2
+        # Approach bounds should be metal + 2 cells
+        assert bounds.approach_gx1 == bounds.metal_gx1 - 2
+        assert bounds.approach_gy1 == bounds.metal_gy1 - 2
+        assert bounds.approach_gx2 == bounds.metal_gx2 + 2
+        assert bounds.approach_gy2 == bounds.metal_gy2 + 2
+
+    def test_compute_pad_bounds_through_hole(self):
+        """Test _compute_pad_bounds for a through-hole pad with drill."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.127
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        # Through-hole pad with drill
+        pad = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.7,
+            height=1.7,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=1.0,
+        )
+        bounds = pf._compute_pad_bounds(pad)
+
+        # THT pad should have reasonable metal area
+        assert bounds.metal_gx1 <= bounds.metal_gx2
+        assert bounds.metal_gy1 <= bounds.metal_gy2
+        # Metal area should span more than 1 cell for a 1.7mm pad at 0.127mm res
+        assert bounds.metal_gx2 - bounds.metal_gx1 >= 1
+        assert bounds.metal_gy2 - bounds.metal_gy1 >= 1
+
+    def test_cpp_routes_off_grid_pad(self):
+        """Test that C++ backend routes successfully when pad is off-grid.
+
+        Creates a scenario where the pad center is offset by half a grid cell,
+        verifying the metal area expansion allows the route to succeed.
+        """
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254  # Coarse grid to make off-grid effect visible
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        # Start pad on-grid
+        start = Pad(
+            x=5.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+        )
+        # End pad offset by half a grid cell (off-grid)
+        end = Pad(
+            x=15.0 + rules.grid_resolution * 0.5,
+            y=10.0 + rules.grid_resolution * 0.5,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+        )
+
+        route = pf.route(start, end)
+        assert route is not None, "C++ backend should find route to off-grid pad"
+        assert len(route.segments) > 0
+
+
 class TestCppBackendImport:
     """Test import behavior of cpp_backend module."""
 

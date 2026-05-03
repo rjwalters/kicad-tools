@@ -372,6 +372,66 @@ class CppPathfinder:
         layer = Layer(layer_value)
         return layer.kicad_name in self._rules.allowed_layers
 
+    def _compute_pad_bounds(self, pad: Pad) -> "router_cpp.PadBounds":
+        """Compute pad metal area and approach zone bounds in grid coordinates.
+
+        This mirrors the Python pathfinder's ``_get_pad_metal_bounds()`` logic
+        (Issue #956/#977) so the C++ A* search can:
+        - Accept any cell within the end pad's metal area as a goal (Phase 1)
+        - Seed start nodes from all cells within the start pad's metal area
+        - Define geometry-derived approach zones for clearance relaxation (Phase 2)
+
+        Args:
+            pad: The pad to compute bounds for.
+
+        Returns:
+            A ``router_cpp.PadBounds`` struct with metal and approach grid bounds.
+        """
+        # Calculate effective pad dimensions (same logic as grid._add_pad_unsafe)
+        if getattr(pad, "through_hole", False):
+            if pad.width > 0 and pad.height > 0:
+                effective_width = pad.width
+                effective_height = pad.height
+            elif getattr(pad, "drill", 0) > 0:
+                effective_width = pad.drill + 0.7
+                effective_height = effective_width
+            else:
+                effective_width = 1.7
+                effective_height = 1.7
+        else:
+            effective_width = pad.width
+            effective_height = pad.height
+
+        # Metal area bounds in world coordinates
+        metal_x1 = pad.x - effective_width / 2
+        metal_y1 = pad.y - effective_height / 2
+        metal_x2 = pad.x + effective_width / 2
+        metal_y2 = pad.y + effective_height / 2
+
+        # Convert to grid coordinates using ceil/floor to include only cells
+        # whose CENTER is inside the metal area (Issue #996).
+        resolution = self._grid.resolution
+        origin_x = self._grid.origin_x
+        origin_y = self._grid.origin_y
+
+        gx1 = max(0, math.ceil((metal_x1 - origin_x) / resolution))
+        gy1 = max(0, math.ceil((metal_y1 - origin_y) / resolution))
+        gx2 = min(self._grid.cols - 1, math.floor((metal_x2 - origin_x) / resolution))
+        gy2 = min(self._grid.rows - 1, math.floor((metal_y2 - origin_y) / resolution))
+
+        # Approach zone: metal area + 2-cell escape margin (Issue #1618)
+        pad_escape_margin = 2
+        bounds = router_cpp.PadBounds()
+        bounds.metal_gx1 = int(gx1)
+        bounds.metal_gy1 = int(gy1)
+        bounds.metal_gx2 = int(gx2)
+        bounds.metal_gy2 = int(gy2)
+        bounds.approach_gx1 = int(gx1) - pad_escape_margin
+        bounds.approach_gy1 = int(gy1) - pad_escape_margin
+        bounds.approach_gx2 = int(gx2) + pad_escape_margin
+        bounds.approach_gy2 = int(gy2) + pad_escape_margin
+        return bounds
+
     def route(
         self,
         start: Pad,
@@ -456,6 +516,13 @@ class CppPathfinder:
             ),
         )
 
+        # Issue #2427: Compute pad metal bounds and approach zones.
+        # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
+        # so the C++ A* search can use expanded goal/start regions and
+        # geometry-derived approach zone relaxation.
+        start_pad_bounds = self._compute_pad_bounds(start)
+        end_pad_bounds = self._compute_pad_bounds(end)
+
         # Route using C++ implementation
         result = self._impl.route(
             start.x,
@@ -472,6 +539,8 @@ class CppPathfinder:
             weight,
             trace_radius_cells,
             via_radius_cells,
+            start_pad_bounds,
+            end_pad_bounds,
         )
 
         if not result.success:
