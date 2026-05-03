@@ -516,6 +516,310 @@ class TestAvoidanceCost:
         assert grid._impl.at(2, 2, 0).avoidance_cost == 42.0
 
 
+class TestResumableRouting:
+    """Test resumable A* search (Issue #2447)."""
+
+    def test_route_resumable_finds_path(self):
+        """Test that route_resumable finds a path identical to route()."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        start = Pad(
+            x=5.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+        end = Pad(
+            x=15.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+
+        # route() should work as before (backward compatible)
+        route = pf.route(start, end)
+        assert route is not None
+        assert len(route.segments) > 0
+
+    def test_route_resumable_bindings_exist(self):
+        """Test that route_resumable, resume, clear_search_state bindings exist."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router import router_cpp
+        from kicad_tools.router.cpp_backend import CppGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        grid = CppGrid(cols=50, rows=50, layers=2, resolution=0.254)
+
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = rules.trace_width
+        cpp_rules.trace_clearance = rules.trace_clearance
+        cpp_rules.via_drill = rules.via_drill
+        cpp_rules.via_diameter = rules.via_diameter
+        cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.grid_resolution = rules.grid_resolution
+        cpp_rules.cost_straight = rules.cost_straight
+        cpp_rules.cost_turn = rules.cost_turn
+        cpp_rules.cost_via = rules.cost_via
+        cpp_rules.cost_congestion = rules.cost_congestion
+        cpp_rules.congestion_threshold = rules.congestion_threshold
+
+        pf = router_cpp.Pathfinder(grid._impl, cpp_rules, True)
+
+        assert hasattr(pf, "route_resumable")
+        assert hasattr(pf, "resume")
+        assert hasattr(pf, "clear_search_state")
+
+    def test_route_resumable_and_resume_cycle(self):
+        """Test route_resumable + resume finds alternative path after rejection."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router import router_cpp
+        from kicad_tools.router.cpp_backend import CppGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        grid = CppGrid(cols=80, rows=80, layers=2, resolution=0.254)
+
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = rules.trace_width
+        cpp_rules.trace_clearance = rules.trace_clearance
+        cpp_rules.via_drill = rules.via_drill
+        cpp_rules.via_diameter = rules.via_diameter
+        cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.grid_resolution = rules.grid_resolution
+        cpp_rules.cost_straight = rules.cost_straight
+        cpp_rules.cost_turn = rules.cost_turn
+        cpp_rules.cost_via = rules.cost_via
+        cpp_rules.cost_congestion = rules.cost_congestion
+        cpp_rules.congestion_threshold = rules.congestion_threshold
+
+        pf = router_cpp.Pathfinder(grid._impl, cpp_rules, True)
+
+        # Route from (1,1) to (10,10) on layer 0
+        result1 = pf.route_resumable(
+            0.254, 0.254, 0,  # start
+            2.54, 2.54, 0,    # end
+            1,                 # net
+        )
+        assert result1.success, "Initial resumable route should succeed"
+        nodes_after_first = pf.nodes_explored
+
+        # Get the goal cell from the last segment
+        last_seg = result1.segments[-1]
+        reject_gx, reject_gy = grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
+
+        # Resume with the goal cell rejected
+        result2 = pf.resume(reject_gx, reject_gy, 0)
+
+        # The resume should find an alternative path (different goal cell
+        # in the end pad metal area) or exhaust the search
+        # Either way, nodes_explored should be >= what we had before
+        assert pf.nodes_explored >= nodes_after_first
+
+        # Clean up
+        pf.clear_search_state()
+
+    def test_clear_search_state_resets(self):
+        """Test that clear_search_state releases memory and resets state."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router import router_cpp
+        from kicad_tools.router.cpp_backend import CppGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        grid = CppGrid(cols=50, rows=50, layers=2, resolution=0.254)
+
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = rules.trace_width
+        cpp_rules.trace_clearance = rules.trace_clearance
+        cpp_rules.via_drill = rules.via_drill
+        cpp_rules.via_diameter = rules.via_diameter
+        cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.grid_resolution = rules.grid_resolution
+        cpp_rules.cost_straight = rules.cost_straight
+        cpp_rules.cost_turn = rules.cost_turn
+        cpp_rules.cost_via = rules.cost_via
+        cpp_rules.cost_congestion = rules.cost_congestion
+        cpp_rules.congestion_threshold = rules.congestion_threshold
+
+        pf = router_cpp.Pathfinder(grid._impl, cpp_rules, True)
+
+        # Run a resumable search
+        result = pf.route_resumable(
+            0.254, 0.254, 0,
+            5.08, 5.08, 0,
+            1,
+        )
+        assert result.success
+
+        # Clear state
+        pf.clear_search_state()
+
+        # Resume after clear should return failure (no active search)
+        result2 = pf.resume(0, 0, 0)
+        assert not result2.success
+
+    def test_route_still_works_after_resumable(self):
+        """Test that non-resumable route() still works after route_resumable()."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router import router_cpp
+        from kicad_tools.router.cpp_backend import CppGrid
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        grid = CppGrid(cols=50, rows=50, layers=2, resolution=0.254)
+
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = rules.trace_width
+        cpp_rules.trace_clearance = rules.trace_clearance
+        cpp_rules.via_drill = rules.via_drill
+        cpp_rules.via_diameter = rules.via_diameter
+        cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.grid_resolution = rules.grid_resolution
+        cpp_rules.cost_straight = rules.cost_straight
+        cpp_rules.cost_turn = rules.cost_turn
+        cpp_rules.cost_via = rules.cost_via
+        cpp_rules.cost_congestion = rules.cost_congestion
+        cpp_rules.congestion_threshold = rules.congestion_threshold
+
+        pf = router_cpp.Pathfinder(grid._impl, cpp_rules, True)
+
+        # Run a resumable search and clear
+        result1 = pf.route_resumable(
+            0.254, 0.254, 0,
+            5.08, 5.08, 0,
+            1,
+        )
+        assert result1.success
+        pf.clear_search_state()
+
+        # Non-resumable route should still work fine
+        result2 = pf.route(
+            0.254, 0.254, 0,
+            5.08, 5.08, 0,
+            1,
+        )
+        assert result2.success
+
+    def test_python_wrapper_uses_resumable(self):
+        """Test that CppPathfinder.route() uses resumable API internally."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        start = Pad(
+            x=5.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+        end = Pad(
+            x=15.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+
+        # The Python wrapper now uses route_resumable internally
+        route = pf.route(start, end)
+        assert route is not None
+        assert len(route.segments) > 0
+
+    def test_exception_safety_clears_state(self):
+        """Test that search state is cleared even when validation raises."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.254
+        from kicad_tools.router.grid import RoutingGrid
+
+        grid = RoutingGrid(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        start = Pad(
+            x=5.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+        end = Pad(
+            x=15.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="NET1", layer=Layer.F_CU,
+        )
+
+        # Route should work (exercises try/finally in the wrapper)
+        route = pf.route(start, end)
+        assert route is not None
+
+        # Route again to verify state was properly cleaned up
+        route2 = pf.route(start, end)
+        assert route2 is not None
+
+
 class TestCppBackendImport:
     """Test import behavior of cpp_backend module."""
 

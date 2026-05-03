@@ -186,44 +186,19 @@ float Pathfinder::get_congestion_cost(int x, int y, int layer) const {
     return 0.0f;
 }
 
-RouteResult Pathfinder::route(
-    float start_x, float start_y, int start_layer,
-    float end_x, float end_y, int end_layer,
-    int net,
-    const std::vector<int>& start_layers,
-    const std::vector<int>& end_layers,
-    bool negotiated_mode,
-    float present_cost_factor,
-    float weight,
-    int trace_radius_cells,
-    int via_radius_cells,
-    const PadBounds& start_pad_bounds,
-    const PadBounds& end_pad_bounds
+// Helper: Initialize pad bounds from arguments, applying default single-cell
+// fallback when no explicit bounds are provided (Issue #2427).
+static void init_pad_bounds(
+    PadBounds& sp, PadBounds& ep,
+    int start_gx, int start_gy, int end_gx, int end_gy,
+    const PadBounds& start_pad_bounds, const PadBounds& end_pad_bounds
 ) {
-    RouteResult result;
-    result.net = net;
-    result.success = false;
-
-    // Convert to grid coordinates
-    auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
-    auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
-
-    // Determine valid start/end layers
-    std::vector<int> valid_start_layers = start_layers.empty()
-        ? std::vector<int>{start_layer} : start_layers;
-    std::vector<int> valid_end_layers = end_layers.empty()
-        ? std::vector<int>{end_layer} : end_layers;
-
-    // Issue #2427: Use pad bounds if provided, otherwise fall back to single-cell
-    // bounds matching the grid-snapped center (backward-compatible).
-    PadBounds sp = start_pad_bounds;
-    PadBounds ep = end_pad_bounds;
+    sp = start_pad_bounds;
+    ep = end_pad_bounds;
     bool has_start_bounds = (sp.metal_gx1 != sp.metal_gx2 || sp.metal_gy1 != sp.metal_gy2
                              || (sp.metal_gx1 == start_gx && sp.metal_gy1 == start_gy));
     bool has_end_bounds = (ep.metal_gx1 != ep.metal_gx2 || ep.metal_gy1 != ep.metal_gy2
                            || (ep.metal_gx1 == end_gx && ep.metal_gy1 == end_gy));
-    // If no bounds were passed (all zeros but not matching grid coords), create
-    // single-cell bounds at the grid-snapped position for uniform code paths.
     if (!has_start_bounds && sp.metal_gx1 == 0 && sp.metal_gy1 == 0
         && sp.metal_gx2 == 0 && sp.metal_gy2 == 0) {
         sp.metal_gx1 = sp.metal_gx2 = start_gx;
@@ -242,17 +217,47 @@ RouteResult Pathfinder::route(
         ep.approach_gx2 = end_gx + 2;
         ep.approach_gy2 = end_gy + 2;
     }
+}
 
-    // A* data structures
-    using PQ = std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>>;
+RouteResult Pathfinder::route(
+    float start_x, float start_y, int start_layer,
+    float end_x, float end_y, int end_layer,
+    int net,
+    const std::vector<int>& start_layers,
+    const std::vector<int>& end_layers,
+    bool negotiated_mode,
+    float present_cost_factor,
+    float weight,
+    int trace_radius_cells,
+    int via_radius_cells,
+    const PadBounds& start_pad_bounds,
+    const PadBounds& end_pad_bounds
+) {
+    // Non-resumable route: use local A* state, no member state touched.
+    // This preserves backward compatibility for callers that don't need retry.
+    RouteResult result;
+    result.net = net;
+    result.success = false;
+
+    auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
+    auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
+
+    std::vector<int> valid_start_layers = start_layers.empty()
+        ? std::vector<int>{start_layer} : start_layers;
+    std::vector<int> valid_end_layers = end_layers.empty()
+        ? std::vector<int>{end_layer} : end_layers;
+
+    PadBounds sp, ep;
+    init_pad_bounds(sp, ep, start_gx, start_gy, end_gx, end_gy,
+                    start_pad_bounds, end_pad_bounds);
+
+    // Local A* data structures (not stored as members)
     PQ open_set;
     std::unordered_set<std::tuple<int, int, int>, GridPosHash> closed_set;
     std::unordered_map<std::tuple<int, int, int>, float, GridPosHash> g_scores;
-    std::vector<AStarNode> closed_list;  // For path reconstruction
+    std::vector<AStarNode> closed_list;
 
-    // Issue #2427 Phase 1: Seed start nodes from ALL cells within start pad's
-    // metal area, not just the grid-snapped center. This handles off-grid pads
-    // where the center cell may be blocked by another net's clearance zone.
+    // Seed start nodes
     for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
         for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
             if (!grid_.is_valid(sgx, sgy, 0)) continue;
@@ -273,6 +278,7 @@ RouteResult Pathfinder::route(
     last_iterations_ = 0;
     last_nodes_explored_ = 0;
 
+    // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
         last_iterations_++;
 
@@ -285,15 +291,11 @@ RouteResult Pathfinder::route(
         }
         closed_set.insert(current_key);
 
-        // Store node for path reconstruction
         int current_idx = static_cast<int>(closed_list.size());
         closed_list.push_back(current);
         last_nodes_explored_++;
 
-        // Issue #2427 Phase 1: Goal check - accept any cell within end pad's
-        // metal area bounds, not just the exact grid-snapped center cell.
-        // This handles off-grid pads where the center doesn't align with the
-        // routing grid (mirrors Python pathfinder behavior from Issue #956).
+        // Goal check
         bool in_end_metal = (
             current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
             current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2
@@ -309,8 +311,7 @@ RouteResult Pathfinder::route(
             }
         }
 
-        // Issue #2427 Phase 2: Pre-compute whether current node is within a
-        // pad's metal area (for pad exit relaxation, mirroring Issue #990).
+        // Pad exit relaxation
         bool is_exiting_start_pad = (
             current.x >= sp.metal_gx1 && current.x <= sp.metal_gx2 &&
             current.y >= sp.metal_gy1 && current.y <= sp.metal_gy2 &&
@@ -330,11 +331,8 @@ RouteResult Pathfinder::route(
             int ny = current.y + dy;
             int nlayer = current.layer;
 
-            if (!grid_.is_valid(nx, ny, nlayer)) {
-                continue;
-            }
+            if (!grid_.is_valid(nx, ny, nlayer)) continue;
 
-            // Check diagonal corner blocking
             if (dx != 0 && dy != 0) {
                 if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer, net,
                                         negotiated_mode)) {
@@ -342,11 +340,8 @@ RouteResult Pathfinder::route(
                 }
             }
 
-            // Check cell blocking
             const auto& cell = grid_.at(nx, ny, nlayer);
 
-            // Issue #2427 Phase 2: Geometry-derived approach zone and pad metal
-            // area checks (mirrors Python pathfinder Issues #1618, #990, #1764).
             bool layer_in_start = std::find(valid_start_layers.begin(),
                 valid_start_layers.end(), nlayer) != valid_start_layers.end();
             bool layer_in_end = std::find(valid_end_layers.begin(),
@@ -371,21 +366,16 @@ RouteResult Pathfinder::route(
             );
 
             if (cell.blocked) {
-                // Issue #1764: If neighbor is within pad metal area, always allow
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
-                    // Same-net blocked cell (e.g., our THT pad area) - allow
+                    // Same-net blocked cell - allow
                 } else if (cell.net == 0) {
-                    // No-net blocked cell - use full check
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells)) {
                         continue;
                     }
                 } else {
-                    // Different net's blocked cell
-                    // Issue #996/#990: When exiting a pad, allow entering clearance
-                    // zones (not actual pad copper) so A* can escape dense layouts.
                     bool is_clearance_only = !cell.pad_blocked;
                     bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
                     if (is_clearance_only && is_pad_exit) {
@@ -395,10 +385,6 @@ RouteResult Pathfinder::route(
                     }
                 }
             } else {
-                // Issue #1702 Gap 1: Even when center cell is unblocked, check
-                // trace clearance. The trace has physical width and must not
-                // violate clearance to other nets within its radius. Skip this
-                // check near pads to allow pad approach/exit (Issue #990/#1618).
                 bool is_pad_exit_or_approach = (
                     is_start_adjacent || is_end_adjacent ||
                     is_exiting_start_pad || is_exiting_end_pad
@@ -412,11 +398,8 @@ RouteResult Pathfinder::route(
             }
 
             auto neighbor_key = std::make_tuple(nx, ny, nlayer);
-            if (closed_set.count(neighbor_key)) {
-                continue;
-            }
+            if (closed_set.count(neighbor_key)) continue;
 
-            // Calculate cost
             float turn_cost = 0.0f;
             if (current.dx != 0 || current.dy != 0) {
                 if (current.dx != dx || current.dy != dy) {
@@ -458,9 +441,7 @@ RouteResult Pathfinder::route(
             }
 
             auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
-            if (closed_set.count(neighbor_key)) {
-                continue;
-            }
+            if (closed_set.count(neighbor_key)) continue;
 
             float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
             float negotiated_cost = 0.0f;
@@ -490,6 +471,319 @@ RouteResult Pathfinder::route(
 
     // No path found
     return result;
+}
+
+RouteResult Pathfinder::route_resumable(
+    float start_x, float start_y, int start_layer,
+    float end_x, float end_y, int end_layer,
+    int net,
+    const std::vector<int>& start_layers,
+    const std::vector<int>& end_layers,
+    bool negotiated_mode,
+    float present_cost_factor,
+    float weight,
+    int trace_radius_cells,
+    int via_radius_cells,
+    const PadBounds& start_pad_bounds,
+    const PadBounds& end_pad_bounds
+) {
+    // Clear any previous search state
+    clear_search_state();
+
+    // Store parameters for resume()
+    search_start_x_ = start_x;
+    search_start_y_ = start_y;
+    search_end_x_ = end_x;
+    search_end_y_ = end_y;
+    search_net_ = net;
+    search_negotiated_mode_ = negotiated_mode;
+    search_present_cost_factor_ = present_cost_factor;
+    search_weight_ = weight;
+    search_trace_radius_cells_ = trace_radius_cells;
+    search_via_radius_cells_ = via_radius_cells;
+
+    auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
+    auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
+    search_end_gx_ = end_gx;
+    search_end_gy_ = end_gy;
+
+    search_valid_start_layers_ = start_layers.empty()
+        ? std::vector<int>{start_layer} : start_layers;
+    search_valid_end_layers_ = end_layers.empty()
+        ? std::vector<int>{end_layer} : end_layers;
+
+    init_pad_bounds(search_start_pad_bounds_, search_end_pad_bounds_,
+                    start_gx, start_gy, end_gx, end_gy,
+                    start_pad_bounds, end_pad_bounds);
+
+    // Seed start nodes into member open set
+    const auto& sp = search_start_pad_bounds_;
+    for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
+        for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
+            if (!grid_.is_valid(sgx, sgy, 0)) continue;
+            for (int sl : search_valid_start_layers_) {
+                float h = heuristic(sgx, sgy, sl, end_gx, end_gy,
+                                    search_valid_end_layers_[0]);
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0};
+                auto key = std::make_tuple(sgx, sgy, sl);
+                auto it = search_g_scores_.find(key);
+                if (it == search_g_scores_.end() || 0.0f < it->second) {
+                    search_g_scores_[key] = 0.0f;
+                    search_open_set_.push(start_node);
+                }
+            }
+        }
+    }
+
+    search_max_iterations_ = grid_.cols() * grid_.rows() * 4;
+    last_iterations_ = 0;
+    last_nodes_explored_ = 0;
+    search_state_active_ = true;
+
+    return run_astar_loop();
+}
+
+RouteResult Pathfinder::resume(int reject_x, int reject_y, int reject_layer) {
+    RouteResult result;
+    result.net = search_net_;
+    result.success = false;
+
+    if (!search_state_active_) {
+        return result;  // No active search to resume
+    }
+
+    // Add rejected goal to skip set; it stays in closed_set (already expanded)
+    rejected_goals_.insert(std::make_tuple(reject_x, reject_y, reject_layer));
+
+    return run_astar_loop();
+}
+
+RouteResult Pathfinder::run_astar_loop() {
+    RouteResult result;
+    result.net = search_net_;
+    result.success = false;
+
+    const auto& sp = search_start_pad_bounds_;
+    const auto& ep = search_end_pad_bounds_;
+
+    while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
+        last_iterations_++;
+
+        AStarNode current = search_open_set_.top();
+        search_open_set_.pop();
+
+        auto current_key = std::make_tuple(current.x, current.y, current.layer);
+        if (search_closed_set_.count(current_key)) {
+            continue;
+        }
+        search_closed_set_.insert(current_key);
+
+        int current_idx = static_cast<int>(search_closed_list_.size());
+        search_closed_list_.push_back(current);
+        last_nodes_explored_++;
+
+        // Goal check (with rejected goals skip)
+        bool in_end_metal = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2
+        );
+        if (in_end_metal) {
+            bool layer_ok = std::find(search_valid_end_layers_.begin(),
+                                      search_valid_end_layers_.end(),
+                                      current.layer) != search_valid_end_layers_.end();
+            if (layer_ok) {
+                // Issue #2447: Skip rejected goals (mirrors Python pathfinder's
+                // continue at line 1553 when _reconstruct_route fails).
+                if (!rejected_goals_.count(current_key)) {
+                    result = reconstruct_path(search_closed_list_, current_idx,
+                                              search_start_x_, search_start_y_,
+                                              search_end_x_, search_end_y_,
+                                              search_net_);
+                    result.success = true;
+                    return result;
+                }
+                // Goal rejected, continue searching from open set
+            }
+        }
+
+        // Pad exit relaxation
+        bool is_exiting_start_pad = (
+            current.x >= sp.metal_gx1 && current.x <= sp.metal_gx2 &&
+            current.y >= sp.metal_gy1 && current.y <= sp.metal_gy2 &&
+            std::find(search_valid_start_layers_.begin(),
+                      search_valid_start_layers_.end(),
+                      current.layer) != search_valid_start_layers_.end()
+        );
+        bool is_exiting_end_pad = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2 &&
+            std::find(search_valid_end_layers_.begin(),
+                      search_valid_end_layers_.end(),
+                      current.layer) != search_valid_end_layers_.end()
+        );
+
+        // Explore 2D neighbors
+        for (const auto& [dx, dy, dlayer, cost_mult] : neighbors_2d_) {
+            int nx = current.x + dx;
+            int ny = current.y + dy;
+            int nlayer = current.layer;
+
+            if (!grid_.is_valid(nx, ny, nlayer)) continue;
+
+            if (dx != 0 && dy != 0) {
+                if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer,
+                                        search_net_, search_negotiated_mode_)) {
+                    continue;
+                }
+            }
+
+            const auto& cell = grid_.at(nx, ny, nlayer);
+
+            bool layer_in_start = std::find(search_valid_start_layers_.begin(),
+                search_valid_start_layers_.end(), nlayer) != search_valid_start_layers_.end();
+            bool layer_in_end = std::find(search_valid_end_layers_.begin(),
+                search_valid_end_layers_.end(), nlayer) != search_valid_end_layers_.end();
+
+            bool is_in_start_metal = (
+                nx >= sp.metal_gx1 && nx <= sp.metal_gx2 &&
+                ny >= sp.metal_gy1 && ny <= sp.metal_gy2 && layer_in_start
+            );
+            bool is_in_end_metal = (
+                nx >= ep.metal_gx1 && nx <= ep.metal_gx2 &&
+                ny >= ep.metal_gy1 && ny <= ep.metal_gy2 && layer_in_end
+            );
+
+            bool is_start_adjacent = (
+                nx >= sp.approach_gx1 && nx <= sp.approach_gx2 &&
+                ny >= sp.approach_gy1 && ny <= sp.approach_gy2 && layer_in_start
+            );
+            bool is_end_adjacent = (
+                nx >= ep.approach_gx1 && nx <= ep.approach_gx2 &&
+                ny >= ep.approach_gy1 && ny <= ep.approach_gy2 && layer_in_end
+            );
+
+            if (cell.blocked) {
+                if (is_in_start_metal || is_in_end_metal) {
+                    // Allow entry into own pad's metal area
+                } else if (cell.net == search_net_) {
+                    // Same-net blocked cell - allow
+                } else if (cell.net == 0) {
+                    if (is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_)) {
+                        continue;
+                    }
+                } else {
+                    bool is_clearance_only = !cell.pad_blocked;
+                    bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
+                    if (is_clearance_only && is_pad_exit) {
+                        // Clearance zone cell while exiting pad - allow
+                    } else {
+                        continue;
+                    }
+                }
+            } else {
+                bool is_pad_exit_or_approach = (
+                    is_start_adjacent || is_end_adjacent ||
+                    is_exiting_start_pad || is_exiting_end_pad
+                );
+                if (!is_pad_exit_or_approach) {
+                    if (is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_)) {
+                        continue;
+                    }
+                }
+            }
+
+            auto neighbor_key = std::make_tuple(nx, ny, nlayer);
+            if (search_closed_set_.count(neighbor_key)) continue;
+
+            float turn_cost = 0.0f;
+            if (current.dx != 0 || current.dy != 0) {
+                if (current.dx != dx || current.dy != dy) {
+                    turn_cost = rules_.cost_turn;
+                }
+            }
+
+            float congestion_cost = get_congestion_cost(nx, ny, nlayer);
+            float negotiated_cost = 0.0f;
+            if (search_negotiated_mode_) {
+                negotiated_cost = grid_.get_negotiated_cost(nx, ny, nlayer,
+                                                           search_present_cost_factor_);
+            }
+
+            float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
+
+            float new_g = current.g_score +
+                          cost_mult * rules_.cost_straight +
+                          turn_cost + congestion_cost + negotiated_cost +
+                          avoidance;
+
+            auto it = search_g_scores_.find(neighbor_key);
+            if (it == search_g_scores_.end() || new_g < it->second) {
+                search_g_scores_[neighbor_key] = new_g;
+                float h = heuristic(nx, ny, nlayer, search_end_gx_, search_end_gy_,
+                                    search_valid_end_layers_[0]);
+                float f = new_g + search_weight_ * h;
+
+                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy};
+                search_open_set_.push(neighbor);
+            }
+        }
+
+        // Try layer change (via)
+        for (int new_layer : routable_layers_) {
+            if (new_layer == current.layer) continue;
+
+            if (is_via_blocked(current.x, current.y, search_net_,
+                               search_negotiated_mode_, search_via_radius_cells_)) {
+                continue;
+            }
+
+            auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
+            if (search_closed_set_.count(neighbor_key)) continue;
+
+            float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
+            float negotiated_cost = 0.0f;
+            if (search_negotiated_mode_) {
+                negotiated_cost = grid_.get_negotiated_cost(
+                    current.x, current.y, new_layer, search_present_cost_factor_);
+            }
+
+            float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
+
+            float new_g = current.g_score + rules_.cost_via + congestion_cost +
+                          negotiated_cost + avoidance;
+
+            auto it = search_g_scores_.find(neighbor_key);
+            if (it == search_g_scores_.end() || new_g < it->second) {
+                search_g_scores_[neighbor_key] = new_g;
+                float h = heuristic(current.x, current.y, new_layer,
+                                    search_end_gx_, search_end_gy_,
+                                    search_valid_end_layers_[0]);
+                float f = new_g + search_weight_ * h;
+
+                AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
+                                   current_idx, true, current.dx, current.dy};
+                search_open_set_.push(neighbor);
+            }
+        }
+    }
+
+    // Open set exhausted or iteration limit hit
+    search_state_active_ = false;
+    return result;
+}
+
+void Pathfinder::clear_search_state() {
+    // Clear all A* member state to release memory
+    search_open_set_ = PQ();  // priority_queue has no clear(); swap with empty
+    search_closed_set_.clear();
+    search_g_scores_.clear();
+    search_closed_list_.clear();
+    rejected_goals_.clear();
+    search_state_active_ = false;
 }
 
 RouteResult Pathfinder::reconstruct_path(

@@ -503,9 +503,6 @@ class CppPathfinder:
         Returns:
             Route object if successful, None if no path found
         """
-        from .layers import Layer
-        from .primitives import Route, Segment, Via
-
         # Get layer indices
         start_layer = self._grid.num_layers // 2  # Default to middle
         end_layer = self._grid.num_layers // 2
@@ -563,49 +560,141 @@ class CppPathfinder:
         start_pad_bounds = self._compute_pad_bounds(start)
         end_pad_bounds = self._compute_pad_bounds(end)
 
-        # Route using C++ implementation
-        result = self._impl.route(
-            start.x,
-            start.y,
-            start_layer,
-            end.x,
-            end.y,
-            end_layer,
-            start.net,
-            start_layers or [],
-            end_layers or [],
-            negotiated_mode,
-            present_cost_factor,
-            weight,
-            trace_radius_cells,
-            via_radius_cells,
-            start_pad_bounds,
-            end_pad_bounds,
-        )
+        # Issue #2447: Use resumable A* so that when post-route validation
+        # fails, the search continues from the preserved open set rather
+        # than restarting from scratch. This mirrors the Python pathfinder's
+        # behavior where validation failure leads to `continue` in the A*
+        # main loop, finding an alternative approach path.
+        #
+        # Maximum number of resume attempts before giving up.
+        max_resume_attempts = 5
 
-        if not result.success:
-            return self._try_python_fallback(
-                start,
-                end,
-                net_class=net_class,
-                negotiated_mode=negotiated_mode,
-                present_cost_factor=present_cost_factor,
-                weight=weight,
-                per_net_timeout=per_net_timeout,
-                extra_goal_cells=extra_goal_cells,
+        try:
+            result = self._impl.route_resumable(
+                start.x,
+                start.y,
+                start_layer,
+                end.x,
+                end.y,
+                end_layer,
+                start.net,
+                start_layers or [],
+                end_layers or [],
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                trace_radius_cells,
+                via_radius_cells,
+                start_pad_bounds,
+                end_pad_bounds,
             )
 
-        # Convert C++ result to Python Route
+            if not result.success:
+                return self._try_python_fallback(
+                    start,
+                    end,
+                    net_class=net_class,
+                    negotiated_mode=negotiated_mode,
+                    present_cost_factor=present_cost_factor,
+                    weight=weight,
+                    per_net_timeout=per_net_timeout,
+                    extra_goal_cells=extra_goal_cells,
+                )
+
+            for attempt in range(max_resume_attempts + 1):
+                route = self._convert_result_to_route(
+                    result, start, net_class
+                )
+
+                # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
+                # clearance validation via C++ validate_route().
+                violation_location = self._validate_route_clearance(
+                    route, start, end, trace_radius_cells
+                )
+
+                if violation_location is None:
+                    # Route passed validation
+                    return route
+
+                # Validation failed. Boost avoidance cost at violation location
+                # (complementary mechanism to resumable search).
+                self._boost_avoidance_at(violation_location, trace_radius_cells)
+
+                if attempt >= max_resume_attempts:
+                    # Exhausted resume attempts, try Python fallback
+                    return self._try_python_fallback(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        present_cost_factor=present_cost_factor,
+                        weight=weight,
+                        per_net_timeout=per_net_timeout,
+                        extra_goal_cells=extra_goal_cells,
+                    )
+
+                # Find the goal cell of the failed path and reject it.
+                # The last segment's endpoint (converted to grid coords) is the
+                # goal cell that A* reached.
+                last_seg = result.segments[-1] if result.segments else None
+                if last_seg is not None:
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
+                        last_seg.x2, last_seg.y2
+                    )
+                    reject_layer = last_seg.layer
+                else:
+                    # Fallback: use end pad grid coords
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
+                        end.x, end.y
+                    )
+                    reject_layer = end_layer
+
+                # Resume A* from the preserved open set, skipping the
+                # rejected goal cell.
+                result = self._impl.resume(reject_gx, reject_gy, reject_layer)
+
+                if not result.success:
+                    return self._try_python_fallback(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        present_cost_factor=present_cost_factor,
+                        weight=weight,
+                        per_net_timeout=per_net_timeout,
+                        extra_goal_cells=extra_goal_cells,
+                    )
+
+            return None
+        finally:
+            # Always clear search state to release memory (Issue #2447 risk).
+            self._impl.clear_search_state()
+
+    def _convert_result_to_route(
+        self,
+        result: "router_cpp.RouteResult",
+        start: "Pad",
+        net_class: "NetClassRouting | None",
+    ) -> "Route":
+        """Convert a C++ RouteResult to a Python Route object.
+
+        Args:
+            result: C++ route result with segments and vias.
+            start: Source pad (provides net and net_name).
+            net_class: Optional net class for trace width override.
+
+        Returns:
+            Python Route object with segments, vias, and validated layer transitions.
+        """
+        from .layers import Layer
+        from .primitives import Route, Segment, Via
+
         route = Route(net=start.net, net_name=start.net_name)
 
         # Issue #1543: Apply net-class-aware trace width to segments.
-        # The C++ backend uses the global rules.trace_width for all segments,
-        # so we override with the per-net width when converting to Python.
-        # net_class was already looked up above for Gap 2 radius computation.
         trace_width = net_class.trace_width if net_class else None
 
         for cpp_seg in result.segments:
-            # Convert grid index to Layer enum value
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
             seg = Segment(
                 x1=cpp_seg.x1,
@@ -620,7 +709,6 @@ class CppPathfinder:
             route.segments.append(seg)
 
         for cpp_via in result.vias:
-            # Convert grid indices to Layer enum values
             layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
             layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
             via = Via(
@@ -634,68 +722,82 @@ class CppPathfinder:
             )
             route.vias.append(via)
 
-        # Validate layer transitions and insert any missing vias
         route.validate_layer_transitions(
             via_drill=self._rules.via_drill,
             via_diameter=self._rules.via_diameter,
         )
-
-        # Issue #1702 Gap 3 + Issue #2439: Post-route geometric clearance
-        # validation in C++. Eliminates Python callback overhead by running
-        # all 4 validation checks (segment-pad, segment-segment, via-segment,
-        # via-via, same-net drill spacing) in a single C++ call.
-        py_grid = getattr(self._grid, "_py_grid", None)
-        if py_grid is not None:
-            # Sync stored segments/vias from completed routes to C++
-            self._sync_stored_routes(py_grid)
-
-            # Build exclude_ref_hashes for start/end pad components (Issue #1764)
-            exclude_ref_hashes: list[int] = []
-            for pad in (start, end):
-                if pad.ref:
-                    exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
-
-            # Build C++ segment/via lists from route
-            cpp_segs: list[router_cpp.Segment] = []
-            for seg in route.segments:
-                cs = router_cpp.Segment()
-                cs.x1, cs.y1, cs.x2, cs.y2 = seg.x1, seg.y1, seg.x2, seg.y2
-                cs.width = seg.width
-                cs.layer = self._grid.layer_to_index(seg.layer.value)
-                cs.net = seg.net
-                cpp_segs.append(cs)
-
-            cpp_vias: list[router_cpp.Via] = []
-            for via in route.vias:
-                cv = router_cpp.Via()
-                cv.x, cv.y = via.x, via.y
-                cv.drill = via.drill
-                cv.diameter = via.diameter
-                cv.layer_from = self._grid.layer_to_index(via.layers[0].value)
-                cv.layer_to = self._grid.layer_to_index(via.layers[1].value)
-                cv.net = via.net
-                cpp_vias.append(cv)
-
-            vresult = self._grid._impl.validate_route(
-                cpp_segs, cpp_vias,
-                start.net,
-                exclude_ref_hashes,
-                self._rules.trace_clearance,
-                self._rules.via_clearance,
-                self._rules.min_drill_clearance,
-            )
-
-            if not vresult.valid:
-                # Issue #2438: Feed C++ violation coordinates back as
-                # avoidance cost so subsequent routing attempts steer
-                # away from this area.
-                self._boost_avoidance_at(
-                    (vresult.violation_x, vresult.violation_y),
-                    trace_radius_cells,
-                )
-                return None
-
         return route
+
+    def _validate_route_clearance(
+        self,
+        route: "Route",
+        start: "Pad",
+        end: "Pad",
+        trace_radius_cells: int,
+    ) -> tuple[float, float] | None:
+        """Validate post-route geometric clearance using C++ validation.
+
+        Issue #2439: Uses the C++ validate_route() call which runs all 4
+        validation checks (segment-pad, segment-segment, via-segment,
+        via-via, same-net drill spacing) in a single C++ call, eliminating
+        Python callback overhead.
+
+        Args:
+            route: Route to validate.
+            start: Source pad (for component reference exclusion).
+            end: Destination pad (for component reference exclusion).
+            trace_radius_cells: Trace half-width in grid cells (for avoidance).
+
+        Returns:
+            (x, y) world coordinates of violation, or None if route is valid.
+        """
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return None
+
+        # Sync stored segments/vias from completed routes to C++
+        self._sync_stored_routes(py_grid)
+
+        # Build exclude_ref_hashes for start/end pad components (Issue #1764)
+        exclude_ref_hashes: list[int] = []
+        for pad in (start, end):
+            if pad.ref:
+                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
+
+        # Build C++ segment/via lists from route
+        cpp_segs: list[router_cpp.Segment] = []
+        for seg in route.segments:
+            cs = router_cpp.Segment()
+            cs.x1, cs.y1, cs.x2, cs.y2 = seg.x1, seg.y1, seg.x2, seg.y2
+            cs.width = seg.width
+            cs.layer = self._grid.layer_to_index(seg.layer.value)
+            cs.net = seg.net
+            cpp_segs.append(cs)
+
+        cpp_vias: list[router_cpp.Via] = []
+        for via in route.vias:
+            cv = router_cpp.Via()
+            cv.x, cv.y = via.x, via.y
+            cv.drill = via.drill
+            cv.diameter = via.diameter
+            cv.layer_from = self._grid.layer_to_index(via.layers[0].value)
+            cv.layer_to = self._grid.layer_to_index(via.layers[1].value)
+            cv.net = via.net
+            cpp_vias.append(cv)
+
+        vresult = self._grid._impl.validate_route(
+            cpp_segs, cpp_vias,
+            start.net,
+            exclude_ref_hashes,
+            self._rules.trace_clearance,
+            self._rules.via_clearance,
+            self._rules.min_drill_clearance,
+        )
+
+        if not vresult.valid:
+            return (vresult.violation_x, vresult.violation_y)
+
+        return None
 
     def _boost_avoidance_at(
         self,
