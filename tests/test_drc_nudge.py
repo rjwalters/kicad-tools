@@ -15,11 +15,14 @@ from kicad_tools.router.drc_nudge import (
     _expand_via_layers,
     _merge_same_net_vias,
     _nudge_segment,
+    _nudge_segment_with_chain,
     _perpendicular_unit,
     _reconnect_segments,
+    _segment_endpoints_anchored_to_net_pads,
     _segment_length,
     drc_verify_and_nudge,
 )
+from kicad_tools.router.primitives import Pad
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -750,3 +753,214 @@ class TestValidateRoutesWithExistingRoutes:
         # The existing via coordinates should not appear in the new route sexp
         existing_sexp = existing_route.to_sexp()
         assert existing_sexp not in sexp_output
+
+
+# ---------------------------------------------------------------------------
+# Tests for chain-aware nudging and pad-anchor preservation (Issue #2475)
+# ---------------------------------------------------------------------------
+
+
+class TestSegmentEndpointsAnchoredToNetPads:
+    """Pad-anchor detection used by chain-aware nudge to preserve connectivity."""
+
+    def _make_pad(self, ref: str, pin: str, x: float, y: float, net: int = 1) -> Pad:
+        return Pad(
+            x=x, y=y, width=1.0, height=1.0,
+            net=net, net_name="N",
+            layer=Layer.F_CU, ref=ref, pin=pin,
+        )
+
+    def test_segment_with_endpoint_on_pad_is_detected(self):
+        pad = self._make_pad("J1", "1", 10.0, 5.0)
+        router = _StubAutorouter(
+            pads={("J1", "1"): pad},
+            nets={1: [("J1", "1")]},
+        )
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_pads(seg, 1, router) is True
+
+    def test_segment_close_but_not_at_pad_is_not_detected(self):
+        pad = self._make_pad("J1", "1", 10.0, 5.0)
+        router = _StubAutorouter(
+            pads={("J1", "1"): pad},
+            nets={1: [("J1", "1")]},
+        )
+        # 0.05mm offset -- outside the 0.02mm pad anchor tolerance.
+        seg = Segment(x1=10.05, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_pads(seg, 1, router) is False
+
+    def test_segment_with_no_pad_endpoint_returns_false(self):
+        pad = self._make_pad("J1", "1", 0.0, 0.0)
+        router = _StubAutorouter(
+            pads={("J1", "1"): pad},
+            nets={1: [("J1", "1")]},
+        )
+        # Segment far from any pad of net 1.
+        seg = Segment(x1=10.0, y1=10.0, x2=15.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_pads(seg, 1, router) is False
+
+    def test_pad_of_different_net_does_not_match(self):
+        pad = self._make_pad("J1", "1", 10.0, 5.0, net=2)
+        router = _StubAutorouter(
+            pads={("J1", "1"): pad},
+            nets={2: [("J1", "1")]},
+        )
+        # Segment endpoint coincides with pad of *different* net -- not an anchor.
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_pads(seg, 1, router) is False
+
+    def test_missing_pads_attribute_returns_false(self):
+        # _StubAutorouter has empty pads/nets -- helper must tolerate this.
+        router = _StubAutorouter()
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_pads(seg, 1, router) is False
+
+
+class TestNudgeSegmentWithChain:
+    """Chain-aware segment nudge that preserves abutting same-net segments."""
+
+    def test_chain_endpoints_follow_nudged_segment(self):
+        """Issue #2475: nudging a middle segment must drag adjacent endpoints with it."""
+        # Three connected segments forming an L-shape: seg_a -> seg_b -> seg_c.
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg_b = Segment(x1=10, y1=0, x2=10, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        seg_c = Segment(x1=10, y1=5, x2=20, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="N", segments=[seg_a, seg_b, seg_c], vias=[])
+        router = _StubAutorouter(routes=[route])
+
+        ok = _nudge_segment_with_chain(seg_b, 1.0, 0.0, 0.5, router)
+        assert ok is True
+        # seg_b moved +0.5 in x
+        assert math.isclose(seg_b.x1, 10.5)
+        assert math.isclose(seg_b.x2, 10.5)
+        # seg_a's endpoint that abutted seg_b should follow it.
+        assert math.isclose(seg_a.x2, 10.5), "seg_a.x2 should follow seg_b's new x1"
+        # seg_c's endpoint that abutted seg_b should follow it.
+        assert math.isclose(seg_c.x1, 10.5), "seg_c.x1 should follow seg_b's new x2"
+        # Other endpoints stay put.
+        assert math.isclose(seg_a.x1, 0.0)
+        assert math.isclose(seg_c.x2, 20.0)
+
+    def test_pad_anchored_segment_not_nudged(self):
+        """A segment with an endpoint on a same-net pad must not be moved."""
+        pad = Pad(
+            x=0.0, y=0.0, width=1.0, height=1.0,
+            net=1, net_name="N", layer=Layer.F_CU,
+            ref="J1", pin="1",
+        )
+        seg = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="N", segments=[seg], vias=[])
+        router = _StubAutorouter(
+            routes=[route],
+            pads={("J1", "1"): pad},
+            nets={1: [("J1", "1")]},
+        )
+
+        ok = _nudge_segment_with_chain(seg, 0.0, 1.0, 0.2, router)
+        assert ok is False
+        # Segment must be unchanged.
+        assert seg.x1 == 0.0 and seg.y1 == 0.0
+        assert seg.x2 == 10.0 and seg.y2 == 0.0
+
+    def test_different_net_segment_not_affected(self):
+        """Endpoints on a different net should not snap to the nudged segment."""
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # seg_b touches seg_a.x2 but is on a *different* net -- must be ignored.
+        seg_b = Segment(x1=10, y1=0, x2=10, y2=5, width=0.2, layer=Layer.F_CU, net=2)
+        route_a = Route(net=1, net_name="A", segments=[seg_a], vias=[])
+        route_b = Route(net=2, net_name="B", segments=[seg_b], vias=[])
+        router = _StubAutorouter(routes=[route_a, route_b])
+
+        ok = _nudge_segment_with_chain(seg_a, 0.0, 1.0, 0.2, router)
+        assert ok is True
+        # seg_a moved +0.2 in y
+        assert math.isclose(seg_a.y1, 0.2)
+        # seg_b is on a different net -- should NOT have moved.
+        assert seg_b.x1 == 10.0 and seg_b.y1 == 0.0
+        assert seg_b.x2 == 10.0 and seg_b.y2 == 5.0
+
+    def test_different_layer_segment_not_affected(self):
+        """Segments on a different layer should not be snapped."""
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # Same net, but on a different layer -- chain link goes through a via,
+        # which provides positional freedom; we should not drag it.
+        seg_b = Segment(x1=10, y1=0, x2=10, y2=5, width=0.2, layer=Layer.B_CU, net=1)
+        route = Route(net=1, net_name="N", segments=[seg_a, seg_b], vias=[])
+        router = _StubAutorouter(routes=[route])
+
+        ok = _nudge_segment_with_chain(seg_a, 0.0, 1.0, 0.2, router)
+        assert ok is True
+        # seg_a moved.
+        assert math.isclose(seg_a.y1, 0.2)
+        # seg_b is on a different layer -- coordinates unchanged.
+        assert seg_b.x1 == 10.0 and seg_b.y1 == 0.0
+
+
+class TestNoSilentDisconnectFromNudge:
+    """End-to-end scenario: nudging a clearance violation must not disconnect a chain.
+
+    Mirrors the board 05 PHASE_B scenario (issue #2475): a 4-pad net with a
+    chain that crosses near another net's pad.  Before the fix, the nudge
+    moved a single segment, breaking continuity and reducing PHASE_B from
+    4/4 to 3/4 pads.  The chain-aware nudge keeps the chain intact.
+    """
+
+    def test_chain_remains_connected_after_nudge(self):
+        """A 3-segment chain on net 1 stays connected after a nudge."""
+        # Chain: pad(0,0) -- seg_a -- seg_b -- seg_c -- pad(20,5)
+        # seg_b is the middle segment that we'll nudge to repair clearance.
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg_b = Segment(x1=10, y1=0, x2=10, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        seg_c = Segment(x1=10, y1=5, x2=20, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="PHASE_B", segments=[seg_a, seg_b, seg_c], vias=[])
+
+        # Pin pads on net 1 at the ends of the chain.
+        p_start = Pad(
+            x=0.0, y=0.0, width=1.0, height=1.0,
+            net=1, net_name="PHASE_B", layer=Layer.F_CU, ref="J1", pin="1",
+        )
+        p_end = Pad(
+            x=20.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="PHASE_B", layer=Layer.F_CU, ref="J2", pin="2",
+        )
+        router = _StubAutorouter(
+            routes=[route],
+            pads={("J1", "1"): p_start, ("J2", "2"): p_end},
+            nets={1: [("J1", "1"), ("J2", "2")]},
+        )
+
+        # Nudge the middle segment -- this is the case that broke before #2475.
+        ok = _nudge_segment_with_chain(seg_b, 1.0, 0.0, 0.18, router)
+        assert ok is True
+
+        # Walk the chain and verify it's still connected.
+        # seg_a.x2/y2 should equal seg_b.x1/y1
+        assert math.isclose(seg_a.x2, seg_b.x1)
+        assert math.isclose(seg_a.y2, seg_b.y1)
+        # seg_b.x2/y2 should equal seg_c.x1/y1
+        assert math.isclose(seg_b.x2, seg_c.x1)
+        assert math.isclose(seg_b.y2, seg_c.y1)
+        # Pads stay anchored at chain ends.
+        assert math.isclose(seg_a.x1, p_start.x)
+        assert math.isclose(seg_a.y1, p_start.y)
+        assert math.isclose(seg_c.x2, p_end.x)
+        assert math.isclose(seg_c.y2, p_end.y)
+
+    def test_chain_disconnects_with_legacy_nudge(self):
+        """Sanity: the legacy ``_nudge_segment`` does NOT preserve the chain.
+
+        This documents the regression that motivated the chain-aware variant.
+        """
+        seg_a = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg_b = Segment(x1=10, y1=0, x2=10, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        seg_c = Segment(x1=10, y1=5, x2=20, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+
+        _nudge_segment(seg_b, 1.0, 0.0, 0.18)
+
+        # seg_b moved, but seg_a and seg_c did not -- chain is broken.
+        assert not math.isclose(seg_a.x2, seg_b.x1), (
+            "Legacy nudge leaves seg_a stranded -- chain breaks"
+        )
+        assert not math.isclose(seg_b.x2, seg_c.x1), (
+            "Legacy nudge leaves seg_c stranded -- chain breaks"
+        )

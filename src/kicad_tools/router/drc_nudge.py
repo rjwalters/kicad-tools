@@ -108,6 +108,173 @@ def _nudge_segment(seg: Segment, nx: float, ny: float, amount: float) -> None:
     seg.y2 += ny * amount
 
 
+def _nudge_segment_with_chain(
+    seg: Segment,
+    nx: float,
+    ny: float,
+    amount: float,
+    router: Autorouter,
+    chain_tol: float | None = None,
+) -> bool:
+    """Translate *seg* and update connecting segments to preserve the chain.
+
+    Issue #2475: The basic ``_nudge_segment`` only moves the segment itself,
+    leaving any abutting segments stranded with mismatched endpoints — the
+    routed chain becomes disconnected and the net silently drops a pad.
+    This wrapper records the segment's endpoints **before** the nudge,
+    applies the translation, then walks every same-net segment in the
+    router and snaps any endpoint that previously coincided with the
+    pre-nudge endpoint to the post-nudge endpoint.
+
+    The chain update is a 1-D snap (replace any matching endpoint with
+    the new one) so it only fixes connections that were *already* abutting
+    within ``chain_tol``.  Endpoints that were already disconnected before
+    the nudge are not touched.
+
+    A segment is *not* nudged when one of its endpoints sits on a pad of
+    the same net; sliding it would disconnect the pad.  In that case this
+    function returns False and leaves ``seg`` unchanged so the caller
+    can record the failure.
+
+    Args:
+        seg: The segment to translate.
+        nx, ny: Unit vector for the translation direction.
+        amount: Translation distance (mm).
+        router: Autorouter providing access to all routes and pads.
+        chain_tol: Tolerance for matching adjacent segment endpoints.
+
+    Returns:
+        True if the segment was successfully nudged and the chain repaired;
+        False if the segment was left untouched (e.g. pad-anchored).
+    """
+    if chain_tol is None:
+        chain_tol = _ENDPOINT_TOL
+
+    # Pad-anchor guard.
+    if _segment_endpoints_anchored_to_net_pads(seg, seg.net, router):
+        logger.debug(
+            "Skipping nudge for net %s: segment is pad-anchored",
+            seg.net,
+        )
+        return False
+
+    # Capture pre-nudge endpoints so we can update neighbour segments.
+    old_x1, old_y1 = seg.x1, seg.y1
+    old_x2, old_y2 = seg.x2, seg.y2
+
+    # Apply the translation to seg itself.
+    _nudge_segment(seg, nx, ny, amount)
+
+    new_x1, new_y1 = seg.x1, seg.y1
+    new_x2, new_y2 = seg.x2, seg.y2
+
+    # Walk all same-net segments and snap any endpoint that matched the
+    # old position of seg's endpoint to the new position.  Skip ``seg``
+    # itself.  We also restrict to the same routing layer because routed
+    # chains rarely cross layers without a via in between (and a via
+    # provides the freedom we need; segments do not).
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        if route.net != seg.net:
+            continue
+        for other in route.segments:
+            if other is seg:
+                continue
+            if other.layer != seg.layer:
+                continue
+            # Endpoint 1 of "other" matches old endpoint 1 of seg?
+            if (
+                abs(other.x1 - old_x1) < chain_tol
+                and abs(other.y1 - old_y1) < chain_tol
+            ):
+                other.x1 = new_x1
+                other.y1 = new_y1
+            elif (
+                abs(other.x1 - old_x2) < chain_tol
+                and abs(other.y1 - old_y2) < chain_tol
+            ):
+                other.x1 = new_x2
+                other.y1 = new_y2
+            # Endpoint 2 of "other" matches?
+            if (
+                abs(other.x2 - old_x1) < chain_tol
+                and abs(other.y2 - old_y1) < chain_tol
+            ):
+                other.x2 = new_x1
+                other.y2 = new_y1
+            elif (
+                abs(other.x2 - old_x2) < chain_tol
+                and abs(other.y2 - old_y2) < chain_tol
+            ):
+                other.x2 = new_x2
+                other.y2 = new_y2
+
+    return True
+
+
+# Tolerance in mm for considering a segment endpoint anchored to a pad
+# centre.  Routed segments terminate at pad centres exactly (within float
+# rounding), so a small tolerance here suffices.  This is intentionally
+# tighter than ``_ENDPOINT_TOL`` (0.05 mm) because we only want to detect
+# *actual* pad anchors, not nearby segment intersections.
+_PAD_ANCHOR_TOL = 0.02
+
+
+def _segment_endpoints_anchored_to_net_pads(
+    seg: Segment,
+    net: int,
+    router: Autorouter,
+) -> bool:
+    """Return True when either endpoint of ``seg`` sits on a pad of ``net``.
+
+    Issue #2475: ``drc_verify_and_nudge`` translates whole segments by up
+    to ``max_displacement`` (0.2 mm) to repair clearance violations.  If the
+    segment terminates at a pad centre, that translation moves the segment
+    away from the pad and disconnects the net at that pin.  This was the
+    mechanism by which board 05 PHASE_B silently dropped from 4/4 to 3/4
+    pads after the router itself had achieved full connectivity: the
+    PHASE_B vs GATE_CL pad clearance violation was "resolved" by sliding
+    the PHASE_B segment off its J2:2 anchor.
+
+    The right thing to do for an anchored segment is to leave it alone
+    (preserve electrical connectivity) and let the unresolved clearance
+    surface in the post-save report so the user sees a real violation
+    rather than a silently-broken trace.
+
+    Args:
+        seg: The segment about to be nudged.
+        net: The net the segment belongs to.
+        router: The autorouter, used to look up pad positions.
+
+    Returns:
+        True if either endpoint is within ``_PAD_ANCHOR_TOL`` of any pad
+        on ``net``; False otherwise (or when pad data is unavailable).
+    """
+    pads = getattr(router, "pads", None)
+    nets = getattr(router, "nets", None)
+    if not pads or not nets:
+        return False
+
+    pad_keys = nets.get(net) or []
+    for key in pad_keys:
+        pad = pads.get(key)
+        if pad is None:
+            continue
+        # Endpoint 1
+        if (
+            abs(seg.x1 - pad.x) < _PAD_ANCHOR_TOL
+            and abs(seg.y1 - pad.y) < _PAD_ANCHOR_TOL
+        ):
+            return True
+        # Endpoint 2
+        if (
+            abs(seg.x2 - pad.x) < _PAD_ANCHOR_TOL
+            and abs(seg.y2 - pad.y) < _PAD_ANCHOR_TOL
+        ):
+            return True
+    return False
+
+
 def _point_to_segment_distance(
     px: float, py: float, x1: float, y1: float, x2: float, y2: float
 ) -> float:
@@ -388,8 +555,9 @@ def _try_nudge_seg_seg(
         if dot < 0:
             perp_x, perp_y = -perp_x, -perp_y
 
-    _nudge_segment(target_seg, perp_x, perp_y, nudge_amount)
-    return True
+    # Issue #2475: Use chain-aware nudge so abutting same-net segments are
+    # snapped to the new endpoint and the routed chain stays connected.
+    return _nudge_segment_with_chain(target_seg, perp_x, perp_y, nudge_amount, router)
 
 
 def _try_nudge_seg_via(
@@ -435,8 +603,8 @@ def _try_nudge_seg_via(
         nx = away_dx / away_len
         ny = away_dy / away_len
 
-    _nudge_segment(target_seg, nx, ny, nudge_amount)
-    return True
+    # Issue #2475: Use chain-aware nudge.
+    return _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
 
 
 def _try_nudge_seg_pad(
@@ -479,8 +647,10 @@ def _try_nudge_seg_pad(
         nx = away_dx / away_len
         ny = away_dy / away_len
 
-    _nudge_segment(target_seg, nx, ny, nudge_amount)
-    return True
+    # Issue #2475: Use chain-aware nudge so we don't break the routed
+    # chain by translating a single segment in isolation.  The chain-aware
+    # variant also refuses to nudge pad-anchored segments outright.
+    return _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
 
 
 # ---------------------------------------------------------------------------
