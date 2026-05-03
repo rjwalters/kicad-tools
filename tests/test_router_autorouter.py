@@ -740,6 +740,49 @@ class TestRouterPathfinder:
         blocked = router._is_trace_blocked(10, 10, 0, net=1)
         assert blocked is False
 
+    def test_is_trace_blocked_boundary_clamp(self):
+        """Trace near grid edge should clamp, not reject (Issue #2425).
+
+        Previously _is_trace_blocked returned True unconditionally when
+        the trace clearance region extended outside the grid, making
+        pads near the board periphery unroutable.
+        """
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(50.0, 50.0, rules)
+        router = Router(grid, rules)
+
+        # Ensure the trace half-width is at least 1 cell so the check
+        # region extends beyond the grid edge when the cell is at (0, 0).
+        router._trace_half_width_cells = 1
+
+        # Cell at corner (0, 0) -- the check region extends to negative
+        # coordinates.  With the old code this returned True (blocked);
+        # with the clamping fix it should check only in-bounds cells.
+        blocked = router._is_trace_blocked(0, 0, 0, net=1)
+        assert blocked is False, (
+            "Cell at grid corner (0,0) should not be blocked when "
+            "in-bounds cells are clear"
+        )
+
+        # Cell at opposite corner
+        max_x = grid.cols - 1
+        max_y = grid.rows - 1
+        blocked = router._is_trace_blocked(max_x, max_y, 0, net=1)
+        assert blocked is False, (
+            "Cell at grid corner (max,max) should not be blocked when "
+            "in-bounds cells are clear"
+        )
+
+        # Block a cell adjacent to the corner -- the boundary cell
+        # should now report blocked.
+        grid.grid[0][0][1].blocked = True
+        grid.grid[0][0][1].is_obstacle = True
+        blocked = router._is_trace_blocked(0, 0, 0, net=1)
+        assert blocked is True, (
+            "Cell at grid corner should be blocked when an adjacent "
+            "in-bounds cell is an obstacle"
+        )
+
     def test_router_is_via_blocked(self):
         """Test via blocking check."""
         rules = DesignRules(grid_resolution=0.5)

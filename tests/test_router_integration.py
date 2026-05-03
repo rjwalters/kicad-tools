@@ -184,6 +184,15 @@ class TestRealBoardRouting:
         if hasattr(router, 'routing_failures'):
             print(f"Failures: {len(router.routing_failures)}")
 
+        # Issue #2425: Assert minimum net completion rate.
+        # Before the boundary-clamping fix only ~4 nets routed;
+        # after clamping trace-width checks to grid bounds, at least
+        # 6 nets should succeed (periphery pads are now reachable).
+        assert routed_nets >= 6, (
+            f"Expected at least 6/{total_nets} nets routed but got {routed_nets}. "
+            f"Boundary-clamping fix may have regressed."
+        )
+
     def test_no_shorts_in_output(self, voltage_divider_pcb: Path):
         """Routed output must have zero net-to-net shorts."""
         # Load and route board

@@ -4367,8 +4367,15 @@ class Autorouter:
         def mark_route(route: Route):
             self._mark_route(route)
 
+        def record_failure(source_pad: Pad, target_pad: Pad):
+            self._record_routing_failure(net, source_pad, target_pad)
+
         # Route with corridor-aware costs (negotiated router will pick up corridor costs)
-        new_routes = neg_router.route_net_negotiated(pad_objs, present_cost_factor, mark_route, per_net_timeout=per_net_timeout)
+        new_routes = neg_router.route_net_negotiated(
+            pad_objs, present_cost_factor, mark_route,
+            per_net_timeout=per_net_timeout,
+            failure_callback=record_failure,
+        )
         routes.extend(new_routes)
         return routes
 
