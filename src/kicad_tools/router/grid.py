@@ -406,6 +406,13 @@ class RoutingGrid:
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
 
+        # Issue #2452: Track pads by component reference for same-component
+        # clearance relaxation. When pads share the same component (e.g.,
+        # crystal Y1's OSC_IN and OSC_OUT), the clearance between them can be
+        # reduced since the component footprint already guarantees physical
+        # manufacturability at that pitch.
+        self._component_pads: dict[str, list[Pad]] = {}
+
         # R-tree spatial index for segment clearance queries (Issue #1249).
         # Per-layer rtree.index.Index for fast envelope-based candidate pruning
         # in validate_segment_clearance, replacing O(R*S) brute-force iteration.
@@ -750,6 +757,11 @@ class RoutingGrid:
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
 
+        # Issue #2452: Track pads by component reference for same-component
+        # clearance relaxation.
+        if pad.ref:
+            self._component_pads.setdefault(pad.ref, []).append(pad)
+
         # Clearance model: trace clearance + trace half-width from pad edge.
         # The pathfinder checks if the trace CENTER can be placed at a cell,
         # so we must block cells where the trace edge would violate clearance.
@@ -864,6 +876,149 @@ class RoutingGrid:
                 center_cell = self.grid[layer_idx][center_gy][center_gx]
                 center_cell.net = pad.net
                 center_cell.original_net = pad.net
+
+        # Issue #2452: Same-component pad clearance relaxation.
+        # When two pads share the same component reference (e.g., Y1) but are
+        # on different nets, the clearance corridor between them is often too
+        # narrow after grid discretization. The component footprint already
+        # guarantees physical manufacturability at the component's pitch, so we
+        # can safely reduce the blocking envelope in the corridor between
+        # same-component pads.
+        #
+        # For each previously-added pad on the same component (different net),
+        # compute the overlap of their full-clearance zones and unblock
+        # clearance-only cells (not metal cells) in that overlap region, using
+        # a reduced clearance of trace_width/2 (just enough to prevent copper
+        # overlap from the trace edge).
+        if pad.ref and pad.net > 0:
+            self._relax_same_component_clearance(
+                pad, effective_width, effective_height, clearance, layers_to_block
+            )
+
+    def _relax_same_component_clearance(
+        self,
+        pad: Pad,
+        effective_width: float,
+        effective_height: float,
+        clearance: float,
+        layers_to_block: list[int],
+    ) -> None:
+        """Relax clearance between pads on the same component.
+
+        Issue #2452: When two pads share the same component reference (e.g.,
+        crystal Y1 with OSC_IN and OSC_OUT) but are on different nets, their
+        full clearance envelopes can overlap so much that no passable grid cells
+        remain in the corridor between them.  The component footprint already
+        guarantees physical manufacturability at the designed pitch, so we can
+        safely reduce the blocking envelope in the overlap region.
+
+        For each previously-added pad on the same component with a different
+        net, we compute the rectangular overlap of the two pads' full-clearance
+        zones.  Within that overlap we unblock any cell that is:
+          - a clearance-only cell (not pad metal, i.e. ``pad_blocked == False``)
+          - currently blocked
+          - assigned to *either* pad's net (not a third-party obstacle)
+
+        After unblocking, the cell's ``original_net`` is preserved so that
+        post-route DRC can still detect true violations, but the A* search
+        can now route through the corridor.
+
+        A reduced clearance of ``trace_width / 2`` is maintained around each
+        pad's metal area so traces cannot physically overlap pad copper.
+        """
+        component_pads = self._component_pads.get(pad.ref, [])
+        reduced_clearance = self.rules.trace_width / 2
+
+        for other_pad in component_pads:
+            if other_pad is pad or other_pad.net == pad.net:
+                continue
+            if other_pad.net <= 0:
+                continue
+
+            # Compute the other pad's effective dimensions (mirrors add_pad logic)
+            if other_pad.through_hole:
+                if other_pad.width > 0 and other_pad.height > 0:
+                    other_ew = other_pad.width
+                    other_eh = other_pad.height
+                elif other_pad.drill > 0:
+                    other_ew = other_pad.drill + 0.7
+                    other_eh = other_ew
+                else:
+                    other_ew = 1.7
+                    other_eh = 1.7
+            else:
+                other_ew = other_pad.width
+                other_eh = other_pad.height
+
+            # Full clearance envelope for the current pad
+            pad_env_x1 = pad.x - effective_width / 2 - clearance
+            pad_env_y1 = pad.y - effective_height / 2 - clearance
+            pad_env_x2 = pad.x + effective_width / 2 + clearance
+            pad_env_y2 = pad.y + effective_height / 2 + clearance
+
+            # Full clearance envelope for the other pad (same clearance model)
+            other_env_x1 = other_pad.x - other_ew / 2 - clearance
+            other_env_y1 = other_pad.y - other_eh / 2 - clearance
+            other_env_x2 = other_pad.x + other_ew / 2 + clearance
+            other_env_y2 = other_pad.y + other_eh / 2 + clearance
+
+            # Compute overlap rectangle in world coordinates
+            overlap_x1 = max(pad_env_x1, other_env_x1)
+            overlap_y1 = max(pad_env_y1, other_env_y1)
+            overlap_x2 = min(pad_env_x2, other_env_x2)
+            overlap_y2 = min(pad_env_y2, other_env_y2)
+
+            if overlap_x1 >= overlap_x2 or overlap_y1 >= overlap_y2:
+                continue  # No overlap -- nothing to relax
+
+            # Reduced-clearance metal zones: keep cells blocked within
+            # trace_width/2 of either pad's metal edge.
+            pad_reduced_x1 = pad.x - effective_width / 2 - reduced_clearance
+            pad_reduced_y1 = pad.y - effective_height / 2 - reduced_clearance
+            pad_reduced_x2 = pad.x + effective_width / 2 + reduced_clearance
+            pad_reduced_y2 = pad.y + effective_height / 2 + reduced_clearance
+
+            other_reduced_x1 = other_pad.x - other_ew / 2 - reduced_clearance
+            other_reduced_y1 = other_pad.y - other_eh / 2 - reduced_clearance
+            other_reduced_x2 = other_pad.x + other_ew / 2 + reduced_clearance
+            other_reduced_y2 = other_pad.y + other_eh / 2 + reduced_clearance
+
+            # Convert overlap region to grid coordinates
+            ogx1, ogy1 = self.world_to_grid(overlap_x1, overlap_y1)
+            ogx2, ogy2 = self.world_to_grid(overlap_x2, overlap_y2)
+
+            for layer_idx in layers_to_block:
+                for gy in range(ogy1, ogy2 + 1):
+                    for gx in range(ogx1, ogx2 + 1):
+                        if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+                            continue
+
+                        # Never unblock pad metal cells
+                        if self._pad_blocked[layer_idx, gy, gx]:
+                            continue
+
+                        # Only unblock cells that belong to one of the two
+                        # same-component nets (don't touch third-party blocks)
+                        cell_net = int(self._net[layer_idx, gy, gx])
+                        if cell_net != pad.net and cell_net != other_pad.net:
+                            continue
+
+                        # Keep the cell blocked if it falls within the reduced
+                        # clearance zone of either pad's metal
+                        wx, wy = self.grid_to_world(gx, gy)
+                        in_pad_reduced = (
+                            pad_reduced_x1 <= wx <= pad_reduced_x2
+                            and pad_reduced_y1 <= wy <= pad_reduced_y2
+                        )
+                        in_other_reduced = (
+                            other_reduced_x1 <= wx <= other_reduced_x2
+                            and other_reduced_y1 <= wy <= other_reduced_y2
+                        )
+                        if in_pad_reduced or in_other_reduced:
+                            continue
+
+                        # Unblock the cell so A* can route through
+                        self._blocked[layer_idx, gy, gx] = False
 
     def add_keepout(
         self,
