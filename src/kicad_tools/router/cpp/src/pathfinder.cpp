@@ -126,12 +126,28 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
 
 bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
                                 int radius_override) const {
+    int dummy_net = 0;
+    float dummy_x = 0.0f, dummy_y = 0.0f;
+    return is_via_blocked_diag(x, y, net, allow_sharing, radius_override,
+                               dummy_net, dummy_x, dummy_y);
+}
+
+bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
+                                     int radius_override,
+                                     int& out_blocking_net,
+                                     float& out_world_x,
+                                     float& out_world_y) const {
+    out_blocking_net = 0;
+    out_world_x = 0.0f;
+    out_world_y = 0.0f;
+
     int radius = (radius_override > 0) ? radius_override : via_half_cells_;
     for (int layer = 0; layer < grid_.layers(); ++layer) {
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 int cx = x + dx, cy = y + dy;
                 if (!grid_.is_valid(cx, cy, layer)) {
+                    // Grid-cell rejection: no specific blocking net.
                     return true;
                 }
 
@@ -154,13 +170,10 @@ bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
         }
     }
 
-    // Issue #2466: Also check via-vs-via geometric clearance against
-    // ``stored_vias_``.  The grid-cell blocking heuristic above can miss
-    // conflicts in negotiated mode (where ``allow_sharing`` lets cells with
-    // ``usage_count > 0`` be passed through), but two vias can never
-    // physically overlap regardless of routing mode.  This mirrors the
-    // post-route validator (Grid3D::validate_route) so the search refuses
-    // placements that the validator would later reject.
+    // Issue #2466: Geometric via-vs-via clearance against ``stored_vias_``.
+    // Issue #2476: When this branch causes a rejection, record the offending
+    // stored-via net so the negotiated strategy can target the rip-up at the
+    // specific net whose via is blocking us, rather than blanket retry.
     auto candidate_world = grid_.grid_to_world(x, y);
     float candidate_x = candidate_world.first;
     float candidate_y = candidate_world.second;
@@ -174,6 +187,9 @@ bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
         float distance = std::sqrt(dxw * dxw + dyw * dyw);
         float clearance = distance - candidate_radius - sv.diameter / 2.0f;
         if (clearance < clearance_required) {
+            out_blocking_net = sv.net;
+            out_world_x = candidate_x;
+            out_world_y = candidate_y;
             return true;
         }
     }
@@ -302,6 +318,17 @@ RouteResult Pathfinder::route(
     int max_iterations = grid_.cols() * grid_.rows() * 4;
     last_iterations_ = 0;
     last_nodes_explored_ = 0;
+
+    // Issue #2476: Track via-vs-via blocked rejections so the negotiated
+    // strategy can target rip-up at the specific net whose stored via is
+    // blocking us, rather than blanket retry.  We record the most-recently
+    // observed offending stored via along with the world-coord of the
+    // candidate slot that was rejected.  When the search ends with
+    // success=false, these are written into ``result``'s diagnostic fields.
+    int via_block_count = 0;
+    int last_blocking_net = 0;
+    float last_block_world_x = 0.0f;
+    float last_block_world_y = 0.0f;
 
     // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
@@ -460,8 +487,20 @@ RouteResult Pathfinder::route(
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
-            if (is_via_blocked(current.x, current.y, net, negotiated_mode,
-                               via_radius_cells)) {
+            // Issue #2476: Use diagnostic-aware variant so we can record the
+            // offending stored-via net when the geometric via-vs-via clearance
+            // rule is what caused the rejection.
+            int blocking_net = 0;
+            float block_wx = 0.0f, block_wy = 0.0f;
+            if (is_via_blocked_diag(current.x, current.y, net, negotiated_mode,
+                                    via_radius_cells,
+                                    blocking_net, block_wx, block_wy)) {
+                if (blocking_net != 0) {
+                    ++via_block_count;
+                    last_blocking_net = blocking_net;
+                    last_block_world_x = block_wx;
+                    last_block_world_y = block_wy;
+                }
                 continue;
             }
 
@@ -494,7 +533,21 @@ RouteResult Pathfinder::route(
         }
     }
 
-    // No path found
+    // Search ended without reaching the goal.  Populate structured failure
+    // diagnostics (Issue #2476) so the negotiated strategy can dispatch a
+    // targeted retry/rip-up rather than blanket retrying with no insight.
+    result.failure_reason = (last_iterations_ >= max_iterations)
+        ? FAILURE_ITERATION_LIMIT
+        : FAILURE_NO_PATH;
+    if (via_block_count > 0 && last_blocking_net != 0) {
+        // At least one via expansion was refused by stored-via geometry.
+        // Surface this regardless of why the open set ultimately drained --
+        // a Python caller can then choose to rip up the blocking net.
+        result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        result.blocking_via_net = last_blocking_net;
+        result.failure_x = last_block_world_x;
+        result.failure_y = last_block_world_y;
+    }
     return result;
 }
 
@@ -564,6 +617,15 @@ RouteResult Pathfinder::route_resumable(
     last_iterations_ = 0;
     last_nodes_explored_ = 0;
     search_state_active_ = true;
+
+    // Issue #2476: Reset via-vs-via failure trackers at the start of a
+    // fresh resumable search.  resume() must NOT reset these -- a candidate
+    // observed during the original route_resumable() may still be the
+    // best diagnostic when resume() fails.
+    search_via_block_count_ = 0;
+    search_last_blocking_net_ = 0;
+    search_last_block_world_x_ = 0.0f;
+    search_last_block_world_y_ = 0.0f;
 
     return run_astar_loop();
 }
@@ -761,8 +823,20 @@ RouteResult Pathfinder::run_astar_loop() {
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
-            if (is_via_blocked(current.x, current.y, search_net_,
-                               search_negotiated_mode_, search_via_radius_cells_)) {
+            // Issue #2476: Diagnostic-aware via blocking check so we can
+            // record which stored-via net rejected our candidate slot.
+            int blocking_net = 0;
+            float block_wx = 0.0f, block_wy = 0.0f;
+            if (is_via_blocked_diag(current.x, current.y, search_net_,
+                                    search_negotiated_mode_,
+                                    search_via_radius_cells_,
+                                    blocking_net, block_wx, block_wy)) {
+                if (blocking_net != 0) {
+                    ++search_via_block_count_;
+                    search_last_blocking_net_ = blocking_net;
+                    search_last_block_world_x_ = block_wx;
+                    search_last_block_world_y_ = block_wy;
+                }
                 continue;
             }
 
@@ -796,8 +870,20 @@ RouteResult Pathfinder::run_astar_loop() {
         }
     }
 
-    // Open set exhausted or iteration limit hit
+    // Open set exhausted or iteration limit hit.  Surface structured
+    // failure diagnostics (Issue #2476) -- the negotiated strategy uses
+    // ``failure_reason`` to dispatch targeted retries rather than blanket
+    // re-routing.
     search_state_active_ = false;
+    result.failure_reason = (last_iterations_ >= search_max_iterations_)
+        ? FAILURE_ITERATION_LIMIT
+        : FAILURE_NO_PATH;
+    if (search_via_block_count_ > 0 && search_last_blocking_net_ != 0) {
+        result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        result.blocking_via_net = search_last_blocking_net_;
+        result.failure_x = search_last_block_world_x_;
+        result.failure_y = search_last_block_world_y_;
+    }
     return result;
 }
 
@@ -809,6 +895,12 @@ void Pathfinder::clear_search_state() {
     search_closed_list_.clear();
     rejected_goals_.clear();
     search_state_active_ = false;
+    // Issue #2476: Reset failure trackers as well so a stale blocker from
+    // the previous net does not leak into the next route().
+    search_via_block_count_ = 0;
+    search_last_blocking_net_ = 0;
+    search_last_block_world_x_ = 0.0f;
+    search_last_block_world_y_ = 0.0f;
 }
 
 RouteResult Pathfinder::reconstruct_path(

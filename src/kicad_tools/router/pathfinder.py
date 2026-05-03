@@ -2034,6 +2034,17 @@ class Router:
         # No path found
         return None
 
+    def get_last_failure_info(self) -> dict | None:
+        """Return structured failure diagnostics from the most recent failed route().
+
+        Issue #2476: API parity with ``CppPathfinder.get_last_failure_info``.
+        The Python pathfinder does not currently expose structured via-blocked
+        failure reasons -- callers always receive ``None`` here.  The
+        negotiated strategy treats ``None`` as "no actionable diagnostic"
+        and falls back to its existing rip-up logic.
+        """
+        return None
+
     def find_blocking_nets(
         self,
         start: Pad,

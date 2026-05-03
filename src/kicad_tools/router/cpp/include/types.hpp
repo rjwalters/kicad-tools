@@ -61,12 +61,45 @@ struct Via {
     int net;
 };
 
+// Failure reason codes for RouteResult (Issue #2476).
+//
+// When ``success == false`` the search was unable to produce a route.  The
+// numbering mirrors ``ValidationResult::violation_type`` so Python callers
+// can dispatch on the same vocabulary across both search-time failures and
+// post-route validator violations.
+//
+// FAILURE_VIA_VIA_BLOCKED is set when every via candidate considered during
+// the A* expansion was refused by the geometric via-vs-via clearance check
+// in ``Pathfinder::is_via_blocked`` (the path-side mirror of the validator's
+// type-5 violation).  When set, ``RouteResult::blocking_via_net`` carries
+// the net id of the most recently observed offending stored via, and
+// ``RouteResult::failure_x``/``failure_y`` carry the world-coordinate
+// location of the candidate via that was rejected.  The negotiated strategy
+// uses these fields to target rip-up at the specific net whose stored via
+// blocked progress, rather than blanket retry.
+enum FailureReason : int {
+    FAILURE_NONE = 0,
+    FAILURE_NO_PATH = 1,            // Open set exhausted, no candidates remained.
+    FAILURE_ITERATION_LIMIT = 2,    // Reached max_iterations cap.
+    FAILURE_VIA_VIA_BLOCKED = 5,    // All via candidates refused by stored-via geometry.
+};
+
 // Complete route result
 struct RouteResult {
     std::vector<Segment> segments;
     std::vector<Via> vias;
-    int net;
-    bool success;
+    int net = 0;
+    bool success = false;
+
+    // Issue #2476: Structured failure diagnostics.
+    //
+    // Populated when ``success == false`` so the negotiated strategy can
+    // dispatch retry/rip-up intelligently (e.g. rip up the specific net
+    // whose stored via blocked our path, rather than a blanket retry).
+    int failure_reason = FAILURE_NONE;
+    int blocking_via_net = 0;       // Net of the offending stored via (if any).
+    float failure_x = 0.0f;         // World-coord of last rejected candidate.
+    float failure_y = 0.0f;
 };
 
 // Neighbor direction: dx, dy, dlayer, cost_multiplier

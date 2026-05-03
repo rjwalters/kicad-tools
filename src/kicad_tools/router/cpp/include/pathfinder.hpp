@@ -94,6 +94,25 @@ public:
     bool is_via_blocked(int x, int y, int net, bool allow_sharing,
                         int radius_override = 0) const;
 
+    // Issue #2476: Diagnostic-aware variant of is_via_blocked.
+    //
+    // Identical semantics to the boolean overload above, but additionally
+    // records the offending stored-via net (when the geometric via-vs-via
+    // clearance rule is what caused the rejection).  When the function
+    // returns true:
+    //   * out_blocking_net != 0 indicates a geometric via-vs-via reject; the
+    //     value is the net id of the stored via that triggered the
+    //     clearance violation.  ``out_world_x``/``out_world_y`` carry the
+    //     world-coordinate location of the rejected candidate.
+    //   * out_blocking_net == 0 indicates the rejection came from the
+    //     grid-cell blocking heuristic (out-of-bounds or another net's
+    //     marked clearance), not the stored-via geometry.
+    bool is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
+                             int radius_override,
+                             int& out_blocking_net,
+                             float& out_world_x,
+                             float& out_world_y) const;
+
 private:
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_
@@ -168,6 +187,16 @@ private:
     PadBounds search_start_pad_bounds_{};
     PadBounds search_end_pad_bounds_{};
     bool search_state_active_ = false;  // True when resumable state is valid
+
+    // Issue #2476: Via-vs-via failure tracking for run_astar_loop().  Reset
+    // by route_resumable() and accumulated across the search and any
+    // subsequent resume() calls so that the failure reason surfaced to
+    // Python reflects the blocker most recently observed before the open
+    // set drained.
+    int search_via_block_count_ = 0;
+    int search_last_blocking_net_ = 0;
+    float search_last_block_world_x_ = 0.0f;
+    float search_last_block_world_y_ = 0.0f;
 };
 
 }  // namespace router

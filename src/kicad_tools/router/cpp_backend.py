@@ -389,6 +389,19 @@ class CppPathfinder:
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
 
+        # Issue #2476: Capture structured failure diagnostics from the most
+        # recent failed route() call so the negotiated strategy can
+        # dispatch targeted retry/rip-up.  Reset at the start of every
+        # route() invocation; populated when route() returns None.
+        #
+        # Schema: {
+        #   "failure_reason": int,           # FAILURE_* constant
+        #   "blocking_via_net": int,         # 0 if not via-blocked
+        #   "failure_x": float,              # world-coord (mm)
+        #   "failure_y": float,
+        # } or ``None`` if no diagnostic was captured.
+        self._last_failure_info: dict | None = None
+
     def set_routable_layers(self, layers: list[int]) -> None:
         """Set which layers are routable (skip plane layers)."""
         self._impl.set_routable_layers(layers)
@@ -569,6 +582,11 @@ class CppPathfinder:
         # Maximum number of resume attempts before giving up.
         max_resume_attempts = 5
 
+        # Issue #2476: Reset failure-info at the start of every route() call
+        # so the negotiated strategy never sees stale diagnostics from a
+        # previous net.
+        self._last_failure_info = None
+
         try:
             result = self._impl.route_resumable(
                 start.x,
@@ -590,6 +608,13 @@ class CppPathfinder:
             )
 
             if not result.success:
+                # Issue #2476: Capture structured failure diagnostics from
+                # the C++ pathfinder.  In particular, FAILURE_VIA_VIA_BLOCKED
+                # carries the offending stored-via net so the negotiated
+                # strategy can target rip-up at that net rather than a
+                # blanket retry.  We capture even when the Python fallback
+                # also fails, since the cpp diagnostic is still actionable.
+                self._capture_failure_info(result)
                 return self._try_python_fallback(
                     start,
                     end,
@@ -621,7 +646,11 @@ class CppPathfinder:
                 self._boost_avoidance_at(violation_location, trace_radius_cells)
 
                 if attempt >= max_resume_attempts:
-                    # Exhausted resume attempts, try Python fallback
+                    # Exhausted resume attempts, try Python fallback.
+                    # Issue #2476: Capture failure-info before falling back
+                    # so the negotiated strategy can still see the cpp-side
+                    # via-blocked diagnostic.
+                    self._capture_failure_info(result)
                     return self._try_python_fallback(
                         start,
                         end,
@@ -654,6 +683,11 @@ class CppPathfinder:
                 result = self._impl.resume(reject_gx, reject_gy, reject_layer)
 
                 if not result.success:
+                    # Issue #2476: Capture failure diagnostics; resume()
+                    # accumulates trackers from the original
+                    # route_resumable() call so the most recent via-blocker
+                    # is still reported.
+                    self._capture_failure_info(result)
                     return self._try_python_fallback(
                         start,
                         end,
@@ -669,6 +703,57 @@ class CppPathfinder:
         finally:
             # Always clear search state to release memory (Issue #2447 risk).
             self._impl.clear_search_state()
+
+    def _capture_failure_info(self, result: "router_cpp.RouteResult") -> None:
+        """Record structured failure diagnostics from a failed C++ route.
+
+        Issue #2476: When the C++ A* search fails (open set exhausted or
+        all via candidates were refused by stored-via geometry), the
+        ``RouteResult`` carries a ``failure_reason`` and -- for the
+        via-vs-via case -- the offending stored-via net.  We stash this on
+        the pathfinder so ``get_last_failure_info()`` can return it to the
+        negotiated strategy after ``route()`` returns ``None``.
+
+        Note: We capture even when we are about to fall back to the Python
+        router.  If the Python fallback also fails, the cpp-side
+        diagnostic is still actionable (the via blocker has not moved).
+
+        Args:
+            result: The failed C++ ``RouteResult`` to capture diagnostics
+                from.  ``failure_reason == FAILURE_NONE`` is silently
+                ignored (no useful info).
+        """
+        # router_cpp may be None if the import failed; guard so this method
+        # is safe to call from anywhere on the failure path.
+        if router_cpp is None:
+            return
+
+        reason = getattr(result, "failure_reason", router_cpp.FAILURE_NONE)
+        if reason == router_cpp.FAILURE_NONE:
+            return
+
+        self._last_failure_info = {
+            "failure_reason": int(reason),
+            "blocking_via_net": int(getattr(result, "blocking_via_net", 0)),
+            "failure_x": float(getattr(result, "failure_x", 0.0)),
+            "failure_y": float(getattr(result, "failure_y", 0.0)),
+        }
+
+    def get_last_failure_info(self) -> dict | None:
+        """Return structured failure diagnostics from the most recent failed route().
+
+        Issue #2476: The negotiated strategy uses this to decide between
+        blanket retry and targeted rip-up of a specific blocking net.
+        Returns ``None`` if the last route() succeeded or the failure had
+        no actionable signal (e.g. an unrelated grid-cell rejection).
+
+        Returns:
+            Dict with keys ``failure_reason``, ``blocking_via_net``,
+            ``failure_x``, ``failure_y`` -- or ``None`` if no diagnostic
+            is available.  ``failure_reason`` matches the ``FAILURE_*``
+            constants in the ``router_cpp`` module (see ``types.hpp``).
+        """
+        return self._last_failure_info
 
     def _convert_result_to_route(
         self,
