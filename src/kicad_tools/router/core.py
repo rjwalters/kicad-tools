@@ -1922,6 +1922,82 @@ class Autorouter:
                 refs.add(pad.ref)
         return refs
 
+    def _find_connector_siblings_of_prerouted_nets(
+        self,
+        prerouted_nets: set[int] | list[int],
+        candidate_nets: list[int] | set[int],
+    ) -> set[int]:
+        """Find candidate nets sharing a destination component with prerouted nets.
+
+        Issue #2482: When the differential-pair pre-pass routes USB_D+/USB_D-
+        before the negotiated loop, it claims grid cells in the destination
+        connector's pin field (e.g. J1).  Single-ended nets that also
+        terminate on the same connector (e.g. USB_CC1) are then routed in
+        plain priority order with no awareness that their escape corridor
+        has just been consumed by the diff-pair members, and they can
+        deadlock against the just-laid traces.
+
+        This helper identifies candidate nets that share at least one
+        destination component with any prerouted net.  These siblings need
+        to be routed *first within their tier* so they get a fair chance
+        to claim the remaining corridor space before lower-priority,
+        unrelated nets do.
+
+        Unlike :meth:`_find_same_tier_destination_siblings`, this helper:
+
+        - Does NOT require the candidate net to be in the same priority
+          tier as the prerouted net.  A diff-pair member may be HIGH_SPEED
+          (priority 2) while its connector sibling is DIGITAL (priority 4)
+          — both still need ordering coordination because they share the
+          same physical pin field.
+        - Returns siblings of the *whole* prerouted set, not of a single
+          failed net.  This is the natural shape for ordering-time use:
+          we have a fixed set of pre-pass routes and need to find which
+          remaining nets care about them.
+
+        The helper still applies the priority floor from
+        :meth:`_find_same_tier_destination_siblings` to avoid promoting
+        every random default-class net that happens to share a generic
+        component (e.g. the MCU U1, which most of a board's nets touch):
+        only candidates whose own class priority is < 10 are considered.
+
+        Args:
+            prerouted_nets: Set/list of net IDs that have already been
+                routed by a pre-pass (e.g. the diff-pair pre-pass).
+            candidate_nets: Iterable of net IDs to consider as siblings
+                (typically the nets remaining after the prerouted-set
+                filter in :meth:`route_all_negotiated`).
+
+        Returns:
+            Set of candidate net IDs whose pads touch at least one
+            component that some prerouted net's pads also touch, and
+            which carry a non-default net class (priority < 10).
+        """
+        prerouted_set = set(prerouted_nets)
+        if not prerouted_set:
+            return set()
+
+        # Collect destination components for the entire prerouted set.
+        prerouted_components: set[str] = set()
+        for net_id in prerouted_set:
+            prerouted_components |= self._get_net_destination_components(net_id)
+        if not prerouted_components:
+            return set()
+
+        siblings: set[int] = set()
+        for net_id in candidate_nets:
+            if net_id in prerouted_set:
+                continue
+            # Skip default/unclassified nets (priority 10) — they cover too
+            # many unrelated nets to use a shared-component heuristic.
+            if self._get_net_class_priority(net_id) >= 10:
+                continue
+            other_components = self._get_net_destination_components(net_id)
+            if other_components & prerouted_components:
+                siblings.add(net_id)
+
+        return siblings
+
     def _find_same_tier_destination_siblings(
         self,
         failed_net: int,
@@ -3201,6 +3277,43 @@ class Autorouter:
         self._detect_and_apply_matrix_preferences(net_order)
         # Re-sort after matrix priority boost
         net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
+
+        # Issue #2482: Bump connector-siblings of prerouted nets to the
+        # front of their priority tier.
+        #
+        # When the diff-pair pre-pass routes USB_D+/USB_D- the negotiated
+        # loop sees them via ``self.routes`` and skips them above.  But
+        # the pre-pass *also* claimed grid cells in the destination
+        # connector pin field.  Single-ended nets terminating at the same
+        # connector (e.g. USB_CC1 on the USB-C J1) must route *before*
+        # lower-priority unrelated nets in their own tier or they'll
+        # find their escape corridor already consumed.
+        #
+        # We use a stable sort keyed on
+        # ``(class_priority, is_connector_sibling_of_prerouted)`` so that
+        # within each priority tier, sibling nets sort first while the
+        # rest of the priority tuple (complexity, constraint, congestion)
+        # provides the secondary tiebreaker for nets in the same group.
+        if prerouted_nets and net_order:
+            connector_siblings = self._find_connector_siblings_of_prerouted_nets(
+                prerouted_nets, net_order
+            )
+            if connector_siblings:
+                flush_print(
+                    f"  Connector-siblings of prerouted nets bumped to "
+                    f"front of tier: {len(connector_siblings)} (Issue #2482)"
+                )
+
+                def _sibling_aware_priority(net_id: int) -> tuple:
+                    base = self._get_net_priority(net_id)
+                    # Inject a 0/1 flag right after the class priority so
+                    # ties within the same tier prefer connector siblings
+                    # (flag=0) over non-siblings (flag=1).  The remainder of
+                    # the original 6-tuple becomes the tertiary tiebreaker.
+                    flag = 0 if net_id in connector_siblings else 1
+                    return (base[0], flag) + base[1:]
+
+                net_order = sorted(net_order, key=_sibling_aware_priority)
 
         total_nets = len(net_order)
 
