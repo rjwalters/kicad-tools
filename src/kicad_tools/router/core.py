@@ -4604,6 +4604,7 @@ class Autorouter:
         verbose: bool = True,
         progress_callback: ProgressCallback | None = None,
         num_workers: int | None = None,
+        timeout: float | None = None,
     ) -> list[Route]:
         """Route using evolutionary optimization with GA-style operators.
 
@@ -4619,6 +4620,9 @@ class Autorouter:
             progress_callback: Optional callback for progress updates.
             num_workers: Number of parallel workers. None or 0 for auto-detection
                 based on CPU count. 1 for sequential execution.
+            timeout: Optional wall-clock budget in seconds.  If exceeded the GA
+                exits early before starting the next generation and returns
+                the best partial result found so far.
 
         Returns:
             List of routes from the best chromosome found.
@@ -4633,6 +4637,7 @@ class Autorouter:
             verbose=verbose,
             progress_callback=progress_callback,
             num_workers=num_workers,
+            timeout=timeout,
         )
 
     def route_all_block_aware(
