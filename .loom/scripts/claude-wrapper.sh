@@ -1542,6 +1542,17 @@ main() {
     log_info "Workspace: ${WORKSPACE}"
     [[ -n "${TERMINAL_ID}" ]] && log_info "Terminal ID: ${TERMINAL_ID}"
 
+    # Observability for OAuth-token rotation (issue #3236).  Log a single
+    # masked line so post-mortem debugging can confirm which spawn path was
+    # used (env-token vs Keychain) without leaking secret material to logs.
+    if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        local _tok_len=${#CLAUDE_CODE_OAUTH_TOKEN}
+        local _tok_tail="${CLAUDE_CODE_OAUTH_TOKEN: -4}"
+        log_info "OAuth auth mode: env-token (CLAUDE_CODE_OAUTH_TOKEN set, len=${_tok_len}, tail=…${_tok_tail})"
+    else
+        log_info "OAuth auth mode: keychain (CLAUDE_CODE_OAUTH_TOKEN not set)"
+    fi
+
     # Detect --dangerously-skip-permissions flag (automated agent mode)
     for arg in "$@"; do
         if [[ "$arg" == "--dangerously-skip-permissions" ]]; then
