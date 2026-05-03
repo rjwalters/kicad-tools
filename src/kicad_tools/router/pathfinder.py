@@ -731,9 +731,16 @@ class Router:
         x2 = gx + radius + 1
         y2 = gy + radius + 1
 
-        # Check if region extends outside grid (any out-of-bounds cell blocks)
-        if x1 < 0 or y1 < 0 or x2 > self.grid.cols or y2 > self.grid.rows:
-            return True
+        # Clamp region to grid bounds instead of rejecting out-of-bounds
+        # entirely (Issue #2425).  Pads near the board periphery previously
+        # had all neighbours rejected because the trace-width check region
+        # extended outside the grid, making them unroutable.
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(self.grid.cols, x2)
+        y2 = min(self.grid.rows, y2)
+        if x1 >= x2 or y1 >= y2:
+            return True  # degenerate region after clamping
 
         # Extract array slices for the region
         blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]

@@ -401,6 +401,7 @@ class NegotiatedRouter:
         present_cost_factor: float,
         mark_route_callback: callable,
         per_net_timeout: float | None = None,
+        failure_callback: callable | None = None,
     ) -> list[Route]:
         """Route a single net in negotiated mode.
 
@@ -410,6 +411,9 @@ class NegotiatedRouter:
             mark_route_callback: Callback to mark a route on the grid
             per_net_timeout: Optional wall-clock timeout in seconds for each
                 A* search within this net (Issue #1605)
+            failure_callback: Optional callback to record routing failures.
+                Called with (source_pad, target_pad) when routing fails
+                (Issue #2425).
 
         Returns:
             List of routes created
@@ -474,6 +478,8 @@ class NegotiatedRouter:
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
                     self._collect_route_cells(route, routed_cells)
+                elif failure_callback is not None:
+                    failure_callback(source_pad, target_pad)
         else:
             # 2-pin net
             route = self.router.route(
@@ -486,6 +492,8 @@ class NegotiatedRouter:
             if route:
                 mark_route_callback(route)
                 routes.append(route)
+            elif failure_callback is not None:
+                failure_callback(pad_objs[0], pad_objs[1])
 
         return routes
 
