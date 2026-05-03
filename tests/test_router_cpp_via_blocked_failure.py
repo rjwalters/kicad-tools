@@ -474,3 +474,277 @@ class TestNegotiatedRouterViaBlockedRetry:
         )
         assert resolved == 0
         assert attempted == 0
+
+
+# =====================================================================
+# Issue #2481: Cross-net stored-via removal on rip-up
+# =====================================================================
+
+
+@requires_cpp
+class TestUnmarkRouteInvalidatesStoredVias:
+    """``RoutingGrid.unmark_route`` must invalidate the cpp ``stored_vias_``
+    so the next via search at the unmarked location is no longer blocked
+    (Issue #2481)."""
+
+    def test_unmark_route_clears_cpp_stored_via(self):
+        """After unmark_route, the cpp side's stored_via_count drops to zero
+        (a single-route grid).  The Python ``unmark_route`` must call into
+        the cpp grid to clear stored validation data; without this hook,
+        stored_via_count stays at the pre-rip-up level and
+        ``Pathfinder::is_via_blocked_diag`` keeps rejecting candidates at
+        the freed location.
+        """
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Via
+
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+
+        # Build a Python-side route with a single via at (1.0, 1.0)
+        # on net 7, and register it on the Python grid.
+        route = Route(net=7, net_name="N7")
+        route.vias.append(
+            Via(
+                x=1.0, y=1.0, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=7, net_name="N7",
+            )
+        )
+        grid.routes.append(route)
+
+        # Simulate the sync that happens after a successful route() call.
+        cpp_grid._impl.add_stored_via(1.0, 1.0, 0.3, 0.6, 7)
+        cpp_grid._synced_route_count = len(grid.routes)
+        assert cpp_grid._impl.stored_via_count == 1
+
+        # Now rip up.  Issue #2481: the C++ stored_vias_ must be cleared
+        # AND the synced-count reset so the next sync repopulates from
+        # the (now empty) grid.routes list.
+        grid.unmark_route(route)
+
+        assert cpp_grid._impl.stored_via_count == 0, (
+            "unmark_route must invalidate cpp stored_vias_; otherwise the "
+            "next is_via_blocked_diag call rejects against a stale entry."
+        )
+        assert cpp_grid._synced_route_count == 0, (
+            "_synced_route_count must reset so the next _sync_stored_routes "
+            "call rebuilds the snapshot from py_grid.routes (now empty)."
+        )
+
+    def test_unmark_route_then_via_search_unblocked(self):
+        """End-to-end: a candidate via slot rejected by is_via_blocked_diag
+        before rip-up is *not* rejected after rip-up at the same coordinate.
+        """
+        # Build a 2mm x 2mm grid and register a single stored via on net 2
+        # at (0.8, 0.8) -- close enough to (0.8, 0.8) that any candidate
+        # at that exact point on a different net is rejected.
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.2,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(
+            width=2.0, height=2.0, rules=rules,
+            layer_stack=LayerStack.four_layer_all_signal(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        # Build a route that holds the stored via on the Python side, and
+        # mirror it on the cpp side so the dedup-on-ripup path runs.
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Via
+
+        route = Route(net=2, net_name="N2")
+        route.vias.append(
+            Via(
+                x=0.8, y=0.8, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="N2",
+            )
+        )
+        grid.routes.append(route)
+        cpp_grid._impl.add_stored_via(0.8, 0.8, 0.3, 0.6, 2)
+        cpp_grid._synced_route_count = 1
+
+        # Convert (0.8, 0.8) world -> grid coords for is_via_blocked.
+        gx, gy = cpp_grid._impl.world_to_grid(0.8, 0.8)
+
+        # Sanity: the candidate is rejected by is_via_blocked because of
+        # the geometric stored-via clearance check.  This relies on the
+        # candidate net (3) being different from the stored via's net (2).
+        assert pathfinder._impl.is_via_blocked(
+            gx, gy, 3, False, 0,
+        ), "Setup expectation: stored via on net 2 blocks net 3 candidate."
+
+        # Rip up the Python-side route -- this must clear cpp stored_vias_.
+        grid.unmark_route(route)
+
+        # After rip-up: the cpp stored_via_count is zero.
+        assert cpp_grid._impl.stored_via_count == 0
+
+        # The same is_via_blocked query no longer rejects geometrically.
+        # (Grid cells around (0.8, 0.8) were never marked, so this checks
+        # the stored-via path specifically.)
+        assert not pathfinder._impl.is_via_blocked(
+            gx, gy, 3, False, 0,
+        ), "After unmark_route, is_via_blocked must not reject against the freed via."
+
+    def test_invalidate_stored_routes_method_exists_and_works(self):
+        """``CppGrid.invalidate_stored_routes`` is the public hook the
+        Python grid uses to drop the cpp snapshot.  Test it in isolation.
+        """
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+
+        cpp_grid._impl.add_stored_via(1.0, 1.0, 0.3, 0.6, 5)
+        cpp_grid._impl.add_stored_segment(0.0, 0.0, 1.0, 0.0, 0.25, 0, 5)
+        cpp_grid._synced_route_count = 1
+        # Pads from from_routing_grid are present, but the test grid was
+        # built with no pads, so pad_count may be 0 -- we just assert it
+        # doesn't change after invalidate_stored_routes().
+        pad_count_before = cpp_grid._impl.pad_count
+        assert cpp_grid._impl.stored_via_count == 1
+        assert cpp_grid._impl.stored_segment_count == 1
+
+        cpp_grid.invalidate_stored_routes()
+
+        assert cpp_grid._impl.stored_via_count == 0
+        assert cpp_grid._impl.stored_segment_count == 0
+        assert cpp_grid._impl.pad_count == pad_count_before, (
+            "invalidate_stored_routes must NOT clear pads -- they are "
+            "intrinsic board geometry and survive rip-up."
+        )
+        assert cpp_grid._synced_route_count == 0
+
+
+# =====================================================================
+# Issue #2481: RSMT sub-route via deduplication
+# =====================================================================
+
+
+class TestRsmtSubRouteViaDedup:
+    """Multi-edge RSMT routes that meet at a Steiner tap must produce
+    exactly one via at that tap, not one per incident edge (Issue #2481)."""
+
+    def test_dedupe_helper_collapses_duplicate_vias(self):
+        """The standalone ``_dedupe_sibling_route_vias`` helper consolidates
+        same-coordinate same-net vias across sibling routes, expanding the
+        survivor's layer span when necessary.
+        """
+        from kicad_tools.router.algorithms.negotiated import (
+            _dedupe_sibling_route_vias,
+        )
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Via
+
+        # Three sibling routes that all carry a via at the same Steiner
+        # tap (1.5, 2.5).
+        r0 = Route(net=1, net_name="N1")
+        r0.vias.append(
+            Via(
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.IN1_CU), net=1, net_name="N1",
+            )
+        )
+
+        r1 = Route(net=1, net_name="N1")
+        r1.vias.append(
+            Via(
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.IN1_CU), net=1, net_name="N1",
+            )
+        )
+
+        r2 = Route(net=1, net_name="N1")
+        r2.vias.append(
+            Via(
+                # Different layer span -- forces a layer expansion.
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.IN1_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+        # Plus a second via on a different coordinate -- must NOT be deduped.
+        r2.vias.append(
+            Via(
+                x=4.0, y=4.0, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+
+        removed = _dedupe_sibling_route_vias([r0, r1, r2])
+
+        assert removed == 2, (
+            "Two duplicates at (1.5, 2.5) must be collapsed; one occurrence kept."
+        )
+        # r0 keeps its via; r1 loses it; r2 loses the (1.5, 2.5) but keeps (4.0, 4.0).
+        assert len(r0.vias) == 1
+        assert len(r1.vias) == 0
+        assert len(r2.vias) == 1
+        assert r2.vias[0].x == pytest.approx(4.0)
+
+        # The surviving via on r0 must have its layer span expanded to
+        # cover the (IN1_CU, B_CU) range that was lost when r2's via at
+        # (1.5, 2.5) was dropped.
+        survivor = r0.vias[0]
+        assert survivor.layers[0].value == Layer.F_CU.value
+        assert survivor.layers[1].value == Layer.B_CU.value
+
+    def test_dedupe_helper_no_duplicates_no_change(self):
+        """When there are no duplicates the helper is a no-op and returns 0."""
+        from kicad_tools.router.algorithms.negotiated import (
+            _dedupe_sibling_route_vias,
+        )
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Via
+
+        r0 = Route(net=1, net_name="N1")
+        r0.vias.append(
+            Via(
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+        r1 = Route(net=1, net_name="N1")
+        r1.vias.append(
+            Via(
+                x=4.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+
+        removed = _dedupe_sibling_route_vias([r0, r1])
+        assert removed == 0
+        assert len(r0.vias) == 1
+        assert len(r1.vias) == 1
+
+    def test_dedupe_helper_single_route_no_change(self):
+        """A single-route input is returned unchanged (no sibling to dedupe against)."""
+        from kicad_tools.router.algorithms.negotiated import (
+            _dedupe_sibling_route_vias,
+        )
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Via
+
+        r0 = Route(net=1, net_name="N1")
+        r0.vias.append(
+            Via(
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+        # Two vias on the same route at the same coord -- intra-route
+        # merge is the responsibility of _merge_same_net_vias, not this
+        # helper, so the helper must leave them alone.
+        r0.vias.append(
+            Via(
+                x=1.5, y=2.5, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+            )
+        )
+
+        removed = _dedupe_sibling_route_vias([r0])
+        assert removed == 0
+        assert len(r0.vias) == 2

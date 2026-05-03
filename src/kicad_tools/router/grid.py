@@ -385,6 +385,15 @@ class RoutingGrid:
         # Track placed routes for net assignment
         self.routes: list[Route] = []
 
+        # Issue #2481: Optional back-reference to a paired C++ grid.  When
+        # set (by ``CppGrid.from_routing_grid``), rip-up paths invalidate
+        # the C++ side's ``stored_vias_``/``stored_segments_`` snapshots so
+        # the next geometric pre-search check (Issue #2466) does not
+        # consult stale data from a route that was just ripped up.  The
+        # attribute is loosely typed (``Any``) so this module does not
+        # need to import the optional cpp backend.
+        self._cpp_grid: object | None = None
+
         # Alias for backward compatibility
         self.layers = self.num_layers
 
@@ -1795,11 +1804,19 @@ class RoutingGrid:
         Issue #1674: Computes clearance per-segment from ``seg.width``
         to match the per-segment marking done by ``mark_route()``.
 
+        Issue #2481: When a paired C++ grid exists (``_cpp_grid``), this
+        method also invalidates the C++ stored-via / stored-segment
+        snapshot.  Without the invalidation,
+        ``Pathfinder::is_via_blocked_diag`` would continue to consult
+        already-ripped-up via positions and reject legitimate placements,
+        and the post-route validator would compare against stale data.
+
         Args:
             route: The route to unmark.
             max_trace_width: Must match the value used in ``mark_route()``
                 so via cells are cleared symmetrically (Issue #1692).
         """
+        removed = False
         with self._acquire_lock():
             for seg in route.segments:
                 total_clearance = seg.width / 2 + self.rules.trace_clearance
@@ -1814,6 +1831,19 @@ class RoutingGrid:
                 # Remove from R-tree index before removing from list (Issue #1249)
                 self._rtree_remove_route(route)
                 self.routes.remove(route)
+                removed = True
+
+        # Issue #2481: After releasing the grid lock, propagate the rip-up
+        # to the paired C++ grid (if any) so its ``stored_vias_`` /
+        # ``stored_segments_`` no longer reference this route.  We only
+        # invalidate when the route was actually in ``self.routes`` --
+        # otherwise the snapshot is unaffected by this call.
+        if removed:
+            cpp_grid = self._cpp_grid
+            if cpp_grid is not None:
+                invalidate = getattr(cpp_grid, "invalidate_stored_routes", None)
+                if invalidate is not None:
+                    invalidate()
 
     def _unmark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Unmark cells along a segment (clear blocked status and net)."""

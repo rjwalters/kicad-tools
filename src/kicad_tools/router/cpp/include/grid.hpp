@@ -116,6 +116,18 @@ public:
     // Clear all stored validation data (pads, segments, vias).
     void clear_validation_data();
 
+    // Clear only stored routes (segments + vias), keeping pads.
+    // Issue #2481: Used by CppGrid.invalidate_stored_routes() after a
+    // rip-up on the Python side.  ``Pathfinder::is_via_blocked_diag``
+    // (Issue #2466) consults ``stored_vias_`` to refuse via placements
+    // that would violate cross-net clearance with already-placed routes.
+    // Without this clearing path, those entries remain even when the
+    // owning route has been ripped up, leading to false rejections (and,
+    // when the surviving routes are later re-synced, double-counted
+    // vias).  Pads are intentionally left untouched: they are intrinsic
+    // board geometry and never change between sync points.
+    void clear_stored_routes();
+
     // Validate a candidate route against all stored pads, segments, and vias.
     // Ports the 4 Python validation methods from grid.py lines 905-1317:
     //   - validate_segment_clearance (seg vs pads + stored segs + stored vias)

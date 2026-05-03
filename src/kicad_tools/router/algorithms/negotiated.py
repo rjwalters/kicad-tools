@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ..congestion_estimator import CongestionEstimator
     from ..grid import RoutingGrid
     from ..pathfinder import Router
-    from ..primitives import Pad, Route
+    from ..primitives import Pad, Route, Via
     from ..rules import DesignRules, NetClassRouting
 
 
@@ -354,6 +354,95 @@ def calculate_congestion_tuned_params(
     return adjusted_mult, adjusted_hist
 
 
+# Resolution used when grouping vias by (x, y) for cross-route same-net
+# deduplication.  Vias whose coordinates round to the same key (to the
+# nearest micron) are treated as the same physical placement.
+_VIA_DEDUP_RESOLUTION_MM = 0.001
+
+
+def _dedupe_sibling_route_vias(
+    routes: list[Route],
+    *,
+    resolution_mm: float = _VIA_DEDUP_RESOLUTION_MM,
+) -> int:
+    """Drop duplicate same-net vias across sibling Route objects (Issue #2481).
+
+    A multi-pin net routed via RSMT decomposition emits one ``Route``
+    object per Steiner edge, each carrying its own ``vias`` list.  When
+    two RSMT edges meet at a Steiner tap and both edges require a layer
+    transition there, they each insert a via at the same (x, y).  These
+    duplicates survive into the post-route validator, where each pair of
+    sibling vias against any cross-net via produces a separate
+    via-vs-via violation -- inflating the reported defect count and, for
+    the C++ side, polluting ``stored_vias_`` with redundant entries.
+
+    This function keeps the first via per (rounded x, rounded y) across
+    *all* the supplied sibling routes, expands its layer span to cover
+    every duplicate, and removes the duplicates from their owning route.
+    Segments are not touched: they already terminate at the Steiner tap
+    coordinate, which still has a via after this dedup.
+
+    Args:
+        routes: List of sibling ``Route`` objects produced for a single
+            net.  Mutated in place.
+        resolution_mm: Coordinate rounding for the dedup key.  Defaults
+            to 1 micron, well below the routing grid resolution.
+
+    Returns:
+        The number of duplicate vias removed across all routes.
+    """
+    if len(routes) < 2:
+        return 0
+
+    from ..layers import Layer
+
+    inv_res = 1.0 / resolution_mm
+    seen: dict[tuple[int, int], Via] = {}
+    removed = 0
+
+    for route in routes:
+        if not route.vias:
+            continue
+        keep_indices: list[int] = []
+        for idx, via in enumerate(route.vias):
+            key = (
+                int(round(via.x * inv_res)),
+                int(round(via.y * inv_res)),
+            )
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = via
+                keep_indices.append(idx)
+            else:
+                # Expand the surviving via's layer range to cover this
+                # duplicate's layer range, in case the two edges had
+                # different layer pairs at the same tap (mid-layer
+                # buried via on one edge, full-stack on the other).
+                min_layer = min(
+                    existing.layers[0].value,
+                    existing.layers[1].value,
+                    via.layers[0].value,
+                    via.layers[1].value,
+                )
+                max_layer = max(
+                    existing.layers[0].value,
+                    existing.layers[1].value,
+                    via.layers[0].value,
+                    via.layers[1].value,
+                )
+                if (
+                    min_layer != existing.layers[0].value
+                    or max_layer != existing.layers[1].value
+                ):
+                    existing.layers = (Layer(min_layer), Layer(max_layer))
+                removed += 1
+
+        if len(keep_indices) != len(route.vias):
+            route.vias = [route.vias[k] for k in keep_indices]
+
+    return removed
+
+
 class NegotiatedRouter:
     """PathFinder-style negotiated congestion router.
 
@@ -504,6 +593,15 @@ class NegotiatedRouter:
                     self._record_via_blocked_failure(source_pad.net)
                     if failure_callback is not None:
                         failure_callback(source_pad, target_pad)
+
+            # Issue #2481: Dedupe vias at the same (x, y) location across
+            # the multi-edge RSMT sub-routes for this net.  Two RSMT edges
+            # that meet at a Steiner tap on the same layer pair would each
+            # insert a via at that tap, producing duplicate same-net vias
+            # that the post-route DRC counts as triple-pair violations.
+            # We keep the first occurrence per (rounded) (x, y) and drop
+            # the rest from sibling sub-routes.
+            _dedupe_sibling_route_vias(routes)
         else:
             # 2-pin net
             route = self.router.route(
