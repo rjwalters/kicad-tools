@@ -205,6 +205,11 @@ NB_MODULE(router_cpp, m) {
              "reject_x"_a, "reject_y"_a, "reject_layer"_a)
         .def("clear_search_state", &Pathfinder::clear_search_state)
         .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
+        .def("is_via_blocked", &Pathfinder::is_via_blocked,
+             "x"_a, "y"_a, "net"_a, "allow_sharing"_a, "radius_override"_a = 0,
+             "Check if a via placement at (x, y) is blocked. "
+             "Includes both grid-cell blocking and geometric via-vs-via "
+             "clearance against stored_vias_ (Issue #2466).")
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 
