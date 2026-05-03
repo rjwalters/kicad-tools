@@ -3019,6 +3019,21 @@ class Autorouter:
         net_order = self._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
 
+        # Issue #2464: Filter out nets that have already been routed by a
+        # pre-pass (e.g., the differential pair pre-pass).  Without this
+        # the negotiated loop would attempt to re-route diff-pair nets,
+        # which wastes effort and can corrupt the carefully-coupled routing
+        # produced by the CoupledPathfinder.
+        prerouted_nets: set[int] = {r.net for r in self.routes}
+        if prerouted_nets:
+            skipped_nets = [n for n in net_order if n in prerouted_nets]
+            if skipped_nets:
+                flush_print(
+                    f"  Pre-routed nets skipped by negotiated loop: "
+                    f"{len(skipped_nets)} (Issue #2464)"
+                )
+            net_order = [n for n in net_order if n not in prerouted_nets]
+
         # Issue #2432: Detect charlieplex/matrix topology and assign
         # alternating layer preferences to break circular blocking.
         self._detect_and_apply_matrix_preferences(net_order)
@@ -5485,9 +5500,48 @@ class Autorouter:
         self,
         diffpair_config: DifferentialPairConfig | None = None,
         net_order: list[int] | None = None,
+        non_diffpair_strategy: object = None,
+        coupled_only: bool = False,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
-        """Route all nets with differential pair-aware routing."""
-        return self._diffpair.route_all_with_diffpairs(diffpair_config, net_order)
+        """Route all nets with differential pair-aware routing.
+
+        Args:
+            diffpair_config: Configuration for diff-pair routing.
+            net_order: Optional explicit net ordering (basic strategy only).
+            non_diffpair_strategy: Issue #2464: Optional callable that routes
+                non-diff-pair nets after the diff-pair pre-pass.  When None,
+                falls back to per-net basic routing.
+            coupled_only: Issue #2464: When True, the diff-pair pass only
+                routes pairs that the CoupledPathfinder can handle (no
+                fall-back to independent routing); pairs that fall through
+                are deferred to the main strategy.
+        """
+        return self._diffpair.route_all_with_diffpairs(
+            diffpair_config,
+            net_order,
+            non_diffpair_strategy=non_diffpair_strategy,
+            coupled_only=coupled_only,
+        )
+
+    def route_diffpair_prepass(
+        self,
+        diffpair_config: DifferentialPairConfig | None = None,
+    ) -> tuple[list[Route], list[LengthMismatchWarning], set[int]]:
+        """Route only differential pairs as a pre-pass (Issue #2464).
+
+        Used by the CLI when ``--differential-pairs`` is set.  Diff pairs
+        are routed first via the CoupledPathfinder, then the regular
+        strategy (negotiated/MC/GA) routes the remaining nets.
+
+        Args:
+            diffpair_config: Configuration for diff-pair routing.  No-op
+                when None or ``enabled`` is False.
+
+        Returns:
+            ``(routes, warnings, routed_net_ids)`` — see
+            :meth:`DiffPairRouter.route_diffpair_prepass` for details.
+        """
+        return self._diffpair.route_diffpair_prepass(diffpair_config)
 
     # =========================================================================
     # Failure Analysis API

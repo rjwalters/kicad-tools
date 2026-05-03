@@ -757,11 +757,22 @@ class DiffPairRouter:
         self,
         pair: DifferentialPair,
         spacing: float | None = None,
+        coupled_only: bool = False,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair using coupled pathfinding.
 
         Routes both P and N traces simultaneously while maintaining
         constant spacing between them.
+
+        Args:
+            pair: The differential pair to route.
+            spacing: Optional spacing override.
+            coupled_only: Issue #2464: When True, do not fall back to
+                independent routing if the coupled pathfinder cannot
+                handle the pair (e.g., 3-pad nets, no path found).
+                Returns ``([], None)`` instead.  Used by the diff-pair
+                pre-pass so that pairs that cannot be coupled are left
+                for the main strategy to route normally.
         """
         if pair.rules is None:
             return [], None
@@ -784,6 +795,12 @@ class DiffPairRouter:
         # Pair pads for routing
         pad_pairs = self._pair_pads_for_coupled_routing(p_pads, n_pads)
         if not pad_pairs:
+            if coupled_only:
+                print(
+                    "    Skipping diff-pair pre-pass: complex pad configuration "
+                    "(coupled pathfinder needs exactly 2 pads per net)"
+                )
+                return [], None
             print("    WARNING: Complex pad configuration, falling back to independent routing")
             return self.route_differential_pair_independent(pair, spacing)
 
@@ -808,6 +825,11 @@ class DiffPairRouter:
             result = pathfinder.route_coupled(p_start, p_end, n_start, n_end)
 
             if result is None:
+                if coupled_only:
+                    print(
+                        "    Skipping diff-pair pre-pass: coupled pathfinder found no path"
+                    )
+                    return [], None
                 print("    WARNING: Coupled routing failed, falling back to independent routing")
                 return self.route_differential_pair_independent(pair, spacing)
 
@@ -945,15 +967,114 @@ class DiffPairRouter:
         else:
             return self.route_differential_pair_independent(pair, spacing)
 
+    def route_diffpair_prepass(
+        self,
+        diffpair_config: DifferentialPairConfig | None = None,
+    ) -> tuple[list[Route], list[LengthMismatchWarning], set[int]]:
+        """Route only the differential pairs, leaving other nets to a follow-up strategy.
+
+        Issue #2464: This is a pre-pass that the main routing strategies
+        (negotiated, monte-carlo, evolutionary) can run before their normal
+        flow.  Diff-pair traces are routed via the CoupledPathfinder and
+        marked on the grid, after which the main strategy routes the
+        remaining nets.
+
+        Args:
+            diffpair_config: Configuration for diff-pair routing.  If None
+                or ``enabled`` is False, this method is a no-op.
+
+        Returns:
+            ``(routes, warnings, diff_net_ids)`` where:
+              - ``routes`` is the list of routes produced for the diff pairs.
+              - ``warnings`` is the list of length-mismatch warnings.
+              - ``diff_net_ids`` is the set of net IDs that were successfully
+                routed (and should therefore be skipped by the follow-up
+                strategy).
+        """
+        if diffpair_config is None or not diffpair_config.enabled:
+            return [], [], set()
+
+        diff_pairs = self.detect_differential_pairs()
+        if not diff_pairs:
+            print("  No differential pairs detected")
+            return [], [], set()
+
+        print("\n=== Differential Pair Pre-Pass (Issue #2464) ===")
+        print(f"  Detected {len(diff_pairs)} differential pairs:")
+        for pair in diff_pairs:
+            print(f"    - {pair}: {pair.pair_type.value}")
+
+        for pair in diff_pairs:
+            if pair.rules is not None:
+                pair.rules = diffpair_config.get_rules(pair.pair_type)
+
+        all_routes: list[Route] = []
+        warnings: list[LengthMismatchWarning] = []
+        routed_net_ids: set[int] = set()
+
+        for pair in diff_pairs:
+            p_id, n_id = pair.get_net_ids()
+            # Issue #2464: Use coupled_only=True so that the pre-pass is a
+            # no-op for pairs that the CoupledPathfinder cannot handle.
+            # Those pairs are left for the main strategy (negotiated/MC/GA)
+            # to route in its normal flow, which avoids producing partial
+            # routes that the main strategy would then refuse to complete.
+            pair_routes, warning = self.route_differential_pair_coupled(
+                pair,
+                diffpair_config.spacing,
+                coupled_only=True,
+            )
+            if pair_routes:
+                routed_for_net: dict[int, int] = {}
+                for r in pair_routes:
+                    routed_for_net[r.net] = routed_for_net.get(r.net, 0) + 1
+                if routed_for_net.get(p_id, 0) > 0 and routed_for_net.get(n_id, 0) > 0:
+                    routed_net_ids.add(p_id)
+                    routed_net_ids.add(n_id)
+
+            all_routes.extend(pair_routes)
+            if warning:
+                warnings.append(warning)
+
+        unrouted_pairs = [p for p in diff_pairs if p.get_net_ids()[0] not in routed_net_ids]
+        if all_routes:
+            print(f"  Diff-pair pre-pass produced {len(all_routes)} routes "
+                  f"covering {len(routed_net_ids)} nets")
+        if unrouted_pairs:
+            print(f"  Diff pairs falling through to main strategy: {len(unrouted_pairs)}")
+        if warnings:
+            print(f"  Length mismatch warnings: {len(warnings)}")
+            for w in warnings:
+                print(f"    - {w}")
+
+        return all_routes, warnings, routed_net_ids
+
     def route_all_with_diffpairs(
         self,
         diffpair_config: DifferentialPairConfig | None = None,
         net_order: list[int] | None = None,
+        non_diffpair_strategy: object = None,
+        coupled_only: bool = False,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
         Differential pairs are routed first (they're most constrained),
         then remaining nets are routed using the standard router.
+
+        Args:
+            diffpair_config: Configuration for diff-pair routing.
+            net_order: Optional explicit net ordering (basic strategy only).
+            non_diffpair_strategy: Optional callable that routes non-diff-pair
+                nets.  When provided (Issue #2464), the callable is invoked
+                after the diff-pair pass and is expected to return a list of
+                routes for the remaining nets.  When None, falls back to
+                per-net basic routing via :meth:`Autorouter.route_net`.
+            coupled_only: Issue #2464: When True, the diff-pair pass only
+                produces routes for pairs that the CoupledPathfinder can
+                handle; pairs with unsupported pad configurations (e.g.,
+                3-pad nets) are deferred to the main strategy.  When
+                False (default), preserves the legacy fall-back to
+                independent routing.
         """
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
@@ -981,35 +1102,74 @@ class DiffPairRouter:
         print("\n--- Routing differential pairs first (most constrained) ---")
         all_routes: list[Route] = []
         warnings: list[LengthMismatchWarning] = []
+        # Track diff-pair nets that we successfully routed so the
+        # caller can decide which nets to leave for the main strategy.
+        coupled_routed_nets: set[int] = set()
 
         for pair in diff_pairs:
-            pair_routes, warning = self.route_differential_pair(
-                pair,
-                diffpair_config.spacing,
-                use_coupled_routing=True,  # Use coupled routing by default
-            )
+            p_id, n_id = pair.get_net_ids()
+            if coupled_only:
+                pair_routes, warning = self.route_differential_pair_coupled(
+                    pair,
+                    diffpair_config.spacing,
+                    coupled_only=True,
+                )
+            else:
+                pair_routes, warning = self.route_differential_pair(
+                    pair,
+                    diffpair_config.spacing,
+                    use_coupled_routing=True,  # Use coupled routing by default
+                )
+            if pair_routes:
+                routed_for_net: dict[int, int] = {}
+                for r in pair_routes:
+                    routed_for_net[r.net] = routed_for_net.get(r.net, 0) + 1
+                if routed_for_net.get(p_id, 0) > 0 and routed_for_net.get(n_id, 0) > 0:
+                    coupled_routed_nets.add(p_id)
+                    coupled_routed_nets.add(n_id)
             all_routes.extend(pair_routes)
             if warning:
                 warnings.append(warning)
 
+        # Issue #2464: When coupled_only=True, only the nets actually
+        # routed by the CoupledPathfinder are reserved.  Pairs that fell
+        # through (e.g., 3-pad nets) remain in the routable set so the
+        # main strategy can pick them up.
+        if coupled_only:
+            diff_net_ids = coupled_routed_nets
+
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
-            if net_order:
-                non_diff_order = [n for n in net_order if n in non_diff_nets]
+            if non_diffpair_strategy is not None:
+                # Issue #2464: Delegate non-diff-pair routing to the caller's
+                # strategy (negotiated, MC, GA, etc.).  The callable is
+                # responsible for routing every net in self.autorouter.nets;
+                # diff-pair nets are filtered by the caller's net selection
+                # since their pads are already marked as routed on the grid.
+                strategy_routes = non_diffpair_strategy()
+                # Filter out any routes for diff-pair nets that the strategy
+                # may have re-routed (shouldn't happen if grid marking is
+                # correct, but defend against it).
+                for r in strategy_routes:
+                    if r.net not in diff_net_ids:
+                        all_routes.append(r)
             else:
-                non_diff_order = sorted(
-                    non_diff_nets, key=lambda n: self.autorouter._get_net_priority(n)
-                )
-
-            for net in non_diff_order:
-                routes = self.autorouter.route_net(net)
-                all_routes.extend(routes)
-                if routes:
-                    print(
-                        f"  Net {net}: {len(routes)} routes, "
-                        f"{sum(len(r.segments) for r in routes)} segments"
+                if net_order:
+                    non_diff_order = [n for n in net_order if n in non_diff_nets]
+                else:
+                    non_diff_order = sorted(
+                        non_diff_nets, key=lambda n: self.autorouter._get_net_priority(n)
                     )
+
+                for net in non_diff_order:
+                    routes = self.autorouter.route_net(net)
+                    all_routes.extend(routes)
+                    if routes:
+                        print(
+                            f"  Net {net}: {len(routes)} routes, "
+                            f"{sum(len(r.segments) for r in routes)} segments"
+                        )
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")

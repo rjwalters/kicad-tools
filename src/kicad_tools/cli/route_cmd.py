@@ -3892,6 +3892,40 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Define the Phase 2 routing function
                 def phase2_route_fn():
+                    # Issue #2464: When --differential-pairs is set, run a
+                    # diff-pair pre-pass before the configured strategy.
+                    # The strategy then routes the remaining nets; diff-pair
+                    # nets are filtered from the negotiated loop via the
+                    # prerouted-net skip in route_all_negotiated.
+                    if (
+                        args.differential_pairs
+                        and args.strategy in ("negotiated", "basic")
+                    ):
+                        def _phase2_strategy():
+                            if args.strategy == "negotiated":
+                                return router.route_all_negotiated(
+                                    max_iterations=args.iterations,
+                                    timeout=args.timeout,
+                                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                                    batch_routing=getattr(args, "batch_routing", False)
+                                    or getattr(args, "high_performance", False),
+                                    hierarchical=getattr(args, "hierarchical", False),
+                                    perturbation=getattr(args, "perturbation", True),
+                                )
+                            return router.route_all()
+
+                        # coupled_only=True so pairs that the
+                        # CoupledPathfinder cannot handle (3-pad nets,
+                        # etc.) fall through to the main strategy
+                        # rather than being half-routed independently
+                        # and then skipped.  Issue #2464.
+                        result, dp_warnings = router.route_all_with_diffpairs(
+                            diffpair_config,
+                            non_diffpair_strategy=_phase2_strategy,
+                            coupled_only=(args.strategy == "negotiated"),
+                        )
+                        diffpair_warnings.extend(dp_warnings)
+                        return result
                     if args.strategy == "evolutionary":
                         return router.route_all_evolutionary(
                             pop_size=args.pop_size,
@@ -3965,6 +3999,29 @@ def main(argv: list[str] | None = None) -> int:
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
+            elif args.differential_pairs and args.strategy == "negotiated":
+                # Issue #2464: Diff-pair pre-pass + negotiated for the rest.
+                # The negotiated loop honors prerouted nets via the new skip
+                # logic in route_all_negotiated.  coupled_only=True so
+                # unsupported pad configurations fall through cleanly.
+                def _neg_strategy():
+                    return router.route_all_negotiated(
+                        max_iterations=args.iterations,
+                        timeout=args.timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        batch_routing=getattr(args, "batch_routing", False)
+                        or getattr(args, "high_performance", False),
+                        hierarchical=getattr(args, "hierarchical", False),
+                        perturbation=getattr(args, "perturbation", True),
+                    )
+
+                result, dp_warnings = router.route_all_with_diffpairs(
+                    diffpair_config,
+                    non_diffpair_strategy=_neg_strategy,
+                    coupled_only=True,
+                )
+                diffpair_warnings.extend(dp_warnings)
+                return result
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
@@ -3976,12 +4033,36 @@ def main(argv: list[str] | None = None) -> int:
                     perturbation=getattr(args, "perturbation", True),
                 )
             elif args.differential_pairs and args.strategy == "basic":
-                result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+                result, dp_warnings = router.route_all_with_diffpairs(diffpair_config)
+                diffpair_warnings.extend(dp_warnings)
                 return result
             elif args.bus_routing and args.strategy == "basic":
                 return router.route_all_with_buses(bus_config)
             elif args.strategy == "basic":
                 return router.route_all()
+            elif args.differential_pairs and args.strategy in ("monte-carlo", "evolutionary"):
+                # Issue #2464: MC/GA reset the grid per trial (see
+                # _reset_for_new_trial), which would wipe pre-routed
+                # diff-pair traces.  For now, surface a warning and fall
+                # through to the standard strategy.  Follow-up work needed
+                # to integrate diff-pair pre-pass with these strategies.
+                if not quiet:
+                    flush_print(
+                        "  Warning: --differential-pairs is not yet supported with "
+                        f"strategy='{args.strategy}' (each trial resets the grid). "
+                        "Falling through to standard strategy. See Issue #2464."
+                    )
+                if args.strategy == "monte-carlo":
+                    return router.route_all_monte_carlo(
+                        num_trials=args.mc_trials,
+                        verbose=args.verbose and not quiet,
+                    )
+                else:
+                    return router.route_all_evolutionary(
+                        pop_size=args.pop_size,
+                        generations=args.generations,
+                        verbose=args.verbose and not quiet,
+                    )
             elif args.strategy == "monte-carlo":
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
