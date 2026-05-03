@@ -2,6 +2,9 @@
 
 These tests verify the adaptive parameter tuning functions that improve
 convergence for negotiated congestion routing.
+
+Also includes tests for matrix-conflict detection and layer preference
+assignment (Issue #2432).
 """
 
 from kicad_tools.router.algorithms.negotiated import (
@@ -1083,3 +1086,282 @@ class TestEmptyNetsToRerouteTermination:
         assert nets_to_reroute == [1, 2, 3], (
             "Re-enabled nets must remain in reroute list"
         )
+
+
+# =========================================================================
+# Matrix conflict detection and layer assignment tests (Issue #2432)
+# =========================================================================
+
+
+class TestDetectMatrixConflicts:
+    """Tests for Autorouter._detect_matrix_conflicts()."""
+
+    def _make_autorouter_with_nets(self, nets_data):
+        """Create a minimal Autorouter with given nets data.
+
+        Args:
+            nets_data: dict mapping net_id -> list of (ref, pin) tuples
+        """
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=50, height=50)
+        ar.nets = nets_data
+        ar.net_names = {n: f"NET_{n}" for n in nets_data}
+        return ar
+
+    def test_no_conflicts_disjoint_nets(self):
+        """Nets with no shared components should produce no conflict groups."""
+        ar = self._make_autorouter_with_nets({
+            1: [("R1", "1"), ("R1", "2")],
+            2: [("R2", "1"), ("R2", "2")],
+            3: [("C1", "1"), ("C1", "2")],
+        })
+        groups = ar._detect_matrix_conflicts([1, 2, 3])
+        assert groups == []
+
+    def test_no_conflicts_single_shared_component(self):
+        """Two nets sharing only 1 component should NOT conflict (threshold=2)."""
+        ar = self._make_autorouter_with_nets({
+            1: [("D1", "A"), ("D1", "K"), ("R1", "1")],
+            2: [("D1", "A"), ("D2", "K"), ("R2", "1")],
+        })
+        groups = ar._detect_matrix_conflicts([1, 2], threshold=2)
+        assert groups == []
+
+    def test_charlieplex_four_nets(self):
+        """Four nets sharing 3+ LEDs should form one conflict group."""
+        # Simulates NODE_A..NODE_D each connecting to pads on D1..D6
+        ar = self._make_autorouter_with_nets({
+            1: [("D1", "A"), ("D2", "K"), ("D3", "A"), ("D5", "K")],
+            2: [("D1", "K"), ("D2", "A"), ("D4", "A"), ("D6", "K")],
+            3: [("D3", "K"), ("D4", "K"), ("D5", "A"), ("D6", "A")],
+            4: [("D1", "A"), ("D3", "K"), ("D5", "A"), ("D6", "K")],
+        })
+        groups = ar._detect_matrix_conflicts([1, 2, 3, 4])
+        assert len(groups) == 1
+        assert groups[0] == {1, 2, 3, 4}
+
+    def test_two_independent_groups(self):
+        """Two separate matrix groups should produce two conflict sets."""
+        ar = self._make_autorouter_with_nets({
+            # Group 1: nets 1, 2 share D1, D2, D3
+            1: [("D1", "A"), ("D2", "K"), ("D3", "A")],
+            2: [("D1", "K"), ("D2", "A"), ("D3", "K")],
+            # Group 2: nets 3, 4 share U1, U2 (different components)
+            3: [("U1", "1"), ("U2", "2"), ("U3", "1")],
+            4: [("U1", "2"), ("U2", "1"), ("U3", "2")],
+            # Net 5: no conflicts
+            5: [("R1", "1"), ("R1", "2")],
+        })
+        groups = ar._detect_matrix_conflicts([1, 2, 3, 4, 5])
+        assert len(groups) == 2
+        group_sets = [frozenset(g) for g in groups]
+        assert frozenset({1, 2}) in group_sets
+        assert frozenset({3, 4}) in group_sets
+
+    def test_custom_threshold(self):
+        """Higher threshold should require more shared components."""
+        ar = self._make_autorouter_with_nets({
+            1: [("D1", "A"), ("D2", "K")],
+            2: [("D1", "K"), ("D2", "A")],
+        })
+        # threshold=2: should conflict (share D1, D2)
+        groups_t2 = ar._detect_matrix_conflicts([1, 2], threshold=2)
+        assert len(groups_t2) == 1
+
+        # threshold=3: should NOT conflict (only share 2 components)
+        groups_t3 = ar._detect_matrix_conflicts([1, 2], threshold=3)
+        assert groups_t3 == []
+
+    def test_empty_nets(self):
+        """Empty net list should produce no conflicts."""
+        ar = self._make_autorouter_with_nets({})
+        groups = ar._detect_matrix_conflicts([])
+        assert groups == []
+
+
+class TestAssignMatrixLayerPreferences:
+    """Tests for Autorouter._assign_matrix_layer_preferences()."""
+
+    def _make_autorouter(self, num_layers=2):
+        """Create a minimal Autorouter with given layer count."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.layers import LayerDefinition, LayerStack, LayerType
+
+        layers = []
+        for i in range(num_layers):
+            name = "F.Cu" if i == 0 else ("B.Cu" if i == num_layers - 1 else f"In{i}.Cu")
+            layers.append(LayerDefinition(
+                name=name,
+                index=i,
+                layer_type=LayerType.SIGNAL,
+                is_outer=(i == 0 or i == num_layers - 1),
+            ))
+        stack = LayerStack(layers=layers, name="Test")
+        ar = Autorouter(width=50, height=50, layer_stack=stack)
+        return ar
+
+    def test_alternating_layers_two_layer_board(self):
+        """Nets in a conflict group should get alternating F.Cu/B.Cu."""
+        ar = self._make_autorouter(num_layers=2)
+        groups = [{1, 2, 3, 4}]
+        prefs = ar._assign_matrix_layer_preferences(groups)
+        assert len(prefs) == 4
+        # Sorted order: 1, 2, 3, 4
+        assert prefs[1] == [0]  # F.Cu
+        assert prefs[2] == [1]  # B.Cu
+        assert prefs[3] == [0]  # F.Cu
+        assert prefs[4] == [1]  # B.Cu
+
+    def test_single_layer_board_no_preferences(self):
+        """Single-layer board should return empty preferences."""
+        ar = self._make_autorouter(num_layers=1)
+        groups = [{1, 2}]
+        prefs = ar._assign_matrix_layer_preferences(groups)
+        assert prefs == {}
+
+    def test_four_layer_board_uses_outer_layers(self):
+        """Multi-layer board should alternate between first and last layers."""
+        ar = self._make_autorouter(num_layers=4)
+        groups = [{10, 20}]
+        prefs = ar._assign_matrix_layer_preferences(groups)
+        assert prefs[10] == [0]  # F.Cu (index 0)
+        assert prefs[20] == [3]  # B.Cu (index 3)
+
+    def test_multiple_groups_independent(self):
+        """Each conflict group should be assigned independently."""
+        ar = self._make_autorouter(num_layers=2)
+        groups = [{1, 2}, {3, 4}]
+        prefs = ar._assign_matrix_layer_preferences(groups)
+        assert len(prefs) == 4
+        # Group 1: nets 1,2
+        assert prefs[1] == [0]
+        assert prefs[2] == [1]
+        # Group 2: nets 3,4
+        assert prefs[3] == [0]
+        assert prefs[4] == [1]
+
+
+class TestInjectMatrixLayerPreferences:
+    """Tests for Autorouter._inject_matrix_layer_preferences()."""
+
+    def _make_autorouter_with_nets(self, nets_data, net_names=None):
+        """Create a minimal Autorouter with given nets data."""
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=50, height=50)
+        ar.nets = nets_data
+        if net_names:
+            ar.net_names = net_names
+        else:
+            ar.net_names = {n: f"NET_{n}" for n in nets_data}
+        return ar
+
+    def test_creates_net_class_entries(self):
+        """Should create NetClassRouting entries with preferred_layers."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        ar = self._make_autorouter_with_nets(
+            {1: [], 2: []},
+            net_names={1: "NODE_A", 2: "NODE_B"},
+        )
+        prefs = {1: [0], 2: [1]}
+        ar._inject_matrix_layer_preferences(prefs)
+
+        assert "NODE_A" in ar.net_class_map
+        assert ar.net_class_map["NODE_A"].preferred_layers == [0]
+        assert "NODE_B" in ar.net_class_map
+        assert ar.net_class_map["NODE_B"].preferred_layers == [1]
+
+    def test_preserves_existing_net_class(self):
+        """Should copy existing net class and add layer preference."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        ar = self._make_autorouter_with_nets(
+            {1: []},
+            net_names={1: "MCLK"},
+        )
+        # Pre-existing net class for MCLK
+        ar.net_class_map["MCLK"] = NetClassRouting(
+            name="Clock", priority=2, trace_width=0.15
+        )
+        prefs = {1: [0]}
+        ar._inject_matrix_layer_preferences(prefs)
+
+        nc = ar.net_class_map["MCLK"]
+        assert nc.priority == 2  # Preserved
+        assert nc.trace_width == 0.15  # Preserved
+        assert nc.preferred_layers == [0]  # Added
+
+    def test_skips_nets_without_names(self):
+        """Nets with no name should be skipped without error."""
+        ar = self._make_autorouter_with_nets(
+            {1: []},
+            net_names={},  # No name for net 1
+        )
+        prefs = {1: [0]}
+        ar._inject_matrix_layer_preferences(prefs)
+        # Should not crash; no new entries since no name
+
+
+class TestMatrixConstraintBoost:
+    """Tests for matrix net priority boost in _calculate_constraint_score."""
+
+    def _make_autorouter_with_matrix_nets(self, matrix_nets):
+        """Create an Autorouter with specified matrix conflict nets."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        ar = Autorouter(width=50, height=50)
+        ar._matrix_conflict_nets = set(matrix_nets)
+        # Add minimal pad data for the nets
+        for net_id in matrix_nets:
+            pad_key = (f"R{net_id}", "1")
+            ar.nets[net_id] = [pad_key]
+            ar.pads[pad_key] = Pad(
+                x=10.0, y=10.0,
+                width=1.0, height=1.0,
+                net=net_id, net_name=f"NET_{net_id}",
+                ref=f"R{net_id}", pin="1",
+            )
+            ar.net_names[net_id] = f"NET_{net_id}"
+        return ar
+
+    def test_matrix_net_gets_higher_constraint_score(self):
+        """Matrix-conflicting nets should have higher constraint score."""
+        ar = self._make_autorouter_with_matrix_nets([1])
+        # Also add a non-matrix net
+        pad_key = ("R99", "1")
+        from kicad_tools.router.primitives import Pad
+        ar.nets[99] = [pad_key]
+        ar.pads[pad_key] = Pad(
+            x=20.0, y=20.0,
+            width=1.0, height=1.0,
+            net=99, net_name="NET_99",
+            ref="R99", pin="1",
+        )
+        ar.net_names[99] = "NET_99"
+
+        matrix_score = ar._calculate_constraint_score(1)
+        normal_score = ar._calculate_constraint_score(99)
+        assert matrix_score > normal_score, (
+            "Matrix net should have higher constraint score"
+        )
+
+    def test_non_matrix_net_unaffected(self):
+        """Non-matrix nets should not get the matrix boost."""
+        ar = self._make_autorouter_with_matrix_nets([])
+        pad_key = ("R1", "1")
+        from kicad_tools.router.primitives import Pad
+        ar.nets[1] = [pad_key]
+        ar.pads[pad_key] = Pad(
+            x=10.0, y=10.0,
+            width=1.0, height=1.0,
+            net=1, net_name="NET_1",
+            ref="R1", pin="1",
+        )
+        ar.net_names[1] = "NET_1"
+
+        score = ar._calculate_constraint_score(1)
+        # Score should only contain pad_count_weight * 1 = 0.5
+        assert score < 5.0, "Non-matrix net should have low constraint score"
