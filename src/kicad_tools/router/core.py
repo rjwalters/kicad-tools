@@ -4554,6 +4554,45 @@ class Autorouter:
             num_workers=num_workers,
         )
 
+    def route_all_evolutionary(
+        self,
+        pop_size: int = 20,
+        generations: int = 10,
+        seed: int | None = None,
+        verbose: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        num_workers: int | None = None,
+    ) -> list[Route]:
+        """Route using evolutionary optimization with GA-style operators.
+
+        Maintains a population of routing chromosomes encoding net ordering
+        and per-net cost parameters, and evolves them over multiple
+        generations using tournament selection, order crossover, and mutation.
+
+        Args:
+            pop_size: Population size per generation.
+            generations: Number of evolutionary generations.
+            seed: Random seed for reproducibility.
+            verbose: Whether to print progress information.
+            progress_callback: Optional callback for progress updates.
+            num_workers: Number of parallel workers. None or 0 for auto-detection
+                based on CPU count. 1 for sequential execution.
+
+        Returns:
+            List of routes from the best chromosome found.
+        """
+        from .algorithms.evolutionary import run_evolutionary
+
+        return run_evolutionary(
+            autorouter=self,
+            pop_size=pop_size,
+            generations=generations,
+            seed=seed,
+            verbose=verbose,
+            progress_callback=progress_callback,
+            num_workers=num_workers,
+        )
+
     def route_all_block_aware(
         self,
         blocks: list[PCBBlock] | None = None,

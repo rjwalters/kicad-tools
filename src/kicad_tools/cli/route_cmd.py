@@ -1108,6 +1108,12 @@ def route_with_layer_escalation(
                     num_trials=args.mc_trials,
                     verbose=args.verbose and not quiet,
                 )
+            elif args.strategy == "evolutionary":
+                router.route_all_evolutionary(
+                    pop_size=args.pop_size,
+                    generations=args.generations,
+                    verbose=args.verbose and not quiet,
+                )
         except Exception as e:
             if not quiet:
                 print(f"  Routing error: {e}")
@@ -1632,6 +1638,12 @@ def route_with_rule_relaxation(
                     num_trials=args.mc_trials,
                     verbose=args.verbose and not quiet,
                 )
+            elif args.strategy == "evolutionary":
+                router.route_all_evolutionary(
+                    pop_size=args.pop_size,
+                    generations=args.generations,
+                    verbose=args.verbose and not quiet,
+                )
         except Exception as e:
             if not quiet:
                 print(f"  Routing error: {e}")
@@ -2115,6 +2127,12 @@ def route_with_combined_escalation(
                         num_trials=args.mc_trials,
                         verbose=args.verbose and not quiet,
                     )
+                elif args.strategy == "evolutionary":
+                    router.route_all_evolutionary(
+                        pop_size=args.pop_size,
+                        generations=args.generations,
+                        verbose=args.verbose and not quiet,
+                    )
             except Exception as e:
                 if not quiet:
                     print(f"  Routing error: {e}")
@@ -2491,7 +2509,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--strategy",
-        choices=["basic", "negotiated", "monte-carlo"],
+        choices=["basic", "negotiated", "monte-carlo", "evolutionary"],
         default="negotiated",
         help="Routing strategy (default: negotiated)",
     )
@@ -2558,6 +2576,18 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=10,
         help="Number of Monte Carlo trials (default: 10)",
+    )
+    parser.add_argument(
+        "--pop-size",
+        type=int,
+        default=20,
+        help="Evolutionary optimizer population size (default: 20)",
+    )
+    parser.add_argument(
+        "--generations",
+        type=int,
+        default=10,
+        help="Evolutionary optimizer generations (default: 10)",
     )
     parser.add_argument(
         "--iterations",
@@ -3944,6 +3974,12 @@ def main(argv: list[str] | None = None) -> int:
             elif args.strategy == "monte-carlo":
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    verbose=args.verbose and not quiet,
+                )
+            elif args.strategy == "evolutionary":
+                return router.route_all_evolutionary(
+                    pop_size=args.pop_size,
+                    generations=args.generations,
                     verbose=args.verbose and not quiet,
                 )
             return None
