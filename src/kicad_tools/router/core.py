@@ -3843,6 +3843,44 @@ class Autorouter:
                             f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
                             f" - engaging targeted rip-up fallback ({elapsed_str()})"
                         )
+
+                        # Issue #2476: Drive a focused via-blocked rip-up
+                        # first.  The C++ pathfinder records the offending
+                        # stored-via net when its A* expansion fails the
+                        # geometric via-vs-via clearance check.  Ripping up
+                        # that specific net is much more likely to unblock
+                        # progress than the Bresenham-based blocker scan
+                        # below, which can miss conflicts that are blocked
+                        # by clearance/congestion rather than direct-line
+                        # intersection.  Any nets still failing afterwards
+                        # fall through to the existing targeted-ripup path.
+                        def _mark_route_via_blocked(route: Route) -> None:
+                            self._mark_route(route)
+
+                        via_resolved, via_attempted = neg_router.via_blocked_ripup(
+                            net_routes=net_routes,
+                            routes_list=self.routes,
+                            pads_by_net=pads_by_net,
+                            present_cost_factor=present_factor,
+                            mark_route_callback=_mark_route_via_blocked,
+                            ripup_history=ripup_history,
+                            max_ripups_per_net=max_ripups_per_net,
+                            per_net_timeout=per_net_timeout,
+                        )
+                        if via_attempted > 0:
+                            flush_print(
+                                f"  Via-blocked rip-up resolved {via_resolved}/{via_attempted} "
+                                f"net(s) via cpp diagnostic ({elapsed_str()})"
+                            )
+                            # Recompute the still-failed list -- some nets
+                            # may now be routed thanks to the targeted via
+                            # blocker rip-up.
+                            still_failed = [
+                                n for n in net_order
+                                if n not in net_routes and n in pads_by_net
+                                and n not in off_grid_nets
+                            ]
+
                         targeted_fallback_count = 0
                         for failed_net in still_failed:
                             if check_timeout():

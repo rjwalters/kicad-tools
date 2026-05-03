@@ -395,6 +395,14 @@ class NegotiatedRouter:
         self.congestion_estimator = congestion_estimator
         self.congestion_weight = congestion_weight
 
+        # Issue #2476: Set of (failed_net_id, blocking_via_net_id) pairs
+        # collected from the C++ pathfinder's structured failure
+        # diagnostics during route_net_negotiated().  The negotiated outer
+        # loop drains this via :meth:`get_and_clear_via_blocking_nets` to
+        # target rip-up at the specific net whose stored via blocked
+        # progress, rather than blanket retry.
+        self._last_via_blocking_nets: set[tuple[int, int]] = set()
+
     def route_net_negotiated(
         self,
         pad_objs: list[Pad],
@@ -417,6 +425,17 @@ class NegotiatedRouter:
 
         Returns:
             List of routes created
+
+        Notes:
+            Issue #2476: After every failed sub-route (RSMT edge or 2-pin
+            connection), this method consults
+            ``self.router.get_last_failure_info()`` and, when the C++
+            pathfinder reports a ``FAILURE_VIA_VIA_BLOCKED`` diagnostic,
+            records the offending stored-via net in
+            ``self._last_via_blocking_nets``.  The negotiated outer loop
+            uses that list (via :meth:`get_and_clear_via_blocking_nets`) to
+            target rip-up at the specific blockers rather than blanket
+            retry.
         """
         if len(pad_objs) < 2:
             return []
@@ -478,8 +497,13 @@ class NegotiatedRouter:
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
                     self._collect_route_cells(route, routed_cells)
-                elif failure_callback is not None:
-                    failure_callback(source_pad, target_pad)
+                else:
+                    # Issue #2476: Capture structured via-blocked failure
+                    # diagnostics from the cpp pathfinder so the negotiated
+                    # outer loop can target rip-up at the specific blocker.
+                    self._record_via_blocked_failure(source_pad.net)
+                    if failure_callback is not None:
+                        failure_callback(source_pad, target_pad)
         else:
             # 2-pin net
             route = self.router.route(
@@ -492,10 +516,72 @@ class NegotiatedRouter:
             if route:
                 mark_route_callback(route)
                 routes.append(route)
-            elif failure_callback is not None:
-                failure_callback(pad_objs[0], pad_objs[1])
+            else:
+                # Issue #2476: Capture cpp-side via-blocked diagnostic.
+                self._record_via_blocked_failure(pad_objs[0].net)
+                if failure_callback is not None:
+                    failure_callback(pad_objs[0], pad_objs[1])
 
         return routes
+
+    # =========================================================================
+    # Via-blocked failure tracking (Issue #2476)
+    # =========================================================================
+
+    # Failure-reason constant mirroring router_cpp.FAILURE_VIA_VIA_BLOCKED.
+    # Hard-coded here so the Python module imports cleanly even when the C++
+    # extension is unavailable; matches the value of ``FAILURE_VIA_VIA_BLOCKED``
+    # in ``cpp/include/types.hpp``.
+    _FAILURE_VIA_VIA_BLOCKED = 5
+
+    def _record_via_blocked_failure(self, failed_net: int) -> None:
+        """Capture a via-vs-via failure from the most recent route() call.
+
+        Issue #2476: When a sub-route fails, ask the underlying router for
+        structured failure diagnostics.  If the C++ pathfinder reports
+        ``FAILURE_VIA_VIA_BLOCKED`` along with a non-zero
+        ``blocking_via_net``, record the (failed_net, blocking_net) pair so
+        the negotiated outer loop can rip up the specific blocker rather
+        than blanket retry.
+
+        This is a no-op when:
+        - The router is the Python pathfinder (returns ``None``).
+        - The failure was an unrelated grid-cell rejection (no actionable
+          diagnostic).
+        - The blocking net id is 0 (not a stored-via geometric reject).
+
+        Args:
+            failed_net: Net id of the net whose route failed.
+        """
+        get_info = getattr(self.router, "get_last_failure_info", None)
+        if get_info is None:
+            return
+        info = get_info()
+        if not info:
+            return
+        if info.get("failure_reason") != self._FAILURE_VIA_VIA_BLOCKED:
+            return
+        blocking_net = int(info.get("blocking_via_net") or 0)
+        if blocking_net == 0 or blocking_net == failed_net:
+            return
+        self._last_via_blocking_nets.add((failed_net, blocking_net))
+
+    def get_and_clear_via_blocking_nets(self) -> set[tuple[int, int]]:
+        """Drain and return the set of (failed_net, blocking_net) pairs.
+
+        Issue #2476: Each pair indicates that ``failed_net``'s A* search
+        was rejected by ``blocking_net``'s stored via.  The negotiated
+        outer loop rips up ``blocking_net`` and then retries
+        ``failed_net``.  After draining, the internal set is cleared so
+        subsequent iterations only see fresh diagnostics.
+
+        Returns:
+            A set of ``(failed_net, blocking_net)`` tuples.  Empty if no
+            via-blocked failures have been recorded since the last drain.
+        """
+        result = self._last_via_blocking_nets
+        self._last_via_blocking_nets = set()
+        return result
 
     def _collect_route_cells(
         self,
@@ -595,6 +681,118 @@ class NegotiatedRouter:
                 if route in routes_list:
                     routes_list.remove(route)
             net_routes[net] = []
+
+    def via_blocked_ripup(
+        self,
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
+    ) -> tuple[int, int]:
+        """Targeted rip-up driven by C++ via-vs-via failure diagnostics.
+
+        Issue #2476: When the C++ A* search refuses every via candidate
+        because of a stored-via clearance violation, it surfaces the
+        offending stored-via net via ``RouteResult.blocking_via_net``.
+        This method drains those (failed_net, blocking_net) pairs from
+        :meth:`get_and_clear_via_blocking_nets`, rips up each blocking
+        net, and routes the failed net first.  Displaced blockers are
+        rerouted afterwards.
+
+        Compared to :meth:`targeted_ripup`, the blocker set comes from a
+        precise geometric diagnostic rather than a Bresenham line scan or
+        relaxed A*, so we avoid the false "no direct blockers found" path
+        that previously punted to a blanket retry on board 02.
+
+        Args:
+            net_routes: Dictionary of net_id -> list of routes.
+            routes_list: Master list of all routes.
+            pads_by_net: Dictionary of net_id -> list of pads.
+            present_cost_factor: Current congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            ripup_history: Optional dict tracking per-net rip-up counts.
+            max_ripups_per_net: Maximum rip-ups per net to prevent loops.
+            per_net_timeout: Optional wall-clock timeout per A* search.
+
+        Returns:
+            Tuple of ``(resolved_count, attempted_count)`` -- how many
+            failed nets routed successfully after the rip-up, out of how
+            many distinct via-blocked failures were observed.
+        """
+        if ripup_history is None:
+            ripup_history = {}
+
+        pairs = self.get_and_clear_via_blocking_nets()
+        if not pairs:
+            return (0, 0)
+
+        # Group blockers per failed net.  A single failed net may have
+        # accumulated multiple distinct blocking-via observations across
+        # its RSMT edges.
+        blockers_by_failed: dict[int, set[int]] = {}
+        for failed_net, blocking_net in pairs:
+            blockers_by_failed.setdefault(failed_net, set()).add(blocking_net)
+
+        resolved = 0
+        attempted = 0
+
+        for failed_net, blocking_nets in blockers_by_failed.items():
+            attempted += 1
+
+            # Filter blockers by ripup budget.
+            nets_to_ripup: set[int] = set()
+            for net in blocking_nets:
+                if ripup_history.get(net, 0) < max_ripups_per_net:
+                    nets_to_ripup.add(net)
+                    ripup_history[net] = ripup_history.get(net, 0) + 1
+
+            if not nets_to_ripup:
+                # All blockers have hit their rip-up budget; skip this net
+                # so we don't churn endlessly on the same conflict.
+                continue
+
+            # Rip up the specific blockers identified by the cpp search.
+            self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
+
+            # Route the failed net first (priority over displaced nets).
+            failed_pads = pads_by_net.get(failed_net, [])
+            failed_net_success = False
+            if failed_pads and len(failed_pads) >= 2:
+                routes = self.route_net_negotiated(
+                    failed_pads, present_cost_factor, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[failed_net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                    failed_net_success = True
+
+            # Re-route the displaced blockers.  Their routing may now use
+            # different via positions that no longer collide with the
+            # newly-routed failed net.
+            for net in nets_to_ripup:
+                net_pads = pads_by_net.get(net, [])
+                if net_pads and len(net_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        net_pads, present_cost_factor, mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[net] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            if failed_net_success:
+                resolved += 1
+
+        return (resolved, attempted)
 
     def targeted_ripup(
         self,

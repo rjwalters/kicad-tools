@@ -99,7 +99,21 @@ NB_MODULE(router_cpp, m) {
         .def_ro("segments", &RouteResult::segments)
         .def_ro("vias", &RouteResult::vias)
         .def_ro("net", &RouteResult::net)
-        .def_ro("success", &RouteResult::success);
+        .def_ro("success", &RouteResult::success)
+        // Issue #2476: structured failure diagnostics (mirrors
+        // ValidationResult::violation_type vocabulary).
+        .def_ro("failure_reason", &RouteResult::failure_reason)
+        .def_ro("blocking_via_net", &RouteResult::blocking_via_net)
+        .def_ro("failure_x", &RouteResult::failure_x)
+        .def_ro("failure_y", &RouteResult::failure_y);
+
+    // Issue #2476: FailureReason constants (exposed as module attributes
+    // so Python tests/strategies can dispatch on the same vocabulary the
+    // C++ search uses internally).
+    m.attr("FAILURE_NONE") = static_cast<int>(FAILURE_NONE);
+    m.attr("FAILURE_NO_PATH") = static_cast<int>(FAILURE_NO_PATH);
+    m.attr("FAILURE_ITERATION_LIMIT") = static_cast<int>(FAILURE_ITERATION_LIMIT);
+    m.attr("FAILURE_VIA_VIA_BLOCKED") = static_cast<int>(FAILURE_VIA_VIA_BLOCKED);
 
     // Grid3D class
     nb::class_<Grid3D>(m, "Grid3D")
