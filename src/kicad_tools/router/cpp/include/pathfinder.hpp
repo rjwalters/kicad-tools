@@ -84,6 +84,16 @@ public:
     int get_iterations() const { return last_iterations_; }
     int get_nodes_explored() const { return last_nodes_explored_; }
 
+    // Check if via placement is blocked on all layers.
+    // radius_override: if > 0, use this instead of via_half_cells_.
+    //
+    // Public to allow direct exercise from regression tests.  See
+    // tests/test_router_cpp_via_clearance.py (Issue #2466) which verifies
+    // that the search refuses placements the post-route validator would
+    // later reject.
+    bool is_via_blocked(int x, int y, int net, bool allow_sharing,
+                        int radius_override = 0) const;
+
 private:
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_
@@ -93,11 +103,6 @@ private:
     // Check if diagonal move cuts through obstacles
     bool is_diagonal_blocked(int x, int y, int dx, int dy, int layer, int net,
                              bool allow_sharing) const;
-
-    // Check if via placement is blocked on all layers
-    // radius_override: if > 0, use this instead of via_half_cells_
-    bool is_via_blocked(int x, int y, int net, bool allow_sharing,
-                        int radius_override = 0) const;
 
     // Heuristic: Manhattan distance with layer change cost
     float heuristic(int x, int y, int layer, int goal_x, int goal_y, int goal_layer) const;

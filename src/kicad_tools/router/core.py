@@ -624,10 +624,19 @@ class Autorouter:
         # Mark all vias on C++ grid
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            # Via radius includes via_clearance + trace half-width (same as Python)
-            radius_cells = int(
-                (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                / self.grid.resolution
+            # Issue #2466: Use ``ceil`` (not ``int``) for the via blocking
+            # radius so that grid-cell blocking matches the validator's
+            # geometric ``via_diameter/2 + via_clearance`` keepout.  The
+            # previous ``int(...)`` truncation under-blocked by up to one
+            # grid cell, allowing the search to place a via that the post-
+            # route validator would later flag.  Mirrors the +1 safety
+            # margin in ``RoutingGrid._mark_via`` (Issue #1797).
+            radius_cells = (
+                math.ceil(
+                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+                    / self.grid.resolution
+                )
+                + 1
             )
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 

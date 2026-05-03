@@ -153,6 +153,31 @@ bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
             }
         }
     }
+
+    // Issue #2466: Also check via-vs-via geometric clearance against
+    // ``stored_vias_``.  The grid-cell blocking heuristic above can miss
+    // conflicts in negotiated mode (where ``allow_sharing`` lets cells with
+    // ``usage_count > 0`` be passed through), but two vias can never
+    // physically overlap regardless of routing mode.  This mirrors the
+    // post-route validator (Grid3D::validate_route) so the search refuses
+    // placements that the validator would later reject.
+    auto candidate_world = grid_.grid_to_world(x, y);
+    float candidate_x = candidate_world.first;
+    float candidate_y = candidate_world.second;
+    float candidate_radius = rules_.via_diameter / 2.0f;
+    float clearance_required = rules_.via_clearance;
+
+    for (const auto& sv : grid_.stored_vias()) {
+        if (sv.net == net) continue;  // same-net spacing handled elsewhere
+        float dxw = candidate_x - sv.x;
+        float dyw = candidate_y - sv.y;
+        float distance = std::sqrt(dxw * dxw + dyw * dyw);
+        float clearance = distance - candidate_radius - sv.diameter / 2.0f;
+        if (clearance < clearance_required) {
+            return true;
+        }
+    }
+
     return false;
 }
 

@@ -143,6 +143,12 @@ public:
     size_t stored_segment_count() const { return stored_segments_.size(); }
     size_t stored_via_count() const { return stored_vias_.size(); }
 
+    // Accessor for stored vias (Issue #2466).
+    // Used by Pathfinder::is_via_blocked to perform a geometric via-vs-via
+    // clearance check that mirrors validate_route() exactly, so the search
+    // refuses placements the post-route validator would later reject.
+    const std::vector<StoredVia>& stored_vias() const { return stored_vias_; }
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +
