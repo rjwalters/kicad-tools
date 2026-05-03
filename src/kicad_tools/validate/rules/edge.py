@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+# Floating-point tolerance for edge clearance comparisons (0.1 micron).
+# Zone boundaries inset by exactly ``edge_clearance`` via Shapely ``buffer``
+# can land at distances like 0.29999... instead of 0.300 due to IEEE-754
+# rounding.  A 0.1-micron epsilon is well below manufacturing precision and
+# prevents false-positive DRC violations at exact boundaries.
+_CLEARANCE_EPSILON_MM = 1e-4
+
+
 class EdgeClearanceRule(DRCRule):
     """Check copper and hole clearances to board edge.
 
@@ -96,7 +104,7 @@ class EdgeClearanceRule(DRCRule):
                 # Actual clearance from trace edge (not centerline)
                 actual_clearance = distance - half_width
 
-                if actual_clearance < min_clearance:
+                if actual_clearance < min_clearance - _CLEARANCE_EPSILON_MM:
                     results.add(
                         DRCViolation(
                             rule_id="edge_clearance_trace",
@@ -138,7 +146,7 @@ class EdgeClearanceRule(DRCRule):
             half_size = via.size / 2
             actual_clearance = distance - half_size
 
-            if actual_clearance < min_clearance:
+            if actual_clearance < min_clearance - _CLEARANCE_EPSILON_MM:
                 results.add(
                     DRCViolation(
                         rule_id="edge_clearance_via",
@@ -200,7 +208,7 @@ class EdgeClearanceRule(DRCRule):
                     min_clearance = min_copper_clearance
                     rule_id = "edge_clearance_pad"
 
-                if actual_clearance < min_clearance:
+                if actual_clearance < min_clearance - _CLEARANCE_EPSILON_MM:
                     results.add(
                         DRCViolation(
                             rule_id=rule_id,
@@ -244,7 +252,7 @@ class EdgeClearanceRule(DRCRule):
                     board_point = (point[0] - ox, point[1] - oy)
                     distance = self._min_distance_to_outline(board_point, outline_segments)
 
-                    if distance < min_clearance:
+                    if distance < min_clearance - _CLEARANCE_EPSILON_MM:
                         results.add(
                             DRCViolation(
                                 rule_id="edge_clearance_zone",
