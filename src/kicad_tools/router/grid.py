@@ -1977,6 +1977,86 @@ class RoutingGrid:
         # Ensure we return a plain NumPy array regardless of backend
         return to_numpy(ratios) if not isinstance(ratios, np.ndarray) else ratios
 
+    def compute_expanded_blocked(
+        self,
+        radius: int,
+        net: int,
+        allow_sharing: bool = False,
+    ) -> np.ndarray:
+        """Pre-compute an expanded blocked bitmap for trace-width clearance.
+
+        Issue #2430: Instead of extracting NumPy sub-arrays per neighbor in
+        ``_is_trace_blocked``, dilate the blocked bitmap once at the start
+        of each ``route()`` call.  The per-neighbor check then becomes a
+        single array lookup: ``expanded[layer, ny, nx]``.
+
+        The dilation uses ``scipy.ndimage.maximum_filter`` when available,
+        falling back to a pure-NumPy sliding-window maximum.
+
+        Args:
+            radius: Half-width of the trace in grid cells (``_trace_half_width_cells``).
+            net: Net ID of the route being planned.  Same-net cells are
+                 *not* treated as blocked (consistent with ``_is_trace_blocked``).
+            allow_sharing: If True (negotiated mode), only static obstacles
+                           block; shared-usage cells are passable.
+
+        Returns:
+            Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
+            ``True`` means the cell is blocked for this net considering
+            trace width expansion.
+        """
+        if allow_sharing:
+            # Negotiated mode: block only static obstacles with different net
+            different_net = self._net != net
+            obstacle_blocks = self._blocked & self._is_obstacle & different_net
+            static_blocks = (
+                self._blocked & ~self._is_obstacle & different_net & (self._usage_count == 0)
+            )
+            base_blocked = obstacle_blocks | static_blocks
+        else:
+            # Standard mode: block cells that are blocked AND different net
+            base_blocked = self._blocked & (self._net != net)
+
+        if radius <= 1:
+            # No expansion needed; single-cell check is equivalent.
+            return base_blocked
+
+        # Dilate by *radius* using a square structuring element of side 2*radius+1.
+        kernel_size = 2 * radius + 1
+        try:
+            from scipy.ndimage import maximum_filter  # type: ignore[import-untyped]
+
+            # maximum_filter on bool is equivalent to dilation (any-True in window).
+            expanded = maximum_filter(
+                base_blocked.astype(np.uint8),
+                size=(1, kernel_size, kernel_size),
+            ).astype(np.bool_)
+        except ImportError:
+            # Fallback: pure-NumPy sliding-window maximum via np.lib.stride_tricks.
+            # Pad the array so that out-of-bounds cells count as blocked.
+            padded = np.ones(
+                (
+                    self.num_layers,
+                    self.rows + 2 * radius,
+                    self.cols + 2 * radius,
+                ),
+                dtype=np.bool_,
+            )
+            padded[
+                :,
+                radius : radius + self.rows,
+                radius : radius + self.cols,
+            ] = base_blocked
+
+            expanded = np.zeros_like(base_blocked)
+            for dy in range(kernel_size):
+                for dx in range(kernel_size):
+                    expanded |= padded[
+                        :, dy : dy + self.rows, dx : dx + self.cols
+                    ]
+
+        return expanded
+
     def get_total_overflow(self) -> int:
         """Get total overflow (sum of usage_count - 1 for overused cells).
 

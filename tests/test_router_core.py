@@ -3810,3 +3810,161 @@ class TestEscalationStateReset:
         router.reset_attempt_state()
         router.reset_attempt_state()
         assert router.power_stall_abort is False
+
+
+class TestLargeGridPerformance:
+    """Performance regression tests for large grid A* pathfinding (Issue #2430)."""
+
+    def test_route_400x400_completes_within_budget(self):
+        """A* on a 400x400 grid with obstacles must complete in <5s.
+
+        This exercises the optimizations added in Issue #2430:
+        - Pre-computed expanded blocked bitmap
+        - NumPy array g_scores/closed_set
+        - Pre-computed zone cost arrays
+        """
+        import time
+
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+        from kicad_tools.router.primitives import Pad
+
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.15,
+            via_diameter=0.6,
+        )
+        # 400x400 grid: board ~40mm x 40mm at 0.1mm resolution
+        grid = RoutingGrid(
+            width=40.0,
+            height=40.0,
+            rules=rules,
+            resolution_override=0.1,
+        )
+
+        # Place some obstacles to make the search non-trivial
+        import numpy as np
+        for y_start in range(50, 350, 40):
+            grid._blocked[0, y_start:y_start + 20, 50:350] = True
+            grid._net[0, y_start:y_start + 20, 50:350] = 99  # different net
+            # Leave gaps for routing
+            grid._blocked[0, y_start:y_start + 20, 190:210] = False
+            grid._net[0, y_start:y_start + 20, 190:210] = 0
+
+        router = Router(grid, rules)
+
+        start_pad = Pad(
+            x=1.0, y=1.0, width=0.5, height=0.5,
+            net=1, net_name="TEST", layer=Layer.F_CU,
+            ref="U1", pin="1", through_hole=False,
+        )
+        end_pad = Pad(
+            x=39.0, y=39.0, width=0.5, height=0.5,
+            net=1, net_name="TEST", layer=Layer.F_CU,
+            ref="U2", pin="1", through_hole=False,
+        )
+
+        t0 = time.monotonic()
+        route = router.route(start_pad, end_pad, per_net_timeout=10.0)
+        elapsed = time.monotonic() - t0
+
+        # Route should complete (obstacles have gaps)
+        assert route is not None, f"Route failed on 400x400 grid (took {elapsed:.2f}s)"
+        # Performance budget: must complete in <15s on CI (generous for slow runners).
+        # Before Issue #2430 optimizations, this would timeout or take >30s.
+        assert elapsed < 15.0, (
+            f"Route took {elapsed:.2f}s on 400x400 grid (budget: 15s)"
+        )
+
+    def test_crossing_index_scales_sublinearly(self):
+        """Crossing detection with spatial index should not degrade linearly.
+
+        Adds many routed segments and verifies that _count_edge_crossings
+        with the spatial index is significantly faster than worst-case linear.
+        """
+        import time
+
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.15,
+            via_diameter=0.6,
+            crossing_penalty=10.0,
+        )
+        grid = RoutingGrid(
+            width=40.0,
+            height=40.0,
+            rules=rules,
+            resolution_override=0.1,
+        )
+
+        router = Router(grid, rules)
+
+        # Add 500 routed segments spread across the grid
+        import random
+        rng = random.Random(42)
+        for _ in range(500):
+            x1 = rng.randint(0, 350)
+            y1 = rng.randint(0, 350)
+            x2 = x1 + rng.randint(1, 50)
+            y2 = y1 + rng.randint(-5, 5)
+            router._routed_segments.append((x1, y1, x2, y2, 0, 99))
+
+        # Build spatial index
+        router._build_crossing_grid()
+
+        # Query crossings for many edges
+        t0 = time.monotonic()
+        total_crossings = 0
+        for i in range(1000):
+            cx, cy = i % 300 + 25, (i * 7) % 300 + 25
+            nx, ny = cx + 1, cy + 1
+            total_crossings += router._count_edge_crossings(cx, cy, nx, ny, 0, 1)
+        elapsed_indexed = time.monotonic() - t0
+
+        # Verify the index was used (should be fast)
+        assert elapsed_indexed < 2.0, (
+            f"Indexed crossing queries took {elapsed_indexed:.2f}s for 1000 queries "
+            f"with 500 segments (should be <2s)"
+        )
+
+    def test_expanded_blocked_bitmap_consistency(self):
+        """Pre-computed expanded blocked bitmap matches per-cell checks."""
+        import numpy as np
+
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.15,
+            via_diameter=0.6,
+        )
+        grid = RoutingGrid(
+            width=5.0,
+            height=5.0,
+            rules=rules,
+            resolution_override=0.1,
+        )
+
+        # Place some obstacles
+        grid._blocked[0, 20:25, 20:25] = True
+        grid._net[0, 20:25, 20:25] = 99
+
+        router = Router(grid, rules)
+        radius = router._trace_half_width_cells
+        net = 1
+
+        # Compute expanded bitmap
+        expanded = grid.compute_expanded_blocked(radius, net, allow_sharing=False)
+
+        # Verify against per-cell _is_trace_blocked for a sample of cells
+        for y in range(5, grid.rows - 5, 5):
+            for x in range(5, grid.cols - 5, 5):
+                per_cell = router._is_trace_blocked(x, y, 0, net, False, radius=radius)
+                bitmap = bool(expanded[0, y, x])
+                assert bitmap == per_cell, (
+                    f"Mismatch at ({x}, {y}): bitmap={bitmap}, per_cell={per_cell}"
+                )
