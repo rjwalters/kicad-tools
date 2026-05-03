@@ -20,7 +20,6 @@ from pathlib import Path
 
 
 def _detect_uninset_zones(
-    pcb_text: str,
     pcb_path: Path,
     edge_clearance: float,
 ) -> set[str]:
@@ -211,7 +210,7 @@ def auto_pour_if_missing(
     nets_needing_reinset: set[str] = set()
     if edge_clearance and edge_clearance > 0 and nets_with_zones:
         nets_needing_reinset = _detect_uninset_zones(
-            pcb_text, pcb_path, edge_clearance
+            pcb_path, edge_clearance
         )
         if nets_needing_reinset:
             _remove_zones_for_nets(pcb_path, nets_needing_reinset)
