@@ -76,43 +76,95 @@ def _detect_uninset_zones(
     return nets_needing_fix
 
 
+def _find_zone_span(text: str, start: int) -> int | None:
+    """Return the index just past the matching close paren of a ``(zone``.
+
+    *start* must point at the ``(`` of the ``(zone`` token.  Walks the
+    string counting parens (skipping over those inside double-quoted
+    strings) and returns the index immediately after the matching
+    closing paren, or ``None`` if the parens are unbalanced.
+    """
+    depth = 0
+    in_string = False
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                # Skip escaped character inside string
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return None
+
+
 def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     """Remove zone definitions for the given net names from the PCB file.
 
-    Uses a regex-based approach to strip ``(zone ...)`` blocks whose
-    ``net_name`` or ``net`` attribute matches one of *net_names*.
+    Uses a balanced-paren scan over the full file text so that zone
+    blocks spanning multiple lines (the format KiCad's writer
+    produces) are matched correctly.
     """
+    if not net_names:
+        return
+
     pcb_text = pcb_path.read_text()
 
-    for net_name in net_names:
-        escaped = re.escape(net_name)
-        # KiCad 7/8: (zone ... (net_name "GND") ... )  -- top-level node
-        # KiCad 9:   (zone ... (net "GND") ... )        -- top-level node
-        # We match the entire (zone ...) block using a balanced-paren
-        # approach: find the opening "(zone" and count parens to find
-        # the matching close.
-        new_lines: list[str] = []
-        lines = pcb_text.split("\n")
-        skip_depth = 0
-        for line in lines:
-            if skip_depth > 0:
-                skip_depth += line.count("(") - line.count(")")
-                continue
-            # Detect start of a zone block for this net
-            if re.search(
-                rf'\(zone\s.*?\(net_name\s+"{escaped}"\)',
-                line,
-                re.DOTALL,
-            ) or re.search(
-                rf'\(zone\s[^)]*\(net\s+"{escaped}"\)',
-                line,
-            ):
-                skip_depth = line.count("(") - line.count(")")
-                continue
-            new_lines.append(line)
-        pcb_text = "\n".join(new_lines)
+    # Build a single regex that matches ``(net_name "X")`` or
+    # ``(net "X")`` (KiCad 9 name-only form) for any of *net_names*.
+    escaped = "|".join(re.escape(n) for n in net_names)
+    inner_pattern = re.compile(rf'\((?:net_name|net)\s+"(?:{escaped})"\)')
 
-    pcb_path.write_text(pcb_text)
+    # Iterate every ``(zone`` opener in the file and decide whether to
+    # remove that span.  We walk forward across the text rebuilding it
+    # rather than relying on per-line state.
+    out_parts: list[str] = []
+    cursor = 0
+    zone_start_pattern = re.compile(r"\(zone\b")
+    for m in zone_start_pattern.finditer(pcb_text):
+        start = m.start()
+        if start < cursor:
+            # This opener lies inside a span we already removed (e.g. a
+            # nested ``(zone`` reference, which KiCad does not emit, but
+            # be defensive).
+            continue
+        end = _find_zone_span(pcb_text, start)
+        if end is None:
+            # Unbalanced parens -- bail out to avoid corrupting the
+            # file; leave the rest of the text untouched.
+            break
+        block = pcb_text[start:end]
+        if inner_pattern.search(block):
+            # Drop this zone block from the output.  Also strip any
+            # trailing whitespace/newline that immediately follows so
+            # we don't leave a dangling blank line.
+            out_parts.append(pcb_text[cursor:start])
+            trailing = end
+            while trailing < len(pcb_text) and pcb_text[trailing] in (
+                " ",
+                "\t",
+            ):
+                trailing += 1
+            if trailing < len(pcb_text) and pcb_text[trailing] == "\n":
+                trailing += 1
+            cursor = trailing
+        # else: keep the block; cursor unchanged so it gets emitted on
+        # the next iteration's slice.
+
+    out_parts.append(pcb_text[cursor:])
+    pcb_path.write_text("".join(out_parts))
 
 
 def auto_pour_if_missing(
@@ -182,10 +234,7 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     if signal_net_count == 0:
         if not quiet:
-            print(
-                "Auto-pour: skipped (all nets are power/ground — "
-                "routing as signals instead)"
-            )
+            print("Auto-pour: skipped (all nets are power/ground — routing as signals instead)")
         return 0, []
 
     # ------------------------------------------------------------------
@@ -196,9 +245,7 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     nets_with_zones: set[str] = set()
     # KiCad 7/8 format: (zone ... (net_name "GND") ...)
-    for zm in re.finditer(
-        r'\(zone\s+.*?\(net_name\s+"([^"]+)"\)', pcb_text, re.DOTALL
-    ):
+    for zm in re.finditer(r'\(zone\s+.*?\(net_name\s+"([^"]+)"\)', pcb_text, re.DOTALL):
         nets_with_zones.add(zm.group(1))
     # KiCad 9 name-only format: (zone ... (net "GND") ...)
     for zm in re.finditer(r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', pcb_text):
@@ -209,9 +256,7 @@ def auto_pour_if_missing(
     # If so, remove those zones so they are regenerated with inset.
     nets_needing_reinset: set[str] = set()
     if edge_clearance and edge_clearance > 0 and nets_with_zones:
-        nets_needing_reinset = _detect_uninset_zones(
-            pcb_path, edge_clearance
-        )
+        nets_needing_reinset = _detect_uninset_zones(pcb_path, edge_clearance)
         if nets_needing_reinset:
             _remove_zones_for_nets(pcb_path, nets_needing_reinset)
             # Re-read the file after removal
@@ -224,9 +269,7 @@ def auto_pour_if_missing(
                     f"{', '.join(sorted(nets_needing_reinset))}"
                 )
 
-    new_pour_nets = [
-        (name, cls) for name, cls in pour_nets if name not in nets_with_zones
-    ]
+    new_pour_nets = [(name, cls) for name, cls in pour_nets if name not in nets_with_zones]
 
     if not new_pour_nets:
         return 0, []
@@ -234,9 +277,7 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 5. Create zones via the shared generator
     # ------------------------------------------------------------------
-    count = auto_create_zones_for_pour_nets(
-        pcb_path, new_pour_nets, edge_clearance=edge_clearance
-    )
+    count = auto_create_zones_for_pour_nets(pcb_path, new_pour_nets, edge_clearance=edge_clearance)
 
     names = [name for name, _ in new_pour_nets]
     if not quiet and count > 0:

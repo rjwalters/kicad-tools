@@ -237,18 +237,10 @@ class TestAutoPourIfMissing:
         # at least 0.3mm inward from the edges.
         for x_str, y_str in xy_matches:
             x, y = float(x_str), float(y_str)
-            assert (
-                x >= 0.3 - 0.01
-            ), f"X coord {x} too close to left edge (expected >= 0.3)"
-            assert (
-                x <= 49.7 + 0.01
-            ), f"X coord {x} too close to right edge (expected <= 49.7)"
-            assert (
-                y >= 0.3 - 0.01
-            ), f"Y coord {y} too close to top edge (expected >= 0.3)"
-            assert (
-                y <= 49.7 + 0.01
-            ), f"Y coord {y} too close to bottom edge (expected <= 49.7)"
+            assert x >= 0.3 - 0.01, f"X coord {x} too close to left edge (expected >= 0.3)"
+            assert x <= 49.7 + 0.01, f"X coord {x} too close to right edge (expected <= 49.7)"
+            assert y >= 0.3 - 0.01, f"Y coord {y} too close to top edge (expected >= 0.3)"
+            assert y <= 49.7 + 0.01, f"Y coord {y} too close to bottom edge (expected <= 49.7)"
 
     def test_no_edge_clearance_uses_exact_outline(self, tmp_path: Path):
         """Without edge_clearance, zone boundary matches board edge exactly."""
@@ -305,9 +297,7 @@ class TestAutoPourIfMissing:
         pcb_path = tmp_path / "test.kicad_pcb"
         pcb_path.write_text(pcb)
 
-        count, names = auto_pour_if_missing(
-            pcb_path, edge_clearance=0.3
-        )
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
 
         # GND zone should be regenerated (removed + recreated)
         assert count == 1
@@ -320,9 +310,146 @@ class TestAutoPourIfMissing:
 
         for x_str, y_str in xy_matches:
             x, y = float(x_str), float(y_str)
-            assert (
-                x >= 0.3 - 0.01
-            ), f"X coord {x} too close to left edge (expected >= 0.3)"
-            assert (
-                x <= 49.7 + 0.01
-            ), f"X coord {x} too close to right edge (expected <= 49.7)"
+            assert x >= 0.3 - 0.01, f"X coord {x} too close to left edge (expected >= 0.3)"
+            assert x <= 49.7 + 0.01, f"X coord {x} too close to right edge (expected <= 49.7)"
+
+    def test_reinsets_multiline_uninset_zone(self, tmp_path: Path):
+        """Multi-line KiCad zone blocks at the board edge are removed and reinset.
+
+        Regression test for #2462: ``_remove_zones_for_nets`` previously
+        ran a per-line regex which could not match KiCad's actual writer
+        output, where ``(zone``, ``(net …)``, ``(net_name …)``,
+        ``(layer …)`` and ``(polygon …)`` each sit on their own line.
+        The bug caused the un-inset zone to remain in the file while a
+        second inset zone was appended, producing duplicate zones and
+        ``edge_clearance_zone`` DRC violations.
+        """
+        import re
+
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        # Multi-line zone literal that mirrors KiCad's actual writer
+        # output (each sub-node on its own indented line).  The polygon
+        # sits at the exact board edge (0..50) so it should be detected
+        # as un-inset and regenerated.
+        zone_gnd_multiline = (
+            "(zone\n"
+            "    (net 1)\n"
+            '    (net_name "GND")\n'
+            '    (layer "B.Cu")\n'
+            "    (hatch edge 0.5)\n"
+            "    (connect_pads (clearance 0.25)\n"
+            "    )\n"
+            "    (min_thickness 0.25)\n"
+            "    (filled_areas_thickness no)\n"
+            "    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)\n"
+            "    )\n"
+            "    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))\n"
+            "    )\n"
+            "  )"
+        )
+
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "SDA")],
+            pad_nets=[(1, "GND"), (2, "SDA")],
+            zones=[zone_gnd_multiline],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
+
+        # Exactly one new zone should be created for GND (un-inset zone
+        # removed, fresh inset zone added).
+        assert count == 1
+        assert "GND" in names
+
+        text = pcb_path.read_text()
+
+        # Exactly one ``(zone`` block should remain in the file, not
+        # two -- the bug previously left the un-inset original in place.
+        zone_count = len(re.findall(r"\(zone\b", text))
+        assert zone_count == 1, (
+            f"Expected exactly 1 zone block after reinset, got "
+            f"{zone_count}.  File contents:\n{text}"
+        )
+
+        # And every polygon vertex must be inset by edge_clearance.
+        xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
+        assert len(xy_matches) > 0, "No zone polygon coordinates found"
+        for x_str, y_str in xy_matches:
+            x, y = float(x_str), float(y_str)
+            assert x >= 0.3 - 0.01, f"X coord {x} too close to left edge (expected >= 0.3)"
+            assert x <= 49.7 + 0.01, f"X coord {x} too close to right edge (expected <= 49.7)"
+            assert y >= 0.3 - 0.01, f"Y coord {y} too close to top edge (expected >= 0.3)"
+            assert y <= 49.7 + 0.01, f"Y coord {y} too close to bottom edge (expected <= 49.7)"
+
+    def test_reinset_preserves_other_nets_zones(self, tmp_path: Path):
+        """Reinset removes only the un-inset net's zone, not others'.
+
+        Edge case for #2462: when a file contains a mix of un-inset and
+        already-inset zones for different nets, only the un-inset one
+        should be regenerated; the inset zone for the other net must be
+        left untouched.
+        """
+        import re
+
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        # GND zone at the exact board edge (un-inset, multi-line)
+        zone_gnd_uninset = (
+            "(zone\n"
+            "    (net 1)\n"
+            '    (net_name "GND")\n'
+            '    (layer "B.Cu")\n'
+            "    (hatch edge 0.5)\n"
+            "    (connect_pads (clearance 0.25)\n"
+            "    )\n"
+            "    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)\n"
+            "    )\n"
+            "    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))\n"
+            "    )\n"
+            "  )"
+        )
+        # VCC zone already inset by 0.3mm (should be preserved)
+        zone_vcc_inset = (
+            "(zone\n"
+            "    (net 2)\n"
+            '    (net_name "VCC")\n'
+            '    (layer "F.Cu")\n'
+            "    (hatch edge 0.5)\n"
+            "    (connect_pads (clearance 0.25)\n"
+            "    )\n"
+            "    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)\n"
+            "    )\n"
+            "    (polygon (pts (xy 0.3 0.3) (xy 49.7 0.3) "
+            "(xy 49.7 49.7) (xy 0.3 49.7))\n"
+            "    )\n"
+            "  )"
+        )
+
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "VCC"), (3, "SDA")],
+            pad_nets=[(1, "GND"), (2, "VCC"), (3, "SDA")],
+            zones=[zone_gnd_uninset, zone_vcc_inset],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
+
+        # Only GND should be regenerated; VCC's existing inset zone
+        # stays in place.
+        assert count == 1
+        assert names == ["GND"]
+
+        text = pcb_path.read_text()
+        # Two zones total: regenerated GND + preserved VCC.
+        zone_count = len(re.findall(r"\(zone\b", text))
+        assert zone_count == 2, (
+            f"Expected exactly 2 zone blocks (GND regenerated, VCC "
+            f"preserved), got {zone_count}.  File contents:\n{text}"
+        )
+        # VCC's original inset polygon must still be present verbatim.
+        assert "(xy 0.3 0.3)" in text
+        assert "(xy 49.7 0.3)" in text
