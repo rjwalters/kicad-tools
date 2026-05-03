@@ -2109,7 +2109,7 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("-o", "--output", help="Output file path")
     route_parser.add_argument(
         "--strategy",
-        choices=["basic", "negotiated", "monte-carlo"],
+        choices=["basic", "negotiated", "monte-carlo", "evolutionary"],
         default="negotiated",
         help="Routing strategy (default: negotiated)",
     )
@@ -2135,6 +2135,12 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
+    route_parser.add_argument(
+        "--pop-size", type=int, default=20, help="Evolutionary optimizer population size"
+    )
+    route_parser.add_argument(
+        "--generations", type=int, default=10, help="Evolutionary optimizer generations"
+    )
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
     route_parser.add_argument(
         "--timeout",
