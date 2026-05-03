@@ -11,6 +11,15 @@
 
 namespace router {
 
+// Floating-point tolerance for clearance comparisons (Issue #2465).
+// IEEE-754 rounding in radius/distance math can leave computed
+// clearances at values like 0.14999999... when the design intent is
+// exactly 0.150mm, producing spurious sub-micron false-positive
+// violations during routing validation.  0.1 micron (1e-4 mm) is well
+// below any manufacturing precision and matches the epsilon used in
+// the Python paths (drc/incremental.py, router/io.py, validate/rules/edge.py).
+constexpr float CLEARANCE_EPSILON_MM = 1e-4f;
+
 Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
                float origin_x, float origin_y)
     : cols_(cols), rows_(rows), layers_(layers),
@@ -351,7 +360,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < required_clearance) {
+            if (clearance < required_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = pad.x;
                 result.violation_y = pad.y;
@@ -378,7 +387,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < trace_clearance) {
+            if (clearance < trace_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = (seg.x1 + seg.x2 + other.x1 + other.x2) / 4.0f;
                 result.violation_y = (seg.y1 + seg.y2 + other.y1 + other.y2) / 4.0f;
@@ -401,7 +410,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < trace_clearance) {
+            if (clearance < trace_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = sv.x;
                 result.violation_y = sv.y;
@@ -438,7 +447,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < via_clearance) {
+            if (clearance < via_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;
@@ -464,7 +473,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < via_clearance) {
+            if (clearance < via_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;
@@ -494,7 +503,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < min_drill_clearance) {
+            if (clearance < min_drill_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;

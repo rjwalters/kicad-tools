@@ -57,6 +57,15 @@ from .geometry import (
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
+# Floating-point tolerance for clearance comparisons in validate_routes
+# (Issue #2465).  IEEE-754 rounding in radius/distance math can leave
+# computed clearances at values like 0.14999999... when the design intent
+# is exactly 0.150mm, producing spurious sub-micron false-positive
+# violations.  0.1 micron is well below any manufacturing precision and
+# matches the epsilon used in #2428 (validate/rules/edge.py) and the
+# pad-pad DRC check in drc/incremental.py.
+_CLEARANCE_EPSILON_MM = 1e-4
+
 # =============================================================================
 # DRC COMPLIANCE TYPES AND FUNCTIONS
 # =============================================================================
@@ -1573,7 +1582,7 @@ def validate_routes(
                     route_net, pad.net, clearance, net_names, ncm
                 )
 
-                if effective_dist < pair_clear:
+                if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                     # Detect component-inherent violations: obstacle pad is
                     # on the same component as a pad in the route's net.
                     is_component_inherent = ref in route_component_refs
@@ -1629,7 +1638,7 @@ def validate_routes(
                         route_net, other_route.net, clearance, net_names, ncm
                     )
 
-                    if effective_dist < pair_clear:
+                    if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                         # Approximate violation location at midpoint of closest approach
                         loc_x = (segment.x1 + segment.x2 + other_seg.x1 + other_seg.x2) / 4
                         loc_y = (segment.y1 + segment.y2 + other_seg.y1 + other_seg.y2) / 4
@@ -1668,7 +1677,7 @@ def validate_routes(
 
                     effective_dist = dist - seg_half_width - via_radius
 
-                    if effective_dist < via_clear:
+                    if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                         violations.append(
                             ClearanceViolation(
                                 segment_index=seg_idx,
@@ -1714,7 +1723,7 @@ def validate_routes(
                 dist = math.sqrt((via.x - pad.x) ** 2 + (via.y - pad.y) ** 2)
                 effective_dist = dist - via_radius - pad_radius
 
-                if effective_dist < via_clear:
+                if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     is_component_inherent = ref in route_component_refs
 
                     violations.append(
@@ -1747,7 +1756,7 @@ def validate_routes(
                     dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
                     effective_dist = dist - via_a.diameter / 2 - via_b.diameter / 2
 
-                    if effective_dist < via_clear:
+                    if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                         loc_x = (via_a.x + via_b.x) / 2
                         loc_y = (via_a.y + via_b.y) / 2
                         violations.append(
@@ -1780,7 +1789,7 @@ def validate_routes(
                     dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
                     effective_dist = dist - via_a.diameter / 2 - via_b.diameter / 2
 
-                    if effective_dist < via_clear:
+                    if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                         loc_x = (via_a.x + via_b.x) / 2
                         loc_y = (via_a.y + via_b.y) / 2
                         violations.append(
@@ -2552,13 +2561,43 @@ def load_pcb_for_routing(
             f"Auto-detected layer stack: {layer_stack.name} ({layer_stack.num_layers} layers)"
         )
 
+    # Build per-net classification map (Issue #2465).
+    # DEFAULT_NET_CLASS_MAP only contains a hardcoded list of common net
+    # names (+5V, +3.3V, GND, ...).  Any net whose name isn't in that list
+    # falls through to the default DIGITAL class with priority 4, which
+    # means motor phase outputs (PHASE_A/B/C) and similar high-current
+    # signals get treated like ordinary signals despite being routed-
+    # critical.  Enrich the map by running pattern-based auto-classification
+    # over every net in the PCB and merging in the resulting routing
+    # configurations -- entries already present in DEFAULT_NET_CLASS_MAP
+    # are preserved so existing behavior for explicit power names is
+    # unchanged.
+    net_class_map = dict(DEFAULT_NET_CLASS_MAP)
+    try:
+        from .net_class import classify_and_apply_rules as _classify_rules
+
+        _net_names_for_class: dict[int, str] = {}
+        for _m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
+            _nid, _nm = int(_m.group(1)), _m.group(2)
+            if _nid > 0:
+                _net_names_for_class[_nid] = _nm
+        if _net_names_for_class:
+            _auto_rules = _classify_rules(_net_names_for_class)
+            for _name, _routing in _auto_rules.items():
+                # Don't overwrite explicit DEFAULT entries -- those reflect
+                # known-good defaults and may have been hand-tuned.
+                if _name not in net_class_map:
+                    net_class_map[_name] = _routing
+    except Exception as e:  # noqa: BLE001 - classification is best-effort
+        logger.debug(f"Auto net classification skipped: {e}")
+
     router = Autorouter(
         width=board_width,
         height=board_height,
         origin_x=origin_x,
         origin_y=origin_y,
         rules=rules,
-        net_class_map=DEFAULT_NET_CLASS_MAP,
+        net_class_map=net_class_map,
         layer_stack=layer_stack,
         force_python=force_python,
     )

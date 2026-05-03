@@ -61,6 +61,16 @@ except ImportError:
     rtree_index = None  # type: ignore[assignment]
 
 
+# Floating-point tolerance for pad-pad clearance comparisons (0.1 micron).
+# Without this epsilon, IEEE-754 rounding in radius and trig math can leave
+# pad-edge distances at e.g. 0.14999999... when the design intent was 0.15
+# exactly, producing spurious sub-micron DRC violations like "0.149mm vs
+# 0.150mm".  0.1 micron is well below any manufacturing precision and
+# matches the edge-clearance epsilon introduced in #2428
+# (validate/rules/edge.py).
+_CLEARANCE_EPSILON_MM = 1e-4
+
+
 @dataclass
 class Rectangle:
     """Axis-aligned bounding box for spatial queries."""
@@ -696,7 +706,9 @@ class IncrementalDRC:
 
         min_clearance, min_location, min_items, min_nets = result
 
-        if min_clearance < self.rules.min_clearance_mm:
+        # Apply floating-point epsilon (#2428 pattern) to avoid spurious
+        # sub-micron violations from IEEE-754 rounding in radius/trig math.
+        if min_clearance < self.rules.min_clearance_mm - _CLEARANCE_EPSILON_MM:
             return Violation(
                 rule_id="clearance",
                 message=f"Clearance {min_clearance:.3f}mm < minimum {self.rules.min_clearance_mm:.3f}mm",
@@ -764,8 +776,10 @@ class IncrementalDRC:
                     min_items = (f"{ref1}-{pad1.number}", f"{ref2}-{pad2.number}")
                     min_nets = (pad1.net_name, pad2.net_name)
 
-        # Check if below minimum clearance
-        if min_clearance < self.rules.min_clearance_mm:
+        # Check if below minimum clearance.
+        # Apply floating-point epsilon (#2428 pattern) to avoid spurious
+        # sub-micron violations from IEEE-754 rounding in radius/trig math.
+        if min_clearance < self.rules.min_clearance_mm - _CLEARANCE_EPSILON_MM:
             return Violation(
                 rule_id="clearance",
                 message=f"Clearance {min_clearance:.3f}mm < minimum {self.rules.min_clearance_mm:.3f}mm",

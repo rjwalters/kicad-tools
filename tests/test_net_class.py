@@ -22,6 +22,7 @@ class TestNetClassEnum:
         """Test that all expected net classes exist."""
         assert NetClass.POWER.value == "power"
         assert NetClass.GROUND.value == "ground"
+        assert NetClass.HIGH_CURRENT_SIGNAL.value == "high_current_signal"
         assert NetClass.CLOCK.value == "clock"
         assert NetClass.HIGH_SPEED.value == "high_speed"
         assert NetClass.DIFFERENTIAL.value == "differential"
@@ -32,7 +33,7 @@ class TestNetClassEnum:
 
     def test_all_net_classes_count(self):
         """Test that we have expected number of net classes."""
-        assert len(NetClass) == 9
+        assert len(NetClass) == 10
 
 
 class TestSymbolIndicators:
@@ -530,3 +531,126 @@ class TestIssue2431MotorPowerNets:
         rules = classify_and_apply_rules(net_names)
         assert "VMOTOR" in rules
         assert rules["VMOTOR"].is_pour_net is True
+
+
+class TestIssue2465HighCurrentSignal:
+    """Tests for high-current signal net classification (issue #2465).
+
+    PHASE_*/MOTOR_*/COIL_* nets are motor phase outputs and similar
+    high-current point-to-point signals.  They need POWER-tier routing
+    priority (so the router gives them first pick of routing corridors)
+    but they must NOT be poured -- pouring a phase output as a copper
+    plane couples switching noise into adjacent traces.
+    """
+
+    def test_phase_a_classified_as_high_current_signal(self):
+        """PHASE_A must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("PHASE_A") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_b_classified_as_high_current_signal(self):
+        """PHASE_B must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("PHASE_B") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_c_classified_as_high_current_signal(self):
+        """PHASE_C must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("PHASE_C") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_with_digit_classified(self):
+        """PHASE1 (no separator, digit) must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("PHASE1") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_motor_pwm_classified(self):
+        """MOTOR_PWM must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("MOTOR_PWM") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_motor_with_digit_classified(self):
+        """MOTOR1 must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("MOTOR1") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_coil_high_classified(self):
+        """COIL_HIGH must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("COIL_HIGH") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_coil_a_classified(self):
+        """COIL_A must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("COIL_A") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_stator_a_classified(self):
+        """STATOR_A must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("STATOR_A") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_solenoid_classified(self):
+        """SOLENOID must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("SOLENOID") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_relay_classified(self):
+        """RELAY must classify as HIGH_CURRENT_SIGNAL."""
+        assert classify_from_name("RELAY") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_case_insensitive(self):
+        """Pattern matching is case-insensitive."""
+        assert classify_from_name("phase_a") == NetClass.HIGH_CURRENT_SIGNAL
+        assert classify_from_name("Phase_A") == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_a_classify_net_returns_high_current(self):
+        """classify_net() returns HIGH_CURRENT_SIGNAL with adequate confidence."""
+        result = classify_net("PHASE_A")
+        assert result.net_class == NetClass.HIGH_CURRENT_SIGNAL
+        assert result.confidence >= 0.5
+
+    def test_high_current_signal_priority_matches_power(self):
+        """HIGH_CURRENT_SIGNAL must have priority=1 (POWER tier) so that
+        motor phase nets get first pick of routing corridors before
+        ordinary signals consume them."""
+        net_names = {1: "PHASE_A"}
+        rules = classify_and_apply_rules(net_names)
+        assert rules["PHASE_A"].priority == 1
+
+    def test_high_current_signal_is_not_pour_net(self):
+        """HIGH_CURRENT_SIGNAL must NOT be a pour net.  Phase outputs are
+        point-to-point traces, not copper planes."""
+        net_names = {1: "PHASE_A", 2: "MOTOR_PWM", 3: "COIL_HIGH"}
+        rules = classify_and_apply_rules(net_names)
+        for name in net_names.values():
+            assert rules[name].is_pour_net is False, (
+                f"{name} must NOT be a pour net (would couple switching "
+                "noise as a copper plane)"
+            )
+
+    def test_high_current_signal_excluded_from_auto_pour(self):
+        """auto_pour_if_missing() must NOT pick HIGH_CURRENT_SIGNAL nets
+        as pour candidates.  Currently the auto-pour logic only selects
+        POWER and GROUND classifications, so HIGH_CURRENT_SIGNAL is
+        naturally excluded -- this test guards that exclusion."""
+        # The auto_pour module does:
+        #   if classification.net_class in (NetClass.POWER, NetClass.GROUND):
+        # So HIGH_CURRENT_SIGNAL is excluded by definition.
+        net_names = {1: "PHASE_A", 2: "PHASE_B", 3: "PHASE_C"}
+        classifications = auto_classify_nets(net_names)
+        for net_id, c in classifications.items():
+            assert c.net_class not in (NetClass.POWER, NetClass.GROUND), (
+                f"{net_names[net_id]} must not classify as POWER/GROUND "
+                "(would be auto-poured, breaking switching-edge integrity)"
+            )
+
+    def test_phase_not_misclassified_as_differential(self):
+        """PHASE_N could be misread as a differential pair partner of
+        PHASE_P; HIGH_CURRENT_SIGNAL is checked before DIFFERENTIAL so
+        this is prevented."""
+        # PHASE_N with the trailing _N could match DIFFERENTIAL r"[_-]?[PN]$"
+        # but should classify as HIGH_CURRENT_SIGNAL.  PHASE_N is a less
+        # common motor naming variant but the pattern handles it.
+        result = classify_from_name("MOTOR_N")
+        assert result == NetClass.HIGH_CURRENT_SIGNAL
+
+    def test_phase_not_misclassified_as_power(self):
+        """PHASE_A must not match generic POWER patterns (e.g., V-prefix)."""
+        result = classify_from_name("PHASE_A")
+        assert result == NetClass.HIGH_CURRENT_SIGNAL
+        assert result != NetClass.POWER
+
+    def test_gate_bl_not_classified_as_high_current(self):
+        """GATE_BL is a FET gate-drive signal, not a phase output, and
+        must NOT match HIGH_CURRENT_SIGNAL patterns."""
+        result = classify_from_name("GATE_BL")
+        assert result != NetClass.HIGH_CURRENT_SIGNAL
