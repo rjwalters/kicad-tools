@@ -4197,7 +4197,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if power_nets:
             try:
-                gen = ZoneGenerator.from_pcb(str(pcb_path))
+                gen = ZoneGenerator.from_pcb(
+                    str(pcb_path),
+                    edge_clearance=args.edge_clearance,
+                )
                 for net_name, layer in power_nets:
                     # GND gets higher priority (fills last, on top)
                     priority = 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
