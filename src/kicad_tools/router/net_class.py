@@ -117,6 +117,7 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
         r"^(PVDD|PVCC|VBAT|VCORE|VCAP|VIO)$",
         r"_VCC$|_VDD$|_PWR$",
         r"^V\d+",  # V5, V3.3, etc.
+        r"^(VMOTOR|VMOT|VMAIN|VPWR|VDRIVE|VACT|VSRV)$",  # Motor/actuator power
     ],
     NetClass.GROUND: [
         r"^(GND|VSS|GNDA|GNDD|AGND|DGND|PGND|SGND|GROUND|CGND)$",
