@@ -472,6 +472,11 @@ class Autorouter:
         # Cache for component pitches, computed lazily on first access
         self._component_pitches: dict[str, float] | None = None
 
+        # Issue #2432: Matrix-conflicting net IDs (charlieplex topology).
+        # Populated by _detect_and_apply_matrix_preferences() before the
+        # routing loop so _calculate_constraint_score() can boost priority.
+        self._matrix_conflict_nets: set[int] = set()
+
         # Pre-route congestion estimator (Issue #2278)
         # Computed lazily before net ordering; provides RUDY-based
         # congestion scores used as a 6th tiebreaker in _get_net_priority().
@@ -1764,6 +1769,14 @@ class Autorouter:
                 score += fine_pitch_weight
                 break  # One off-grid pad is enough to boost the whole net
 
+        # Issue #2432: Matrix-conflicting nets (charlieplex topology) are
+        # heavily constrained because they share pads with other nets in
+        # the same conflict group.  Boost their priority so they route
+        # before non-matrix nets, giving the layer preference assignment
+        # maximum effect.
+        if net_id in self._matrix_conflict_nets:
+            score += fine_pitch_weight * 2
+
         return score
 
     def _net_has_off_grid_pads(self, net_id: int) -> bool:
@@ -1891,6 +1904,205 @@ class Autorouter:
             f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}"
         )
         return [n for n in net_order if not self._is_pour_net(n)]
+
+    # ------------------------------------------------------------------
+    # Matrix-conflict detection and layer preference assignment (Issue #2432)
+    # ------------------------------------------------------------------
+
+    def _detect_matrix_conflicts(
+        self, net_ids: list[int], threshold: int = 2
+    ) -> list[set[int]]:
+        """Detect groups of nets sharing multiple components (matrix topology).
+
+        In a charlieplex LED matrix, nets like NODE_A through NODE_D each
+        connect to many of the same LEDs.  Two nets are "matrix-conflicting"
+        when they share more than *threshold* components (by reference
+        designator, e.g. "D1").  This method returns groups of mutually
+        conflicting nets that require layer separation to avoid circular
+        blocking during negotiated rip-up.
+
+        Issue #2432: Charlieplex NODE nets stall because they share
+        interleaved LED pads and cannot be ordered sequentially.
+
+        Args:
+            net_ids: Net IDs to analyse (typically the routing order,
+                already filtered of pour nets).
+            threshold: Minimum number of shared components for two nets
+                to be considered conflicting (default 2).
+
+        Returns:
+            List of sets, each set containing net IDs that are mutually
+            conflicting.  Non-conflicting nets are not included.
+        """
+        # Build per-net component sets (references only, ignore pin number)
+        net_components: dict[int, set[str]] = {}
+        for net_id in net_ids:
+            pad_keys = self.nets.get(net_id, [])
+            refs: set[str] = set()
+            for ref, _pin in pad_keys:
+                refs.add(ref)
+            if refs:
+                net_components[net_id] = refs
+
+        # Build adjacency: two nets are conflicting if they share > threshold refs
+        from collections import defaultdict
+
+        adjacency: dict[int, set[int]] = defaultdict(set)
+        net_list = list(net_components.keys())
+        for i in range(len(net_list)):
+            for j in range(i + 1, len(net_list)):
+                a, b = net_list[i], net_list[j]
+                shared = len(net_components[a] & net_components[b])
+                if shared >= threshold:
+                    adjacency[a].add(b)
+                    adjacency[b].add(a)
+
+        if not adjacency:
+            return []
+
+        # Connected-components via BFS to find groups of conflicting nets
+        visited: set[int] = set()
+        groups: list[set[int]] = []
+        for net_id in adjacency:
+            if net_id in visited:
+                continue
+            group: set[int] = set()
+            queue = [net_id]
+            while queue:
+                current = queue.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                group.add(current)
+                for neighbor in adjacency[current]:
+                    if neighbor not in visited:
+                        queue.append(neighbor)
+            if len(group) >= 2:
+                groups.append(group)
+
+        return groups
+
+    def _assign_matrix_layer_preferences(
+        self, conflict_groups: list[set[int]]
+    ) -> dict[int, list[int]]:
+        """Assign alternating preferred layers for matrix-conflicting nets.
+
+        For each group of conflicting nets, alternates between front and
+        back copper layers so that adjacent charlieplex nets are steered
+        to different layers, breaking the circular blocking pattern.
+
+        On single-layer boards (only one routable layer), no preferences
+        are assigned so routing falls back to the normal ordering.
+
+        Issue #2432.
+
+        Args:
+            conflict_groups: Groups of mutually conflicting net IDs,
+                as returned by :meth:`_detect_matrix_conflicts`.
+
+        Returns:
+            Dict mapping net_id -> list of preferred layer indices.
+            Only nets that received a preference are included.
+        """
+        # Determine available routing layers
+        num_layers = self.grid.num_layers
+        if num_layers < 2:
+            # Single-layer board: layer separation is impossible
+            return {}
+
+        # Use the first and last layer indices (outer layers) for alternation
+        layer_a = 0
+        layer_b = num_layers - 1
+
+        preferences: dict[int, list[int]] = {}
+        for group in conflict_groups:
+            sorted_nets = sorted(group)  # Deterministic ordering
+            for idx, net_id in enumerate(sorted_nets):
+                if idx % 2 == 0:
+                    preferences[net_id] = [layer_a]
+                else:
+                    preferences[net_id] = [layer_b]
+
+        return preferences
+
+    def _inject_matrix_layer_preferences(
+        self, net_layer_prefs: dict[int, list[int]]
+    ) -> None:
+        """Inject per-net layer preferences into net_class_map overrides.
+
+        Creates per-net NetClassRouting entries with ``preferred_layers``
+        set, so the pathfinder's ``_get_layer_preference_cost()`` biases
+        A* toward the assigned layer.  If the net already has a net class
+        entry, a copy is created with the layer preference added.
+
+        Issue #2432.
+
+        Args:
+            net_layer_prefs: Dict mapping net_id -> preferred layer indices,
+                as returned by :meth:`_assign_matrix_layer_preferences`.
+        """
+        from dataclasses import replace
+
+        for net_id, layers in net_layer_prefs.items():
+            net_name = self.net_names.get(net_id, "")
+            if not net_name:
+                continue
+            existing = self.net_class_map.get(net_name)
+            if existing is not None:
+                # Copy existing net class and add layer preference
+                override = replace(existing, preferred_layers=layers)
+            else:
+                # Create a new net class entry with default values + layer pref
+                override = NetClassRouting(
+                    name=f"matrix_{net_name}",
+                    preferred_layers=layers,
+                )
+            self.net_class_map[net_name] = override
+
+        if net_layer_prefs:
+            names = [
+                self.net_names.get(n, f"Net {n}") for n in net_layer_prefs
+            ]
+            flush_print(
+                f"  Matrix conflict: assigned layer preferences for {len(names)} net(s): {names}"
+            )
+
+    # Cache of net IDs detected as matrix-conflicting (Issue #2432).
+    # Populated by _detect_and_apply_matrix_preferences() so that
+    # _calculate_constraint_score() can boost priority for these nets.
+    _matrix_conflict_nets: set[int]
+
+    def _detect_and_apply_matrix_preferences(
+        self, net_order: list[int]
+    ) -> None:
+        """Detect matrix-conflicting nets and inject layer preferences.
+
+        Convenience method that chains :meth:`_detect_matrix_conflicts`,
+        :meth:`_assign_matrix_layer_preferences`, and
+        :meth:`_inject_matrix_layer_preferences`.
+
+        Also populates :attr:`_matrix_conflict_nets` so that
+        :meth:`_calculate_constraint_score` can boost priority for
+        matrix nets.
+
+        Issue #2432.
+
+        Args:
+            net_order: Filtered net ordering (pour nets removed).
+        """
+        groups = self._detect_matrix_conflicts(net_order)
+        if not groups:
+            self._matrix_conflict_nets = set()
+            return
+
+        prefs = self._assign_matrix_layer_preferences(groups)
+        self._inject_matrix_layer_preferences(prefs)
+
+        # Cache the set of matrix-conflicting net IDs for priority boost
+        all_conflict_nets: set[int] = set()
+        for group in groups:
+            all_conflict_nets |= group
+        self._matrix_conflict_nets = all_conflict_nets
 
     def _get_net_priority(self, net_id: int) -> tuple[int, int, float, int, float, float]:
         """Get routing priority for a net (lower = higher priority).
@@ -2169,6 +2381,12 @@ class Autorouter:
         # Issue #1295: Filter out pour nets (GND, VCC, etc.) — they should be
         # connected via zone fills, not routed as individual traces.
         net_order = self._filter_pour_nets(net_order)
+
+        # Issue #2432: Detect charlieplex/matrix topology and assign
+        # alternating layer preferences to break circular blocking.
+        self._detect_and_apply_matrix_preferences(net_order)
+        # Re-sort after matrix priority boost
+        net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
 
         if parallel:
             return self.route_all_parallel(
@@ -2786,6 +3004,13 @@ class Autorouter:
         # Issue #1295: Filter out pour nets before negotiated routing
         net_order = self._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
+
+        # Issue #2432: Detect charlieplex/matrix topology and assign
+        # alternating layer preferences to break circular blocking.
+        self._detect_and_apply_matrix_preferences(net_order)
+        # Re-sort after matrix priority boost
+        net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
+
         total_nets = len(net_order)
 
         neg_router = NegotiatedRouter(
