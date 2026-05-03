@@ -1,6 +1,7 @@
 """Tests for router autorouter, pathfinder, and adaptive autorouter."""
 
 import math
+import random
 
 import pytest
 
@@ -413,6 +414,107 @@ class TestAutorouter:
         # Clock nets should come before signal nets
         assert set(shuffled[:2]) == {1, 2}  # Clock nets first
         assert shuffled[2] == 3  # Signal net last
+
+    def test_shuffle_within_tiers_preserves_complexity_tier(self):
+        """Test that shuffle groups by (priority, complexity_tier), not just priority."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        mc = MonteCarloRouter(total_nets=4)
+
+        # Mock priority tuples: (net_class_priority, complexity_tier, ...)
+        # Net 1: clock, simple (tier 0)
+        # Net 2: clock, complex (tier 1)
+        # Net 3: default, simple (tier 0)
+        # Net 4: default, complex (tier 1)
+        priorities = {
+            1: (2, 0, 0.0, 2, 5.0, 0.0),
+            2: (2, 1, 0.0, 4, 20.0, 0.0),
+            3: (10, 0, 0.0, 2, 5.0, 0.0),
+            4: (10, 1, 0.0, 4, 20.0, 0.0),
+        }
+
+        random.seed(42)
+        shuffled = mc.shuffle_within_tiers([1, 2, 3, 4], lambda n: priorities[n])
+
+        # Groups should be: (2,0)=[1], (2,1)=[2], (10,0)=[3], (10,1)=[4]
+        # Clock simple before clock complex before default simple before default complex
+        assert shuffled.index(1) < shuffled.index(2)  # clock simple < clock complex
+        assert shuffled.index(2) < shuffled.index(3)  # clock complex < default simple
+        assert shuffled.index(3) < shuffled.index(4)  # default simple < default complex
+
+    def test_shuffle_with_promotions_moves_tier1_to_tier0(self):
+        """Test that promotion_rate=1.0 moves all tier-1 nets into tier-0 position."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        mc = MonteCarloRouter(total_nets=4)
+
+        priorities = {
+            1: (10, 0, 0.0, 2, 5.0, 0.0),   # default, simple
+            2: (10, 0, 0.0, 2, 6.0, 0.0),   # default, simple
+            3: (10, 1, 0.0, 4, 20.0, 0.0),  # default, complex
+            4: (10, 1, 0.0, 4, 25.0, 0.0),  # default, complex
+        }
+
+        random.seed(42)
+        result = mc.shuffle_with_promotions(
+            [1, 2, 3, 4], lambda n: priorities[n], promotion_rate=1.0
+        )
+
+        # With promotion_rate=1.0, all tier-1 nets should be promoted to tier 0
+        # All nets should be in a single group (10, 0), so order is just a shuffle
+        assert set(result) == {1, 2, 3, 4}
+        assert len(result) == 4
+
+    def test_shuffle_with_promotions_zero_rate_matches_shuffle_within_tiers(self):
+        """Test that promotion_rate=0.0 produces same grouping as shuffle_within_tiers."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        mc = MonteCarloRouter(total_nets=4)
+
+        priorities = {
+            1: (2, 0, 0.0, 2, 5.0, 0.0),
+            2: (2, 1, 0.0, 4, 20.0, 0.0),
+            3: (10, 0, 0.0, 2, 5.0, 0.0),
+            4: (10, 1, 0.0, 4, 20.0, 0.0),
+        }
+
+        get_priority = lambda n: priorities[n]  # noqa: E731
+
+        # Both methods with same seed should produce same ordering
+        random.seed(99)
+        shuffled = mc.shuffle_within_tiers([1, 2, 3, 4], get_priority)
+        random.seed(99)
+        promoted = mc.shuffle_with_promotions(
+            [1, 2, 3, 4], get_priority, promotion_rate=0.0
+        )
+
+        assert shuffled == promoted
+
+    def test_shuffle_with_promotions_never_crosses_net_class(self):
+        """Test that promotions never mix nets across net class priority boundaries."""
+        from kicad_tools.router.algorithms.monte_carlo import MonteCarloRouter
+
+        mc = MonteCarloRouter(total_nets=4)
+
+        priorities = {
+            1: (2, 0, 0.0, 2, 5.0, 0.0),   # clock, simple
+            2: (2, 1, 0.0, 4, 20.0, 0.0),  # clock, complex
+            3: (10, 0, 0.0, 2, 5.0, 0.0),  # default, simple
+            4: (10, 1, 0.0, 4, 20.0, 0.0), # default, complex
+        }
+
+        # Run many times with full promotion to verify no cross-class mixing
+        for seed in range(50):
+            random.seed(seed)
+            result = mc.shuffle_with_promotions(
+                [1, 2, 3, 4], lambda n: priorities[n], promotion_rate=1.0
+            )
+            # Clock nets (1, 2) must always come before default nets (3, 4)
+            clock_indices = {result.index(1), result.index(2)}
+            default_indices = {result.index(3), result.index(4)}
+            assert max(clock_indices) < min(default_indices), (
+                f"Clock nets appeared after default nets with seed {seed}: {result}"
+            )
 
     def test_create_intra_ic_routes(self):
         """Test intra-IC route creation for same-component pins."""

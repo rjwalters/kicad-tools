@@ -343,10 +343,13 @@ class EvolutionaryRoutingOptimizer:
             base_chrom.strategy_flags[net] = False
         population.append(base_chrom)
 
-        # Remaining: random shuffles
+        # Remaining: random shuffles with cross-tier promotions
         for i in range(1, self.pop_size):
             random.seed(seed + i)
-            order = mc.shuffle_within_tiers(base_order, get_priority)
+            promotion_rate = min(0.1 + 0.05 * i, 0.5)
+            order = mc.shuffle_with_promotions(
+                base_order, get_priority, promotion_rate=promotion_rate
+            )
             chrom = RoutingChromosome(net_order=order)
             for net in base_order:
                 chrom.astar_weights[net] = max(0.5, min(3.0, random.gauss(1.0, 0.3)))

@@ -303,7 +303,9 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     if trial_num == 0:
         net_order = base_order.copy()
     else:
-        net_order = router._shuffle_within_tiers(base_order)
+        # Increasing promotion rate over trials to broaden exploration
+        promotion_rate = min(0.1 + 0.05 * trial_num, 0.5)
+        net_order = router._shuffle_within_tiers(base_order, promotion_rate=promotion_rate)
 
     # Run routing
     if use_negotiated:
@@ -4463,9 +4465,22 @@ class Autorouter:
             self.grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
         self.routes = []
 
-    def _shuffle_within_tiers(self, net_order: list[int]) -> list[int]:
-        """Shuffle nets but keep priority ordering."""
+    def _shuffle_within_tiers(
+        self, net_order: list[int], promotion_rate: float = 0.0
+    ) -> list[int]:
+        """Shuffle nets but keep priority ordering.
+
+        Args:
+            net_order: Original net order
+            promotion_rate: If > 0, use cross-tier promotions that move
+                complex/long-span nets into simple-tier positions within
+                the same net class priority. 0.0 uses standard shuffle.
+        """
         mc_router = MonteCarloRouter(len([n for n in self.nets if n != 0]))
+        if promotion_rate > 0.0:
+            return mc_router.shuffle_with_promotions(
+                net_order, self._get_net_priority, promotion_rate=promotion_rate
+            )
         return mc_router.shuffle_within_tiers(net_order, self._get_net_priority)
 
     def _evaluate_solution(self, routes: list[Route]) -> float:
