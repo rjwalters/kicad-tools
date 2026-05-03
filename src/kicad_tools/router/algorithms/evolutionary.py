@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -397,6 +398,7 @@ def run_evolutionary(
     verbose: bool = True,
     progress_callback: ProgressCallback | None = None,
     num_workers: int | None = None,
+    timeout: float | None = None,
 ) -> list[Route]:
     """Run evolutionary routing optimization on an Autorouter instance.
 
@@ -412,10 +414,16 @@ def run_evolutionary(
         verbose: Whether to print progress.
         progress_callback: Optional callback for progress updates.
         num_workers: Number of parallel workers (None/0 = auto, 1 = sequential).
+        timeout: Optional wall-clock budget in seconds.  If exceeded, the loop
+            exits early before starting the next generation and returns the
+            best partial result found so far.  Default ``None`` means no
+            wall-clock limit.
 
     Returns:
         List of routes from the best chromosome found.
     """
+    start_time = time.monotonic()
+
     base_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
     random.seed(base_seed)
 
@@ -430,10 +438,12 @@ def run_evolutionary(
     )
 
     if verbose:
-        print("\n=== Evolutionary Routing Optimizer ===")
-        print(f"  Population: {pop_size}, Generations: {generations}")
+        print("\n=== Evolutionary Routing Optimizer ===", flush=True)
+        print(f"  Population: {pop_size}, Generations: {generations}", flush=True)
         if num_workers > 1:
-            print(f"  Parallel workers: {num_workers}")
+            print(f"  Parallel workers: {num_workers}", flush=True)
+        if timeout is not None:
+            print(f"  Timeout: {timeout:.1f}s", flush=True)
 
     # Prepare base net order (same as Monte Carlo)
     base_order = sorted(autorouter.nets.keys(), key=lambda n: autorouter._get_net_priority(n))
@@ -454,6 +464,16 @@ def run_evolutionary(
     total_evals = pop_size * generations
 
     for gen in range(generations):
+        # ----- wall-clock timeout check (Issue #2467) -----
+        if timeout is not None and time.monotonic() - start_time >= timeout:
+            if verbose:
+                print(
+                    f"  Timeout {timeout:.1f}s reached at gen {gen}; "
+                    f"returning best (score={best_score:.2f})",
+                    flush=True,
+                )
+            break
+
         # ----- evaluate population -----
         if num_workers > 1:
             routes_scores = _evaluate_parallel(
@@ -492,7 +512,8 @@ def run_evolutionary(
             avg_fitness = sum(c.fitness for c in population) / len(population)
             new_best = " NEW BEST" if gen == best_gen else ""
             print(
-                f"  Gen {gen + 1}: best={gen_best_score:.2f} avg={avg_fitness:.2f}{new_best}"
+                f"  Gen {gen + 1}: best={gen_best_score:.2f} avg={avg_fitness:.2f}{new_best}",
+                flush=True,
             )
 
         # Evolve (skip on last gen)
@@ -500,7 +521,7 @@ def run_evolutionary(
             population = optimizer._evolve(population)
 
     if verbose:
-        print(f"\n  Best: Gen {best_gen + 1} (score={best_score:.2f})")
+        print(f"\n  Best: Gen {best_gen + 1} (score={best_score:.2f})", flush=True)
 
     autorouter.routes = best_routes if best_routes else []
     if progress_callback is not None:

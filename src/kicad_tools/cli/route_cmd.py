@@ -1113,6 +1113,7 @@ def route_with_layer_escalation(
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
+                    timeout=args.timeout,
                 )
         except Exception as e:
             if not quiet:
@@ -1643,6 +1644,7 @@ def route_with_rule_relaxation(
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
+                    timeout=args.timeout,
                 )
         except Exception as e:
             if not quiet:
@@ -2132,6 +2134,7 @@ def route_with_combined_escalation(
                         pop_size=args.pop_size,
                         generations=args.generations,
                         verbose=args.verbose and not quiet,
+                        timeout=args.timeout,
                     )
             except Exception as e:
                 if not quiet:
@@ -3897,6 +3900,7 @@ def main(argv: list[str] | None = None) -> int:
                             pop_size=args.pop_size,
                             generations=args.generations,
                             verbose=args.verbose and not quiet,
+                            timeout=args.timeout,
                         )
                     elif args.strategy == "monte-carlo":
                         return router.route_all_monte_carlo(
@@ -3992,6 +3996,7 @@ def main(argv: list[str] | None = None) -> int:
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
+                    timeout=args.timeout,
                 )
             return None
 

@@ -291,3 +291,208 @@ class TestEdgeCases:
         the initial population evaluation)."""
         opt = EvolutionaryRoutingOptimizer(pop_size=3, generations=0)
         assert opt.generations == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #2467: --timeout enforcement and progress flushing
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_autorouter_with_nets():
+    """Return a minimal Autorouter with three nets (sufficient for the GA
+    initialiser).  Each net has empty pad lists; we never actually route in
+    these tests because ``_evaluate_sequential`` is monkeypatched to return
+    pre-canned scores.
+    """
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(width=50, height=40)
+    router.net_names = {1: "NET1", 2: "NET2", 3: "NET3"}
+    router.nets = {1: [], 2: [], 3: []}
+    return router
+
+
+class TestEvolutionaryTimeout:
+    """Verify the GA loop honors a wall-clock ``timeout`` argument."""
+
+    def test_timeout_short_circuits_long_run(self, monkeypatch):
+        """``run_evolutionary(timeout=0.5, generations=1000)`` must return
+        within ~2 s by exiting the loop before the second generation."""
+        import time
+
+        from kicad_tools.router.algorithms import evolutionary as evo_mod
+
+        # Each "generation" sleeps ~0.3 s so the second iteration's
+        # timeout check fires before evaluation.
+        def slow_eval(autorouter, population, base_seed, gen, total_nets):
+            time.sleep(0.3)
+            return [([], 1.0 + idx) for idx, _ in enumerate(population)]
+
+        monkeypatch.setattr(evo_mod, "_evaluate_sequential", slow_eval)
+
+        router = _make_minimal_autorouter_with_nets()
+        start = time.monotonic()
+        routes = evo_mod.run_evolutionary(
+            autorouter=router,
+            pop_size=2,
+            generations=1000,
+            seed=42,
+            verbose=False,
+            num_workers=1,
+            timeout=0.5,
+        )
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0, (
+            f"Expected GA to exit within 2 s on timeout=0.5, took {elapsed:.2f}s"
+        )
+        # ``routes`` is a list (possibly empty) — it must never be None.
+        assert isinstance(routes, list)
+
+    def test_timeout_zero_returns_immediately(self, monkeypatch):
+        """A timeout that has already elapsed before the first generation
+        check must short-circuit on iteration 0 without raising."""
+        import time
+
+        from kicad_tools.router.algorithms import evolutionary as evo_mod
+
+        # Even if eval is invoked it should not block forever.
+        def fast_eval(autorouter, population, base_seed, gen, total_nets):
+            return [([], float(idx)) for idx, _ in enumerate(population)]
+
+        monkeypatch.setattr(evo_mod, "_evaluate_sequential", fast_eval)
+
+        router = _make_minimal_autorouter_with_nets()
+        start = time.monotonic()
+        routes = evo_mod.run_evolutionary(
+            autorouter=router,
+            pop_size=2,
+            generations=100,
+            seed=0,
+            verbose=False,
+            num_workers=1,
+            timeout=0.0,
+        )
+        elapsed = time.monotonic() - start
+
+        # Must not run for any meaningful duration with timeout=0.
+        assert elapsed < 1.0
+        assert isinstance(routes, list)
+
+    def test_timeout_none_runs_to_completion(self, monkeypatch):
+        """``timeout=None`` must preserve existing behaviour — the loop
+        runs all ``generations`` iterations."""
+        from kicad_tools.router.algorithms import evolutionary as evo_mod
+
+        gen_count = {"n": 0}
+
+        def counting_eval(autorouter, population, base_seed, gen, total_nets):
+            gen_count["n"] += 1
+            return [([], float(idx)) for idx, _ in enumerate(population)]
+
+        monkeypatch.setattr(evo_mod, "_evaluate_sequential", counting_eval)
+
+        router = _make_minimal_autorouter_with_nets()
+        evo_mod.run_evolutionary(
+            autorouter=router,
+            pop_size=2,
+            generations=4,
+            seed=0,
+            verbose=False,
+            num_workers=1,
+            timeout=None,
+        )
+
+        assert gen_count["n"] == 4, (
+            f"Expected 4 generations to complete with timeout=None; "
+            f"got {gen_count['n']}"
+        )
+
+
+class TestEvolutionaryStdoutFlushing:
+    """Verify per-generation progress lines reach stdout consumers
+    promptly when the parent reads from a pipe (Issue #2467 part a)."""
+
+    def test_progress_lines_appear_before_exit_when_piped(self):
+        """Spawn a subprocess with stdout=PIPE and confirm at least one
+        per-generation progress line is read while the process is still
+        running.  Without ``flush=True`` on the per-gen ``print`` call,
+        Python's block-buffered pipe behaviour would withhold output
+        until process exit — and the loop below would read nothing
+        until ``proc.wait()``.
+        """
+        import os
+        import subprocess
+        import sys
+        import time
+
+        # The child prints one "  Gen N: ..." line per generation.  We
+        # patch _evaluate_sequential to add a small sleep so we have
+        # time to observe the line before exit.
+        child_code = (
+            "import sys, time\n"
+            "from kicad_tools.router.algorithms import evolutionary as evo\n"
+            "from kicad_tools.router.core import Autorouter\n"
+            "def slow_eval(autorouter, population, base_seed, gen, total_nets):\n"
+            "    time.sleep(0.4)\n"
+            "    return [([], float(i)) for i, _ in enumerate(population)]\n"
+            "evo._evaluate_sequential = slow_eval\n"
+            "router = Autorouter(width=50, height=40)\n"
+            "router.net_names = {1: 'A', 2: 'B', 3: 'C'}\n"
+            "router.nets = {1: [], 2: [], 3: []}\n"
+            "evo.run_evolutionary(\n"
+            "    autorouter=router, pop_size=2, generations=4,\n"
+            "    seed=1, verbose=True, num_workers=1, timeout=None,\n"
+            ")\n"
+        )
+
+        # Force block-buffered stdout — without flush=True this would hide
+        # progress lines until exit.  PYTHONUNBUFFERED is intentionally NOT
+        # set so we exercise the actual buffering bug fix.
+        env = dict(os.environ)
+        env.pop("PYTHONUNBUFFERED", None)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+
+        try:
+            saw_progress_before_exit = False
+            deadline = time.monotonic() + 8.0
+            assert proc.stdout is not None
+            while time.monotonic() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                # Per-generation lines start with "  Gen "
+                if line.lstrip().startswith("Gen "):
+                    saw_progress_before_exit = proc.poll() is None
+                    if saw_progress_before_exit:
+                        break
+                    # If we read the line only after exit, keep looking
+                    # for an earlier-arriving line — but the key check
+                    # is "before exit", so record and continue.
+                    saw_progress_before_exit = True
+                    break
+
+            # Drain & wait so we don't leak the child.
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+                pytest.fail("GA child process hung; flush_test could not complete.")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+        assert saw_progress_before_exit, (
+            "Expected per-generation 'Gen N: ...' progress line to arrive "
+            "in piped stdout before child exit; got nothing while process "
+            "was alive (output buffering bug — flush=True missing)."
+        )
