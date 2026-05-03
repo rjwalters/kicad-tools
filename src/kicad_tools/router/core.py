@@ -676,6 +676,11 @@ class Autorouter:
 
         active = "cpp" if isinstance(self.router, CppPathfinder) else "python"
         info["active"] = active
+
+        # Include Python fallback statistics when using C++ backend
+        if isinstance(self.router, CppPathfinder):
+            info["fallback_stats"] = self.router.fallback_stats
+
         return info
 
     def get_width_for_impedance(

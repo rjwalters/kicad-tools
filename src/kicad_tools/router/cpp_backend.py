@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
 
     from .grid import RoutingGrid
+    from .pathfinder import Router
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
 
@@ -348,6 +350,13 @@ class CppPathfinder:
         self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
         self._grid = grid
         self._rules = rules
+        self._diagonal_routing = diagonal_routing
+
+        # Lazy Python fallback router (constructed on first fallback)
+        self._py_router: Router | None = None
+        # Fallback statistics
+        self._fallback_count: int = 0
+        self._fallback_nets: list[str] = []
 
     def set_routable_layers(self, layers: list[int]) -> None:
         """Set which layers are routable (skip plane layers)."""
@@ -544,7 +553,16 @@ class CppPathfinder:
         )
 
         if not result.success:
-            return None
+            return self._try_python_fallback(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
 
         # Convert C++ result to Python Route
         route = Route(net=start.net, net_name=start.net_name)
@@ -672,6 +690,104 @@ class CppPathfinder:
         to prevent avoidance costs from polluting subsequent net routing.
         """
         self._grid._impl.clear_avoidance_costs()
+
+    def _try_python_fallback(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Attempt to route using the Python pathfinder as a fallback.
+
+        Called when the C++ A* search fails to find a path.  The Python
+        pathfinder uses different neighbor expansion and clearance relaxation
+        logic that can handle single-corridor geometries where the C++
+        cost-based avoidance steering cannot.
+
+        The Python ``Router`` operates on ``_py_grid`` which is kept in sync
+        by :meth:`core.Autorouter._mark_route` (updates both grids after
+        every committed route).
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters
+            negotiated_mode: Enable negotiated congestion routing
+            present_cost_factor: Multiplier for sharing penalty
+            weight: A* weight
+            per_net_timeout: Optional per-net timeout in seconds
+            extra_goal_cells: Additional goal cells for early termination
+
+        Returns:
+            Route object if fallback succeeds, None if also fails.
+        """
+        py_grid = self._grid._py_grid
+        if py_grid is None:
+            return None
+
+        # Lazy-construct the Python Router on first fallback
+        if self._py_router is None:
+            from .pathfinder import Router
+
+            self._py_router = Router(
+                py_grid,
+                self._rules,
+                net_class_map=self._net_class_map,
+                diagonal_routing=self._diagonal_routing,
+            )
+
+        t0 = time.monotonic()
+        # Python Router.route() does not accept start_layers/end_layers;
+        # it derives layer information internally from pad attributes.
+        route = self._py_router.route(
+            start,
+            end,
+            net_class=net_class,
+            negotiated_mode=negotiated_mode,
+            present_cost_factor=present_cost_factor,
+            weight=weight,
+            per_net_timeout=per_net_timeout,
+            extra_goal_cells=extra_goal_cells,
+        )
+        dt = time.monotonic() - t0
+
+        net_name = getattr(start, "net_name", "?")
+        if route is not None:
+            self._fallback_count += 1
+            self._fallback_nets.append(net_name)
+            logger.info(
+                "Net %s: C++ pathfinder failed, routed via Python fallback (%.1fs)",
+                net_name,
+                dt,
+            )
+        else:
+            logger.debug(
+                "Net %s: C++ pathfinder failed, Python fallback also failed (%.1fs)",
+                net_name,
+                dt,
+            )
+
+        return route
+
+    @property
+    def fallback_stats(self) -> dict:
+        """Get statistics about Python fallback usage.
+
+        Returns:
+            Dictionary with:
+                - fallback_count: Number of nets routed via Python fallback
+                - fallback_nets: List of net names that used fallback
+        """
+        return {
+            "fallback_count": self._fallback_count,
+            "fallback_nets": list(self._fallback_nets),
+        }
 
     @property
     def iterations(self) -> int:
