@@ -188,6 +188,22 @@ NB_MODULE(router_cpp, m) {
              "via_radius_cells"_a = 0,
              "start_pad_bounds"_a = PadBounds{},
              "end_pad_bounds"_a = PadBounds{})
+        .def("route_resumable", &Pathfinder::route_resumable,
+             "start_x"_a, "start_y"_a, "start_layer"_a,
+             "end_x"_a, "end_y"_a, "end_layer"_a,
+             "net"_a,
+             "start_layers"_a = std::vector<int>{},
+             "end_layers"_a = std::vector<int>{},
+             "negotiated_mode"_a = false,
+             "present_cost_factor"_a = 0.0f,
+             "weight"_a = 1.0f,
+             "trace_radius_cells"_a = 0,
+             "via_radius_cells"_a = 0,
+             "start_pad_bounds"_a = PadBounds{},
+             "end_pad_bounds"_a = PadBounds{})
+        .def("resume", &Pathfinder::resume,
+             "reject_x"_a, "reject_y"_a, "reject_layer"_a)
+        .def("clear_search_state", &Pathfinder::clear_search_state)
         .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
