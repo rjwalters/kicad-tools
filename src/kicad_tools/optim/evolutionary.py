@@ -26,6 +26,7 @@ Example::
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import random
@@ -532,9 +533,7 @@ class EvolutionaryPlacementOptimizer:
             pcb, fixed_refs=fixed_refs, enable_clustering=enable_clustering
         )
 
-        optimizer = cls(
-            physics_opt.board_outline, config, routing_evaluator=routing_evaluator
-        )
+        optimizer = cls(physics_opt.board_outline, config, routing_evaluator=routing_evaluator)
         optimizer.components = physics_opt.components
         optimizer.springs = physics_opt.springs
         optimizer.clusters = physics_opt.clusters
@@ -786,6 +785,132 @@ class EvolutionaryPlacementOptimizer:
                     comp.rotation = rot
                     comp.update_pin_positions()
 
+    def _evaluate_fitness_isolated(self, ind: Individual) -> float:
+        """Thread-safe fitness evaluation using deep-copied component state.
+
+        Creates independent copies of all components so that multiple
+        threads can evaluate different individuals in parallel without
+        racing on shared mutable component objects.
+        """
+        # Deep-copy components and build an isolated component map
+        components_copy = copy.deepcopy(self.components)
+        component_map_copy: dict[str, Component] = {comp.ref: comp for comp in components_copy}
+
+        # Apply candidate positions to the copies
+        for ref, (x, y) in ind.positions.items():
+            comp = component_map_copy.get(ref)
+            if comp:
+                comp.x = x
+                comp.y = y
+                comp.rotation = ind.rotations.get(ref, comp.rotation)
+                comp.update_pin_positions()
+
+        # --- compute objectives on copies ---
+
+        # Wire length
+        wire_length = 0.0
+        for spring in self.springs:
+            comp1 = component_map_copy.get(spring.comp1_ref)
+            comp2 = component_map_copy.get(spring.comp2_ref)
+            if not comp1 or not comp2:
+                continue
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+            if not pin1 or not pin2:
+                continue
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            wire_length += math.sqrt(dx * dx + dy * dy)
+
+        # Conflicts (AABB overlap)
+        conflicts = 0
+        n = len(components_copy)
+        for i in range(n):
+            c1 = components_copy[i]
+            hw1, hh1 = c1.width / 2, c1.height / 2
+            for j in range(i + 1, n):
+                c2 = components_copy[j]
+                hw2, hh2 = c2.width / 2, c2.height / 2
+                if abs(c1.x - c2.x) < (hw1 + hw2) and abs(c1.y - c2.y) < (hh1 + hh2):
+                    conflicts += 1
+
+        # Boundary violations
+        boundary_violations = 0
+        for comp in components_copy:
+            if not self.board_outline.contains_point(Vector2D(comp.x, comp.y)):
+                boundary_violations += 1
+
+        # Routability
+        if self.routing_evaluator is not None:
+            positions_dict: dict[str, tuple[float, float]] = {}
+            rotations_dict: dict[str, float] = {}
+            for comp in components_copy:
+                positions_dict[comp.ref] = (comp.x, comp.y)
+                rotations_dict[comp.ref] = comp.rotation
+            try:
+                completion_rate = self.routing_evaluator.evaluate_routability(
+                    positions_dict, rotations_dict
+                )
+                routability = max(0.0, min(1.0, completion_rate)) * 100.0
+            except Exception:
+                routability = self._estimate_routability_spacing_from(components_copy)
+        else:
+            routability = self._estimate_routability_spacing_from(components_copy)
+
+        # Pin alignments
+        aligned_pins = 0
+        total_pin_pairs = 0
+        tolerance = self.config.pin_alignment_tolerance
+        for spring in self.springs:
+            comp1 = component_map_copy.get(spring.comp1_ref)
+            comp2 = component_map_copy.get(spring.comp2_ref)
+            if not comp1 or not comp2:
+                continue
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+            if not pin1 or not pin2:
+                continue
+            total_pin_pairs += 1
+            dx = abs(pin2.x - pin1.x)
+            dy = abs(pin2.y - pin1.y)
+            if dx < tolerance or dy < tolerance:
+                aligned_pins += 1
+        alignment = (aligned_pins / total_pin_pairs * 100.0) if total_pin_pairs > 0 else 0.0
+
+        # Weighted sum (higher = better)
+        fitness = (
+            1000.0
+            - wire_length * self.config.wire_length_weight
+            - conflicts * self.config.conflict_weight
+            - boundary_violations * self.config.boundary_violation_weight
+            + routability * self.config.routability_weight
+            + alignment * self.config.pin_alignment_weight
+        )
+
+        return fitness
+
+    @staticmethod
+    def _estimate_routability_spacing_from(components: list[Component]) -> float:
+        """Spacing-based routability proxy computed from a component list.
+
+        Thread-safe variant of ``_estimate_routability_spacing`` that
+        operates on an explicitly-provided component list rather than
+        reading from ``self.components``.
+        """
+        n = len(components)
+        if n < 2:
+            return 100.0
+        total_spacing = 0.0
+        count = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = components[i].x - components[j].x
+                dy = components[i].y - components[j].y
+                total_spacing += math.sqrt(dx * dx + dy * dy)
+                count += 1
+        avg_spacing = total_spacing / count if count > 0 else 0
+        return min(100.0, avg_spacing * 5.0)
+
     def _total_wire_length(self) -> float:
         """Compute total wire length from spring connections."""
         total = 0.0
@@ -923,9 +1048,7 @@ class EvolutionaryPlacementOptimizer:
             rotations[comp.ref] = comp.rotation
 
         try:
-            completion_rate = self.routing_evaluator.evaluate_routability(
-                positions, rotations
-            )
+            completion_rate = self.routing_evaluator.evaluate_routability(positions, rotations)
             # Clamp to [0, 1] and scale to [0, 100]
             return max(0.0, min(1.0, completion_rate)) * 100.0
         except Exception:
@@ -1129,9 +1252,7 @@ class EvolutionaryPlacementOptimizer:
             )
 
         # Prepare spring data list
-        springs_list = [
-            (s.comp1_ref, s.pin1_num, s.comp2_ref, s.pin2_num) for s in self.springs
-        ]
+        springs_list = [(s.comp1_ref, s.pin1_num, s.comp2_ref, s.pin2_num) for s in self.springs]
 
         # Prepare board vertices
         board_vertices = [(v.x, v.y) for v in self.board_outline.vertices]
@@ -1142,9 +1263,7 @@ class EvolutionaryPlacementOptimizer:
             self._spring_indices,
             self._spring_pin_offsets,
             self._board_vertices_arr,
-        ) = prepare_evaluation_data(
-            components_dict, springs_list, board_vertices, self._ref_to_idx
-        )
+        ) = prepare_evaluation_data(components_dict, springs_list, board_vertices, self._ref_to_idx)
 
         self._gpu_data_prepared = True
 
@@ -1248,7 +1367,7 @@ class EvolutionaryPlacementOptimizer:
             max_workers = self.config.max_workers or os.cpu_count()
 
             def _eval_one(ind: Individual) -> float:
-                return self._evaluate_fitness(ind)
+                return self._evaluate_fitness_isolated(ind)
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 fitness_values = list(executor.map(_eval_one, population))
