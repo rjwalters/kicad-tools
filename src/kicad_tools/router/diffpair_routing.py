@@ -229,9 +229,7 @@ class CoupledPathfinder:
                         return True
         return False
 
-    def _is_at_goal(
-        self, pos: GridPos, goal: GridPos | None
-    ) -> bool:
+    def _is_at_goal(self, pos: GridPos, goal: GridPos | None) -> bool:
         """Check if a grid position is at the goal (ignoring layer)."""
         if goal is None:
             return False
@@ -246,11 +244,31 @@ class CoupledPathfinder:
         n_goal: GridPos | None = None,
         p_start: GridPos | None = None,
         n_start: GridPos | None = None,
+        target_spacing_cells: int | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
+        Args:
+            state: Current coupled search state.
+            p_net: Net id for the positive trace.
+            n_net: Net id for the negative trace.
+            p_goal: Goal grid position for the positive trace.
+            n_goal: Goal grid position for the negative trace.
+            p_start: Start grid position for the positive trace.
+            n_start: Start grid position for the negative trace.
+            target_spacing_cells: Per-call effective target spacing
+                in grid cells.  When ``None``, falls back to
+                ``self.target_spacing_cells``.  Issue #2484: the
+                effective spacing is threaded as a kwarg so that
+                ``route_coupled`` can widen it for a single call
+                (e.g. when start pads sit further apart than the
+                configured spacing) without mutating instance state.
+
         Returns list of (new_state, cost, is_via) tuples.
         """
+        if target_spacing_cells is None:
+            target_spacing_cells = self.target_spacing_cells
+
         neighbors: list[tuple[CoupledState, float, bool]] = []
 
         # Issue #2473: Relax the spacing constraint when both traces
@@ -267,7 +285,7 @@ class CoupledPathfinder:
             # ``approach_radius`` is generous enough to admit the goal
             # pair's spacing difference but small enough that the
             # relaxation does not infect the rest of the search.
-            approach_radius = max(self.target_spacing_cells, 6)
+            approach_radius = max(target_spacing_cells, 6)
             if p_dist_to_goal <= approach_radius and n_dist_to_goal <= approach_radius:
                 approach_relaxed = True
 
@@ -292,13 +310,9 @@ class CoupledPathfinder:
             # disqualify the move.
             p_is_endpoint = self._is_at_goal(new_p, p_goal) or self._is_at_goal(new_p, p_start)
             n_is_endpoint = self._is_at_goal(new_n, n_goal) or self._is_at_goal(new_n, n_start)
-            if not p_is_endpoint and self._is_trace_blocked(
-                new_p.x, new_p.y, new_p.layer, p_net
-            ):
+            if not p_is_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
                 continue
-            if not n_is_endpoint and self._is_trace_blocked(
-                new_n.x, new_n.y, new_n.layer, n_net
-            ):
+            if not n_is_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
                 continue
 
             # Calculate spacing between new positions
@@ -310,8 +324,8 @@ class CoupledPathfinder:
             # Issue #2473: When the search is in the "approach" phase
             # near the goal pads, allow wider spacing variation so
             # mismatched source/sink pad pitches can converge.
-            tolerance = 1 if not approach_relaxed else max(1, self.target_spacing_cells)
-            if abs(new_spacing - self.target_spacing_cells) > tolerance:
+            tolerance = 1 if not approach_relaxed else max(1, target_spacing_cells)
+            if abs(new_spacing - target_spacing_cells) > tolerance:
                 continue
 
             # Calculate cost
@@ -374,13 +388,9 @@ class CoupledPathfinder:
                 swapped_p = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
                 swapped_n = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
 
-                if self._is_trace_blocked(
-                    swapped_p.x, swapped_p.y, swapped_p.layer, p_net
-                ):
+                if self._is_trace_blocked(swapped_p.x, swapped_p.y, swapped_p.layer, p_net):
                     continue
-                if self._is_trace_blocked(
-                    swapped_n.x, swapped_n.y, swapped_n.layer, n_net
-                ):
+                if self._is_trace_blocked(swapped_n.x, swapped_n.y, swapped_n.layer, n_net):
                     continue
 
                 # Higher cost than a normal via to discourage gratuitous
@@ -457,11 +467,19 @@ class CoupledPathfinder:
         # of the configured spacing and the actual start-pad distance,
         # which keeps clearance valid while letting the coupled run
         # follow the natural pad pitch.
+        #
+        # Issue #2484: Keep this widened value as a per-call local
+        # rather than mutating ``self.target_spacing_cells``.  The
+        # previous implementation permanently widened the instance
+        # attribute on the first wide-pad call and leaked the new
+        # spacing into every subsequent ``route_coupled`` invocation
+        # on the same pathfinder.
         actual_start_spacing = math.sqrt(
             (p_start_gx - n_start_gx) ** 2 + (p_start_gy - n_start_gy) ** 2
         )
-        if actual_start_spacing > self.target_spacing_cells:
-            self.target_spacing_cells = int(round(actual_start_spacing))
+        effective_target_spacing = self.target_spacing_cells
+        if actual_start_spacing > effective_target_spacing:
+            effective_target_spacing = int(round(actual_start_spacing))
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
@@ -508,6 +526,7 @@ class CoupledPathfinder:
                 n_goal_pos,
                 p_start_pos,
                 n_start_pos,
+                target_spacing_cells=effective_target_spacing,
             ):
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
                 if neighbor_key in closed_set:
@@ -916,9 +935,7 @@ class DiffPairRouter:
         """Euclidean distance between two pads (ignoring layer)."""
         return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2)
 
-    def _cluster_pads(
-        self, pads: list[Pad], threshold: float
-    ) -> list[list[Pad]]:
+    def _cluster_pads(self, pads: list[Pad], threshold: float) -> list[list[Pad]]:
         """Group pads into connected clusters by Euclidean proximity.
 
         Two pads are placed in the same cluster when their pad-center
@@ -965,9 +982,7 @@ class DiffPairRouter:
         return (cx, cy)
 
     @staticmethod
-    def _polarity_swap_between(
-        p_start: Pad, n_start: Pad, p_end: Pad, n_end: Pad
-    ) -> bool:
+    def _polarity_swap_between(p_start: Pad, n_start: Pad, p_end: Pad, n_end: Pad) -> bool:
         """Detect whether the orientation of the start pair is mirrored at the end.
 
         The differential pair ``(p, n)`` defines an oriented vector
@@ -1213,16 +1228,12 @@ class DiffPairRouter:
             # Backward-compatible fast path.
             legacy = self._pair_pads_for_coupled_routing(p_pads, n_pads)
             coupled_specs = [
-                CoupledSegmentSpec(
-                    p_start=ps, p_end=pe, n_start=ns, n_end=ne, polarity_swap=False
-                )
+                CoupledSegmentSpec(p_start=ps, p_end=pe, n_start=ns, n_end=ne, polarity_swap=False)
                 for ps, pe, ns, ne in legacy
             ]
             stub_specs: list[StubEdgeSpec] = []
         else:
-            coupled_specs, stub_specs = self._pair_pads_for_coupled_routing_npad(
-                p_pads, n_pads
-            )
+            coupled_specs, stub_specs = self._pair_pads_for_coupled_routing_npad(p_pads, n_pads)
 
         if not coupled_specs:
             if coupled_only:
@@ -1256,19 +1267,14 @@ class DiffPairRouter:
         for spec in coupled_specs:
             polarity_marker = " (polarity-swap)" if spec.polarity_swap else ""
             print(
-                f"    Routing {pair.positive.net_name}/{pair.negative.net_name}"
-                f"{polarity_marker}..."
+                f"    Routing {pair.positive.net_name}/{pair.negative.net_name}{polarity_marker}..."
             )
 
-            result = pathfinder.route_coupled(
-                spec.p_start, spec.p_end, spec.n_start, spec.n_end
-            )
+            result = pathfinder.route_coupled(spec.p_start, spec.p_end, spec.n_start, spec.n_end)
 
             if result is None:
                 if coupled_only:
-                    print(
-                        "    Skipping diff-pair pre-pass: coupled pathfinder found no path"
-                    )
+                    print("    Skipping diff-pair pre-pass: coupled pathfinder found no path")
                     return [], None
                 print("    WARNING: Coupled routing failed, falling back to independent routing")
                 return self.route_differential_pair_independent(pair, spacing)
@@ -1492,8 +1498,10 @@ class DiffPairRouter:
 
         unrouted_pairs = [p for p in diff_pairs if p.get_net_ids()[0] not in routed_net_ids]
         if all_routes:
-            print(f"  Diff-pair pre-pass produced {len(all_routes)} routes "
-                  f"covering {len(routed_net_ids)} nets")
+            print(
+                f"  Diff-pair pre-pass produced {len(all_routes)} routes "
+                f"covering {len(routed_net_ids)} nets"
+            )
         if unrouted_pairs:
             print(f"  Diff pairs falling through to main strategy: {len(unrouted_pairs)}")
         if warnings:

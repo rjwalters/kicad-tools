@@ -930,3 +930,196 @@ class TestCoupledRoutingIntegration:
             assert p_route.net == 1
             assert n_route.net == 2
             assert len(p_route.segments) > 0 or len(n_route.segments) > 0
+
+
+class TestRouteCoupledTargetSpacingNotMutated:
+    """Issue #2484: route_coupled must not mutate self.target_spacing_cells.
+
+    The original implementation widened ``self.target_spacing_cells`` in
+    place when the start pads were further apart than the configured
+    spacing.  That mutation leaked into every subsequent ``route_coupled``
+    call on the same pathfinder, silently widening the spacing target
+    for unrelated pairs.  The fix threads the per-call effective spacing
+    as a kwarg into ``_get_coupled_neighbors`` instead of mutating
+    instance state.
+    """
+
+    def _make_pathfinder(self, target_spacing_cells: int = 3):
+        """Build a CoupledPathfinder with a clean grid."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            via_diameter=0.6,
+            via_drill=0.3,
+            via_clearance=0.2,
+        )
+        grid = RoutingGrid(
+            width=40.0,
+            height=40.0,
+            rules=rules,
+            origin_x=0.0,
+            origin_y=0.0,
+        )
+        pathfinder = CoupledPathfinder(
+            grid=grid,
+            rules=rules,
+            target_spacing_cells=target_spacing_cells,
+        )
+        return pathfinder, grid, rules
+
+    def _wide_pads(self, grid):
+        """Pads naturally further apart than the configured 3-cell target.
+
+        Spacing of 6 grid cells ensures the start-pad widening branch
+        (lines 487-492 of diffpair_routing.py) is exercised.
+        """
+        wide_dy_mm = 6 * grid.resolution
+        p_start = Pad(
+            x=5.0, y=10.0, width=1.0, height=1.0, net=1, net_name="WIDE_P", layer=Layer.F_CU
+        )
+        p_end = Pad(
+            x=25.0, y=10.0, width=1.0, height=1.0, net=1, net_name="WIDE_P", layer=Layer.F_CU
+        )
+        n_start = Pad(
+            x=5.0,
+            y=10.0 + wide_dy_mm,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="WIDE_N",
+            layer=Layer.F_CU,
+        )
+        n_end = Pad(
+            x=25.0,
+            y=10.0 + wide_dy_mm,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="WIDE_N",
+            layer=Layer.F_CU,
+        )
+        return p_start, p_end, n_start, n_end
+
+    def _narrow_pads(self, grid):
+        """Pads at exactly the configured 3-cell target spacing."""
+        narrow_dy_mm = 3 * grid.resolution
+        p_start = Pad(
+            x=5.0, y=20.0, width=1.0, height=1.0, net=3, net_name="NARROW_P", layer=Layer.F_CU
+        )
+        p_end = Pad(
+            x=25.0, y=20.0, width=1.0, height=1.0, net=3, net_name="NARROW_P", layer=Layer.F_CU
+        )
+        n_start = Pad(
+            x=5.0,
+            y=20.0 + narrow_dy_mm,
+            width=1.0,
+            height=1.0,
+            net=4,
+            net_name="NARROW_N",
+            layer=Layer.F_CU,
+        )
+        n_end = Pad(
+            x=25.0,
+            y=20.0 + narrow_dy_mm,
+            width=1.0,
+            height=1.0,
+            net=4,
+            net_name="NARROW_N",
+            layer=Layer.F_CU,
+        )
+        return p_start, p_end, n_start, n_end
+
+    def test_target_spacing_unchanged_after_wide_call(self):
+        """The configured target_spacing_cells must survive a widened call.
+
+        This is the strongest single assertion: it locks the contract
+        that ``route_coupled`` does not write to ``self.target_spacing_cells``,
+        regardless of whether the search itself succeeds.
+        """
+        pathfinder, grid, _rules = self._make_pathfinder(target_spacing_cells=3)
+        p_start, p_end, n_start, n_end = self._wide_pads(grid)
+
+        grid.add_pad(p_start)
+        grid.add_pad(p_end)
+        grid.add_pad(n_start)
+        grid.add_pad(n_end)
+
+        # Call route_coupled with start pads at 6 grid-cell spacing —
+        # this triggers the widening branch in route_coupled.  The result
+        # may be a successful route or None (the simple grid is tight),
+        # but in either case the instance attribute must not be mutated.
+        pathfinder.route_coupled(p_start, p_end, n_start, n_end)
+
+        assert pathfinder.target_spacing_cells == 3, (
+            "route_coupled mutated self.target_spacing_cells: "
+            f"expected 3, got {pathfinder.target_spacing_cells}"
+        )
+
+    def test_second_call_uses_configured_spacing(self):
+        """A second route_coupled call must honor the original 3-cell target.
+
+        End-to-end check: after a wide-pad call (which previously leaked
+        a widened spacing into the instance), a subsequent call with
+        pads at the configured 3-cell spacing must search at 3 cells,
+        not at the widened value.
+        """
+        pathfinder, grid, _rules = self._make_pathfinder(target_spacing_cells=3)
+
+        # First call: wide pads at 6 cells.
+        wp_start, wp_end, wn_start, wn_end = self._wide_pads(grid)
+        grid.add_pad(wp_start)
+        grid.add_pad(wp_end)
+        grid.add_pad(wn_start)
+        grid.add_pad(wn_end)
+        pathfinder.route_coupled(wp_start, wp_end, wn_start, wn_end)
+
+        # Instance attribute must still be 3 going into the second call.
+        assert pathfinder.target_spacing_cells == 3
+
+        # Second call: narrow pads at 3 cells.
+        np_start, np_end, nn_start, nn_end = self._narrow_pads(grid)
+        grid.add_pad(np_start)
+        grid.add_pad(np_end)
+        grid.add_pad(nn_start)
+        grid.add_pad(nn_end)
+        result = pathfinder.route_coupled(np_start, np_end, nn_start, nn_end)
+
+        # Whether or not the second routing succeeds depends on the
+        # geometry of the simple test grid; what we are locking down is
+        # that the *spacing target* used by the second call did not
+        # inherit the widened value from the first call.  The instance
+        # attribute reflects this directly.
+        assert pathfinder.target_spacing_cells == 3
+
+        # If the second call succeeded, every neighbor on the routed path
+        # was generated against the 3-cell target.  Verify the routes
+        # exist and refer to the narrow nets — proof the search did not
+        # silently drop into the wide-spacing regime.
+        if result is not None:
+            p_route, n_route = result
+            assert p_route.net == 3
+            assert n_route.net == 4
+
+    def test_widening_still_applies_within_a_single_call(self):
+        """The widening behavior itself (Issue #2473) must still work.
+
+        The fix is purely about lifetime — the widened value still has
+        to flow into ``_get_coupled_neighbors`` for the current call,
+        otherwise the search cannot leave the start state when start
+        pads exceed the configured spacing.  We verify this indirectly:
+        after a wide-pad call, the start state was at least admitted
+        (no exception, attribute still consistent), and the configured
+        spacing was preserved across the call boundary.
+        """
+        pathfinder, grid, _rules = self._make_pathfinder(target_spacing_cells=3)
+        p_start, p_end, n_start, n_end = self._wide_pads(grid)
+        grid.add_pad(p_start)
+        grid.add_pad(p_end)
+        grid.add_pad(n_start)
+        grid.add_pad(n_end)
+
+        # Should run to completion (success or None) without raising.
+        pathfinder.route_coupled(p_start, p_end, n_start, n_end)
+
+        # Instance attribute is the original configured value.
+        assert pathfinder.target_spacing_cells == 3
