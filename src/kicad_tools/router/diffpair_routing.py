@@ -93,6 +93,42 @@ class CoupledState:
         return math.sqrt(dx * dx + dy * dy)
 
 
+@dataclass
+class CoupledSegmentSpec:
+    """Specification for a single coupled-routing segment.
+
+    Issue #2473: For N-pad differential pairs (e.g., USB-C connectors),
+    the pair-up step now produces a list of these specs rather than a
+    flat 4-tuple, so the driver can run the coupled pathfinder for each
+    spec and feed the leftover stub edges to the independent router.
+    """
+
+    p_start: Pad
+    p_end: Pad
+    n_start: Pad
+    n_end: Pad
+    # ``True`` when the orientation of (p_start, n_start) is the
+    # mirror of (p_end, n_end) — i.e., the pair must perform a
+    # coordinated layer-swap crossover during routing.  The
+    # CoupledPathfinder consumes this hint to enable swap-via moves.
+    polarity_swap: bool = False
+
+
+@dataclass
+class StubEdgeSpec:
+    """Specification for a single-net stub edge.
+
+    Issue #2473: When a differential pair has more than 2 pads on
+    a side (e.g., USB-C A6 + B6 paralleled into the same net),
+    the extra pads connect to the main coupled run via short
+    independent stubs.  These are routed via the standard
+    autorouter rather than the CoupledPathfinder.
+    """
+
+    start: Pad
+    end: Pad
+
+
 @dataclass(order=True)
 class CoupledNode:
     """Node for coupled A* priority queue."""
@@ -117,6 +153,7 @@ class CoupledPathfinder:
         rules: DesignRules,
         target_spacing_cells: int,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        allow_swap_via: bool = False,
     ):
         """Initialize coupled pathfinder.
 
@@ -125,11 +162,17 @@ class CoupledPathfinder:
             rules: Design rules for routing
             target_spacing_cells: Target spacing between P/N in grid cells
             net_class_map: Optional net class map for per-net trace widths
+            allow_swap_via: Issue #2473: When True, the pathfinder may
+                place a paired layer-swap that exchanges the P/N grid
+                positions across an inner layer.  Used when source and
+                sink polarity orientations are mirrored (USB-C-shaped
+                pads).
         """
         self.grid = grid
         self.rules = rules
         self.target_spacing_cells = target_spacing_cells
         self.net_class_map = net_class_map or {}
+        self.allow_swap_via = allow_swap_via
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -186,17 +229,47 @@ class CoupledPathfinder:
                         return True
         return False
 
+    def _is_at_goal(
+        self, pos: GridPos, goal: GridPos | None
+    ) -> bool:
+        """Check if a grid position is at the goal (ignoring layer)."""
+        if goal is None:
+            return False
+        return pos.x == goal.x and pos.y == goal.y
+
     def _get_coupled_neighbors(
         self,
         state: CoupledState,
         p_net: int,
         n_net: int,
+        p_goal: GridPos | None = None,
+        n_goal: GridPos | None = None,
+        p_start: GridPos | None = None,
+        n_start: GridPos | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
         neighbors: list[tuple[CoupledState, float, bool]] = []
+
+        # Issue #2473: Relax the spacing constraint when both traces
+        # are within a short "approach radius" of their goal pads.
+        # This lets a coupled run that started at one pad pitch
+        # converge onto a goal pair with a different pad pitch (e.g.,
+        # USB-C 0.5mm pad spacing reached from MCU 0.8mm pad spacing).
+        # The relaxation only fires near the goals so the bulk of the
+        # run still maintains constant spacing.
+        approach_relaxed = False
+        if p_goal is not None and n_goal is not None:
+            p_dist_to_goal = abs(state.p_pos.x - p_goal.x) + abs(state.p_pos.y - p_goal.y)
+            n_dist_to_goal = abs(state.n_pos.x - n_goal.x) + abs(state.n_pos.y - n_goal.y)
+            # ``approach_radius`` is generous enough to admit the goal
+            # pair's spacing difference but small enough that the
+            # relaxation does not infect the rest of the search.
+            approach_radius = max(self.target_spacing_cells, 6)
+            if p_dist_to_goal <= approach_radius and n_dist_to_goal <= approach_radius:
+                approach_relaxed = True
 
         # Try moving both traces in the same direction
         for dx, dy in self.directions:
@@ -211,10 +284,21 @@ class CoupledPathfinder:
                 state.n_pos.layer,
             )
 
-            # Check if both new positions are valid
-            if self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+            # Check if both new positions are valid.  Issue #2473:
+            # Skip the trace-blocked check when stepping into a
+            # known goal or start cell — those cells host the pad
+            # we are explicitly trying to land on, so the
+            # half-width footprint of the partner pad must not
+            # disqualify the move.
+            p_is_endpoint = self._is_at_goal(new_p, p_goal) or self._is_at_goal(new_p, p_start)
+            n_is_endpoint = self._is_at_goal(new_n, n_goal) or self._is_at_goal(new_n, n_start)
+            if not p_is_endpoint and self._is_trace_blocked(
+                new_p.x, new_p.y, new_p.layer, p_net
+            ):
                 continue
-            if self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+            if not n_is_endpoint and self._is_trace_blocked(
+                new_n.x, new_n.y, new_n.layer, n_net
+            ):
                 continue
 
             # Calculate spacing between new positions
@@ -222,8 +306,11 @@ class CoupledPathfinder:
             spacing_dy = new_p.y - new_n.y
             new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
 
-            # Only accept moves that maintain target spacing (within tolerance)
-            tolerance = 1  # Allow 1 cell tolerance
+            # Only accept moves that maintain target spacing (within tolerance).
+            # Issue #2473: When the search is in the "approach" phase
+            # near the goal pads, allow wider spacing variation so
+            # mismatched source/sink pad pitches can converge.
+            tolerance = 1 if not approach_relaxed else max(1, self.target_spacing_cells)
             if abs(new_spacing - self.target_spacing_cells) > tolerance:
                 continue
 
@@ -264,6 +351,46 @@ class CoupledPathfinder:
 
             new_state = CoupledState(new_p, new_n, state.direction)
             neighbors.append((new_state, cost, True))
+
+        # Issue #2473: Swap-via move for polarity-swap crossover.  Both
+        # traces drop a via at their current location, then re-emerge on
+        # an inner layer with their grid positions exchanged.  This
+        # supports USB-C-shaped pad layouts where the connector inverts
+        # the differential polarity (D+/D- swap rows between A and B).
+        if self.allow_swap_via:
+            for new_layer in routable_layers:
+                if new_layer == state.p_pos.layer:
+                    continue
+
+                # Both pads must be able to host a via at their current
+                # position on every layer (the via spans through-hole).
+                if self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+                    continue
+                if self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+                    continue
+
+                # After the swap, the P-trace continues from where N was,
+                # and vice versa, on the new layer.
+                swapped_p = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
+                swapped_n = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
+
+                if self._is_trace_blocked(
+                    swapped_p.x, swapped_p.y, swapped_p.layer, p_net
+                ):
+                    continue
+                if self._is_trace_blocked(
+                    swapped_n.x, swapped_n.y, swapped_n.layer, n_net
+                ):
+                    continue
+
+                # Higher cost than a normal via to discourage gratuitous
+                # swaps when a straight path would suffice.
+                cost = self.rules.cost_via * 3
+
+                # Reset direction after the swap — the orientation has
+                # inverted, so any prior straight-line streak is broken.
+                new_state = CoupledState(swapped_p, swapped_n, (0, 0))
+                neighbors.append((new_state, cost, True))
 
         return neighbors
 
@@ -321,6 +448,21 @@ class CoupledPathfinder:
         p_goal_pos = GridPos(p_end_gx, p_end_gy, end_layer)
         n_goal_pos = GridPos(n_end_gx, n_end_gy, end_layer)
 
+        # Issue #2473: Derive the actual target spacing from the start
+        # pad pair on the grid.  Real-world differential pairs (USB-C,
+        # USB device-side connectors) often have pad spacing that
+        # exceeds the manufacturer-minimum spacing configured on the
+        # rules.  Using the configured spacing as a hard target prevents
+        # the search from leaving the start state.  We honor the larger
+        # of the configured spacing and the actual start-pad distance,
+        # which keeps clearance valid while letting the coupled run
+        # follow the natural pad pitch.
+        actual_start_spacing = math.sqrt(
+            (p_start_gx - n_start_gx) ** 2 + (p_start_gy - n_start_gy) ** 2
+        )
+        if actual_start_spacing > self.target_spacing_cells:
+            self.target_spacing_cells = int(round(actual_start_spacing))
+
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
         # A* setup
@@ -359,7 +501,13 @@ class CoupledPathfinder:
 
             # Explore neighbors
             for new_state, cost, is_via in self._get_coupled_neighbors(
-                current.state, p_start.net, n_start.net
+                current.state,
+                p_start.net,
+                n_start.net,
+                p_goal_pos,
+                n_goal_pos,
+                p_start_pos,
+                n_start_pos,
             ):
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
                 if neighbor_key in closed_set:
@@ -730,28 +878,292 @@ class DiffPairRouter:
 
         Matches P/N pads that are closest together as start/end pairs.
 
+        Issue #2473: For pairs with more than 2 pads per net, this is now
+        a thin wrapper around :meth:`_pair_pads_for_coupled_routing_npad`,
+        which returns ``CoupledSegmentSpec`` and ``StubEdgeSpec`` objects.
+        Callers that only need 2-pad behavior continue to receive a list
+        of plain 4-tuples for backward compatibility.
+
         Returns:
-            List of (p_start, p_end, n_start, n_end) tuples
+            List of (p_start, p_end, n_start, n_end) tuples for the
+            coupled segments only.  Stub edges (intra-net hops) are
+            available via :meth:`_pair_pads_for_coupled_routing_npad`.
         """
-        if len(p_pads) != 2 or len(n_pads) != 2:
-            # For now, only support simple 2-pad pairs
+        if len(p_pads) < 2 or len(n_pads) < 2:
+            # Need at least one pad on each side to form a pair.
             return []
 
-        # Find which P pad is closer to which N pad
-        p0, p1 = p_pads[0], p_pads[1]
-        n0, n1 = n_pads[0], n_pads[1]
+        if len(p_pads) == 2 and len(n_pads) == 2:
+            # Fast path for the common 2-pad case — preserves the
+            # exact pre-#2473 ordering for the regression test fixture.
+            p0, p1 = p_pads[0], p_pads[1]
+            n0, n1 = n_pads[0], n_pads[1]
 
-        # Distance from p0 to both n pads
-        d_p0_n0 = math.sqrt((p0.x - n0.x) ** 2 + (p0.y - n0.y) ** 2)
-        d_p0_n1 = math.sqrt((p0.x - n1.x) ** 2 + (p0.y - n1.y) ** 2)
+            d_p0_n0 = math.sqrt((p0.x - n0.x) ** 2 + (p0.y - n0.y) ** 2)
+            d_p0_n1 = math.sqrt((p0.x - n1.x) ** 2 + (p0.y - n1.y) ** 2)
 
-        # Match closest pads together
-        if d_p0_n0 < d_p0_n1:
-            # p0 pairs with n0, p1 pairs with n1
-            return [(p0, p1, n0, n1)]
-        else:
-            # p0 pairs with n1, p1 pairs with n0
-            return [(p0, p1, n1, n0)]
+            if d_p0_n0 < d_p0_n1:
+                return [(p0, p1, n0, n1)]
+            else:
+                return [(p0, p1, n1, n0)]
+
+        # N-pad path: build coupled segments via MST-style pairing.
+        coupled, _stubs = self._pair_pads_for_coupled_routing_npad(p_pads, n_pads)
+        return [(c.p_start, c.p_end, c.n_start, c.n_end) for c in coupled]
+
+    @staticmethod
+    def _pad_distance(a: Pad, b: Pad) -> float:
+        """Euclidean distance between two pads (ignoring layer)."""
+        return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2)
+
+    def _cluster_pads(
+        self, pads: list[Pad], threshold: float
+    ) -> list[list[Pad]]:
+        """Group pads into connected clusters by Euclidean proximity.
+
+        Two pads are placed in the same cluster when their pad-center
+        distance is below ``threshold`` (mm).  Used to identify "groups"
+        of pads that share a side of the diff pair (e.g., the four
+        USB-C pads on the connector are all within ~1 mm of each other,
+        whereas the MCU pin is several mm away).
+        """
+        if not pads:
+            return []
+
+        # Union-find by index.
+        parent = list(range(len(pads)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i: int, j: int) -> None:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        for i in range(len(pads)):
+            for j in range(i + 1, len(pads)):
+                if self._pad_distance(pads[i], pads[j]) <= threshold:
+                    union(i, j)
+
+        groups: dict[int, list[Pad]] = {}
+        for i, pad in enumerate(pads):
+            r = find(i)
+            groups.setdefault(r, []).append(pad)
+        return list(groups.values())
+
+    @staticmethod
+    def _cluster_centroid(pads: list[Pad]) -> tuple[float, float]:
+        """Return the centroid (mean position) of a pad cluster."""
+        if not pads:
+            return (0.0, 0.0)
+        cx = sum(p.x for p in pads) / len(pads)
+        cy = sum(p.y for p in pads) / len(pads)
+        return (cx, cy)
+
+    @staticmethod
+    def _polarity_swap_between(
+        p_start: Pad, n_start: Pad, p_end: Pad, n_end: Pad
+    ) -> bool:
+        """Detect whether the orientation of the start pair is mirrored at the end.
+
+        The differential pair ``(p, n)`` defines an oriented vector
+        from N to P at each endpoint.  When the two oriented vectors
+        point in opposite directions (dot product < 0), the pair must
+        execute a coordinated layer-swap to maintain coupling.
+        """
+        sx = p_start.x - n_start.x
+        sy = p_start.y - n_start.y
+        ex = p_end.x - n_end.x
+        ey = p_end.y - n_end.y
+        dot = sx * ex + sy * ey
+        return dot < 0.0
+
+    def _pair_pads_for_coupled_routing_npad(
+        self, p_pads: list[Pad], n_pads: list[Pad]
+    ) -> tuple[list[CoupledSegmentSpec], list[StubEdgeSpec]]:
+        """MST-based pad pairing for N-pad differential pairs.
+
+        Issue #2473: When a differential-pair net has more than two
+        pads (e.g., USB-C connectors paralleling top/bottom-side pads),
+        this method:
+
+        1. Clusters pads on each net by spatial proximity.  Pads
+           within the same cluster are connected by short stub edges.
+        2. Selects one "representative" pad per cluster (closest to
+           the centroid of the corresponding cluster on the other net).
+        3. Computes a minimum spanning tree over the representative
+           pads' centroids to produce coupled segments connecting the
+           clusters.
+
+        Stub edges within a cluster are returned separately and
+        routed independently after the coupled pass.
+
+        Returns:
+            Tuple of ``(coupled_segments, stub_edges)`` where each
+            ``CoupledSegmentSpec`` is a side-to-side coupled run and
+            each ``StubEdgeSpec`` is a single-net intra-cluster hop.
+        """
+        if len(p_pads) < 2 or len(n_pads) < 2:
+            return [], []
+
+        # Cluster threshold: pads within this distance share a "side".
+        # USB-C A6 (y=105) and B6 (y=106) are 1 mm apart; the MCU pin is
+        # 10+ mm away.  A 3 mm threshold cleanly separates them.
+        cluster_threshold = 3.0
+
+        p_clusters = self._cluster_pads(p_pads, cluster_threshold)
+        n_clusters = self._cluster_pads(n_pads, cluster_threshold)
+
+        # Each side must form the same number of clusters; otherwise
+        # we cannot reliably pair them up and fall back to "treat
+        # every pad as its own cluster" (still produces an MST).
+        if len(p_clusters) != len(n_clusters):
+            p_clusters = [[p] for p in p_pads]
+            n_clusters = [[n] for n in n_pads]
+
+        # Need at least two clusters per side to form a coupled run.
+        if len(p_clusters) < 2 or len(n_clusters) < 2:
+            return [], []
+
+        # Compute centroids for matching clusters across nets.
+        p_centroids = [self._cluster_centroid(c) for c in p_clusters]
+        n_centroids = [self._cluster_centroid(c) for c in n_clusters]
+
+        # Greedy match P-cluster -> nearest N-cluster centroid.  For
+        # the test fixtures this is optimal (clusters are well
+        # separated) and avoids the O(n!) cost of optimal assignment.
+        n_assigned = [False] * len(n_clusters)
+        cluster_pairs: list[tuple[list[Pad], list[Pad]]] = []
+        for pi, (px, py) in enumerate(p_centroids):
+            best_ni = -1
+            best_dist = float("inf")
+            for ni, (nx, ny) in enumerate(n_centroids):
+                if n_assigned[ni]:
+                    continue
+                dist = math.sqrt((px - nx) ** 2 + (py - ny) ** 2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_ni = ni
+            if best_ni >= 0:
+                n_assigned[best_ni] = True
+                cluster_pairs.append((p_clusters[pi], n_clusters[best_ni]))
+
+        # Within each matched cluster pair, pick the "representative"
+        # P pad and N pad (closest pair across the two clusters) as the
+        # endpoint of the coupled run.  Other pads in the cluster
+        # become stub edges back to the representative.
+        rep_pads: list[tuple[Pad, Pad]] = []  # (p_rep, n_rep)
+        stub_edges: list[StubEdgeSpec] = []
+
+        for p_cluster, n_cluster in cluster_pairs:
+            best_pair: tuple[Pad, Pad] | None = None
+            best_dist = float("inf")
+            for p in p_cluster:
+                for n in n_cluster:
+                    d = self._pad_distance(p, n)
+                    if d < best_dist:
+                        best_dist = d
+                        best_pair = (p, n)
+            if best_pair is None:  # pragma: no cover — defensive
+                continue
+            p_rep, n_rep = best_pair
+            rep_pads.append((p_rep, n_rep))
+
+            for p in p_cluster:
+                if p is not p_rep:
+                    stub_edges.append(StubEdgeSpec(start=p_rep, end=p))
+            for n in n_cluster:
+                if n is not n_rep:
+                    stub_edges.append(StubEdgeSpec(start=n_rep, end=n))
+
+        if len(rep_pads) < 2:
+            return [], stub_edges
+
+        # MST over representative pad pairs.  Edge weight = sum of
+        # P-trace and N-trace lengths for the coupled segment.  This
+        # is the metric the test plan asks us to minimize ("greedy
+        # nearest-neighbor pairing would lose").
+        n_reps = len(rep_pads)
+        edges: list[tuple[float, int, int]] = []
+        for i in range(n_reps):
+            for j in range(i + 1, n_reps):
+                p_i, n_i = rep_pads[i]
+                p_j, n_j = rep_pads[j]
+                weight = self._pad_distance(p_i, p_j) + self._pad_distance(n_i, n_j)
+                edges.append((weight, i, j))
+        edges.sort(key=lambda e: e[0])
+
+        # Kruskal's algorithm with union-find.
+        parent = list(range(n_reps))
+
+        def find(k: int) -> int:
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+
+        coupled_segments: list[CoupledSegmentSpec] = []
+        for weight, i, j in edges:
+            ri, rj = find(i), find(j)
+            if ri == rj:
+                continue
+            parent[ri] = rj
+            p_i, n_i = rep_pads[i]
+            p_j, n_j = rep_pads[j]
+            polarity_swap = self._polarity_swap_between(p_i, n_i, p_j, n_j)
+            coupled_segments.append(
+                CoupledSegmentSpec(
+                    p_start=p_i,
+                    p_end=p_j,
+                    n_start=n_i,
+                    n_end=n_j,
+                    polarity_swap=polarity_swap,
+                )
+            )
+            if len(coupled_segments) == n_reps - 1:
+                break
+
+        return coupled_segments, stub_edges
+
+    def _route_stub_edges(self, stubs: list[StubEdgeSpec]) -> list[Route]:
+        """Route intra-net stub edges via the autorouter's pad-to-pad pathfinder.
+
+        Issue #2473: Stub edges are short single-net hops between pads
+        in the same cluster (e.g., USB-C A6 -> B6 within USB_D+).  They
+        do not need coupled routing because they are not coupled with
+        any other net — they are a short continuation of a single
+        polarity that has already been routed via the coupled run.
+
+        Routes that fail are silently dropped: this is best-effort
+        completion of the stub, and the main strategy can still pick
+        them up afterwards.
+        """
+        results: list[Route] = []
+        for stub in stubs:
+            try:
+                route = self.autorouter.router.route(stub.start, stub.end)
+            except Exception as exc:  # pragma: no cover — defensive
+                print(f"    WARNING: stub route raised: {exc}")
+                route = None
+
+            if route is None:
+                print(
+                    f"    WARNING: stub edge {stub.start.net_name} "
+                    f"{stub.start.ref}.{stub.start.pin} -> "
+                    f"{stub.end.ref}.{stub.end.pin} failed (deferred to main strategy)"
+                )
+                continue
+
+            # Use the autorouter's unified marking helper so both the
+            # Python and C++ grids stay synchronized.
+            self.autorouter._mark_route(route)
+            self.autorouter.routes.append(route)
+            results.append(route)
+        return results
 
     def route_differential_pair_coupled(
         self,
@@ -792,13 +1204,31 @@ class DiffPairRouter:
 
         p_pads, n_pads = pad_result
 
-        # Pair pads for routing
-        pad_pairs = self._pair_pads_for_coupled_routing(p_pads, n_pads)
-        if not pad_pairs:
+        # Issue #2473: Pair pads using the MST-based N-pad helper.
+        # For 2-pad nets this still produces a single coupled segment
+        # with no stubs; for 3+ pad nets (USB-C) it returns one or
+        # more coupled segments plus the intra-cluster stub edges that
+        # the independent router will handle after the coupled pass.
+        if len(p_pads) == 2 and len(n_pads) == 2:
+            # Backward-compatible fast path.
+            legacy = self._pair_pads_for_coupled_routing(p_pads, n_pads)
+            coupled_specs = [
+                CoupledSegmentSpec(
+                    p_start=ps, p_end=pe, n_start=ns, n_end=ne, polarity_swap=False
+                )
+                for ps, pe, ns, ne in legacy
+            ]
+            stub_specs: list[StubEdgeSpec] = []
+        else:
+            coupled_specs, stub_specs = self._pair_pads_for_coupled_routing_npad(
+                p_pads, n_pads
+            )
+
+        if not coupled_specs:
             if coupled_only:
                 print(
                     "    Skipping diff-pair pre-pass: complex pad configuration "
-                    "(coupled pathfinder needs exactly 2 pads per net)"
+                    "(coupled pathfinder could not pair pads)"
                 )
                 return [], None
             print("    WARNING: Complex pad configuration, falling back to independent routing")
@@ -807,22 +1237,32 @@ class DiffPairRouter:
         # Calculate spacing in grid cells
         spacing_cells = int(spacing / self.autorouter.grid.resolution)
 
+        # If any segment requires polarity-swap, enable swap-via moves.
+        any_polarity_swap = any(s.polarity_swap for s in coupled_specs)
+
         # Create coupled pathfinder
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,
             self.autorouter.rules,
             spacing_cells,
             net_class_map=self.autorouter.net_class_map,
+            allow_swap_via=any_polarity_swap,
         )
 
         routes: list[Route] = []
         p_routes: list[Route] = []
         n_routes: list[Route] = []
 
-        for p_start, p_end, n_start, n_end in pad_pairs:
-            print(f"    Routing {pair.positive.net_name}/{pair.negative.net_name}...")
+        for spec in coupled_specs:
+            polarity_marker = " (polarity-swap)" if spec.polarity_swap else ""
+            print(
+                f"    Routing {pair.positive.net_name}/{pair.negative.net_name}"
+                f"{polarity_marker}..."
+            )
 
-            result = pathfinder.route_coupled(p_start, p_end, n_start, n_end)
+            result = pathfinder.route_coupled(
+                spec.p_start, spec.p_end, spec.n_start, spec.n_end
+            )
 
             if result is None:
                 if coupled_only:
@@ -835,15 +1275,29 @@ class DiffPairRouter:
 
             p_route, n_route = result
 
-            # Mark routes on grid
-            self.autorouter.grid.mark_route(p_route)
-            self.autorouter.grid.mark_route(n_route)
+            # Mark routes on grid (use the unified helper that updates
+            # both the Python and C++ grids — issue #1250).
+            self.autorouter._mark_route(p_route)
+            self.autorouter._mark_route(n_route)
             self.autorouter.routes.append(p_route)
             self.autorouter.routes.append(n_route)
 
             p_routes.append(p_route)
             n_routes.append(n_route)
             routes.extend([p_route, n_route])
+
+        # Issue #2473: Route stub edges (intra-net hops within a
+        # cluster, e.g., USB-C A6 -> B6) using the independent router.
+        # These are short, no coupling required, and the autorouter has
+        # better access to obstacle-aware A* than the coupled pathfinder.
+        if stub_specs:
+            stub_routes = self._route_stub_edges(stub_specs)
+            for r in stub_routes:
+                if r.net == pair.positive.net_id:
+                    p_routes.append(r)
+                elif r.net == pair.negative.net_id:
+                    n_routes.append(r)
+                routes.append(r)
 
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
