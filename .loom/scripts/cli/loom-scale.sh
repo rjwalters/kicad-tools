@@ -220,15 +220,26 @@ spawn_role_agent() {
     # Change to workspace
     tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "cd '$REPO_ROOT'" C-m
 
-    # Start claude with role
+    # Start claude with role.  Prefer the resilient wrapper (claude-wrapper.sh)
+    # so OAuth-token rotation, retry, and auth pre-flight all run consistently
+    # with the Python spawn path in agent_spawn.py.  The wrapper exec's the
+    # real `claude` binary; CLAUDE_CODE_OAUTH_TOKEN inherited from the parent
+    # shell flows through naturally.  See issue #3236.
     local role_file="${role}.md"
     local role_path="$REPO_ROOT/.loom/roles/$role_file"
+    local wrapper_path="$REPO_ROOT/.loom/scripts/claude-wrapper.sh"
+    local claude_invocation
+    if [[ -x "$wrapper_path" ]]; then
+        claude_invocation="'$wrapper_path'"
+    else
+        claude_invocation="claude"
+    fi
 
     if [[ -f "$role_path" ]]; then
-        tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "claude -p '/$role' --dangerously-skip-permissions" C-m
+        tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$claude_invocation -p '/$role' --dangerously-skip-permissions" C-m
     else
         echo -e "    ${YELLOW}Warning: Role file not found: $role_file${NC}"
-        tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "claude --dangerously-skip-permissions" C-m
+        tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$claude_invocation --dangerously-skip-permissions" C-m
     fi
 
     return 0
