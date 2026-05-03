@@ -4,6 +4,7 @@
  */
 
 #include "grid.hpp"
+#include "geometry.hpp"
 #include "pathfinder.hpp"
 #include "types.hpp"
 #include <nanobind/nanobind.h>
@@ -11,6 +12,7 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/string.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -45,7 +47,17 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_turn", &DesignRules::cost_turn)
         .def_rw("cost_via", &DesignRules::cost_via)
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
-        .def_rw("congestion_threshold", &DesignRules::congestion_threshold);
+        .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
+        .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance);
+
+    // ValidationResult struct (Issue #2439)
+    nb::class_<ValidationResult>(m, "ValidationResult")
+        .def(nb::init<>())
+        .def_rw("valid", &ValidationResult::valid)
+        .def_rw("min_clearance", &ValidationResult::min_clearance)
+        .def_rw("violation_x", &ValidationResult::violation_x)
+        .def_rw("violation_y", &ValidationResult::violation_y)
+        .def_rw("violation_type", &ValidationResult::violation_type);
 
     // PadBounds struct
     nb::class_<PadBounds>(m, "PadBounds")
@@ -140,7 +152,24 @@ NB_MODULE(router_cpp, m) {
         .def_prop_ro("total_cells", &Grid3D::total_cells)
         // Statistics
         .def("count_blocked", &Grid3D::count_blocked)
-        .def("memory_mb", &Grid3D::memory_mb);
+        .def("memory_mb", &Grid3D::memory_mb)
+        // Geometric validation (Issue #2439)
+        .def("add_pad", &Grid3D::add_pad,
+             "x"_a, "y"_a, "width"_a, "height"_a,
+             "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a)
+        .def("add_stored_segment", &Grid3D::add_stored_segment,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+             "width"_a, "layer_idx"_a, "net"_a)
+        .def("add_stored_via", &Grid3D::add_stored_via,
+             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a)
+        .def("clear_validation_data", &Grid3D::clear_validation_data)
+        .def("validate_route", &Grid3D::validate_route,
+             "segments"_a, "vias"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a, "trace_clearance"_a,
+             "via_clearance"_a, "min_drill_clearance"_a)
+        .def_prop_ro("pad_count", &Grid3D::pad_count)
+        .def_prop_ro("stored_segment_count", &Grid3D::stored_segment_count)
+        .def_prop_ro("stored_via_count", &Grid3D::stored_via_count);
 
     // Pathfinder class
     nb::class_<Pathfinder>(m, "Pathfinder")
@@ -162,6 +191,28 @@ NB_MODULE(router_cpp, m) {
         .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
+
+    // Geometry functions (Issue #2439)
+    m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {
+        return router::fnv1a_hash(s.c_str(), s.size());
+    }, "s"_a, "Compute FNV-1a hash of a string (deterministic)");
+
+    m.def("point_to_segment_distance",
+          &router::point_to_segment_distance,
+          "px"_a, "py"_a, "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+          "Point-to-segment distance");
+
+    m.def("segment_to_segment_distance",
+          &router::segment_to_segment_distance,
+          "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+          "x3"_a, "y3"_a, "x4"_a, "y4"_a,
+          "Segment-to-segment distance");
+
+    m.def("segments_intersect",
+          &router::segments_intersect,
+          "ax1"_a, "ay1"_a, "ax2"_a, "ay2"_a,
+          "bx1"_a, "by1"_a, "bx2"_a, "by2"_a,
+          "Test whether two segments properly intersect");
 
     // Version info
     m.def("version", []() { return "1.0.0"; });

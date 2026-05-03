@@ -221,6 +221,9 @@ class CppGrid:
         # post-route validation and pad_blocked lookups during relaxed
         # blocker identification, see find_blocking_nets_relaxed).
         self._py_grid: RoutingGrid | None = None
+        # Track synced route count for incremental stored segment/via updates
+        # (Issue #2439: C++ geometric validation)
+        self._synced_route_count: int = 0
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
@@ -251,6 +254,34 @@ class CppGrid:
                     py_cell = grid.grid[layer][y][x]
                     if py_cell.blocked:
                         cpp_grid._impl.mark_blocked(x, y, layer, py_cell.net, py_cell.is_obstacle)
+
+        # Issue #2439: Populate pad data for C++ geometric validation.
+        # Pre-compute per-component clearance overrides and FNV-1a ref hashes
+        # so the C++ side never calls back into Python during validation.
+        component_pitches = grid.compute_component_pitches()
+        for pad in grid._pads:
+            # Compute layer index (-1 for through-hole pads = all layers)
+            if pad.through_hole:
+                layer_idx = -1
+            else:
+                try:
+                    layer_idx = grid.layer_to_index(pad.layer.value)
+                except (KeyError, ValueError):
+                    layer_idx = 0
+
+            # Pre-compute clearance for this pad's component (Issue #1016)
+            pin_pitch = component_pitches.get(pad.ref) if pad.ref else None
+            clearance_override = grid.rules.get_clearance_for_component(
+                pad.ref, pin_pitch
+            )
+
+            # Deterministic FNV-1a hash of component reference
+            ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
+
+            cpp_grid._impl.add_pad(
+                pad.x, pad.y, pad.width, pad.height,
+                pad.net, layer_idx, ref_hash, clearance_override,
+            )
 
         return cpp_grid
 
@@ -591,49 +622,58 @@ class CppPathfinder:
             via_diameter=self._rules.via_diameter,
         )
 
-        # Issue #1702 Gap 3: Post-route geometric clearance validation.
-        # Grid-based A* checking is approximate; diagonal segments can cut
-        # through obstacle corners. Validate actual geometry to catch
-        # clearance violations that grid-based checking missed.
+        # Issue #1702 Gap 3 + Issue #2439: Post-route geometric clearance
+        # validation in C++. Eliminates Python callback overhead by running
+        # all 4 validation checks (segment-pad, segment-segment, via-segment,
+        # via-via, same-net drill spacing) in a single C++ call.
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is not None:
-            violation_location = None
+            # Sync stored segments/vias from completed routes to C++
+            self._sync_stored_routes(py_grid)
 
-            # Validate segment-to-obstacle clearance
-            if violation_location is None:
-                for seg in route.segments:
-                    is_valid, _clearance, location = py_grid.validate_segment_clearance(
-                        seg, exclude_net=start.net
-                    )
-                    if not is_valid:
-                        violation_location = location
-                        break
+            # Build exclude_ref_hashes for start/end pad components (Issue #1764)
+            exclude_ref_hashes: list[int] = []
+            for pad in (start, end):
+                if pad.ref:
+                    exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
 
-            # Validate via-to-segment clearance
-            if violation_location is None:
-                for via in route.vias:
-                    is_valid, _clearance, location = py_grid.validate_via_clearance(
-                        via, exclude_net=start.net
-                    )
-                    if not is_valid:
-                        violation_location = location
-                        break
+            # Build C++ segment/via lists from route
+            cpp_segs: list[router_cpp.Segment] = []
+            for seg in route.segments:
+                cs = router_cpp.Segment()
+                cs.x1, cs.y1, cs.x2, cs.y2 = seg.x1, seg.y1, seg.x2, seg.y2
+                cs.width = seg.width
+                cs.layer = self._grid.layer_to_index(seg.layer.value)
+                cs.net = seg.net
+                cpp_segs.append(cs)
 
-            # Validate via-to-via clearance
-            if violation_location is None:
-                for via in route.vias:
-                    is_valid, _clearance, location = py_grid.validate_via_to_via_clearance(
-                        via, exclude_net=start.net
-                    )
-                    if not is_valid:
-                        violation_location = location
-                        break
+            cpp_vias: list[router_cpp.Via] = []
+            for via in route.vias:
+                cv = router_cpp.Via()
+                cv.x, cv.y = via.x, via.y
+                cv.drill = via.drill
+                cv.diameter = via.diameter
+                cv.layer_from = self._grid.layer_to_index(via.layers[0].value)
+                cv.layer_to = self._grid.layer_to_index(via.layers[1].value)
+                cv.net = via.net
+                cpp_vias.append(cv)
 
-            if violation_location is not None:
-                # Issue #2438: Feed violation location back as avoidance cost
-                # so subsequent routing attempts steer away from this area.
+            vresult = self._grid._impl.validate_route(
+                cpp_segs, cpp_vias,
+                start.net,
+                exclude_ref_hashes,
+                self._rules.trace_clearance,
+                self._rules.via_clearance,
+                self._rules.min_drill_clearance,
+            )
+
+            if not vresult.valid:
+                # Issue #2438: Feed C++ violation coordinates back as
+                # avoidance cost so subsequent routing attempts steer
+                # away from this area.
                 self._boost_avoidance_at(
-                    violation_location, trace_radius_cells
+                    (vresult.violation_x, vresult.violation_y),
+                    trace_radius_cells,
                 )
                 return None
 
@@ -682,6 +722,32 @@ class CppPathfinder:
     def nodes_explored(self) -> int:
         """Number of nodes explored in last route."""
         return self._impl.nodes_explored
+
+    def _sync_stored_routes(self, py_grid: RoutingGrid) -> None:
+        """Sync stored segments and vias from completed routes to C++.
+
+        Issue #2439: Incrementally adds new route data to the C++ Grid3D
+        so that validate_route() can check clearances without Python callbacks.
+        Only copies routes added since the last sync.
+        """
+        current_count = len(py_grid.routes)
+        if current_count <= self._grid._synced_route_count:
+            return
+
+        # Add segments/vias from newly completed routes
+        for route in py_grid.routes[self._grid._synced_route_count :]:
+            for seg in route.segments:
+                layer_idx = py_grid.layer_to_index(seg.layer.value)
+                self._grid._impl.add_stored_segment(
+                    seg.x1, seg.y1, seg.x2, seg.y2,
+                    seg.width, layer_idx, seg.net,
+                )
+            for via in route.vias:
+                self._grid._impl.add_stored_via(
+                    via.x, via.y, via.drill, via.diameter, via.net,
+                )
+
+        self._grid._synced_route_count = current_count
 
     def find_blocking_nets(
         self,

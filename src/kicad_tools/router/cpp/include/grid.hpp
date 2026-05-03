@@ -95,6 +95,54 @@ public:
     int count_blocked() const;
     float memory_mb() const;
 
+    // -----------------------------------------------------------------------
+    // Geometric validation storage and methods (Issue #2439)
+    // Eliminates Python callback overhead for post-route clearance checks.
+    // -----------------------------------------------------------------------
+
+    // Register pads for clearance validation.
+    // clearance_override: pre-computed from rules.get_clearance_for_component()
+    void add_pad(float x, float y, float width, float height,
+                 int net, int layer_idx, uint32_t ref_hash,
+                 float clearance_override);
+
+    // Register a completed route's segments for clearance validation.
+    void add_stored_segment(float x1, float y1, float x2, float y2,
+                            float width, int layer_idx, int net);
+
+    // Register a completed route's via for clearance validation.
+    void add_stored_via(float x, float y, float drill, float diameter, int net);
+
+    // Clear all stored validation data (pads, segments, vias).
+    void clear_validation_data();
+
+    // Validate a candidate route against all stored pads, segments, and vias.
+    // Ports the 4 Python validation methods from grid.py lines 905-1317:
+    //   - validate_segment_clearance (seg vs pads + stored segs + stored vias)
+    //   - validate_via_clearance (via vs stored segs)
+    //   - validate_via_to_via_clearance (via vs stored vias, different net)
+    //   - validate_same_net_drill_spacing (via vs stored vias, same net)
+    //
+    // exclude_net: net ID of the route being validated (same-net OK)
+    // exclude_ref_hashes: FNV-1a hashes of component refs to exclude
+    //                     (start/end pad components, Issue #1764)
+    // trace_clearance: default clearance for segments
+    // via_clearance: default clearance for vias
+    // min_drill_clearance: minimum drill-to-drill spacing (same-net)
+    ValidationResult validate_route(
+        const std::vector<Segment>& segments,
+        const std::vector<Via>& vias,
+        int exclude_net,
+        const std::vector<uint32_t>& exclude_ref_hashes,
+        float trace_clearance,
+        float via_clearance,
+        float min_drill_clearance) const;
+
+    // Accessors for validation data sizes (for testing/debugging)
+    size_t pad_count() const { return pads_.size(); }
+    size_t stored_segment_count() const { return stored_segments_.size(); }
+    size_t stored_via_count() const { return stored_vias_.size(); }
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +
@@ -111,6 +159,11 @@ private:
     std::vector<int> congestion_;
     int congestion_cols_, congestion_rows_;
     int congestion_size_ = 8;  // Cells per congestion region
+
+    // Geometric validation storage (Issue #2439)
+    std::vector<PadInfo> pads_;
+    std::vector<StoredSegment> stored_segments_;
+    std::vector<StoredVia> stored_vias_;
 };
 
 }  // namespace router
