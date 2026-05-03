@@ -2304,6 +2304,34 @@ def _add_route_parser(subparsers) -> None:
             "detects any disconnected net in the written PCB file."
         ),
     )
+    route_parser.add_argument(
+        "--differential-pairs",
+        action="store_true",
+        help=(
+            "Enable differential pair routing. Detects diff pair net names "
+            "(e.g., USB_D+/USB_D-, ETH_TX_P/ETH_TX_N) and routes them together "
+            "with the CoupledPathfinder. Compatible with the 'negotiated' and "
+            "'basic' strategies. Issue #2464: makes diff-pair detection a "
+            "routing-time consumer."
+        ),
+    )
+    route_parser.add_argument(
+        "--diffpair-spacing",
+        type=float,
+        help=(
+            "Override differential pair trace spacing in mm. "
+            "Default: auto based on detected pair type "
+            "(USB2: 0.20mm, USB3/HDMI/LVDS: 0.15mm, Ethernet: 0.20mm)."
+        ),
+    )
+    route_parser.add_argument(
+        "--diffpair-max-delta",
+        type=float,
+        help=(
+            "Override maximum length mismatch for differential pairs in mm. "
+            "Default: auto based on detected pair type."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:

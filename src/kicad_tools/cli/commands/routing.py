@@ -233,6 +233,13 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--backend", args.backend])
     if getattr(args, "strict", False):
         sub_argv.append("--strict")
+    # Issue #2464: Forward differential pair routing flags
+    if getattr(args, "differential_pairs", False):
+        sub_argv.append("--differential-pairs")
+    if getattr(args, "diffpair_spacing", None) is not None:
+        sub_argv.extend(["--diffpair-spacing", str(args.diffpair_spacing)])
+    if getattr(args, "diffpair_max_delta", None) is not None:
+        sub_argv.extend(["--diffpair-max-delta", str(args.diffpair_max_delta)])
     return route_main(sub_argv)
 
 
