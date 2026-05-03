@@ -1875,6 +1875,159 @@ class Autorouter:
         net_class = classify_from_name(net_name)
         return net_class in (NetClass.POWER, NetClass.GROUND)
 
+    def _get_net_class_priority(self, net_id: int) -> int:
+        """Return the net-class routing priority (lower = higher priority).
+
+        Issue #2475: Same-priority sibling detection requires comparing the
+        priority class of two nets without invoking the full ``_get_net_priority``
+        tiebreaker tuple.  This returns just the class priority.
+
+        Args:
+            net_id: The net ID to look up.
+
+        Returns:
+            The integer priority (1-10 for signal classes, 99 for pour nets,
+            10 for nets without an assigned class).
+        """
+        net_name = self.net_names.get(net_id, "")
+        net_class = self.net_class_map.get(net_name)
+        if net_class is None:
+            return 10
+        if net_class.is_pour_net:
+            return 99
+        return net_class.priority
+
+    def _get_net_destination_components(self, net_id: int) -> set[str]:
+        """Return the set of component references touched by a net's pads.
+
+        Issue #2475: Used to detect "shared destination" sibling nets — three
+        motor phase nets PHASE_A/B/C all terminate at the same J2 connector,
+        so identifying that shared destination is what lets the rip-up logic
+        consider sibling phase nets as blockers even when they don't sit on
+        the failed net's direct A* path.
+
+        Args:
+            net_id: The net ID to inspect.
+
+        Returns:
+            Set of component reference designators (e.g. ``{"J2", "U1"}``).
+            Empty if the net has no pads.
+        """
+        refs: set[str] = set()
+        for pad_key in self.nets.get(net_id, []):
+            pad = self.pads.get(pad_key)
+            if pad is None:
+                continue
+            if pad.ref:
+                refs.add(pad.ref)
+        return refs
+
+    def _find_same_tier_destination_siblings(
+        self,
+        failed_net: int,
+        candidate_nets: list[int] | set[int],
+    ) -> set[int]:
+        """Find sibling nets in the same priority tier sharing a destination.
+
+        Issue #2475: When a high-priority signal net such as PHASE_C fails
+        its last pad on a shared connector (J2), the ``targeted_ripup``
+        direct-line blocker check misses the earlier-routed PHASE_A/PHASE_B
+        traces because they don't sit on the direct line between PHASE_C's
+        pads — they reserve grid cells in the shared connector pin field.
+        This helper identifies same-tier siblings that route to the same
+        destination component so they can be added to the rip-up set.
+
+        Args:
+            failed_net: The net ID that failed (or partially failed) to route.
+            candidate_nets: Iterable of net IDs to consider as potential siblings
+                (typically the routed nets ``net_routes.keys()``).
+
+        Returns:
+            Set of net IDs that:
+
+            - Are different from ``failed_net``.
+            - Share the same class priority as ``failed_net`` (e.g. both
+              priority 1 ``HIGH_CURRENT_SIGNAL`` / ``POWER`` tier).
+            - Have at least one pad on a component that ``failed_net`` also
+              has pads on.
+        """
+        failed_priority = self._get_net_class_priority(failed_net)
+        # Only apply this for "early-tier" signal classes where competition
+        # for shared connector pin fields is the expected failure mode.
+        # Pour-net priority (99) and the default class (10) don't benefit
+        # from this — they cover too many unrelated nets.
+        if failed_priority >= 10:
+            return set()
+
+        failed_components = self._get_net_destination_components(failed_net)
+        if not failed_components:
+            return set()
+
+        siblings: set[int] = set()
+        for net_id in candidate_nets:
+            if net_id == failed_net:
+                continue
+            if self._get_net_class_priority(net_id) != failed_priority:
+                continue
+            other_components = self._get_net_destination_components(net_id)
+            if other_components & failed_components:
+                siblings.add(net_id)
+
+        return siblings
+
+    def _get_partially_routed_nets(
+        self,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+    ) -> set[int]:
+        """Find nets that are in ``net_routes`` but didn't connect all pads.
+
+        Issue #2475: When a 4-pin net like PHASE_B has its RSMT broken into
+        multiple A* edges and one edge fails, the net still appears in
+        ``net_routes`` with the successfully-routed segments — but it is not
+        fully connected.  The standard rip-up loop only flags nets through
+        overused cells, so a partially routed net with no overflow but a
+        missing pad slips through and never gets re-attempted.  This helper
+        flags those nets so they can join the rip-up set.
+
+        Args:
+            net_routes: Mapping of net ID to list of routes for that net.
+            pads_by_net: Mapping of net ID to list of pads for that net.
+
+        Returns:
+            Set of net IDs whose largest connected component does not contain
+            every pad of the net.
+        """
+        from .observability import validate_net_connectivity
+
+        # Build the net_pads dict expected by validate_net_connectivity,
+        # restricted to nets that actually have routes.
+        net_pads: dict[int, list[Pad]] = {}
+        for net_id in net_routes:
+            pads = pads_by_net.get(net_id)
+            if pads and len(pads) >= 2:
+                net_pads[net_id] = pads
+
+        if not net_pads:
+            return set()
+
+        # Flatten all routes from all nets — validate_net_connectivity
+        # selects the routes per-net by ``r.net``.
+        all_routes: list[Route] = []
+        for routes in net_routes.values():
+            all_routes.extend(routes)
+
+        connectivity = validate_net_connectivity(all_routes, net_pads)
+        partial: set[int] = set()
+        for net_id, info in connectivity.items():
+            if not info.get("connected", True):
+                # Not fully connected — connected_pads < total_pads.
+                if info.get("connected_pads", 0) > 0 and info.get("connected_pads", 0) < info.get(
+                    "total_pads", 0
+                ):
+                    partial.add(net_id)
+        return partial
+
     def _ensure_congestion_estimator(self) -> CongestionEstimator:
         """Build the pre-route congestion estimator if not already computed.
 
@@ -3338,6 +3491,29 @@ class Autorouter:
                             nets_to_reroute.append(failed_net)
                     print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
 
+                # Issue #2475: Also include partially routed nets — nets that
+                # appear in ``net_routes`` but failed to connect all of their
+                # pads (e.g. PHASE_B with 3/4 pads).  These nets have routes
+                # that may not pass through any overused cell, so the standard
+                # detector misses them entirely.  Without re-attempting them,
+                # they remain stuck at the connectivity gap forever.
+                partial_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
+                if partial_nets:
+                    new_partial = [
+                        n for n in partial_nets
+                        if n not in nets_to_reroute and n not in off_grid_nets
+                    ]
+                    if new_partial:
+                        for partial_net in new_partial:
+                            nets_to_reroute.append(partial_net)
+                        partial_names = [
+                            self.net_names.get(n, f"Net_{n}") for n in new_partial
+                        ]
+                        flush_print(
+                            f"  Including {len(new_partial)} partially routed net(s) "
+                            f"in recovery: {', '.join(partial_names)}"
+                        )
+
                 # Issue #2295: Per-net rip-up stall filtering.
                 # Track each net's overflow contribution across rip-up
                 # iterations.  If a net has been ripped up N consecutive times
@@ -3511,6 +3687,17 @@ class Autorouter:
                         if len(pads) < 2:
                             continue
 
+                        # Issue #2475: If the failed net is partially routed
+                        # (some pads connected, some not), rip up its existing
+                        # routes before re-attempting.  Otherwise the new A*
+                        # search runs against a grid where the partial routes
+                        # are still marked, and ``_route_net_negotiated`` will
+                        # build a duplicate Steiner tree on top of stale routes.
+                        if failed_net in net_routes and net_routes[failed_net]:
+                            neg_router.rip_up_nets(
+                                [failed_net], net_routes, self.routes
+                            )
+
                         # Find which nets are blocking by checking pad connections
                         blocking_nets: set[int] = set()
                         for j in range(len(pads) - 1):
@@ -3518,6 +3705,28 @@ class Autorouter:
                                 pads[j], pads[j + 1]
                             )
                             blocking_nets.update(blockers)
+
+                        # Issue #2475: Augment blockers with same-tier siblings
+                        # that share a destination component.  When three motor
+                        # phase nets compete for the same J2 connector pin field,
+                        # the early-routed phase nets reserve grid cells in the
+                        # field but don't sit on the *direct line* between the
+                        # later phase's pads — so the wire-clearance check above
+                        # misses them entirely.  This catches that case.
+                        sibling_blockers = self._find_same_tier_destination_siblings(
+                            failed_net, list(net_routes.keys())
+                        )
+                        if sibling_blockers:
+                            new_siblings = sibling_blockers - blocking_nets
+                            if new_siblings:
+                                sibling_names = [
+                                    self.net_names.get(n, f"Net_{n}") for n in new_siblings
+                                ]
+                                flush_print(
+                                    f"      + {len(new_siblings)} same-tier destination "
+                                    f"sibling(s) added as blockers: {', '.join(sibling_names)}"
+                                )
+                            blocking_nets |= sibling_blockers
 
                         if blocking_nets:
                             # Use targeted rip-up to displace only blocking nets
@@ -3834,9 +4043,17 @@ class Autorouter:
                     # clearing the routed nets that block them. Fall back to
                     # targeted rip-up to identify and displace blockers.
                     # Issue #2333: Skip fallbacks in hotset-only mode.
+                    # Issue #2475: Also include partially routed nets (those
+                    # in net_routes but missing pad-to-pad connectivity), since
+                    # they too cannot make further progress without rip-up.
+                    partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
                     still_failed = [
                         n for n in net_order
-                        if n not in net_routes and n in pads_by_net and n not in off_grid_nets
+                        if (
+                            (n not in net_routes or n in partial_failed)
+                            and n in pads_by_net
+                            and n not in off_grid_nets
+                        )
                     ]
                     if overflow == 0 and still_failed and not timed_out and not hotset_only:
                         flush_print(
@@ -3889,12 +4106,28 @@ class Autorouter:
                             pads_for_net = pads_by_net.get(failed_net, [])
                             if len(pads_for_net) < 2:
                                 continue
+
+                            # Issue #2475: Rip up partially routed net's
+                            # existing routes before re-attempting.
+                            if failed_net in net_routes and net_routes[failed_net]:
+                                neg_router.rip_up_nets(
+                                    [failed_net], net_routes, self.routes
+                                )
+
                             blocking_nets: set[int] = set()
                             for j in range(len(pads_for_net) - 1):
                                 blockers = neg_router.find_blocking_nets_for_connection(
                                     pads_for_net[j], pads_for_net[j + 1]
                                 )
                                 blocking_nets.update(blockers)
+
+                            # Issue #2475: Augment with same-tier destination
+                            # siblings (e.g., other PHASE_* nets sharing J2).
+                            sibling_blockers = self._find_same_tier_destination_siblings(
+                                failed_net, list(net_routes.keys())
+                            )
+                            blocking_nets |= sibling_blockers
+
                             if blocking_nets:
                                 def _mark_route_fallback(route: Route) -> None:
                                     self._mark_route(route)
