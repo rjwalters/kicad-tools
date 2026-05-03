@@ -2645,9 +2645,8 @@ class Autorouter:
         analysis = analyzer.analyze_routing_failure(
             grid=self.grid,
             start=source_coords,
-            goal=target_coords,
-            net_id=net,
-            net_name=net_name,
+            end=target_coords,
+            net=net_name,
         )
 
         failure = RoutingFailure(
@@ -2665,8 +2664,8 @@ class Autorouter:
             target_coords=target_coords,
             blocking_nets=set(blocking_nets),
             blocking_components=blocking_components,
-            reason=analysis.primary_cause if analysis else "No path found",
-            failure_cause=analysis.failure_cause if analysis else FailureCause.UNKNOWN,
+            reason=analysis.root_cause.value if analysis else "No path found",
+            failure_cause=analysis.root_cause if analysis else FailureCause.UNKNOWN,
             analysis=analysis,
         )
         self.routing_failures.append(failure)
