@@ -30,6 +30,9 @@ class NetClass(Enum):
     Each net class has different routing requirements:
     - POWER: Wide traces, solid zone connections, prefer inner layers
     - GROUND: Similar to power, highest zone priority
+    - HIGH_CURRENT_SIGNAL: High-current outputs (motor phases, coil drives)
+      that need POWER-tier routing priority but are NOT poured (point-to-
+      point traces preserve switching-edge integrity).
     - CLOCK: Length-critical, controlled impedance, avoid noise coupling
     - HIGH_SPEED: Impedance-controlled, length matching, inner layers preferred
     - DIFFERENTIAL: Must be routed as pairs, tight length matching
@@ -41,6 +44,7 @@ class NetClass(Enum):
 
     POWER = "power"
     GROUND = "ground"
+    HIGH_CURRENT_SIGNAL = "high_current_signal"
     CLOCK = "clock"
     HIGH_SPEED = "high_speed"
     DIFFERENTIAL = "differential"
@@ -123,6 +127,22 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
         r"^(GND|VSS|GNDA|GNDD|AGND|DGND|PGND|SGND|GROUND|CGND)$",
         r"^(CHASSIS|EARTH|SHIELD)$",
         r"_GND$|_VSS$|_AGND$|_DGND$",
+    ],
+    # High-current outputs that should route at POWER priority but NOT
+    # be poured.  Examples: BLDC motor phases (PHASE_A/B/C), stepper coil
+    # drives (COIL_A/B), solenoid/relay returns, generic MOTOR_* nets.
+    # These nets carry switching currents and benefit from early routing
+    # access to wide corridors, but pouring them as a copper plane would
+    # couple noise into adjacent traces and destroy the point-to-point
+    # nature of the FET-output -> motor-pin path.
+    NetClass.HIGH_CURRENT_SIGNAL: [
+        r"^PHASE_?[A-Z0-9]+$",  # PHASE_A, PHASE_B, PHASE1
+        r"^MOTOR_?[A-Z0-9]+$",  # MOTOR_A, MOTOR1, MOTOR_PWM
+        r"^COIL_?[A-Z0-9]+$",  # COIL_A, COIL1
+        r"^STATOR_?[A-Z0-9]+$",
+        r"^ROTOR_?[A-Z0-9]+$",
+        r"^SOLENOID_?[A-Z0-9]*$",
+        r"^RELAY_?[A-Z0-9]*$",
     ],
     NetClass.CLOCK: [
         r"(CLK|CLOCK|MCLK|SCLK|PCLK|BCLK|LRCLK|FCLK|SYSCLK)",
@@ -227,13 +247,14 @@ def classify_from_name(net_name: str) -> NetClass | None:
 
     Priority order (most specific first):
     1. GROUND - Very specific patterns
-    2. HIGH_SPEED - Interface-specific signals
-    3. RF - RF-specific signals
-    4. DEBUG - Debug interface signals
-    5. CLOCK - Clock signals
-    6. POWER - Power supply signals
-    7. ANALOG - Analog signals
-    8. DIFFERENTIAL - Differential pair indicators
+    2. HIGH_CURRENT_SIGNAL - PHASE_*/MOTOR_*/COIL_* high-current outputs
+    3. HIGH_SPEED - Interface-specific signals
+    4. RF - RF-specific signals
+    5. DEBUG - Debug interface signals
+    6. CLOCK - Clock signals
+    7. POWER - Power supply signals
+    8. ANALOG - Analog signals
+    9. DIFFERENTIAL - Differential pair indicators
 
     Args:
         net_name: Name of the net (e.g., "+3.3V", "USB_DP", "GND")
@@ -246,6 +267,10 @@ def classify_from_name(net_name: str) -> NetClass | None:
     # Check patterns in priority order (most specific first)
     check_order = [
         NetClass.GROUND,  # Very specific, check first
+        # High-current motor/coil outputs must be checked before
+        # DIFFERENTIAL (so MOTOR_N is not flagged as a diff-pair partner)
+        # and before POWER (so PHASE_A doesn't match generic name patterns).
+        NetClass.HIGH_CURRENT_SIGNAL,
         NetClass.HIGH_SPEED,  # Interface names often contain CLK
         NetClass.RF,  # RF-specific
         NetClass.DEBUG,  # Debug interfaces
@@ -491,6 +516,7 @@ def apply_net_class_rules(
         NET_CLASS_CLOCK,
         NET_CLASS_DEBUG,
         NET_CLASS_DIGITAL,
+        NET_CLASS_HIGH_CURRENT_SIGNAL,
         NET_CLASS_HIGH_SPEED,
         NET_CLASS_POWER,
         NetClassRouting,
@@ -510,6 +536,7 @@ def apply_net_class_rules(
             zone_connection="solid",
             is_pour_net=True,
         ),
+        NetClass.HIGH_CURRENT_SIGNAL: NET_CLASS_HIGH_CURRENT_SIGNAL,
         NetClass.CLOCK: NET_CLASS_CLOCK,
         NetClass.HIGH_SPEED: NET_CLASS_HIGH_SPEED,
         NetClass.DIFFERENTIAL: NetClassRouting(

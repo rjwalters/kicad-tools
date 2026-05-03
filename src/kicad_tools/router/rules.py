@@ -407,6 +407,27 @@ NET_CLASS_POWER = NetClassRouting(
     is_pour_net=True,  # Power nets often have pours
 )
 
+# High-current signal nets such as motor phase outputs (PHASE_A/B/C),
+# coil drives, and stepper/solenoid returns.  These need POWER-tier
+# routing priority so they get first pick of routing corridors before
+# ordinary signals consume them, but they must NOT be poured: a phase
+# output is point-to-point from the half-bridge FETs to the load and
+# pouring it as a copper plane couples switching noise into nearby
+# traces and breaks the per-trace current path.
+#
+# Trace width is wider than digital signals (default 0.4mm) to handle
+# motor currents but narrower than full POWER (0.5mm) since these are
+# typically routed individually per-phase rather than as bus rails.
+NET_CLASS_HIGH_CURRENT_SIGNAL = NetClassRouting(
+    name="HighCurrentSignal",
+    priority=1,  # Same tier as POWER so motor phases route early
+    trace_width=0.4,
+    clearance=0.2,
+    via_size=0.8,
+    cost_multiplier=0.85,  # Prefer over normal signals, slightly less than power
+    is_pour_net=False,  # Critical: phase outputs must NOT be poured
+)
+
 NET_CLASS_CLOCK = NetClassRouting(
     name="Clock",
     priority=2,
