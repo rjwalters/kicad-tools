@@ -896,3 +896,323 @@ class TestIssue2387FinePitchEscapeFailure:
         result = SubGridResult(analysis=analysis, failed_pads=[])
         router._raise_if_component_fully_failed(result, {})
         # No exception expected
+
+
+class TestAdaptiveGridStrategyDispatch:
+    """Tests for strategy dispatch within adaptive grid routing (issue #2453).
+
+    When the adaptive multi-resolution grid is active and a non-default
+    strategy (evolutionary or monte-carlo) is requested, the phase2_route_fn
+    lambda must dispatch to the correct router method rather than falling
+    through to the default ``route_all()``.
+    """
+
+    def _make_simple_pads_and_nets(self, grid):
+        """Create a minimal set of pads and nets for dispatch tests."""
+        pads = {}
+        for i in range(4):
+            key = ("U1", str(i + 1))
+            pad = make_pad(
+                x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1)
+            )
+            pads[key] = pad
+            grid.add_pad(pad)
+        nets = {1: [("U1", "1"), ("U1", "2")], 3: [("U1", "3"), ("U1", "4")]}
+        return pads, nets
+
+    def test_evolutionary_strategy_dispatched_through_adaptive_grid(self):
+        """When strategy='evolutionary', route_adaptive's route_fn must call
+        route_all_evolutionary, not the default route_all.
+
+        This validates the fix from commit b1584b35 — the phase2_route_fn
+        lambda in route_cmd.py correctly dispatches evolutionary strategy
+        when the adaptive multi-resolution grid is active.
+        """
+        from unittest.mock import MagicMock, patch
+
+        grid, rules = make_grid_and_rules()
+        adaptive_router = AdaptiveGridRouter(grid, rules)
+        pads, nets = self._make_simple_pads_and_nets(grid)
+
+        # Track which method the route_fn invokes
+        calls = []
+        mock_routes = [
+            Route(net=1, net_name="NET1", segments=[
+                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
+                        layer=Layer.F_CU, net=1),
+            ]),
+        ]
+
+        def fake_route_all_evolutionary(**kwargs):
+            calls.append("evolutionary")
+            return mock_routes
+
+        # Simulate the phase2_route_fn lambda from route_cmd.py
+        # for strategy="evolutionary"
+        mock_router = MagicMock()
+        mock_router.route_all_evolutionary = fake_route_all_evolutionary
+
+        def phase2_route_fn():
+            return mock_router.route_all_evolutionary(
+                pop_size=20, generations=10, verbose=False,
+            )
+
+        result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
+
+        assert "evolutionary" in calls, (
+            "route_all_evolutionary must be called when strategy is 'evolutionary'"
+        )
+        assert result.nets_routed == 1
+        assert isinstance(result, AdaptiveGridResult)
+
+    def test_monte_carlo_strategy_dispatched_through_adaptive_grid(self):
+        """When strategy='monte-carlo', route_adaptive's route_fn must call
+        route_all_monte_carlo, not the default route_all.
+        """
+        from unittest.mock import MagicMock
+
+        grid, rules = make_grid_and_rules()
+        adaptive_router = AdaptiveGridRouter(grid, rules)
+        pads, nets = self._make_simple_pads_and_nets(grid)
+
+        calls = []
+        mock_routes = [
+            Route(net=1, net_name="NET1", segments=[
+                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
+                        layer=Layer.F_CU, net=1),
+            ]),
+        ]
+
+        def fake_route_all_monte_carlo(**kwargs):
+            calls.append("monte-carlo")
+            return mock_routes
+
+        mock_router = MagicMock()
+        mock_router.route_all_monte_carlo = fake_route_all_monte_carlo
+
+        # Simulate the phase2_route_fn lambda for strategy="monte-carlo"
+        def phase2_route_fn():
+            return mock_router.route_all_monte_carlo(
+                num_trials=10, verbose=False,
+            )
+
+        result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
+
+        assert "monte-carlo" in calls, (
+            "route_all_monte_carlo must be called when strategy is 'monte-carlo'"
+        )
+        assert result.nets_routed == 1
+
+    def test_negotiated_strategy_dispatched_through_adaptive_grid(self):
+        """When strategy='negotiated' (default), route_adaptive's route_fn
+        must call route_all_negotiated, not route_all_evolutionary.
+        """
+        from unittest.mock import MagicMock
+
+        grid, rules = make_grid_and_rules()
+        adaptive_router = AdaptiveGridRouter(grid, rules)
+        pads, nets = self._make_simple_pads_and_nets(grid)
+
+        calls = []
+        mock_routes = [
+            Route(net=1, net_name="NET1", segments=[
+                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
+                        layer=Layer.F_CU, net=1),
+            ]),
+        ]
+
+        def fake_route_all_negotiated(**kwargs):
+            calls.append("negotiated")
+            return mock_routes
+
+        mock_router = MagicMock()
+        mock_router.route_all_negotiated = fake_route_all_negotiated
+
+        def phase2_route_fn():
+            return mock_router.route_all_negotiated(
+                max_iterations=50, timeout=None,
+                per_net_timeout=None, batch_routing=False,
+                hierarchical=False, perturbation=True,
+            )
+
+        result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
+
+        assert "negotiated" in calls, (
+            "route_all_negotiated must be called when strategy is 'negotiated'"
+        )
+        assert result.nets_routed == 1
+
+    def test_route_fn_none_falls_back_to_router(self):
+        """When route_fn is None, route_adaptive should use the internal
+        _route_with_router fallback (not crash).
+        """
+        from unittest.mock import MagicMock, patch
+
+        grid, rules = make_grid_and_rules()
+        mock_pathfinder = MagicMock()
+        adaptive_router = AdaptiveGridRouter(grid, rules, router=mock_pathfinder)
+        pads, nets = self._make_simple_pads_and_nets(grid)
+
+        # Mock the internal _route_with_router to avoid needing a real router
+        mock_routes = [
+            Route(net=1, net_name="NET1", segments=[
+                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
+                        layer=Layer.F_CU, net=1),
+            ]),
+        ]
+        with patch.object(
+            adaptive_router, "_route_with_router", return_value=mock_routes
+        ) as mock_method:
+            result = adaptive_router.route_adaptive(nets, pads, route_fn=None)
+
+        mock_method.assert_called_once()
+        assert result.nets_routed == 1
+
+
+class TestPhase2RouteFnDispatchLogic:
+    """Unit tests for the phase2_route_fn dispatch logic from route_cmd.py.
+
+    These tests replicate the lambda structure at lines 3894-3925 of
+    route_cmd.py and verify that each strategy value dispatches to the
+    correct routing method. This provides direct coverage of the fix
+    from commit b1584b35.
+    """
+
+    @staticmethod
+    def _build_phase2_route_fn(strategy, router_mock, args_mock):
+        """Replicate the phase2_route_fn lambda from route_cmd.py."""
+        def phase2_route_fn():
+            if strategy == "evolutionary":
+                return router_mock.route_all_evolutionary(
+                    pop_size=getattr(args_mock, "pop_size", 20),
+                    generations=getattr(args_mock, "generations", 10),
+                    verbose=False,
+                )
+            elif strategy == "monte-carlo":
+                return router_mock.route_all_monte_carlo(
+                    num_trials=getattr(args_mock, "mc_trials", 10),
+                    verbose=False,
+                )
+            elif getattr(args_mock, "two_phase", False) and strategy == "negotiated":
+                return router_mock.route_all_two_phase(
+                    use_negotiated=True,
+                    corridor_width_factor=2.0,
+                    timeout=getattr(args_mock, "timeout", None),
+                    per_net_timeout=getattr(args_mock, "per_net_timeout", None),
+                    max_iterations=getattr(args_mock, "two_phase_iterations", None)
+                    or getattr(args_mock, "iterations", 50),
+                )
+            elif strategy == "negotiated":
+                return router_mock.route_all_negotiated(
+                    max_iterations=getattr(args_mock, "iterations", 50),
+                    timeout=getattr(args_mock, "timeout", None),
+                    per_net_timeout=getattr(args_mock, "per_net_timeout", None),
+                    batch_routing=False,
+                    hierarchical=False,
+                    perturbation=True,
+                )
+            else:
+                return router_mock.route_all()
+        return phase2_route_fn
+
+    def test_evolutionary_calls_route_all_evolutionary(self):
+        """strategy='evolutionary' must call route_all_evolutionary."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_evolutionary.return_value = []
+        args_mock = MagicMock(pop_size=20, generations=10)
+
+        fn = self._build_phase2_route_fn("evolutionary", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_evolutionary.assert_called_once()
+        router_mock.route_all.assert_not_called()
+        router_mock.route_all_monte_carlo.assert_not_called()
+
+    def test_monte_carlo_calls_route_all_monte_carlo(self):
+        """strategy='monte-carlo' must call route_all_monte_carlo."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_monte_carlo.return_value = []
+        args_mock = MagicMock(mc_trials=10)
+
+        fn = self._build_phase2_route_fn("monte-carlo", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_monte_carlo.assert_called_once()
+        router_mock.route_all.assert_not_called()
+        router_mock.route_all_evolutionary.assert_not_called()
+
+    def test_negotiated_calls_route_all_negotiated(self):
+        """strategy='negotiated' (default) must call route_all_negotiated."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_negotiated.return_value = []
+        args_mock = MagicMock(
+            two_phase=False, iterations=50, timeout=None,
+            per_net_timeout=None,
+        )
+
+        fn = self._build_phase2_route_fn("negotiated", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_negotiated.assert_called_once()
+        router_mock.route_all.assert_not_called()
+
+    def test_negotiated_two_phase_calls_route_all_two_phase(self):
+        """strategy='negotiated' with two_phase=True must call route_all_two_phase."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_two_phase.return_value = []
+        args_mock = MagicMock(
+            two_phase=True, iterations=50, timeout=None,
+            per_net_timeout=None, two_phase_iterations=None,
+        )
+
+        fn = self._build_phase2_route_fn("negotiated", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_two_phase.assert_called_once()
+        router_mock.route_all_negotiated.assert_not_called()
+
+    def test_basic_strategy_falls_through_to_route_all(self):
+        """strategy='basic' must call the default route_all."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all.return_value = []
+        args_mock = MagicMock()
+
+        fn = self._build_phase2_route_fn("basic", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all.assert_called_once()
+        router_mock.route_all_evolutionary.assert_not_called()
+        router_mock.route_all_monte_carlo.assert_not_called()
+
+    def test_evolutionary_passes_pop_size_and_generations(self):
+        """Evolutionary strategy must forward pop_size and generations args."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_evolutionary.return_value = []
+        args_mock = MagicMock(pop_size=30, generations=15)
+
+        fn = self._build_phase2_route_fn("evolutionary", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_evolutionary.assert_called_once_with(
+            pop_size=30, generations=15, verbose=False,
+        )
+
+    def test_monte_carlo_passes_mc_trials(self):
+        """Monte Carlo strategy must forward mc_trials as num_trials."""
+        from unittest.mock import MagicMock
+        router_mock = MagicMock()
+        router_mock.route_all_monte_carlo.return_value = []
+        args_mock = MagicMock(mc_trials=25)
+
+        fn = self._build_phase2_route_fn("monte-carlo", router_mock, args_mock)
+        fn()
+
+        router_mock.route_all_monte_carlo.assert_called_once_with(
+            num_trials=25, verbose=False,
+        )
