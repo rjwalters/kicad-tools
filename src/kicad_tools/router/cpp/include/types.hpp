@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 #include <tuple>
 #include <optional>
