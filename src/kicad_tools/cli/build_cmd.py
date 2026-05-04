@@ -77,7 +77,9 @@ class BuildContext:
     quiet: bool = False
     force: bool = False
     optimize_placement: bool = False
+    smoke_check: bool = True
     _executed_scripts: set[Path] | None = None
+    _kicad_cli_warning_emitted: bool = False
 
     def mark_script_executed(self, script: Path) -> None:
         """Mark a script as having been executed."""
@@ -1360,6 +1362,108 @@ def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+# Build steps whose output is a *.kicad_pcb file that can be smoke-checked
+# by kicad-cli.  Other steps (SCHEMATIC, VERIFY, EXPORT) are skipped:
+# SCHEMATIC produces a schematic, VERIFY is read-only, and EXPORT is
+# terminal (its own kicad-cli call surfaces load failures directly).
+_PCB_WRITE_STEPS: set[BuildStep] = {
+    BuildStep.PCB,
+    BuildStep.OUTLINE,
+    BuildStep.PLACEMENT,
+    BuildStep.ZONES,
+    BuildStep.SILKSCREEN,
+    BuildStep.ROUTE,
+}
+
+
+def _smoke_check_pcb(
+    pcb_path: Path,
+    producing_step: str,
+    console: Console,
+    ctx: BuildContext,
+) -> BuildResult | None:
+    """Verify that ``pcb_path`` can be loaded by kicad-cli.
+
+    Runs ``kicad-cli pcb drc --schematic-parity off`` against the PCB and
+    checks for a "Failed to load board" signal in stderr/stdout.  This
+    catches PCB-write bugs (corrupt S-expressions, unrecognised tokens,
+    bogus ``generator_version`` strings, etc.) at the writer that
+    introduced them rather than at the export step many minutes later.
+
+    Args:
+        pcb_path: PCB file just written by ``producing_step``.
+        producing_step: Name of the step that produced *pcb_path* (for
+            attribution in the failure message).
+        console: Rich console for warnings.
+        ctx: Build context — used to track whether the
+            "kicad-cli not installed" warning has already been emitted
+            (so it prints at most once per build).
+
+    Returns:
+        ``None`` when the smoke check passes (kicad-cli loads the PCB
+        without complaint, or kicad-cli is not installed).  A failed
+        :class:`BuildResult` when kicad-cli rejects the file with
+        "Failed to load board" in its output.
+
+    Note:
+        Real DRC rule violations cause kicad-cli to exit non-zero, but
+        without the "Failed to load board" marker.  Those are *not*
+        treated as smoke-check failures — only true parse rejections.
+    """
+    import contextlib
+    import os
+    import tempfile
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_drc
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        if not ctx._kicad_cli_warning_emitted:
+            console.print(
+                "  [yellow]warning[/yellow] kicad-cli not installed; skipping PCB smoke checks"
+            )
+            ctx._kicad_cli_warning_emitted = True
+        return None
+
+    # Use a temp file for the DRC report — we don't care about its
+    # contents, only that kicad-cli could parse the input.
+    fd, report_path_str = tempfile.mkstemp(suffix=".json", prefix="smoke_drc_")
+    os.close(fd)
+    report_path = Path(report_path_str)
+
+    try:
+        result = run_drc(
+            pcb_path,
+            output_path=report_path,
+            schematic_parity=False,
+            kicad_cli=kicad_cli,
+        )
+    finally:
+        # Clean up the report regardless of outcome.
+        with contextlib.suppress(OSError):
+            report_path.unlink(missing_ok=True)
+
+    # Discriminate "load failure" from "DRC violations":
+    # kicad-cli emits "Failed to load board" in stderr (and sometimes
+    # stdout) when the .kicad_pcb cannot be parsed.  Real DRC violations
+    # exit non-zero with no such marker.
+    combined = (result.stderr or "") + "\n" + (result.stdout or "")
+    if "Failed to load board" in combined:
+        message = (
+            f"Output of '{producing_step}' rejected by kicad-cli: "
+            f"{result.stderr.strip() or result.stdout.strip()}\n"
+            f"  Inspect with: head -10 {pcb_path}"
+        )
+        return BuildResult(
+            step=producing_step,
+            success=False,
+            message=message,
+            output_file=pcb_path,
+        )
+
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct build command."""
     parser = argparse.ArgumentParser(
@@ -1441,6 +1545,15 @@ Examples:
         action="store_true",
         help="Run CMA-ES placement optimization before routing (opt-in)",
     )
+    parser.add_argument(
+        "--no-smoke-check",
+        action="store_true",
+        help=(
+            "Disable the per-step kicad-cli load smoke check that runs "
+            "after each PCB-write step.  Use to restore prior behaviour "
+            "when kicad-cli is misbehaving or pipeline speed matters."
+        ),
+    )
 
     args = parser.parse_args(argv)
     console = Console(quiet=args.quiet)
@@ -1511,6 +1624,7 @@ Examples:
         quiet=args.quiet,
         force=args.force,
         optimize_placement=args.optimize_placement,
+        smoke_check=not args.no_smoke_check,
     )
 
     # Print build header
@@ -1607,6 +1721,24 @@ Examples:
             # Stop on failure unless verifying or exporting
             if not result.success and step not in (BuildStep.VERIFY, BuildStep.EXPORT):
                 break
+
+            # Smoke-check: after every successful PCB-write step, ask
+            # kicad-cli whether the PCB it produced is loadable.  This
+            # attributes load-time rejections to the writer that just
+            # ran rather than to the much-later EXPORT step.  Skipped
+            # under --dry-run (no PCB was actually written) and when
+            # the user opts out via --no-smoke-check.
+            if result.success and ctx.smoke_check and not ctx.dry_run and step in _PCB_WRITE_STEPS:
+                pcb_for_check = ctx.routed_pcb_file or ctx.pcb_file
+                if pcb_for_check is not None and pcb_for_check.exists():
+                    smoke = _smoke_check_pcb(pcb_for_check, step.value, console, ctx)
+                    if smoke is not None:
+                        results.append(smoke)
+                        if not args.quiet:
+                            console.print(
+                                f"  [[red]FAIL[/red]] {step.value} (smoke-check): {smoke.message}"
+                            )
+                        break
 
     # Print summary
     if not args.quiet:
