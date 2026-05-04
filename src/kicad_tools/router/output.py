@@ -47,6 +47,9 @@ def show_routing_summary(
         nets_to_route_ids: Optional set of net IDs targeted for routing
             (multi-pad signal nets).  When provided, ``routed_net_ids`` is
             filtered to this set so numerator and denominator are consistent.
+            When ``None``, the function falls back to ``router.nets``
+            (multi-pad nets only) so user-skipped power/pour nets are not
+            mis-reported as failed routes (Issue #2498).
     """
     if quiet:
         return
@@ -76,7 +79,25 @@ def show_routing_summary(
         unrouted_ids = nets_to_route_ids - all_routed_net_ids
     else:
         routed_net_ids = all_routed_net_ids
-        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        # Issue #2498: Fall back to ``router.nets`` when the caller didn't
+        # provide a target net population.  ``router.nets`` reflects the
+        # post-skip state — pads on user-skipped nets (e.g. pour nets like
+        # GND/VCC, or named nets in route_demo.py's ``skip_nets`` list) have
+        # already been rewritten to net=0 by ``load_pcb_for_routing``, so
+        # their net IDs no longer appear in ``router.nets``.  ``net_map``,
+        # by contrast, still contains those nets for diagnostics, which
+        # caused them to be reported as "No path found" failures.
+        # Restrict to multi-pad nets to mirror the convention used by
+        # ``cli/route_cmd.py`` (see ``multi_pad_nets`` there).
+        router_nets = getattr(router, "nets", None)
+        if isinstance(router_nets, dict) and router_nets:
+            all_net_ids = {
+                net_id
+                for net_id, pads in router_nets.items()
+                if isinstance(net_id, int) and net_id > 0 and len(pads) >= 2
+            }
+        else:
+            all_net_ids = {v for k, v in net_map.items() if v > 0}
         unrouted_ids = all_net_ids - all_routed_net_ids
 
     # Group recorded failures by net
@@ -135,9 +156,7 @@ def show_routing_summary(
         for net_id in sorted(partially_connected_nets):
             info = partially_connected_nets[net_id]
             net_name = reverse_net.get(net_id, f"Net_{net_id}")
-            print(
-                f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected"
-            )
+            print(f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected")
 
     # Show cleanup statistics if any artifacts were removed
     cleanup_stats = getattr(router, "_cleanup_stats", None)
@@ -146,17 +165,15 @@ def show_routing_summary(
         if total_removed > 0:
             parts = []
             if cleanup_stats.get("net0_routes_removed"):
-                parts.append(
-                    f"{cleanup_stats['net0_routes_removed']} net-0 route(s)"
-                )
-            net0_items = cleanup_stats.get(
-                "net0_segments_removed", 0
-            ) + cleanup_stats.get("net0_vias_removed", 0)
+                parts.append(f"{cleanup_stats['net0_routes_removed']} net-0 route(s)")
+            net0_items = cleanup_stats.get("net0_segments_removed", 0) + cleanup_stats.get(
+                "net0_vias_removed", 0
+            )
             if net0_items:
                 parts.append(f"{net0_items} net-0 segment/via(s)")
-            oob_items = cleanup_stats.get(
-                "oob_segments_removed", 0
-            ) + cleanup_stats.get("oob_vias_removed", 0)
+            oob_items = cleanup_stats.get("oob_segments_removed", 0) + cleanup_stats.get(
+                "oob_vias_removed", 0
+            )
             if oob_items:
                 parts.append(f"{oob_items} out-of-bounds segment/via(s)")
             print(f"  Cleanup: removed {', '.join(parts)}")
@@ -427,7 +444,9 @@ def show_routing_summary(
                     print(f"{suggestion_num}. {suggestion_text}")
             if num_layers <= 2:
                 suggestion_num += 1
-                print(f"{suggestion_num}. Consider 4-layer routing: kct route{pcb_arg} --layers 4-all")
+                print(
+                    f"{suggestion_num}. Consider 4-layer routing: kct route{pcb_arg} --layers 4-all"
+                )
 
         # Layer escalation recommendation with percentage-based threshold
         num_layers = getattr(router.grid, "num_layers", 2)
@@ -529,7 +548,25 @@ def get_routing_diagnostics_json(
         unrouted_ids = nets_to_route_ids - all_routed_net_ids
     else:
         routed_net_ids = all_routed_net_ids
-        all_net_ids = {v for k, v in net_map.items() if v > 0}
+        # Issue #2498: Fall back to ``router.nets`` when the caller didn't
+        # provide a target net population.  ``router.nets`` reflects the
+        # post-skip state — pads on user-skipped nets (e.g. pour nets like
+        # GND/VCC, or named nets in route_demo.py's ``skip_nets`` list) have
+        # already been rewritten to net=0 by ``load_pcb_for_routing``, so
+        # their net IDs no longer appear in ``router.nets``.  ``net_map``,
+        # by contrast, still contains those nets for diagnostics, which
+        # caused them to be reported as "No path found" failures.
+        # Restrict to multi-pad nets to mirror the convention used by
+        # ``cli/route_cmd.py`` (see ``multi_pad_nets`` there).
+        router_nets = getattr(router, "nets", None)
+        if isinstance(router_nets, dict) and router_nets:
+            all_net_ids = {
+                net_id
+                for net_id, pads in router_nets.items()
+                if isinstance(net_id, int) and net_id > 0 and len(pads) >= 2
+            }
+        else:
+            all_net_ids = {v for k, v in net_map.items() if v > 0}
         unrouted_ids = all_net_ids - all_routed_net_ids
 
     # --- Connectivity validation (Issue #2254) ---
@@ -554,12 +591,14 @@ def get_routing_diagnostics_json(
             if info["total_pads"] >= 2 and not info["connected"]:
                 has_disconnected_islands = True
                 if nid in routed_net_ids:
-                    partially_connected.append({
-                        "net_id": nid,
-                        "net_name": reverse_net.get(nid, f"Net_{nid}"),
-                        "connected_pads": info["connected_pads"],
-                        "total_pads": info["total_pads"],
-                    })
+                    partially_connected.append(
+                        {
+                            "net_id": nid,
+                            "net_name": reverse_net.get(nid, f"Net_{nid}"),
+                            "connected_pads": info["connected_pads"],
+                            "total_pads": info["total_pads"],
+                        }
+                    )
                     routed_net_ids = routed_net_ids - {nid}
 
     # Build successful routes list
@@ -725,13 +764,13 @@ def get_routing_diagnostics_json(
         )
 
     summary_dict: dict = {
-            "nets_requested": nets_to_route,
-            "nets_routed": len(routed_net_ids),
-            "nets_failed": len(unrouted_ids),
-            "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
-            if nets_to_route > 0
-            else 0,
-            "has_disconnected_islands": has_disconnected_islands,
+        "nets_requested": nets_to_route,
+        "nets_routed": len(routed_net_ids),
+        "nets_failed": len(unrouted_ids),
+        "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
+        if nets_to_route > 0
+        else 0,
+        "has_disconnected_islands": has_disconnected_islands,
     }
     if single_pad_count:
         summary_dict["single_pad_nets"] = single_pad_count
@@ -769,7 +808,10 @@ def print_routing_diagnostics_json(
         single_pad_count: Number of single-pad nets excluded from routing.
     """
     diagnostics = get_routing_diagnostics_json(
-        router, net_map, nets_to_route, current_strategy=current_strategy,
+        router,
+        net_map,
+        nets_to_route,
+        current_strategy=current_strategy,
         nets_to_route_ids=nets_to_route_ids,
         single_pad_count=single_pad_count,
     )
