@@ -482,6 +482,15 @@ class Autorouter:
         # routing loop so _calculate_constraint_score() can boost priority.
         self._matrix_conflict_nets: set[int] = set()
 
+        # Issue #2499: Per-net BLOCKED_BY_COMPONENT rip-up budget for
+        # ``route_all``.  Tracks how many times each net has been ripped up
+        # by the standard-flow rip-up path; once a net hits the cap it is no
+        # longer chosen as a rip-up victim, preventing thrash on charlieplex
+        # / matrix boards where multiple sibling NODE nets compete for the
+        # same inter-row corridor.
+        self._route_all_ripup_history: dict[int, int] = {}
+        self._route_all_max_ripups_per_net: int = 2
+
         # Pre-route congestion estimator (Issue #2278)
         # Computed lazily before net ordering; provides RUDY-based
         # congestion scores used as a 6th tiebreaker in _get_net_priority().
@@ -2051,6 +2060,64 @@ class Autorouter:
 
         return siblings
 
+    def _find_lower_priority_siblings_on_components(
+        self,
+        failed_net: int,
+        blocking_components: list[str] | set[str],
+        candidate_nets: list[int] | set[int],
+    ) -> set[int]:
+        """Find sibling nets on blocking components with strictly lower priority.
+
+        Issue #2499: When the standard ``route_all`` flow encounters a
+        ``BLOCKED_BY_COMPONENT`` failure (e.g. a charlieplex NODE net cannot
+        reach its LED pads because earlier-routed siblings have consumed the
+        inter-row corridor), no rip-up is attempted -- the failure is simply
+        recorded and the net is skipped.  This helper identifies candidate
+        nets whose pads sit on the components reported as blocking, and
+        whose ``_get_net_priority`` ranks them as lower priority than
+        ``failed_net`` (i.e. higher tuple value).  Such nets are safe
+        rip-up candidates: displacing them in favour of the higher-priority
+        failed net does not invert the routing-order intent.
+
+        Equal-priority nets are intentionally excluded to avoid oscillation:
+        without a strict ordering, ripping up A for B then B for A could
+        cycle indefinitely.
+
+        Args:
+            failed_net: The net ID that failed to route.
+            blocking_components: Reference designators of components reported
+                as blocking the failed net's path (e.g. ``["D5", "D6"]``).
+            candidate_nets: Iterable of net IDs to consider as rip-up
+                candidates -- typically the IDs already in ``self.routes``.
+
+        Returns:
+            Set of net IDs whose pads touch at least one component in
+            ``blocking_components`` and whose
+            ``_get_net_priority`` value is strictly greater (lower priority)
+            than ``failed_net``'s.
+        """
+        blocking_set = set(blocking_components)
+        if not blocking_set:
+            return set()
+
+        failed_priority_tuple = self._get_net_priority(failed_net)
+
+        siblings: set[int] = set()
+        for net_id in candidate_nets:
+            if net_id == failed_net:
+                continue
+            other_components = self._get_net_destination_components(net_id)
+            if not (other_components & blocking_set):
+                continue
+            other_priority_tuple = self._get_net_priority(net_id)
+            # Strictly higher tuple value == strictly lower priority.
+            # Equal-priority sibling rip-up is rejected to prevent A<->B
+            # oscillation when the two nets have symmetric constraints.
+            if other_priority_tuple > failed_priority_tuple:
+                siblings.add(net_id)
+
+        return siblings
+
     def _get_partially_routed_nets(
         self,
         net_routes: dict[int, list[Route]],
@@ -2670,6 +2737,23 @@ class Autorouter:
                     f"{sum(len(r.segments) for r in routes)} segments, "
                     f"{sum(len(r.vias) for r in routes)} vias"
                 )
+            else:
+                # Issue #2499: When ``route_net`` fails because the path is
+                # blocked by an already-routed component (e.g. charlieplex
+                # NODE_B blocked by D5/D6 reserved cells from earlier-routed
+                # NODE_A or LINE_x siblings), attempt a one-shot targeted
+                # rip-up of strictly lower-priority sibling nets that share
+                # those blocking components.  If the rip-up succeeds the
+                # failed net's routes are now on the grid; collect them
+                # back into ``all_routes`` and remove the recorded failure.
+                rescued = self._attempt_blocked_component_ripup(net)
+                if rescued:
+                    all_routes.extend(rescued)
+                    flush_print(
+                        f"  Net {net}: {len(rescued)} routes (after sibling rip-up), "
+                        f"{sum(len(r.segments) for r in rescued)} segments, "
+                        f"{sum(len(r.vias) for r in rescued)} vias"
+                    )
 
         if progress_callback is not None:
             routed_count = len({r.net for r in all_routes})
@@ -2682,6 +2766,169 @@ class Autorouter:
                 print(failure_summary)
 
         return all_routes
+
+    def _attempt_blocked_component_ripup(
+        self,
+        failed_net: int,
+    ) -> list[Route]:
+        """Attempt a one-shot targeted rip-up after a BLOCKED_BY_COMPONENT failure.
+
+        Issue #2499: The standard ``route_all`` flow does not invoke any
+        rip-up logic on routing failures -- a net that fails to route is
+        simply skipped.  On charlieplex / LED-matrix boards this leaves
+        later-ordered NODE nets stranded after earlier siblings consume the
+        only viable inter-row corridor.
+
+        This helper triggers a single rip-up + reroute attempt when:
+
+        - The most recent failure for ``failed_net`` is
+          ``FailureCause.BLOCKED_PATH`` with a non-empty
+          ``blocking_components`` list.
+        - At least one already-routed net has pads on the blocking
+          components and a strictly lower priority than the failed net
+          (per :meth:`_find_lower_priority_siblings_on_components`).
+        - Neither the failed net nor any sibling has exhausted its
+          per-net rip-up budget (``_route_all_max_ripups_per_net``).
+
+        On success, the failed-net routes are appended to ``self.routes``
+        by ``targeted_ripup`` and the corresponding failure entries are
+        removed from ``self.routing_failures``.  Displaced sibling nets are
+        rerouted by the negotiated path (best-effort -- if any displaced
+        net fails its new routes are simply not added; its previous routes
+        stay ripped).
+
+        Args:
+            failed_net: ID of the net that just failed in ``route_all``.
+
+        Returns:
+            List of new routes added for ``failed_net``.  Empty if no
+            rip-up was attempted or the rip-up did not produce any new
+            routes for ``failed_net``.
+        """
+        # Find the most recent failure for this net.
+        recent_failure = None
+        for failure in reversed(self.routing_failures):
+            if failure.net == failed_net:
+                recent_failure = failure
+                break
+        if recent_failure is None:
+            return []
+        if recent_failure.failure_cause != FailureCause.BLOCKED_PATH:
+            return []
+        blocking_components = recent_failure.blocking_components
+        if not blocking_components:
+            return []
+
+        # Budget check on the failed net itself.
+        max_ripups = self._route_all_max_ripups_per_net
+        if self._route_all_ripup_history.get(failed_net, 0) >= max_ripups:
+            return []
+
+        # Identify lower-priority siblings whose pads sit on the blocking
+        # components.  Restrict candidates to nets that already have routes
+        # on the grid -- there's nothing to rip up otherwise.
+        routed_net_ids = {r.net for r in self.routes if r.net != failed_net}
+        siblings = self._find_lower_priority_siblings_on_components(
+            failed_net=failed_net,
+            blocking_components=blocking_components,
+            candidate_nets=routed_net_ids,
+        )
+        # Drop siblings that have hit the budget cap.
+        history = self._route_all_ripup_history
+        siblings = {s for s in siblings if history.get(s, 0) < max_ripups}
+        if not siblings:
+            return []
+
+        # Build the per-net routes mapping that ``targeted_ripup`` expects
+        # by indexing self.routes by route.net.
+        net_routes: dict[int, list[Route]] = {}
+        for r in self.routes:
+            net_routes.setdefault(r.net, []).append(r)
+
+        # Build pads_by_net for the failed net and each candidate sibling.
+        # Use the same pad-resolution pattern as route_net so that escape-
+        # pad overrides (issue #2401) are honoured.
+        pads_by_net: dict[int, list[Pad]] = {}
+        for net_id in {failed_net, *siblings}:
+            pad_keys = self.nets.get(net_id, [])
+            if len(pad_keys) < 2:
+                continue
+            overrides = self._escape_pad_overrides
+            pad_objs = [overrides.get(p, self.pads[p]) for p in pad_keys if p in self.pads]
+            if len(pad_objs) >= 2:
+                pads_by_net[net_id] = pad_objs
+
+        if failed_net not in pads_by_net:
+            return []
+
+        # Construct a NegotiatedRouter on demand.  The standard ``route_all``
+        # flow does not maintain one because it routes net-by-net without
+        # negotiation; we only need it here for the rip-up + reroute helper.
+        from .algorithms.negotiated import NegotiatedRouter
+
+        neg_router = NegotiatedRouter(
+            self.grid,
+            self.router,
+            self.rules,
+            self.net_class_map,
+            congestion_estimator=self._congestion_estimator,
+        )
+
+        sibling_names = [self.net_names.get(s, f"Net_{s}") for s in siblings]
+        failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+        flush_print(
+            f"  BLOCKED_BY_COMPONENT rip-up for {failed_name}: "
+            f"displacing {len(siblings)} sibling(s) on {', '.join(blocking_components)}: "
+            f"{', '.join(sibling_names)}"
+        )
+
+        # Snapshot pre-rip-up state so we can detect the freshly added routes
+        # for ``failed_net`` afterwards.
+        pre_routes = {id(r) for r in self.routes}
+
+        def mark_route(route: Route) -> None:
+            self._mark_route(route)
+
+        # Bump the budget counters for every net we're about to displace
+        # (and for the failed net) before invoking targeted_ripup, so even
+        # if the helper bails out we still consume budget and avoid retry
+        # loops.
+        self._route_all_ripup_history[failed_net] = (
+            self._route_all_ripup_history.get(failed_net, 0) + 1
+        )
+
+        try:
+            success = neg_router.targeted_ripup(
+                failed_net=failed_net,
+                blocking_nets=siblings,
+                net_routes=net_routes,
+                routes_list=self.routes,
+                pads_by_net=pads_by_net,
+                present_cost_factor=1.0,
+                mark_route_callback=mark_route,
+                ripup_history=self._route_all_ripup_history,
+                max_ripups_per_net=self._route_all_max_ripups_per_net,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            flush_print(f"  BLOCKED_BY_COMPONENT rip-up raised {type(exc).__name__}: {exc}")
+            return []
+
+        # Collect the freshly added routes for the failed net.
+        new_failed_routes = [
+            r for r in self.routes if r.net == failed_net and id(r) not in pre_routes
+        ]
+
+        if success and new_failed_routes:
+            # Drop stale failure entries for the failed net so summary output
+            # reflects the rescued state.
+            self.routing_failures = [f for f in self.routing_failures if f.net != failed_net]
+            return new_failed_routes
+
+        if not success:
+            flush_print(
+                f"  BLOCKED_BY_COMPONENT rip-up for {failed_name}: reroute did not converge"
+            )
+        return new_failed_routes
 
     def route_all_interleaved(
         self,

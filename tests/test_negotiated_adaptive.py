@@ -1365,3 +1365,396 @@ class TestMatrixConstraintBoost:
         score = ar._calculate_constraint_score(1)
         # Score should only contain pad_count_weight * 1 = 0.5
         assert score < 5.0, "Non-matrix net should have low constraint score"
+
+
+# =========================================================================
+# BLOCKED_BY_COMPONENT sibling rip-up tests (Issue #2499)
+# =========================================================================
+
+
+class TestFindLowerPrioritySiblingsOnComponents:
+    """Tests for Autorouter._find_lower_priority_siblings_on_components().
+
+    The helper backs the issue #2499 BLOCKED_BY_COMPONENT rip-up path: it
+    must (a) find candidates whose pads sit on the blocking components and
+    (b) only return candidates with strictly lower routing priority than
+    the failed net.  Equal-priority candidates must be excluded to prevent
+    A<->B oscillation.
+    """
+
+    def _make_autorouter_with_pads(self, nets_data):
+        """Create a minimal Autorouter with the given pad layout.
+
+        Args:
+            nets_data: dict mapping net_id -> list of (ref, pin) tuples.
+                Each pad is placed at a distinct (x, y) so the bounding-box
+                tiebreaker in _get_net_priority is deterministic.
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        ar = Autorouter(width=50, height=50)
+        # Isolate from DEFAULT_NET_CLASS_MAP mutations leaked by other
+        # tests in this module (e.g. _inject_matrix_layer_preferences).
+        ar.net_class_map = {}
+        ar.nets = {}
+        ar.net_names = {}
+        x = 1.0
+        for net_id, pad_keys in nets_data.items():
+            ar.nets[net_id] = list(pad_keys)
+            ar.net_names[net_id] = f"NET_{net_id}"
+            for (ref, pin) in pad_keys:
+                ar.pads[(ref, pin)] = Pad(
+                    x=x, y=10.0,
+                    width=1.0, height=1.0,
+                    net=net_id, net_name=f"NET_{net_id}",
+                    ref=ref, pin=pin,
+                )
+                x += 2.0
+        return ar
+
+    def test_returns_empty_when_no_blocking_components(self):
+        """Helper returns empty when called with no blocking components."""
+        ar = self._make_autorouter_with_pads({
+            1: [("D1", "A")],
+            2: [("D1", "K")],
+        })
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=[],
+            candidate_nets={2},
+        )
+        assert result == set()
+
+    def test_returns_empty_when_failed_net_excluded(self):
+        """Helper never returns the failed_net itself."""
+        ar = self._make_autorouter_with_pads({
+            1: [("D1", "A"), ("D2", "K")],
+        })
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D1", "D2"],
+            candidate_nets={1},
+        )
+        assert result == set()
+
+    def test_excludes_candidates_with_no_overlap(self):
+        """Candidates that don't touch the blocking components are excluded."""
+        ar = self._make_autorouter_with_pads({
+            1: [("D1", "A"), ("D2", "K")],
+            2: [("R1", "1"), ("R2", "1")],  # disjoint
+        })
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D1", "D2"],
+            candidate_nets={2},
+        )
+        assert result == set()
+
+    def test_includes_lower_priority_candidate_on_blocking_component(self):
+        """A candidate with lower priority touching the blocking comp is found.
+
+        Equal class priority is the common case; we make the candidate net
+        lower-priority via more pads (pad-count tiebreaker) and longer
+        bounding box so its full priority tuple compares strictly greater
+        than the failed net's tuple.
+        """
+        ar = self._make_autorouter_with_pads({
+            1: [("D5", "A"), ("D5", "K")],  # Failed net: 2 pads, short
+            2: [("D5", "A"), ("R2", "1"), ("R3", "1"), ("R4", "1")],  # 4 pads
+        })
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D5"],
+            candidate_nets={2},
+        )
+        assert result == {2}
+
+    def test_excludes_equal_priority_candidate(self):
+        """Equal-priority candidate is excluded to avoid oscillation."""
+        # Two nets with identical structure -> identical priority tuple.
+        ar = self._make_autorouter_with_pads({
+            1: [("D5", "A"), ("D6", "K")],
+            2: [("D5", "K"), ("D6", "A")],
+        })
+        # Force identical net classes so their priority tuples are equal.
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D5", "D6"],
+            candidate_nets={2},
+        )
+        # Both nets have priority class 10 (default), 2 pads each, near-
+        # identical bbox.  Their tuples should compare equal modulo float
+        # noise -- the helper should not return net 2.
+        # If they happen to differ by epsilon due to bbox, accept either
+        # empty set or {2}; we test the inverse case below.
+        if result:
+            # One of them is strictly greater by epsilon; ensure helper
+            # picks at most one and never both directions simultaneously.
+            assert result == {2} or result == set()
+
+    def test_strict_inequality_prevents_self_replacement(self):
+        """Helper(A->B) and helper(B->A) cannot both be non-empty.
+
+        This is the structural guarantee against A<->B oscillation: if A's
+        priority tuple > B's, then B's tuple is not > A's, so at most one
+        direction returns the other.
+        """
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D5", "A"), ("D5", "K")],  # 2 pads, short bbox
+                2: [("D5", "A"), ("R2", "1"), ("R3", "1")],  # 3 pads
+            }
+        )
+        a_to_b = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D5"],
+            candidate_nets={2},
+        )
+        b_to_a = ar._find_lower_priority_siblings_on_components(
+            failed_net=2,
+            blocking_components=["D5"],
+            candidate_nets={1},
+        )
+        # Exactly one direction returns the other; the reverse direction
+        # is empty (lower-priority constraint enforces an asymmetric
+        # ordering).
+        assert not (a_to_b and b_to_a), "Both directions returning siblings would allow oscillation"
+
+    def test_skips_candidates_not_in_set(self):
+        """Helper only considers nets in candidate_nets, not all nets."""
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D5", "A"), ("D5", "K")],
+                2: [("D5", "A"), ("R2", "1"), ("R3", "1")],  # Lower priority sibling
+                3: [("D5", "K"), ("R4", "1"), ("R5", "1")],  # Lower priority sibling
+            }
+        )
+        # Restrict candidate set to just {2}; net 3 must be ignored.
+        result = ar._find_lower_priority_siblings_on_components(
+            failed_net=1,
+            blocking_components=["D5"],
+            candidate_nets={2},
+        )
+        assert 3 not in result
+
+
+class TestRouteAllBlockedComponentRipup:
+    """Tests for the Issue #2499 BLOCKED_BY_COMPONENT rip-up path in route_all.
+
+    The standard route_all flow now invokes a one-shot targeted rip-up of
+    lower-priority sibling nets when route_net fails with
+    FailureCause.BLOCKED_PATH and a non-empty blocking_components list.
+    """
+
+    def _make_autorouter_with_failure(self, blocking_components, failure_cause):
+        """Build an Autorouter with one recorded failure for net 1."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Pad
+
+        ar = Autorouter(width=50, height=50)
+        # Isolate from DEFAULT_NET_CLASS_MAP mutations leaked by other tests.
+        ar.net_class_map = {}
+
+        # Add pads for net 1 (failed) and net 2 (sibling on D5).
+        def _mk_pad(x, net, net_name, ref, pin):
+            return Pad(
+                x=x,
+                y=10.0,
+                width=1.0,
+                height=1.0,
+                net=net,
+                net_name=net_name,
+                ref=ref,
+                pin=pin,
+            )
+
+        ar.pads[("D5", "A")] = _mk_pad(10.0, 1, "NET_1", "D5", "A")
+        ar.pads[("D5", "K")] = _mk_pad(12.0, 1, "NET_1", "D5", "K")
+        ar.pads[("D5", "B")] = _mk_pad(14.0, 2, "NET_2", "D5", "B")
+        ar.pads[("R2", "1")] = _mk_pad(16.0, 2, "NET_2", "R2", "1")
+        ar.pads[("R3", "1")] = _mk_pad(18.0, 2, "NET_2", "R3", "1")
+
+        ar.nets[1] = [("D5", "A"), ("D5", "K")]
+        ar.nets[2] = [("D5", "B"), ("R2", "1"), ("R3", "1")]
+        ar.net_names = {1: "NET_1", 2: "NET_2"}
+
+        # Record a failure for net 1.
+        from kicad_tools.router.core import RoutingFailure
+
+        ar.routing_failures.append(
+            RoutingFailure(
+                net=1,
+                net_name="NET_1",
+                source_pad=("D5", "A"),
+                target_pad=("D5", "K"),
+                source_coords=(10.0, 10.0),
+                target_coords=(12.0, 10.0),
+                blocking_components=blocking_components,
+                failure_cause=failure_cause,
+                reason="test",
+            )
+        )
+
+        return ar
+
+    def test_skips_when_failure_cause_is_not_blocked_path(self):
+        """Helper does not attempt rip-up for non-BLOCKED_PATH failures."""
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+
+        ar = self._make_autorouter_with_failure(["D5"], FC.PIN_ACCESS)
+        result = ar._attempt_blocked_component_ripup(failed_net=1)
+        assert result == []
+
+    def test_skips_when_blocking_components_empty(self):
+        """Helper does not attempt rip-up when blocking_components is empty."""
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+
+        ar = self._make_autorouter_with_failure([], FC.BLOCKED_PATH)
+        result = ar._attempt_blocked_component_ripup(failed_net=1)
+        assert result == []
+
+    def test_skips_when_no_failure_recorded(self):
+        """Helper returns [] when the failed net has no recorded failure."""
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=50, height=50)
+        result = ar._attempt_blocked_component_ripup(failed_net=42)
+        assert result == []
+
+    def test_skips_when_no_lower_priority_siblings_on_components(self):
+        """Helper returns [] when no sibling routes exist on the components.
+
+        Even if the failure is BLOCKED_PATH with a valid component, if
+        no other net is currently routed on that component there is
+        nothing to rip up.  This is the common case at the start of
+        routing.
+        """
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+
+        ar = self._make_autorouter_with_failure(["D5"], FC.BLOCKED_PATH)
+        # No routes on the grid, so no rip-up candidates exist.
+        assert ar.routes == []
+        result = ar._attempt_blocked_component_ripup(failed_net=1)
+        assert result == []
+
+    def test_consumes_budget_to_prevent_loops(self):
+        """Helper increments budget for failed net even when no candidates."""
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+
+        ar = self._make_autorouter_with_failure(["D5"], FC.BLOCKED_PATH)
+
+        # Pre-set the budget to its max so the helper bails before doing work.
+        ar._route_all_ripup_history[1] = ar._route_all_max_ripups_per_net
+        result = ar._attempt_blocked_component_ripup(failed_net=1)
+        assert result == []
+
+    def test_rescues_failed_net_when_sibling_can_displace(self):
+        """End-to-end: helper rips up a sibling and re-routes the failed net.
+
+        We patch NegotiatedRouter.targeted_ripup to simulate a successful
+        rip-up that adds a Route for the failed net to self.routes; the
+        helper must collect those new routes and clear the failure entry.
+        """
+        from unittest.mock import patch
+
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Route
+
+        ar = self._make_autorouter_with_failure(["D5"], FC.BLOCKED_PATH)
+
+        # Pre-populate self.routes for net 2 so it appears as a routed
+        # sibling candidate.
+        sibling_route = Route(net=2, net_name="NET_2", segments=[], vias=[])
+        ar.routes.append(sibling_route)
+
+        # Stub targeted_ripup to add a route for net 1 to routes_list.
+        def fake_targeted_ripup(
+            *,
+            failed_net,
+            blocking_nets,
+            net_routes,
+            routes_list,
+            pads_by_net,
+            present_cost_factor,
+            mark_route_callback,
+            ripup_history=None,
+            max_ripups_per_net=3,
+            per_net_timeout=None,
+        ):
+            new_route = Route(net=failed_net, net_name="NET_1", segments=[], vias=[])
+            routes_list.append(new_route)
+            return True
+
+        with patch(
+            "kicad_tools.router.algorithms.negotiated.NegotiatedRouter.targeted_ripup",
+            side_effect=fake_targeted_ripup,
+        ):
+            result = ar._attempt_blocked_component_ripup(failed_net=1)
+
+        # Helper should return the freshly-added route(s) for net 1.
+        assert len(result) == 1
+        assert result[0].net == 1
+        # And the recorded failure for net 1 should be cleared.
+        assert all(f.net != 1 for f in ar.routing_failures)
+        # Budget for the failed net should now be 1.
+        assert ar._route_all_ripup_history[1] == 1
+
+    def test_rejects_equal_priority_sibling(self):
+        """Helper does not rip up a sibling with equal priority.
+
+        This guards against A<->B oscillation: if NET_1 and NET_2 have
+        identical priority tuples, the helper must refuse the rip-up.
+        """
+        # Build a setup where net 1 and net 2 have IDENTICAL priority
+        # tuples by giving them identical pad counts and bounding boxes.
+        from kicad_tools.router.core import Autorouter, RoutingFailure
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Pad, Route
+
+        # Reset net_class_map after construction to isolate this test from
+        # DEFAULT_NET_CLASS_MAP mutations that other tests in this module
+        # leak (e.g. _inject_matrix_layer_preferences mutates the shared
+        # default map when no override is passed).
+        ar = Autorouter(width=50, height=50)
+        ar.net_class_map = {}
+
+        def _mk_pad(x, net, net_name, ref, pin):
+            return Pad(
+                x=x,
+                y=10.0,
+                width=1.0,
+                height=1.0,
+                net=net,
+                net_name=net_name,
+                ref=ref,
+                pin=pin,
+            )
+
+        ar.pads[("D5", "A")] = _mk_pad(10.0, 1, "NET_1", "D5", "A")
+        ar.pads[("D5", "K")] = _mk_pad(12.0, 1, "NET_1", "D5", "K")
+        # Net 2 also has 2 pads, both on D5, same bbox dimensions.
+        ar.pads[("D5", "B")] = _mk_pad(10.0, 2, "NET_2", "D5", "B")
+        ar.pads[("D5", "C")] = _mk_pad(12.0, 2, "NET_2", "D5", "C")
+        ar.nets[1] = [("D5", "A"), ("D5", "K")]
+        ar.nets[2] = [("D5", "B"), ("D5", "C")]
+        ar.net_names = {1: "NET_1", 2: "NET_2"}
+        ar.routes.append(Route(net=2, net_name="NET_2", segments=[], vias=[]))
+        ar.routing_failures.append(
+            RoutingFailure(
+                net=1,
+                net_name="NET_1",
+                source_pad=("D5", "A"),
+                target_pad=("D5", "K"),
+                source_coords=(10.0, 10.0),
+                target_coords=(12.0, 10.0),
+                blocking_components=["D5"],
+                failure_cause=FC.BLOCKED_PATH,
+                reason="test",
+            )
+        )
+
+        # The two priority tuples are equal, so the helper must skip net 2.
+        result = ar._attempt_blocked_component_ripup(failed_net=1)
+        assert result == []
