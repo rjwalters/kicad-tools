@@ -1823,3 +1823,164 @@ class TestRouteAllBlockedComponentRipup:
         # The two priority tuples are equal, so the helper must skip net 2.
         result = ar._attempt_blocked_component_ripup(failed_net=1)
         assert result == []
+
+    def test_route_all_triggers_rescue_on_partial_route_failure(self):
+        """``route_all`` invokes the rescue when ``route_net`` returns some
+        routes but also records a NEW failure for the same net.
+
+        This is the charlieplex NODE_B/NODE_D case that the original
+        ``if routes:`` / ``else:`` integration missed: an N-port net's
+        MST is partially routed (one edge succeeds, returning a non-empty
+        list), but a later MST edge fails and ``record_failure`` appends
+        a ``RoutingFailure`` for that edge.  Without the delta check
+        added in #2499 the rescue path was unreachable on partial-route
+        failures, so the helper never fired on board 02 even though it
+        was wired into ``route_all``.
+
+        The test patches ``route_net`` (and the rescue helper itself) so
+        the production code path -- the failure-delta detection branch
+        in ``route_all`` -- is exercised in isolation.
+        """
+        from unittest.mock import patch
+
+        from kicad_tools.router.core import Autorouter, RoutingFailure
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Pad, Route
+
+        ar = Autorouter(width=50, height=50)
+        ar.net_class_map = {}
+
+        def _mk_pad(x, net, net_name, ref, pin):
+            return Pad(
+                x=x,
+                y=10.0,
+                width=1.0,
+                height=1.0,
+                net=net,
+                net_name=net_name,
+                ref=ref,
+                pin=pin,
+            )
+
+        # Net 1 is an N-port net (3 pads -> MST has 2 edges); we will
+        # simulate one edge succeeding and the other failing.
+        ar.pads[("D5", "A")] = _mk_pad(10.0, 1, "NET_1", "D5", "A")
+        ar.pads[("D5", "K")] = _mk_pad(12.0, 1, "NET_1", "D5", "K")
+        ar.pads[("D6", "A")] = _mk_pad(14.0, 1, "NET_1", "D6", "A")
+        ar.nets[1] = [("D5", "A"), ("D5", "K"), ("D6", "A")]
+        ar.net_names = {1: "NET_1"}
+
+        partial_route = Route(net=1, net_name="NET_1", segments=[], vias=[])
+        rescued_route = Route(net=1, net_name="NET_1", segments=[], vias=[])
+
+        rescue_calls: list[int] = []
+
+        def fake_route_net(net):
+            # Simulate partial routing: one MST edge succeeded (returns
+            # one route) but the other edge failed (record_failure is
+            # called and a RoutingFailure for net 1 is appended).
+            ar.routing_failures.append(
+                RoutingFailure(
+                    net=net,
+                    net_name="NET_1",
+                    source_pad=("D5", "K"),
+                    target_pad=("D6", "A"),
+                    source_coords=(12.0, 10.0),
+                    target_coords=(14.0, 10.0),
+                    blocking_components=["D5"],
+                    failure_cause=FC.BLOCKED_PATH,
+                    reason="simulated partial-route failure",
+                )
+            )
+            return [partial_route]
+
+        def fake_rescue(failed_net):
+            rescue_calls.append(failed_net)
+            return [rescued_route]
+
+        with (
+            patch.object(ar, "route_net", side_effect=fake_route_net),
+            patch.object(ar, "_attempt_blocked_component_ripup", side_effect=fake_rescue),
+        ):
+            all_routes = ar.route_all(net_order=[1])
+
+        # The rescue path MUST have been invoked exactly once for net 1
+        # despite ``route_net`` returning a non-empty list.  This is the
+        # core acceptance criterion for the partial-route fix.
+        assert rescue_calls == [1]
+        # ``all_routes`` should contain both the partial route from
+        # ``route_net`` AND the rescued route from the helper.
+        assert partial_route in all_routes
+        assert rescued_route in all_routes
+
+    def test_route_all_does_not_trigger_rescue_when_no_new_failures(self):
+        """``route_all`` does NOT invoke the rescue when ``route_net``
+        returns routes and records no new failures.
+
+        Guards against false positives: a fully successful net must not
+        trigger the rescue helper, even if there are pre-existing
+        failures from earlier nets in ``self.routing_failures``.
+        """
+        from unittest.mock import patch
+
+        from kicad_tools.router.core import Autorouter, RoutingFailure
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Pad, Route
+
+        ar = Autorouter(width=50, height=50)
+        ar.net_class_map = {}
+
+        def _mk_pad(x, net, net_name, ref, pin):
+            return Pad(
+                x=x,
+                y=10.0,
+                width=1.0,
+                height=1.0,
+                net=net,
+                net_name=net_name,
+                ref=ref,
+                pin=pin,
+            )
+
+        ar.pads[("D5", "A")] = _mk_pad(10.0, 1, "NET_1", "D5", "A")
+        ar.pads[("D5", "K")] = _mk_pad(12.0, 1, "NET_1", "D5", "K")
+        ar.nets[1] = [("D5", "A"), ("D5", "K")]
+        ar.net_names = {1: "NET_1"}
+
+        # Pre-existing failure from a prior (unrelated) net -- the delta
+        # check must compare on a per-net basis, not on the global list.
+        ar.routing_failures.append(
+            RoutingFailure(
+                net=99,
+                net_name="OTHER",
+                source_pad=("X", "1"),
+                target_pad=("Y", "1"),
+                source_coords=(0.0, 0.0),
+                target_coords=(1.0, 1.0),
+                blocking_components=[],
+                failure_cause=FC.BLOCKED_PATH,
+                reason="pre-existing",
+            )
+        )
+
+        good_route = Route(net=1, net_name="NET_1", segments=[], vias=[])
+        rescue_calls: list[int] = []
+
+        def fake_route_net(net):
+            return [good_route]
+
+        def fake_rescue(failed_net):  # pragma: no cover - must not fire
+            rescue_calls.append(failed_net)
+            return []
+
+        with (
+            patch.object(ar, "route_net", side_effect=fake_route_net),
+            patch.object(ar, "_attempt_blocked_component_ripup", side_effect=fake_rescue),
+        ):
+            all_routes = ar.route_all(net_order=[1])
+
+        # Rescue must NOT fire when the net routed cleanly with no new
+        # failures, even though the global ``routing_failures`` list is
+        # non-empty (it contains a pre-existing failure for net 99).
+        assert rescue_calls == []
+        assert good_route in all_routes

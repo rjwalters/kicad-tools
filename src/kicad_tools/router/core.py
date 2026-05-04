@@ -2729,23 +2729,47 @@ class Autorouter:
                 if not progress_callback(progress, f"Routing {net_name}", True):
                     break
 
+            # Issue #2499: track failure-count delta around ``route_net`` so
+            # the rescue path can fire on PARTIAL failures too.  For N-port
+            # nets, ``route_net`` invokes MSTRouter per-edge and records a
+            # ``RoutingFailure`` for each failed edge while still returning
+            # any successful edges -- on charlieplex NODE_B/D this manifests
+            # as a non-empty ``routes`` list with one or more new entries
+            # in ``self.routing_failures``.  The original ``if routes:``
+            # branch missed this case because partial routing made the
+            # else-branch unreachable.
+            pre_failure_count = sum(1 for f in self.routing_failures if f.net == net)
             routes = self.route_net(net)
             all_routes.extend(routes)
-            if routes:
+            new_failure_count = sum(1 for f in self.routing_failures if f.net == net)
+            recorded_new_failure = new_failure_count > pre_failure_count
+
+            if routes and not recorded_new_failure:
+                # Fully successful: no new failures were recorded for this net.
                 flush_print(
                     f"  Net {net}: {len(routes)} routes, "
                     f"{sum(len(r.segments) for r in routes)} segments, "
                     f"{sum(len(r.vias) for r in routes)} vias"
                 )
             else:
-                # Issue #2499: When ``route_net`` fails because the path is
-                # blocked by an already-routed component (e.g. charlieplex
-                # NODE_B blocked by D5/D6 reserved cells from earlier-routed
-                # NODE_A or LINE_x siblings), attempt a one-shot targeted
-                # rip-up of strictly lower-priority sibling nets that share
-                # those blocking components.  If the rip-up succeeds the
-                # failed net's routes are now on the grid; collect them
-                # back into ``all_routes`` and remove the recorded failure.
+                # Either no routes returned (total failure) OR routes were
+                # returned alongside one-or-more freshly recorded failures
+                # (partial failure -- the case board 02 actually hits).
+                # In both cases attempt a one-shot targeted rip-up of
+                # strictly lower-priority sibling nets that share the
+                # failed net's blocking components (or, when the failure
+                # analyser left ``blocking_components`` empty, the failed
+                # net's own destination components).  ``_attempt_blocked_
+                # component_ripup`` is idempotent w.r.t. its per-net budget
+                # (``_route_all_max_ripups_per_net``) so partial-route
+                # callers cannot loop.
+                if routes:
+                    flush_print(
+                        f"  Net {net}: {len(routes)} routes, "
+                        f"{sum(len(r.segments) for r in routes)} segments, "
+                        f"{sum(len(r.vias) for r in routes)} vias "
+                        f"(partial -- {new_failure_count - pre_failure_count} edge failure(s) recorded)"
+                    )
                 rescued = self._attempt_blocked_component_ripup(net)
                 if rescued:
                     all_routes.extend(rescued)
