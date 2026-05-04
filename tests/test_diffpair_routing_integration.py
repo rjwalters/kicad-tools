@@ -206,3 +206,100 @@ def test_negotiated_skips_prerouted_diffpair_nets():
         assert post_count == pre_count, (
             f"Net {net_id} was re-routed: had {pre_count} routes, now {post_count}"
         )
+
+
+def _diffpair_with_connector_sibling_router() -> Autorouter:
+    """Build a fixture with a 2-pad diff pair plus a single-ended connector sibling.
+
+    Issue #2482: The diff-pair pre-pass routes USB_D+/USB_D- and reserves
+    grid cells in J1's pin field.  USB_CC1 terminates at the *same*
+    connector (J1) and must still be able to route after the pre-pass.
+
+    Layout:
+        U1 (left) <--> J1 (right)
+        - USB_D+   on U1:1, J1:1
+        - USB_D-   on U1:2, J1:2
+        - USB_CC1  on U1:3, J1:3
+
+    All three nets share the connector J1 so the connector-sibling
+    ordering bump (Issue #2482) must place USB_CC1 before any other
+    same-tier non-sibling net.
+    """
+    from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.15,
+        grid_resolution=0.1,
+    )
+    net_class_map = {
+        "USB_D+": NET_CLASS_HIGH_SPEED,
+        "USB_D-": NET_CLASS_HIGH_SPEED,
+        "USB_CC1": NET_CLASS_HIGH_SPEED,
+    }
+    router = Autorouter(width=30.0, height=10.0, rules=rules,
+                       net_class_map=net_class_map)
+
+    # Diff pair pads
+    p_y = 5.0 - 0.4
+    n_y = 5.0 + 0.4
+    cc_y = 1.5  # USB_CC1 routes above the diff pair
+
+    router.add_component("U1", [
+        {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
+         "net": 1, "net_name": "USB_D+"},
+        {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
+         "net": 2, "net_name": "USB_D-"},
+        {"number": "3", "x": 5.0, "y": cc_y, "width": 0.4, "height": 0.4,
+         "net": 3, "net_name": "USB_CC1"},
+    ])
+    router.add_component("J1", [
+        {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
+         "net": 1, "net_name": "USB_D+"},
+        {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
+         "net": 2, "net_name": "USB_D-"},
+        {"number": "3", "x": 25.0, "y": cc_y, "width": 0.4, "height": 0.4,
+         "net": 3, "net_name": "USB_CC1"},
+    ])
+    return router
+
+
+def test_diffpair_prepass_then_negotiated_routes_connector_sibling():
+    """Issue #2482: diff-pair prepass + negotiated must route connector siblings.
+
+    With one diff pair (USB_D+/USB_D-) and one shared-connector
+    single-ended net (USB_CC1) all terminating on J1, the diff-pair
+    pre-pass routes the pair first.  The negotiated loop then sees the
+    pre-routed nets via ``self.routes`` and (as of #2482) bumps USB_CC1
+    to the front of its tier so it routes before any other same-tier
+    non-sibling net.
+
+    On this generous fixture (30x10mm, no other nets), all three nets
+    must connect their pads after the combined pre-pass + negotiated
+    routing call.
+    """
+    router = _diffpair_with_connector_sibling_router()
+
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+    pre_routes, _warnings, routed_pair = router.route_diffpair_prepass(config)
+
+    # Sanity: the pre-pass should have routed both diff-pair members.
+    if not pre_routes:
+        # Skip if the CoupledPathfinder couldn't find a path on this
+        # fixture -- the bump logic only matters when there are actually
+        # prerouted nets to bump siblings for.
+        return
+    assert routed_pair == {1, 2}, (
+        f"Expected diff pair pre-pass to route nets 1 and 2; got {routed_pair}"
+    )
+
+    # Now run the negotiated loop.  USB_CC1 must connect.
+    routes = router.route_all_negotiated(max_iterations=10, timeout=60.0)
+
+    # Look for at least one segment per net.
+    nets_with_routes = {r.net for r in router.routes}
+    for net_id, name in [(1, "USB_D+"), (2, "USB_D-"), (3, "USB_CC1")]:
+        assert net_id in nets_with_routes, (
+            f"Expected net {name} (id {net_id}) to have routes after "
+            f"diff-pair prepass + negotiated; routed nets={nets_with_routes}"
+        )

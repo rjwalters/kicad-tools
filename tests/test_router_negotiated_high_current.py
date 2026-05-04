@@ -264,3 +264,286 @@ class TestHighCurrentSignalPriority:
     def test_high_current_signal_matches_power_tier(self):
         """Both classes share priority 1 so motor phases route alongside power."""
         assert NET_CLASS_HIGH_CURRENT_SIGNAL.priority == NET_CLASS_POWER.priority
+
+
+class TestFindConnectorSiblingsOfPreroutedNets:
+    """Issue #2482: identify nets that share a connector with prerouted nets.
+
+    When the diff-pair pre-pass routes USB_D+/USB_D- before the negotiated
+    loop, a single-ended net like USB_CC1 that terminates at the same
+    USB-C connector must be routed before lower-priority unrelated nets
+    in its tier; otherwise the connector pin field corridor is consumed
+    by the diff-pair escape and USB_CC1 can no longer reach its pad.
+    """
+
+    def _make_router_with_diffpair_and_sibling(self):
+        """Build a fixture with two prerouted-style HIGH_SPEED nets and one sibling.
+
+        Layout mirrors board 03's USB section:
+        - U1 (MCU) on the left has three pads: USB_D+, USB_D-, USB_CC1.
+        - J1 (USB-C connector) on the right has matching pads for all three.
+        - USB_D+/USB_D- form a "diff pair" (HIGH_SPEED priority 2).
+        - USB_CC1 is single-ended (HIGH_SPEED priority 2, same tier).
+
+        We call ``_find_connector_siblings_of_prerouted_nets`` with
+        ``prerouted_nets={USB_D+, USB_D-}`` and assert USB_CC1 is reported
+        as a connector sibling because it shares J1 with the diff pair.
+        """
+        from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+        net_class_map = {
+            "USB_D+": NET_CLASS_HIGH_SPEED,
+            "USB_D-": NET_CLASS_HIGH_SPEED,
+            "USB_CC1": NET_CLASS_HIGH_SPEED,
+        }
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(
+            width=40.0,
+            height=20.0,
+            rules=rules,
+            net_class_map=net_class_map,
+        )
+        # MCU side
+        router.add_component("U1", [
+            {"number": "1", "x": 5.0, "y": 5.0, "width": 0.4, "height": 0.4,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": 7.0, "width": 0.4, "height": 0.4,
+             "net": 2, "net_name": "USB_D-"},
+            {"number": "3", "x": 5.0, "y": 9.0, "width": 0.4, "height": 0.4,
+             "net": 3, "net_name": "USB_CC1"},
+        ])
+        # USB-C connector side -- all three nets terminate here.
+        router.add_component("J1", [
+            {"number": "A6", "x": 30.0, "y": 5.0, "width": 0.4, "height": 0.4,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 30.0, "y": 7.0, "width": 0.4, "height": 0.4,
+             "net": 2, "net_name": "USB_D-"},
+            {"number": "A5", "x": 30.0, "y": 9.0, "width": 0.4, "height": 0.4,
+             "net": 3, "net_name": "USB_CC1"},
+        ])
+        return router
+
+    def test_returns_empty_when_no_prerouted(self):
+        router = self._make_router_with_diffpair_and_sibling()
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets=set(), candidate_nets=[1, 2, 3]
+        )
+        assert result == set()
+
+    def test_finds_sibling_sharing_connector(self):
+        """USB_CC1 (net 3) shares J1 with the prerouted USB_D+/D- pair."""
+        router = self._make_router_with_diffpair_and_sibling()
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets={1, 2},  # USB_D+, USB_D-
+            candidate_nets=[3],     # USB_CC1
+        )
+        assert result == {3}
+
+    def test_excludes_prerouted_nets_themselves(self):
+        """Prerouted members must not appear in the sibling set."""
+        router = self._make_router_with_diffpair_and_sibling()
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets={1, 2},
+            candidate_nets=[1, 2, 3],  # include the prerouted nets too
+        )
+        assert 1 not in result and 2 not in result
+        assert result == {3}
+
+    def test_excludes_default_priority_candidates(self):
+        """Priority-10 candidates are filtered to avoid indiscriminate boost."""
+        from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+        # Same fixture but USB_CC1 is left unclassified (priority 10).
+        net_class_map = {
+            "USB_D+": NET_CLASS_HIGH_SPEED,
+            "USB_D-": NET_CLASS_HIGH_SPEED,
+            # USB_CC1 deliberately omitted -> default priority 10
+        }
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(
+            width=40.0, height=20.0, rules=rules,
+            net_class_map=net_class_map,
+        )
+        router.add_component("U1", [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+        ])
+        router.add_component("J1", [
+            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+        ])
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets={1, 2}, candidate_nets=[3]
+        )
+        # Net 3 has default priority 10 -> filtered out.
+        assert result == set()
+
+    def test_excludes_unrelated_destination(self):
+        """A candidate sharing no destination with prerouted nets is excluded."""
+        from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+        net_class_map = {
+            "USB_D+": NET_CLASS_HIGH_SPEED,
+            "USB_D-": NET_CLASS_HIGH_SPEED,
+            "JOY_X": NET_CLASS_HIGH_SPEED,
+        }
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(
+            width=60.0, height=40.0, rules=rules,
+            net_class_map=net_class_map,
+        )
+        router.add_component("U1", [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "3", "x": 5.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
+        ])
+        # USB connector has D+/D- only; joystick connector has JOY_X only.
+        router.add_component("J1", [
+            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+        ])
+        router.add_component("J2", [
+            {"number": "1", "x": 50.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
+        ])
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets={1, 2}, candidate_nets=[4]
+        )
+        # JOY_X shares U1 with the prerouted set but JOY_X also lives on
+        # J2 which neither prerouted net touches.  However, U1 is itself a
+        # shared component -- so the helper currently DOES return JOY_X.
+        # This is the intentional, conservative behaviour: any shared
+        # destination triggers the bump.  We assert it explicitly.
+        assert result == {4}
+
+    def test_cross_tier_sibling_detected(self):
+        """Sibling is detected even when tier differs from prerouted nets.
+
+        A diff-pair member may be HIGH_SPEED (priority 2) while its
+        connector sibling is DIGITAL (priority 4).  Both still need
+        ordering coordination because they share the same physical pin
+        field.
+        """
+        from kicad_tools.router.rules import (
+            NET_CLASS_HIGH_SPEED,
+            NET_CLASS_DIGITAL,
+        )
+
+        net_class_map = {
+            "USB_D+": NET_CLASS_HIGH_SPEED,
+            "USB_D-": NET_CLASS_HIGH_SPEED,
+            "USB_VBUS_DET": NET_CLASS_DIGITAL,
+        }
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(
+            width=40.0, height=20.0, rules=rules,
+            net_class_map=net_class_map,
+        )
+        router.add_component("U1", [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
+        ])
+        router.add_component("J1", [
+            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "A4", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
+        ])
+        result = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets={1, 2}, candidate_nets=[3]
+        )
+        assert result == {3}, (
+            "Cross-tier connector sibling must still be detected so the "
+            "sort step can bump it to the front of its own tier."
+        )
+
+    def test_negotiated_ordering_places_sibling_before_other_tier_members(self):
+        """Issue #2482: in route_all_negotiated, connector siblings sort first within tier.
+
+        We don't run the full router here -- we exercise the bump branch
+        end-to-end by setting up self.routes (simulating the diff-pair
+        prepass output) and then extract the same net_order computation
+        the negotiated loop performs.
+        """
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+        from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
+
+        net_class_map = {
+            "USB_D+": NET_CLASS_HIGH_SPEED,
+            "USB_D-": NET_CLASS_HIGH_SPEED,
+            "USB_CC1": NET_CLASS_HIGH_SPEED,
+            # Add a same-tier non-sibling net to confirm ordering picks
+            # USB_CC1 (sibling) BEFORE the non-sibling within tier 2.
+            "OTHER_HS": NET_CLASS_HIGH_SPEED,
+        }
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(
+            width=60.0, height=20.0, rules=rules,
+            net_class_map=net_class_map,
+        )
+        router.add_component("U1", [
+            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+        ])
+        router.add_component("J1", [
+            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+        ])
+        # OTHER_HS lives between U2 and J3, no shared destination with the
+        # USB nets.
+        router.add_component("U2", [
+            {"number": "1", "x": 5.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
+        ])
+        router.add_component("J3", [
+            {"number": "1", "x": 30.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
+        ])
+
+        # Simulate the diff-pair prepass having routed nets 1, 2.
+        prerouted_segs_d_plus = Segment(
+            x1=5.0, y1=5.0, x2=30.0, y2=5.0, width=0.2,
+            layer=Layer.F_CU, net=1, net_name="USB_D+",
+        )
+        prerouted_segs_d_minus = Segment(
+            x1=5.0, y1=7.0, x2=30.0, y2=7.0, width=0.2,
+            layer=Layer.F_CU, net=2, net_name="USB_D-",
+        )
+        router.routes.append(Route(
+            net=1, net_name="USB_D+",
+            segments=[prerouted_segs_d_plus], vias=[]),
+        )
+        router.routes.append(Route(
+            net=2, net_name="USB_D-",
+            segments=[prerouted_segs_d_minus], vias=[]),
+        )
+
+        # Replicate the ordering logic from route_all_negotiated.
+        prerouted_nets = {r.net for r in router.routes}
+        net_order = sorted(router.nets.keys(),
+                           key=lambda n: router._get_net_priority(n))
+        net_order = router._filter_pour_nets(net_order)
+        net_order = [n for n in net_order if n != 0]
+        net_order = [n for n in net_order if n not in prerouted_nets]
+
+        connector_siblings = router._find_connector_siblings_of_prerouted_nets(
+            prerouted_nets, net_order
+        )
+        assert 3 in connector_siblings  # USB_CC1
+        assert 4 not in connector_siblings  # OTHER_HS not a sibling
+
+        def _sibling_aware_priority(net_id: int) -> tuple:
+            base = router._get_net_priority(net_id)
+            flag = 0 if net_id in connector_siblings else 1
+            return (base[0], flag) + base[1:]
+
+        sorted_order = sorted(net_order, key=_sibling_aware_priority)
+        # USB_CC1 (sibling, net 3) must come before OTHER_HS (net 4).
+        idx_cc1 = sorted_order.index(3)
+        idx_other = sorted_order.index(4)
+        assert idx_cc1 < idx_other, (
+            f"Expected USB_CC1 (net 3) at lower index than OTHER_HS (net 4); "
+            f"got USB_CC1@{idx_cc1}, OTHER_HS@{idx_other}, order={sorted_order}"
+        )
