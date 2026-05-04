@@ -160,33 +160,48 @@ jobs:
     # broke every demo board's manufacturing export — this gate prevents
     # that class of regression from re-landing.
     #
-    # Runs as its own job so the apt install of KiCad does not slow down
-    # the main test job. The smoke surface itself is small (<30 s of test
-    # runtime); the dominant cost is the kicad apt install.
+    # Uses the official kicad/kicad:9.0 Docker image rather than installing
+    # KiCad via apt+PPA. Earlier attempts to install from
+    # ppa:kicad/kicad-9.0-releases on ubuntu-latest were unreliable: both
+    # api.launchpad.net and ppa.launchpadcontent.net failed back-to-back from
+    # the Azure GitHub runner, and apt then silently fell back to KiCad 7
+    # from noble/universe — producing confusing "DRC produced no output"
+    # errors instead of an attributable infrastructure failure. The official
+    # container ships kicad-cli 9 already and is immune to Launchpad outages.
+    container:
+      image: kicad/kicad:9.0
+      # Run as root so uv/pip installs go to the system site-packages and
+      # actions/checkout can write into $GITHUB_WORKSPACE without permission
+      # juggling.
+      options: --user 0:0
     steps:
+      # The kicad/kicad image is Ubuntu-based and ships Python 3 + git, but
+      # we install ca-certificates and curl defensively in case the image
+      # variant we land on is missing one of them (uv's installer needs curl,
+      # and HTTPS pulls need ca-certificates).
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+          # Sanity: the container should have kicad-cli 9 already.
+          kicad-cli --version | tee /tmp/kicad-cli-version
+          grep -qE '^9\.' /tmp/kicad-cli-version || {
+            echo "::error::kicad/kicad:9.0 container does not provide kicad-cli 9.x"
+            exit 1
+          }
+
       - uses: actions/checkout@v4
 
-      - name: Install KiCad 9 (kicad-cli)
-        # ubuntu-latest (24.04 noble) ships KiCad 7.0.11 in the default apt
-        # repos, which rejects PCBs emitted by kicad-tools writers because we
-        # emit `(version 20240108)` (KiCad 8 file format epoch) and
-        # `(generator_version "9.0")` (KiCad 9). Installing from the KiCad 9
-        # PPA gets us a kicad-cli that matches the writer's emitted format.
-        # If the writer ever bumps to a newer major version, bump the PPA in
-        # lockstep.
+      - name: Install uv
+        # setup-uv@v4 should work inside the container, but installing via
+        # the official one-liner avoids any action-host coupling and keeps
+        # the install deterministic across image refreshes.
         run: |
-          sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kicad
-          kicad-cli --version
-
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # uv installs to ~/.local/bin by default; surface it for later steps.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: uv sync --extra dev
