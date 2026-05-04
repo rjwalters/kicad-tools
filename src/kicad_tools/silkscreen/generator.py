@@ -9,6 +9,12 @@ First-pass scope:
 - Add board-level ``gr_text`` elements for project name, revision, and date
   sourced from the project spec metadata.
 
+Marking idempotency: ``add_board_markings`` is robust to project rename and
+revision bump. Marking identity is persisted in a sibling ``*.kct.json``
+sidecar file keyed by the ``gr_text`` UUID. The sidecar is read on
+construction and rewritten on ``save()``. PCB content remains strictly
+KiCad-conformant (no ``kct_*`` custom S-expression children).
+
 Deferred to follow-up issues:
 - Polarity marks (IC pin 1, diode cathode)
 - Intelligent auto-placement with pad/copper collision avoidance
@@ -16,19 +22,28 @@ Deferred to follow-up issues:
 
 from __future__ import annotations
 
+import contextlib
+import json
+import logging
+import os
+import tempfile
 import uuid as uuid_module
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.sexp.builders import gr_text_node
 from kicad_tools.sexp.parser import SExp, parse_file
 
+logger = logging.getLogger(__name__)
+
 # Silkscreen layer names recognised by KiCad (pre-8.0 and 8.0+).
 SILKSCREEN_LAYERS = frozenset(("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen"))
 
-# Board-level gr_text marker attribute used for idempotency detection.
-_MARKING_PREFIX = "kct:"
+# Sidecar schema version.
+_SIDECAR_VERSION = 1
 
 
 @dataclass
@@ -57,8 +72,19 @@ class SilkscreenGenerator:
     """
 
     def __init__(self, pcb_path: Path):
-        self.path = pcb_path
+        self.path = Path(pcb_path)
         self.doc: SExp = parse_file(pcb_path)
+        # Sidecar registry: list of {"uuid": str, "tag": str, "added_at": iso8601}.
+        self._registry: list[dict[str, Any]] = self._load_sidecar(self.sidecar_path)
+
+    # ------------------------------------------------------------------
+    # Sidecar properties
+    # ------------------------------------------------------------------
+
+    @property
+    def sidecar_path(self) -> Path:
+        """Return the sibling ``<pcb>.kct.json`` path used to track markings."""
+        return self.path.with_name(self.path.name + ".kct.json")
 
     # ------------------------------------------------------------------
     # Public API
@@ -107,8 +133,11 @@ class SilkscreenGenerator:
         Places ``gr_text`` elements near the bottom-left of the board
         outline (or at a default position if no outline exists).
 
-        This method is idempotent: it will not add duplicate markings if
-        they already exist.
+        Idempotency is tracked in a ``*.kct.json`` sidecar keyed by
+        ``gr_text`` UUID. Re-running with a different name or revision
+        replaces the existing marking (the prior ``gr_text`` is removed
+        and a fresh one written), so renames and revision bumps do not
+        accumulate stale text on the board.
 
         Args:
             name: Project name (e.g. "LED Driver")
@@ -123,23 +152,55 @@ class SilkscreenGenerator:
         """
         result = SilkscreenResult()
 
-        # Find board extents from Edge.Cuts outline for positioning
-        base_x, base_y = self._get_marking_position()
-
+        # Build the desired markings list as (tag, visible_text) pairs.
         markings: list[tuple[str, str]] = []
         if name:
             label = f"{name} Rev {revision}" if revision else name
-            markings.append(("name", label))
+            markings.append(("kct:name", label))
         if date:
-            markings.append(("date", date))
+            markings.append(("kct:date", date))
 
+        if not markings:
+            return result
+
+        # Determine starting position.
+        base_x, base_y = self._get_marking_position()
+
+        # Compute y offset based on existing markings already at the base
+        # position (so a fresh marking added alongside a pre-existing one
+        # stacks below it).
         y_offset = 0.0
-        for tag, text in markings:
-            if self._has_marking(text):
-                result.markings_skipped += 1
-                result.messages.append(f"Marking '{tag}' already exists, skipped")
-                continue
 
+        for tag, text in markings:
+            existing_uuid = self._lookup_registry_uuid(tag)
+            existing_node = (
+                self._find_gr_text_by_uuid(existing_uuid)
+                if existing_uuid is not None
+                else None
+            )
+
+            if existing_node is not None:
+                existing_text = existing_node.get_first_atom()
+                if existing_text is not None and str(existing_text) == text:
+                    # Same content already on the board: skip.
+                    result.markings_skipped += 1
+                    result.messages.append(
+                        f"Marking '{tag}' already exists, skipped"
+                    )
+                    continue
+                # Content differs (rename or revision bump): drop the old
+                # gr_text and registry row, then re-add below.
+                self.doc.remove(existing_node)
+                self._drop_registry_entry(tag)
+                result.messages.append(
+                    f"Replaced stale marking '{tag}'"
+                )
+            elif existing_uuid is not None:
+                # Registry knows about this tag but the gr_text is gone
+                # (user deleted it). Drop the stale row and re-add.
+                self._drop_registry_entry(tag)
+
+            new_uuid = str(uuid_module.uuid4())
             node = gr_text_node(
                 text,
                 base_x,
@@ -147,10 +208,17 @@ class SilkscreenGenerator:
                 layer=layer,
                 font_size=font_size,
                 font_thickness=font_thickness,
-                uuid_str=str(uuid_module.uuid4()),
+                uuid_str=new_uuid,
             )
 
             self.doc.append(node)
+            self._registry.append(
+                {
+                    "uuid": new_uuid,
+                    "tag": tag,
+                    "added_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             result.markings_added += 1
             result.messages.append(f"Added marking '{tag}': {text}")
             y_offset += font_size + 0.5  # spacing between lines
@@ -158,11 +226,132 @@ class SilkscreenGenerator:
         return result
 
     def save(self, output_path: Path | None = None) -> None:
-        """Write the (possibly modified) SExp tree to disk."""
-        save_pcb(self.doc, output_path or self.path)
+        """Write the (possibly modified) SExp tree to disk.
+
+        Also writes the ``*.kct.json`` sidecar next to the PCB so that
+        marking identity (UUIDs + tags) survives reloads.
+        """
+        target = Path(output_path) if output_path is not None else self.path
+        save_pcb(self.doc, target)
+
+        sidecar = target.with_name(target.name + ".kct.json")
+        self._write_sidecar(sidecar, self._registry)
 
     # ------------------------------------------------------------------
-    # Internals
+    # Sidecar I/O
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_sidecar(sidecar_path: Path) -> list[dict[str, Any]]:
+        """Load the sidecar registry. Missing/corrupt files yield an empty list."""
+        if not sidecar_path.exists():
+            return []
+        try:
+            raw = sidecar_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Could not read marking sidecar %s (%s); proceeding with empty registry.",
+                sidecar_path,
+                exc,
+            )
+            return []
+
+        if not isinstance(data, dict):
+            logger.warning(
+                "Sidecar %s has unexpected shape; ignoring.", sidecar_path
+            )
+            return []
+
+        markings = data.get("markings")
+        if not isinstance(markings, list):
+            return []
+
+        clean: list[dict[str, Any]] = []
+        for entry in markings:
+            if not isinstance(entry, dict):
+                continue
+            uuid_val = entry.get("uuid")
+            tag_val = entry.get("tag")
+            if not isinstance(uuid_val, str) or not isinstance(tag_val, str):
+                continue
+            row: dict[str, Any] = {"uuid": uuid_val, "tag": tag_val}
+            added_at = entry.get("added_at")
+            if isinstance(added_at, str):
+                row["added_at"] = added_at
+            clean.append(row)
+        return clean
+
+    @staticmethod
+    def _write_sidecar(
+        sidecar_path: Path, registry: list[dict[str, Any]]
+    ) -> None:
+        """Atomically write the sidecar registry to disk.
+
+        If the registry is empty and no sidecar exists, nothing is
+        written (avoids littering boards that have no markings). If a
+        sidecar already exists it is rewritten so that deleted entries
+        propagate.
+        """
+        if not registry and not sidecar_path.exists():
+            return
+
+        payload = {
+            "version": _SIDECAR_VERSION,
+            "markings": registry,
+        }
+        serialised = json.dumps(payload, indent=2, sort_keys=False) + "\n"
+
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write via tempfile + os.replace so a crash mid-write
+        # cannot leave a half-written sidecar next to the PCB.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=sidecar_path.name + ".",
+            suffix=".tmp",
+            dir=str(sidecar_path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(serialised)
+            os.replace(tmp_name, sidecar_path)
+        except Exception:
+            # Best-effort cleanup of the temp file on failure.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
+
+    # ------------------------------------------------------------------
+    # Registry helpers
+    # ------------------------------------------------------------------
+
+    def _lookup_registry_uuid(self, tag: str) -> str | None:
+        """Return the UUID recorded for *tag*, or None if absent."""
+        for entry in self._registry:
+            if entry.get("tag") == tag:
+                uuid_val = entry.get("uuid")
+                if isinstance(uuid_val, str):
+                    return uuid_val
+        return None
+
+    def _drop_registry_entry(self, tag: str) -> None:
+        """Remove all registry rows with the given tag (in place)."""
+        self._registry = [e for e in self._registry if e.get("tag") != tag]
+
+    def _find_gr_text_by_uuid(self, target_uuid: str) -> SExp | None:
+        """Return the gr_text node whose ``(uuid ...)`` matches, or None."""
+        if not target_uuid:
+            return None
+        for gr_text in self.doc.find_all("gr_text"):
+            uuid_node = gr_text.find("uuid")
+            if uuid_node is None:
+                continue
+            atom = uuid_node.get_first_atom()
+            if atom is not None and str(atom) == target_uuid:
+                return gr_text
+        return None
+
+    # ------------------------------------------------------------------
+    # Other internals
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -306,11 +495,3 @@ class SilkscreenGenerator:
 
         # Fallback: default KiCad origin area
         return 100.0, 115.0
-
-    def _has_marking(self, text: str) -> bool:
-        """Return True if a gr_text with the given visible label already exists."""
-        for gr_text in self.doc.find_all("gr_text"):
-            atom = gr_text.get_first_atom()
-            if atom is not None and str(atom) == text:
-                return True
-        return False

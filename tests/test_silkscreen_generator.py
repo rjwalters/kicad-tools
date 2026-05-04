@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -361,3 +362,208 @@ class TestBuildStepEnum:
         route_idx = members.index(BuildStep.ROUTE)
 
         assert outline_idx < silk_idx < route_idx
+
+
+# ---------------------------------------------------------------------------
+# Sidecar idempotency tests (issue #2494)
+# ---------------------------------------------------------------------------
+
+
+def _name_marking_texts(doc: SExp) -> list[str]:
+    """Return visible text of every gr_text whose value looks like a marking."""
+    out: list[str] = []
+    for n in doc.find_all("gr_text"):
+        atom = n.get_first_atom()
+        if atom is None:
+            continue
+        out.append(str(atom))
+    return out
+
+
+class TestMarkingSidecar:
+    """Sidecar-backed idempotency for board markings (issue #2494)."""
+
+    def test_revision_bump_does_not_duplicate(self, tmp_path):
+        """Bumping revision should replace, not duplicate, the name marking."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        r1 = gen.add_board_markings(name="Foo", revision="A")
+        assert r1.markings_added == 1
+        gen.save()
+
+        # Reload (simulates a separate build run) and bump the revision.
+        gen2 = SilkscreenGenerator(pcb_path)
+        r2 = gen2.add_board_markings(name="Foo", revision="B")
+        assert r2.markings_added == 1
+        assert r2.markings_skipped == 0
+
+        gr_text_atoms = [
+            str(n.get_first_atom() or "") for n in gen2.doc.find_all("gr_text")
+        ]
+        name_markings = [t for t in gr_text_atoms if t.startswith("Foo")]
+        assert len(name_markings) == 1
+        assert name_markings[0] == "Foo Rev B"
+
+    def test_rename_does_not_duplicate(self, tmp_path):
+        """Renaming the project should replace, not duplicate, the name marking."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        gen.add_board_markings(name="Foo")
+        gen.save()
+
+        gen2 = SilkscreenGenerator(pcb_path)
+        r2 = gen2.add_board_markings(name="Bar")
+        assert r2.markings_added == 1
+        assert r2.markings_skipped == 0
+
+        atoms = [str(n.get_first_atom() or "") for n in gen2.doc.find_all("gr_text")]
+        # No old "Foo" remains; exactly one "Bar".
+        assert "Foo" not in atoms
+        assert atoms.count("Bar") == 1
+
+    def test_sidecar_survives_save_and_reload(self, tmp_path):
+        """Sidecar JSON next to PCB enables idempotent re-runs across reloads."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        gen.add_board_markings(name="Persist", revision="1", date="2026-05-04")
+        gen.save()
+
+        sidecar = pcb_path.with_name(pcb_path.name + ".kct.json")
+        assert sidecar.exists()
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert data["version"] == 1
+        tags = sorted(e["tag"] for e in data["markings"])
+        assert tags == ["kct:date", "kct:name"]
+        # Each entry has a UUID matching a gr_text in the PCB.
+        gen2 = SilkscreenGenerator(pcb_path)
+        r2 = gen2.add_board_markings(
+            name="Persist", revision="1", date="2026-05-04"
+        )
+        assert r2.markings_added == 0
+        assert r2.markings_skipped == 2
+
+    def test_missing_sidecar_graceful(self, tmp_path):
+        """No sidecar at construction must not error."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        # Registry should start empty; first run should add cleanly.
+        result = gen.add_board_markings(name="FreshBoard")
+        assert result.markings_added == 1
+
+    def test_corrupt_sidecar_graceful(self, tmp_path, caplog):
+        """Corrupt sidecar JSON should log a warning and proceed empty."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        sidecar = pcb_path.with_name(pcb_path.name + ".kct.json")
+        sidecar.write_text("{this is not valid json", encoding="utf-8")
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        with caplog.at_level("WARNING"):
+            gen = SilkscreenGenerator(pcb_path)
+        # Generator constructed successfully; no markings tracked.
+        result = gen.add_board_markings(name="AfterCorrupt")
+        assert result.markings_added == 1
+
+    def test_user_edited_gr_text_with_colliding_text_not_treated_as_marking(
+        self, tmp_path
+    ):
+        """User-added gr_text whose visible text matches must not be skipped.
+
+        Sidecar disambiguates by UUID — even if a user puts a gr_text on the
+        board whose value happens to match the future marking string, the
+        generator should still add a fresh marking with its own UUID.
+        """
+        # User has a (gr_text "Foo") already, but the sidecar does not list it.
+        pcb = _minimal_pcb("""
+          (gr_text "Foo" (at 90 90) (layer "F.SilkS")
+            (uuid "user-added-uuid")
+            (effects (font (size 1 1) (thickness 0.15))))
+        """)
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        result = gen.add_board_markings(name="Foo")
+
+        assert result.markings_added == 1
+        # User text still present; generator added its own marking with a
+        # distinct UUID and recorded it in the registry.
+        gr_texts = gen.doc.find_all("gr_text")
+        foo_nodes = [n for n in gr_texts if str(n.get_first_atom() or "") == "Foo"]
+        assert len(foo_nodes) == 2
+
+        uuids = []
+        for n in foo_nodes:
+            uuid_node = n.find("uuid")
+            assert uuid_node is not None
+            uuids.append(str(uuid_node.get_first_atom()))
+        assert "user-added-uuid" in uuids
+        # The other UUID was generated for the marking.
+        assert len([u for u in uuids if u != "user-added-uuid"]) == 1
+
+    def test_no_kct_subfields_on_gr_text(self, tmp_path):
+        """Regression guard: no kct_* custom S-expression children on gr_text."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        gen.add_board_markings(name="NoCustom", revision="A", date="2026-05-04")
+        gen.save()
+
+        text = pcb_path.read_text(encoding="utf-8")
+        assert "kct_marking" not in text
+        assert "kct_" not in text
+
+    def test_user_deleted_gr_text_re_adds_marking(self, tmp_path):
+        """If the registry knows a UUID but the gr_text is gone, re-add it."""
+        pcb = _minimal_pcb()
+        pcb_path = _write_pcb(tmp_path, pcb)
+
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(pcb_path)
+        gen.add_board_markings(name="ReAdd")
+        gen.save()
+
+        # Remove the gr_text from the PCB, but leave the sidecar in place.
+        gen.doc.children = [
+            c for c in gen.doc.children
+            if not (not c.is_atom and c.name == "gr_text")
+        ]
+        from kicad_tools.core.sexp_file import save_pcb
+        save_pcb(gen.doc, pcb_path)
+
+        gen2 = SilkscreenGenerator(pcb_path)
+        result = gen2.add_board_markings(name="ReAdd")
+        assert result.markings_added == 1
+        assert result.markings_skipped == 0
+
+
+class TestDeadConstantRemoved:
+    """Dead `_MARKING_PREFIX` constant should be gone (issue #2494)."""
+
+    def test_marking_prefix_removed(self):
+        from kicad_tools.silkscreen import generator
+
+        assert not hasattr(generator, "_MARKING_PREFIX")
