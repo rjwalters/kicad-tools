@@ -166,8 +166,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install KiCad (kicad-cli)
+      - name: Install KiCad 9 (kicad-cli)
+        # ubuntu-latest (24.04 noble) ships KiCad 7.0.11 in the default apt
+        # repos, which rejects PCBs emitted by kicad-tools writers because we
+        # emit `(version 20240108)` (KiCad 8 file format epoch) and
+        # `(generator_version "9.0")` (KiCad 9). Installing from the KiCad 9
+        # PPA gets us a kicad-cli that matches the writer's emitted format.
+        # If the writer ever bumps to a newer major version, bump the PPA in
+        # lockstep.
         run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends kicad
           kicad-cli --version
