@@ -1183,7 +1183,10 @@ class PCB:
         # Version and generator info
         pcb.append(SExp.list("version", 20240108))
         pcb.append(SExp.list("generator", "kicad_tools"))
-        pcb.append(SExp.list("generator_version", "9.0"))
+        # generator_version is a strict-typed string field in KiCad; emit the
+        # value as a quoted atom so kicad-cli accepts the file even though
+        # "9.0" textually parses as a number.
+        pcb.append(SExp.list("generator_version", SExp.quoted_atom("9.0")))
 
         # General settings
         pcb.append(

@@ -407,13 +407,16 @@ class LibraryPin:
         # Build effects for name and number
         font_effects = SExp.list("effects", SExp.list("font", SExp.list("size", 1.27, 1.27)))
 
+        # Pin name and number are strict-typed string fields in KiCad. Quote
+        # them explicitly so numeric-looking values (e.g. "1", "9.0") survive
+        # round-trip without being silently downgraded to bare numerics.
         children: list[SExp] = [
             SExp(value=self.type),
             SExp(value=self.shape),
             SExp.list("at", self.position[0], self.position[1], self.rotation),
             SExp.list("length", self.length),
-            SExp.list("name", self.name, font_effects),
-            SExp.list("number", self.number, font_effects),
+            SExp.list("name", SExp.quoted_atom(self.name), font_effects),
+            SExp.list("number", SExp.quoted_atom(self.number), font_effects),
         ]
 
         return SExp(name="pin", children=children)
@@ -1126,10 +1129,13 @@ class SymbolLibrary:
               (symbol ...)
             )
         """
+        # generator_version is a strict-typed string field in KiCad; emit the
+        # value as a quoted atom so kicad-cli accepts the file even though
+        # "1.0" textually parses as a number.
         children: list[SExp] = [
             SExp.list("version", 20231120),
             SExp.list("generator", "kicad_tools"),
-            SExp.list("generator_version", "1.0"),
+            SExp.list("generator_version", SExp.quoted_atom("1.0")),
         ]
 
         # Add all symbols

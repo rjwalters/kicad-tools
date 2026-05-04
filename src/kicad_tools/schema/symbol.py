@@ -24,9 +24,17 @@ class SymbolPin:
         """Convert to S-expression.
 
         Format: ``(pin "1" (uuid "..."))``
+
+        Pin number is quoted because KiCad strictly types this token as a
+        string; numeric-looking numbers like "1" must round-trip with their
+        quotes intact.
         """
         pin_uuid = self.uuid or str(uuid_mod.uuid4())
-        return SExp.list("pin", self.number, SExp.list("uuid", pin_uuid))
+        return SExp.list(
+            "pin",
+            SExp.quoted_atom(self.number),
+            SExp.list("uuid", pin_uuid),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SymbolPin:

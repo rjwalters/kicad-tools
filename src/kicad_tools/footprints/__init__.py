@@ -78,7 +78,14 @@ class Pad:
             )
         """
         # Build pad node: (pad "number" type shape ...)
-        pad = SExp.list("pad", self.number, self.pad_type.value, self.shape.value)
+        # Pad number is a strict-typed string in KiCad; quote it explicitly so
+        # numeric-looking numbers like "1" don't get serialized as bare ints.
+        pad = SExp.list(
+            "pad",
+            SExp.quoted_atom(self.number),
+            self.pad_type.value,
+            self.shape.value,
+        )
 
         # Position: (at x y)
         x, y = self.position
