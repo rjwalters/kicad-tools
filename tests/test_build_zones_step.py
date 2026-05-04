@@ -327,3 +327,108 @@ class TestRunStepZones:
 
         pcb2 = PCB.load(str(pcb_with_power))
         assert len(pcb2.zones) == zone_count_1
+
+
+# ---------------------------------------------------------------------------
+# Edge clearance regression (issue #2496)
+# ---------------------------------------------------------------------------
+
+
+class TestRunStepZonesEdgeClearance:
+    """Verify _run_step_zones threads ``edge_clearance`` from manufacturer.
+
+    Regression for issue #2496: ``kct build`` was producing zones whose
+    polygon vertices sat exactly on the board outline (0.000 mm clearance),
+    causing ``edge_clearance_zone`` DRC violations on JLCPCB-targeted boards.
+    The fix looks up ``MfrLimits.min_edge_clearance`` from ``ctx.mfr`` and
+    forwards it to :func:`auto_create_zones_for_pour_nets`.
+    """
+
+    @staticmethod
+    def _bbox(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    @staticmethod
+    def _assert_inset(
+        polygon: list[tuple[float, float]],
+        outline_bbox: tuple[float, float, float, float],
+        clearance: float,
+        epsilon: float = 1e-3,
+    ) -> None:
+        """Every vertex must be at least ``clearance - epsilon`` from outline."""
+        x_min, y_min, x_max, y_max = outline_bbox
+        for x, y in polygon:
+            assert x - x_min >= clearance - epsilon, (
+                f"vertex x={x} too close to left edge x_min={x_min} "
+                f"(needs >= {clearance - epsilon}mm)"
+            )
+            assert x_max - x >= clearance - epsilon, (
+                f"vertex x={x} too close to right edge x_max={x_max} "
+                f"(needs >= {clearance - epsilon}mm)"
+            )
+            assert y - y_min >= clearance - epsilon, (
+                f"vertex y={y} too close to top edge y_min={y_min} "
+                f"(needs >= {clearance - epsilon}mm)"
+            )
+            assert y_max - y >= clearance - epsilon, (
+                f"vertex y={y} too close to bottom edge y_max={y_max} "
+                f"(needs >= {clearance - epsilon}mm)"
+            )
+
+    def test_jlcpcb_inset_to_min_edge_clearance(self, pcb_with_power: Path):
+        """With mfr=jlcpcb, zone polygons must be inset >= 0.3 mm from outline."""
+        ctx = _make_ctx(pcb_file=pcb_with_power, mfr="jlcpcb")
+        result = _run_step_zones(ctx, Console())
+        assert result.success is True
+
+        pcb = PCB.load(str(pcb_with_power))
+        assert len(pcb.zones) >= 1, "expected at least one zone to be created"
+
+        # Outline in MINIMAL_PCB is the rect (0,0)-(50,50).
+        outline_bbox = (0.0, 0.0, 50.0, 50.0)
+
+        for zone in pcb.zones:
+            assert zone.polygon, f"zone {zone.net_name} has no boundary polygon"
+            self._assert_inset(zone.polygon, outline_bbox, clearance=0.3)
+
+    def test_oshpark_uses_larger_clearance(self, pcb_with_power: Path):
+        """With mfr=oshpark (0.381 mm), zone polygons inset by oshpark value.
+
+        Confirms the value is plumbed from the manufacturer profile, not
+        hard-coded to JLCPCB's 0.3 mm.
+        """
+        ctx = _make_ctx(pcb_file=pcb_with_power, mfr="oshpark")
+        result = _run_step_zones(ctx, Console())
+        assert result.success is True
+
+        pcb = PCB.load(str(pcb_with_power))
+        assert len(pcb.zones) >= 1
+
+        outline_bbox = (0.0, 0.0, 50.0, 50.0)
+        for zone in pcb.zones:
+            assert zone.polygon, f"zone {zone.net_name} has no boundary polygon"
+            self._assert_inset(zone.polygon, outline_bbox, clearance=0.381)
+
+    def test_unknown_manufacturer_falls_back_to_no_inset(self, pcb_with_power: Path) -> None:
+        """Unknown manufacturer should not crash; zones still get created.
+
+        ``get_mfr_limits`` raises ``ValueError`` for unknown names; the
+        build step swallows that and proceeds with ``edge_clearance=None``,
+        matching the existing behaviour before this fix.
+        """
+        ctx = _make_ctx(pcb_file=pcb_with_power, mfr="not-a-real-manufacturer")
+        result = _run_step_zones(ctx, Console())
+        assert result.success is True
+
+        pcb = PCB.load(str(pcb_with_power))
+        assert len(pcb.zones) >= 1
+        # Vertices should sit on the outline (no inset applied)
+        for zone in pcb.zones:
+            xs = [p[0] for p in zone.polygon]
+            ys = [p[1] for p in zone.polygon]
+            assert min(xs) <= 0.01
+            assert max(xs) >= 49.99
+            assert min(ys) <= 0.01
+            assert max(ys) >= 49.99

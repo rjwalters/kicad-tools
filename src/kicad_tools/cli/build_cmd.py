@@ -921,7 +921,24 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
             net_list = ", ".join(f"{name} ({cls.value})" for name, cls in new_pour_nets)
             console.print(f"  Creating zones for: {net_list}")
 
-        count = auto_create_zones_for_pour_nets(ctx.pcb_file, new_pour_nets)
+        # Look up edge_clearance from the manufacturer profile so that zone
+        # copper does not extend to the board edge.  This mirrors the
+        # auto-fill logic in route_cmd.py and prevents `edge_clearance_zone`
+        # DRC violations when `kct build` is used (which calls this step
+        # directly instead of going through `auto_pour_if_missing`).
+        from kicad_tools.router.mfr_limits import get_mfr_limits
+
+        edge_clearance: float | None = None
+        try:
+            _mfr_limits = get_mfr_limits(ctx.mfr)
+            if _mfr_limits.min_edge_clearance > 0:
+                edge_clearance = _mfr_limits.min_edge_clearance
+        except ValueError:
+            pass  # Unknown manufacturer -- edge_clearance stays None
+
+        count = auto_create_zones_for_pour_nets(
+            ctx.pcb_file, new_pour_nets, edge_clearance=edge_clearance
+        )
 
         return BuildResult(
             step="zones",
