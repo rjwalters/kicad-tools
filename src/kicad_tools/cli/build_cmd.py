@@ -978,6 +978,39 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                     output_file=routed_file,
                 )
 
+    # Pad-grid preflight: detect off-grid pads BEFORE invoking the router.
+    # This surfaces routability problems at PCB-write time with an actionable
+    # message instead of a deep PADS_OFF_GRID failure inside the router.
+    # See issue #2497.
+    grid_for_preflight, clearance_for_preflight, *_ = _get_routing_params(ctx.mfr, ctx.spec)
+    preflight_target = ctx.pcb_file
+    if preflight_target and preflight_target.exists() and not ctx.dry_run:
+        try:
+            from kicad_tools.router.preflight import check_pad_grid_alignment
+
+            report = check_pad_grid_alignment(
+                preflight_target,
+                grid_resolution=float(grid_for_preflight),
+                clearance=float(clearance_for_preflight),
+            )
+            if not report.passed:
+                if not ctx.quiet:
+                    console.print(report.summary())
+                return BuildResult(
+                    step="route",
+                    success=False,
+                    message=(
+                        "Pad grid preflight failed: "
+                        f"{len(report.off_grid_pads)} off-grid pad(s) at "
+                        f"grid {report.grid_resolution}mm.\n" + report.summary()
+                    ),
+                )
+        except Exception as e:
+            # Preflight is advisory; never block routing on a bug in the
+            # check itself.  Surface the error in verbose mode.
+            if ctx.verbose:
+                console.print(f"  [warning] Pad grid preflight skipped: {e}")
+
     # First check for a route script
     route_script = ctx.project_dir / "route_demo.py"
     if not route_script.exists():

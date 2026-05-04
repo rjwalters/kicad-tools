@@ -15,7 +15,7 @@ from .rules.edge import EdgeClearanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.zone_fill import ZoneFillRule
-from .violations import DRCResults
+from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -231,6 +231,68 @@ class DRCChecker:
         """
         rule = ZoneFillRule()
         return rule.check(self.pcb, self.design_rules)
+
+    def check_pad_grid_alignment(
+        self,
+        grid_resolution: float = 0.1,
+        threshold: float | None = None,
+    ) -> DRCResults:
+        """Check that every pad aligns to the router grid.
+
+        Off-grid pads cause routing failures (``PADS_OFF_GRID``) deep
+        inside the autorouter; running this check at PCB-write time
+        produces a much earlier and more actionable error.  See
+        :func:`kicad_tools.router.preflight.check_pad_grid_alignment`
+        for the underlying implementation.
+
+        Args:
+            grid_resolution: Router grid resolution in mm (default ``0.1``,
+                matching the ``Autorouter`` and ``KCT_ROUTE_GRID`` default).
+            threshold: Maximum L2 deviation considered "on-grid", in mm.
+                Defaults to ``grid_resolution / 10`` to match the router-side
+                check.
+
+        Returns:
+            :class:`DRCResults` with one ``pad_grid`` violation (severity
+            error) per off-grid pad.  Empty when all pads align.
+        """
+        from kicad_tools.router.preflight import check_pad_grid_alignment
+
+        results = DRCResults()
+
+        # The preflight needs the PCB file path -- it re-parses the file
+        # using load_pads_for_analysis() to get absolute pad coordinates
+        # with footprint rotation handled correctly.
+        if self.pcb.path is None:
+            # Cannot run without a backing file (in-memory PCBs can't be
+            # checked because the underlying parser operates on text).
+            results.rules_checked += 1
+            return results
+
+        report = check_pad_grid_alignment(
+            self.pcb.path,
+            grid_resolution=grid_resolution,
+            threshold=threshold,
+            clearance=self.design_rules.min_clearance_mm,
+        )
+
+        results.rules_checked += 1
+
+        for pad in report.off_grid_pads:
+            message = pad.message(report.grid_resolution, report.suggested_grid)
+            ref_label = pad.label
+            results.add(
+                DRCViolation(
+                    rule_id="pad_grid",
+                    severity="error",
+                    message=message,
+                    location=(pad.x, pad.y),
+                    actual_value=pad.offset_mm,
+                    required_value=report.threshold,
+                    items=(ref_label,) if ref_label else (),
+                )
+            )
+        return results
 
     def __repr__(self) -> str:
         return (
