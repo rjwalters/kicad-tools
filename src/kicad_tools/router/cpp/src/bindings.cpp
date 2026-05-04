@@ -177,6 +177,10 @@ NB_MODULE(router_cpp, m) {
         .def("add_stored_via", &Grid3D::add_stored_via,
              "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a)
         .def("clear_validation_data", &Grid3D::clear_validation_data)
+        .def("clear_stored_routes", &Grid3D::clear_stored_routes,
+             "Issue #2481: Drop only stored route data (segments + vias), "
+             "keeping pads.  Used after rip-up to invalidate the cached "
+             "snapshot consulted by Pathfinder::is_via_blocked_diag.")
         .def("validate_route", &Grid3D::validate_route,
              "segments"_a, "vias"_a, "exclude_net"_a,
              "exclude_ref_hashes"_a, "trace_clearance"_a,

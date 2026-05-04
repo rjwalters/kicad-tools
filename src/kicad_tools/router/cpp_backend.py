@@ -242,6 +242,15 @@ class CppGrid:
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
 
+        # Issue #2481: Establish the back-reference from the Python grid
+        # to this CppGrid so ``RoutingGrid.unmark_route`` can invalidate
+        # the C++ stored-via/segment snapshot whenever a route is ripped
+        # up.  Without this, ``Pathfinder::is_via_blocked_diag`` would
+        # consult stale ``stored_vias_`` entries and either reject
+        # legitimate via candidates or silently allow placements that
+        # collide with newly-placed sibling vias the cpp side never saw.
+        grid._cpp_grid = cpp_grid
+
         # Copy layer index mappings for layer conversion
         cpp_grid._index_to_layer = dict(grid._index_to_layer)
         cpp_grid._layer_to_index = dict(grid._layer_to_index)
@@ -342,6 +351,30 @@ class CppGrid:
             "blocked_cells": self._impl.count_blocked(),
             "memory_mb": self._impl.memory_mb(),
         }
+
+    def invalidate_stored_routes(self) -> None:
+        """Drop the cached stored-routes snapshot used by validation.
+
+        Issue #2481: ``CppPathfinder._sync_stored_routes`` is append-only
+        and tracks ``self._synced_route_count`` to skip already-copied
+        routes.  When the Python side rips up a route via
+        :meth:`RoutingGrid.unmark_route`, the C++ ``stored_vias_`` /
+        ``stored_segments_`` vectors retain the ripped-up route's
+        entries, and the next call to ``_sync_stored_routes`` would
+        early-return because ``len(py_grid.routes)`` may have decreased.
+
+        This method clears the C++ side's stored routes and resets the
+        sync watermark to 0 so the *next* call to ``_sync_stored_routes``
+        rebuilds the full snapshot from the surviving
+        ``py_grid.routes``.  It is intentionally cheap: clearing two
+        vectors and resetting a counter; the actual rebuild only happens
+        the next time the cpp pathfinder needs to validate a candidate.
+
+        This is called from ``RoutingGrid.unmark_route`` via the
+        ``_cpp_grid`` back-reference established by ``from_routing_grid``.
+        """
+        self._impl.clear_stored_routes()
+        self._synced_route_count = 0
 
 
 class CppPathfinder:

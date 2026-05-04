@@ -304,6 +304,14 @@ void Grid3D::clear_validation_data() {
     stored_vias_.clear();
 }
 
+void Grid3D::clear_stored_routes() {
+    // Issue #2481: Drop only stored route data (segments + vias).
+    // Pads represent board geometry registered once at grid build time
+    // and must survive rip-up cycles.
+    stored_segments_.clear();
+    stored_vias_.clear();
+}
+
 ValidationResult Grid3D::validate_route(
     const std::vector<Segment>& segments,
     const std::vector<Via>& vias,
