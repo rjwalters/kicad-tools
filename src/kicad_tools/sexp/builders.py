@@ -255,8 +255,12 @@ def symbol_property_node(
 
 
 def pin_uuid_node(pin_number: str, pin_uuid: str) -> SExp:
-    """Build a pin UUID mapping node."""
-    return SExp.list("pin", pin_number, uuid_node(pin_uuid))
+    """Build a pin UUID mapping node.
+
+    Pin number is quoted explicitly since KiCad treats it as a strict-typed
+    string token; otherwise numeric-looking numbers like "1" would emit bare.
+    """
+    return SExp.list("pin", SExp.quoted_atom(pin_number), uuid_node(pin_uuid))
 
 
 def symbol_instances_node(project_name: str, sheet_path: str, reference: str, unit: int) -> SExp:

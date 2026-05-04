@@ -846,10 +846,15 @@ def _deep_copy_sexp(node: SExp) -> SExp:
     """Create a deep copy of an S-expression tree.
 
     This avoids Python's ``copy.deepcopy`` which is slow for large
-    trees. Instead we walk the tree manually.
+    trees. Instead we walk the tree manually. Round-trip metadata
+    (_original_str for numerics, _originally_quoted for strings) is
+    propagated so the cloned subtree serializes identically.
     """
     if node.is_atom:
-        return SExp(value=node.value)
+        new_atom = SExp(value=node.value)
+        new_atom._original_str = node._original_str
+        new_atom._originally_quoted = node._originally_quoted
+        return new_atom
 
     new_node = SExp(name=node.name)
     for child in node.children:

@@ -62,7 +62,16 @@ class SExp:
         attributes (1-indexed) pointing to their start position in the source file.
     """
 
-    __slots__ = ("name", "children", "value", "_inline", "_original_str", "_line", "_column")
+    __slots__ = (
+        "name",
+        "children",
+        "value",
+        "_inline",
+        "_original_str",
+        "_originally_quoted",
+        "_line",
+        "_column",
+    )
 
     def __init__(
         self,
@@ -71,6 +80,7 @@ class SExp:
         value: str | int | float | None = None,
         _inline: bool = False,
         _original_str: str | None = None,
+        _originally_quoted: bool = False,
         _line: int = 0,
         _column: int = 0,
     ):
@@ -81,6 +91,13 @@ class SExp:
         self.value = value
         self._inline = _inline
         self._original_str = _original_str
+        # Tracks whether a string atom was parsed from a quoted token. When True,
+        # the serializer preserves the quoted form even if the textual value
+        # would otherwise look numeric (e.g. (generator_version "9.0")). Mirrors
+        # the role of _original_str on numeric atoms. Programmatically
+        # constructed atoms default to False so existing keyword/round-trip
+        # behavior is unchanged.
+        self._originally_quoted = _originally_quoted
         self._line = _line
         self._column = _column
 
@@ -326,25 +343,10 @@ class SExp:
         tab = "\t"
         tabs = tab * indent
 
-        # Some KiCad fields require their atom child to be a quoted string even
-        # when the value parses as a number (e.g. (generator_version "9.0")).
-        force_quote_atom_str = self.name in _FORCE_QUOTED_STRING_VALUE
-
-        def _atom_str(child: SExp) -> str:
-            if (
-                force_quote_atom_str
-                and child.is_atom
-                and isinstance(child.value, str)
-            ):
-                escaped = child.value.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
-                return f'"{escaped}"'
-            return child.to_string(compact=True)
-
         # Check if should render inline
         if compact or self._should_inline():
             parts = [self.name] if self.name else []
-            parts.extend(_atom_str(c) for c in self.children)
+            parts.extend(c.to_string(compact=True) for c in self.children)
             return "(" + " ".join(parts) + ")"
 
         # Multi-line formatting matching KiCad style
@@ -366,11 +368,11 @@ class SExp:
             if child.is_atom:
                 if indent == 0 or started_new_lines:
                     # Already on new lines, continue that way
-                    lines.append(f"{tabs}{tab}{_atom_str(child)}")
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
                     started_new_lines = True
                 else:
                     # Atoms go on same line as parent opener
-                    lines[-1] += " " + _atom_str(child)
+                    lines[-1] += " " + child.to_string(compact=True)
             elif child._should_inline():
                 if indent == 0:
                     # Root level: each child on own line
@@ -462,7 +464,14 @@ class SExp:
         return False
 
     def _format_value(self, value) -> str:
-        """Format a value for length calculation."""
+        """Format a value for length calculation.
+
+        Note: This is only used by _should_inline() for length budgeting on the
+        parent SExp's atom children, where the per-atom _originally_quoted flag
+        is not in scope. It produces a slight under-estimate for strings that
+        carry the quoted flag but otherwise look unquoted; that only affects
+        whether a node renders inline vs. multi-line, never the byte content.
+        """
         if value is None:
             return ""
         if isinstance(value, str):
@@ -476,8 +485,12 @@ class SExp:
         if self.value is None:
             return ""
         if isinstance(self.value, str):
-            # Check if needs quoting
-            if self._needs_quoting(self.value):
+            # Quote when the value was originally parsed quoted, or when its
+            # textual form requires quoting. The originally-quoted flag
+            # preserves the type distinction between (field "9.0") and
+            # (field 9.0) on round-trip — KiCad strict-typed string fields
+            # like generator_version would otherwise be silently downgraded.
+            if self._originally_quoted or self._needs_quoting(self.value):
                 escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
                 escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
                 return f'"{escaped}"'
@@ -795,6 +808,25 @@ class SExp:
         return cls(value=value)
 
     @classmethod
+    def quoted_atom(cls, value: str) -> SExp:
+        """Create a string atom that always serializes quoted.
+
+        Use this for KiCad strict-typed string fields whose values may
+        textually look numeric (e.g. pad numbers like "1", schematic
+        ``generator_version`` like "9.0", pin numbers, etc.). Without the
+        quoted-string flag, the serializer's textual heuristic would emit
+        these as bare numerics, which kicad-cli rejects on load.
+
+        For value strings that already need quoting under the textual
+        heuristic (containing spaces, dots, etc.) this is equivalent to
+        ``SExp.atom(value)`` -- the flag just guarantees quoting in cases
+        where the value alone would not.
+        """
+        node = cls(value=value)
+        node._originally_quoted = True
+        return node
+
+    @classmethod
     def list(cls, name: str, *children: SExp | str | int | float) -> SExp:
         """Create a list node."""
         node = cls(name=name)
@@ -917,13 +949,6 @@ _STRUCTURAL_ELEMENTS = frozenset({
 _FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset({
     "gr_arc",
     "gr_poly",
-})
-
-# Fields whose string atom value must be emitted quoted even when it looks
-# numeric. KiCad's parser strictly types these as string tokens, so the bare
-# form (e.g. `(generator_version 9.0)`) is rejected by kicad-cli on load.
-_FORCE_QUOTED_STRING_VALUE = frozenset({
-    "generator_version",
 })
 
 # Elements that should never be rendered inline (used in _should_inline())
@@ -1124,8 +1149,16 @@ class Parser:
         return node
 
     def _parse_string_node(self) -> SExp:
-        """Parse a quoted string and return as SExp node."""
-        return SExp(value=self._parse_string())
+        """Parse a quoted string and return as SExp node.
+
+        The _originally_quoted flag is set so the serializer can preserve the
+        quoted form on round-trip even when the textual value parses as a
+        number (e.g. "9.0"). This keeps strict-typed KiCad fields like
+        generator_version from being silently downgraded to bare numerics.
+        """
+        node = SExp(value=self._parse_string())
+        node._originally_quoted = True
+        return node
 
     def _parse_string(self) -> str:
         """Parse a quoted string."""

@@ -245,11 +245,14 @@ class SchematicIOMixin:
 
     def to_sexp_node(self) -> SExp:
         """Build complete schematic as SExp tree."""
+        # generator_version is a strict-typed string field in KiCad; emit the
+        # value as a quoted atom so kicad-cli accepts the file even though
+        # "9.0" textually parses as a number.
         root = SExp.list(
             "kicad_sch",
             SExp.list("version", 20231120),
             SExp.list("generator", "eeschema"),
-            SExp.list("generator_version", "9.0"),
+            SExp.list("generator_version", SExp.quoted_atom("9.0")),
             uuid_node(self.sheet_uuid),
             SExp.list("paper", self.paper),
         )

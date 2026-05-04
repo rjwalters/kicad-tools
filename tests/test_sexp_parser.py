@@ -431,6 +431,92 @@ class TestSerialization:
         assert result == '"hello world"'
 
 
+class TestOriginallyQuotedFlag:
+    """Tests for the _originally_quoted flag that preserves quoted-string
+    semantics on round-trip even when the textual value parses as a number.
+
+    This protects strict-typed KiCad string fields like generator_version,
+    where the bare numeric form (e.g. (generator_version 9.0)) is rejected
+    by kicad-cli on load.
+    """
+
+    def test_default_originally_quoted_is_false(self):
+        """Programmatic atoms default to _originally_quoted=False."""
+        atom = SExp(value="9.0")
+        assert atom._originally_quoted is False
+
+    def test_parser_sets_flag_for_quoted_strings(self):
+        """Parsing a quoted string token sets _originally_quoted=True."""
+        node = parse_string('(field "9.0")')
+        atom = node.children[0]
+        assert atom.is_atom
+        assert atom.value == "9.0"
+        assert atom._originally_quoted is True
+
+    def test_parser_does_not_set_flag_for_unquoted_atoms(self):
+        """Parsing an unquoted atom leaves _originally_quoted=False."""
+        node = parse_string("(field 9.0)")
+        atom = node.children[0]
+        assert atom.is_atom
+        # Unquoted numeric tokens parse as float, not string
+        assert atom.value == 9.0
+        assert atom._originally_quoted is False
+
+    def test_roundtrip_quoted_numeric_string(self):
+        """Quoted numeric-looking strings round-trip with quotes preserved."""
+        original = '(field "9.0")'
+        result = parse_string(original).to_string(compact=True)
+        assert result == '(field "9.0")'
+
+    def test_roundtrip_unquoted_numeric_stays_unquoted(self):
+        """Unquoted numbers round-trip without quotes."""
+        original = "(field 9.0)"
+        result = parse_string(original).to_string(compact=True)
+        assert result == "(field 9.0)"
+
+    def test_roundtrip_quoted_string_atom(self):
+        """Regular quoted strings round-trip with quotes."""
+        original = '(field "abc")'
+        result = parse_string(original).to_string(compact=True)
+        assert result == '(field "abc")'
+
+    def test_roundtrip_unquoted_keyword_stays_unquoted(self):
+        """Unquoted keywords round-trip without quotes."""
+        # 'signal' is in unquoted_keywords; parser produces an unquoted str
+        original = "(layer signal)"
+        result = parse_string(original).to_string(compact=True)
+        assert result == "(layer signal)"
+
+    def test_roundtrip_generator_version_quoted(self):
+        """generator_version with quoted "9.0" round-trips quoted (the bug
+        this issue fixes — ensures kicad-cli accepts the regenerated file)."""
+        original = '(generator_version "9.0")'
+        result = parse_string(original).to_string(compact=True)
+        assert result == '(generator_version "9.0")'
+
+    def test_programmatic_atom_with_flag_emits_quoted(self):
+        """Setting _originally_quoted=True on a programmatic atom forces
+        the serializer to emit it quoted, even when the value looks numeric."""
+        atom = SExp(value="9.0")
+        atom._originally_quoted = True
+        node = SExp.list("generator_version", atom)
+        assert node.to_string(compact=True) == '(generator_version "9.0")'
+
+    def test_programmatic_numeric_string_unquoted_by_default(self):
+        """Documented behavior: SExp.list('field', '9.0') is unquoted because
+        the textual heuristic governs default emission. Programmatic callers
+        that need quoted intent must set _originally_quoted=True explicitly."""
+        node = SExp.list("field", "9.0")
+        assert node.to_string(compact=True) == "(field 9.0)"
+
+    def test_parser_does_not_set_flag_on_list_nodes(self):
+        """The flag is only meaningful for atom nodes; list nodes default
+        to _originally_quoted=False even after parsing (no behavior change)."""
+        node = parse_string('(field "9.0")')
+        # The outer list node was not parsed from a quoted string
+        assert node._originally_quoted is False
+
+
 class TestParseFile:
     """Tests for parse_file function."""
 
@@ -702,6 +788,38 @@ class TestRoundTrip:
         assert footprint is not None
         pad = footprint.find("pad")
         assert pad is not None
+
+
+    def test_roundtrip_pcb_header_quoted_generator_version(self):
+        """KiCad strict-typed string fields with numeric-looking values
+        survive round-trip with their quotes intact.
+
+        This is the regression that issue #2493 fixes: previously the
+        serializer would emit (generator_version 9.0) for the parsed
+        (generator_version "9.0"), and kicad-cli would reject the file.
+        """
+        pcb_content = (
+            "(kicad_pcb\n"
+            '\t(version 20240108)\n'
+            '\t(generator "kicad_tools")\n'
+            '\t(generator_version "9.0")\n'
+            "\t(general\n"
+            "\t\t(thickness 1.6)\n"
+            "\t)\n"
+            ")"
+        )
+        parsed = parse_string(pcb_content)
+        serialized = parsed.to_string()
+
+        # generator_version atom must be quoted on output
+        assert '(generator_version "9.0")' in serialized
+        # The bare-numeric form (the bug) must not appear
+        assert "(generator_version 9.0)" not in serialized
+        # And it must reparse cleanly
+        reparsed = parse_string(serialized)
+        gv = reparsed["generator_version"].children[0]
+        assert gv.value == "9.0"
+        assert gv._originally_quoted is True
 
 
 class TestPositionTracking:
