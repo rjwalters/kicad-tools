@@ -57,7 +57,17 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
-CHECK_CATEGORIES = ["clearance", "dimensions", "edge", "netlist", "placement", "silkscreen", "solder_mask", "zones"]
+CHECK_CATEGORIES = [
+    "clearance",
+    "dimensions",
+    "edge",
+    "netlist",
+    "pad_grid",
+    "placement",
+    "silkscreen",
+    "solder_mask",
+    "zones",
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,6 +271,7 @@ def run_selected_checks(
         "dimensions": checker.check_dimensions,
         "edge": checker.check_edge_clearances,
         "netlist": checker.check_netlist,
+        "pad_grid": checker.check_pad_grid_alignment,
         "placement": checker.check_footprint_placement,
         "silkscreen": checker.check_silkscreen,
         "solder_mask": checker.check_solder_mask_pads,
@@ -307,10 +318,7 @@ def output_table(
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
     if results.suppressed_count > 0:
-        print(
-            f"  Suppressed: {results.suppressed_count} "
-            f"(standard library footprints)"
-        )
+        print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
 
     if not violations:
         print(f"\n{'=' * 60}")

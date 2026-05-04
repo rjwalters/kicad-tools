@@ -129,6 +129,11 @@ from .heuristics import (
     WeightedCongestionHeuristic,
 )
 from .drc_nudge import DRCNudgeResult, drc_verify_and_nudge
+from .preflight import (
+    OffGridReport,
+    PreflightOffGridPad,
+    check_pad_grid_alignment,
+)
 from .io import (
     ClearanceViolation,
     FineZone,
@@ -522,4 +527,8 @@ __all__ = [
     "CachedNetRoute",
     "compute_pad_positions_hash",
     "get_default_cache_path",
+    # Preflight checks (Issue #2497)
+    "OffGridReport",
+    "PreflightOffGridPad",
+    "check_pad_grid_alignment",
 ]

@@ -1393,6 +1393,10 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         if not section.startswith("(footprint"):
             continue
 
+        # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
+        footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
+        footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
+
         # Get footprint reference
         ref_match = re.search(
             r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section
@@ -1479,6 +1483,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                 pin=pin,
                 layer=layer,
                 through_hole=is_thru,
+                footprint_name=footprint_name,
             ))
 
     return pads
