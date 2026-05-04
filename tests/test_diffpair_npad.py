@@ -429,3 +429,82 @@ def test_polarity_swap_helper_detects_orientation_inversion():
     assert DiffPairRouter._polarity_swap_between(
         p_left, n_right, p_right_end, n_left_end
     )
+
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2490): start/end pad-pitch mismatch (USB device-side)
+# ---------------------------------------------------------------------------
+
+
+def _pitch_mismatch_router() -> Autorouter:
+    """Two-pad fixture with mismatched start/end pad pitches.
+
+    Mirrors the USB device-side topology that triggers issue #2490:
+
+    - Start (MCU side, U1): P/N pads at 0.8mm pitch.
+    - End (USB-C side, J1): P/N pads at 0.5mm pitch.
+
+    Without the issue #2490 fix, the coupled pathfinder cannot
+    converge from the wider start pitch to the narrower goal pitch
+    because symmetric step moves preserve spacing exactly and the
+    legacy approach radius leaves no room for asymmetric convergence.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+    router = Autorouter(width=30.0, height=20.0, rules=rules)
+
+    # MCU-side pads at 0.8mm pitch.
+    router.add_component(
+        "U1",
+        [
+            {"number": "29", "x": 9.6, "y": 15.5, "width": 0.5, "height": 0.5,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "28", "x": 10.4, "y": 15.5, "width": 0.5, "height": 0.5,
+             "net": 2, "net_name": "USB_D-"},
+        ],
+    )
+
+    # USB-C-side pads at 0.5mm pitch.
+    router.add_component(
+        "J1",
+        [
+            {"number": "A6", "x": 9.75, "y": 5.0, "width": 0.25, "height": 0.35,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "A7", "x": 10.25, "y": 5.0, "width": 0.25, "height": 0.35,
+             "net": 2, "net_name": "USB_D-"},
+        ],
+    )
+    return router
+
+
+def test_pitch_mismatch_diff_pair_routes():
+    """Issue #2490: a 2-pad pair with start pitch > end pitch routes.
+
+    This regression-tests the combination of:
+
+    * Endpoint via exception (allows dropping a via at the dense pad
+      cluster on layer 0 even though adjacent pads block via clearance).
+    * Approach-radius scaling for pitch deltas (gives the search room
+      to relax spacing before reaching the goal cells).
+    * Asymmetric "converge" moves inside the approach radius (lets P
+      and N step independently to bring spacing from the wider start
+      pitch down to the narrower goal pitch).
+    """
+    router = _pitch_mismatch_router()
+    pairs = router._diffpair.detect_differential_pairs()
+    assert pairs, "fixture must expose a USB diff pair"
+
+    config = DifferentialPairConfig(enabled=True, spacing=0.2)
+    pair = pairs[0]
+    pair.rules = config.get_rules(pair.pair_type)
+
+    routes, _warning = router._diffpair.route_differential_pair_coupled(
+        pair, spacing=0.2, coupled_only=True
+    )
+
+    # Both nets must produce routes.  ``coupled_only=True`` means a
+    # failure short-circuits to ``([], None)`` rather than falling back
+    # to independent routing.  The test therefore proves the coupled
+    # pathfinder itself handles the pitch transition.
+    assert routes, "coupled pathfinder must succeed on pitch-mismatch fixture"
+    nets = {r.net for r in routes}
+    assert 1 in nets and 2 in nets, f"both nets must produce routes; got nets={nets}"
