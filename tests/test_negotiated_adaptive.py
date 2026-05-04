@@ -1550,7 +1550,6 @@ class TestRouteAllBlockedComponentRipup:
     def _make_autorouter_with_failure(self, blocking_components, failure_cause):
         """Build an Autorouter with one recorded failure for net 1."""
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.failure_analysis import FailureCause as FC
         from kicad_tools.router.primitives import Pad
 
         ar = Autorouter(width=50, height=50)
@@ -1607,11 +1606,21 @@ class TestRouteAllBlockedComponentRipup:
         result = ar._attempt_blocked_component_ripup(failed_net=1)
         assert result == []
 
-    def test_skips_when_blocking_components_empty(self):
-        """Helper does not attempt rip-up when blocking_components is empty."""
+    def test_skips_when_no_routed_siblings_to_rip(self):
+        """Helper returns [] when no sibling net is on the grid to rip up.
+
+        With ``blocking_components=[]``, the helper falls back to using
+        the failed net's own destination components (issue #2499 fallback
+        for the empty-blockers case).  But if no other net has any pads
+        on those components AND has been routed, there is nothing to rip
+        up so the helper returns [].
+        """
         from kicad_tools.router.failure_analysis import FailureCause as FC
 
         ar = self._make_autorouter_with_failure([], FC.BLOCKED_PATH)
+        # No routes on the grid, so even the destination-fallback finds
+        # no siblings to displace.
+        assert ar.routes == []
         result = ar._attempt_blocked_component_ripup(failed_net=1)
         assert result == []
 
@@ -1700,6 +1709,62 @@ class TestRouteAllBlockedComponentRipup:
         assert all(f.net != 1 for f in ar.routing_failures)
         # Budget for the failed net should now be 1.
         assert ar._route_all_ripup_history[1] == 1
+
+    def test_falls_back_to_destination_components_when_blockers_empty(self):
+        """When the recorded failure has no blocking_components, the helper
+        falls back to the failed net's own destination components.
+
+        This is the charlieplex matrix case (issue #2499): the C++ A*
+        Bresenham scan does not always identify which sibling net's traces
+        are blocking the inter-row corridor, so ``RoutingFailure.blocking_components``
+        is empty.  The fallback ensures the helper still finds the
+        sibling on the LED component (which the failed net also touches)
+        and triggers a rip-up.
+        """
+        from unittest.mock import patch
+
+        from kicad_tools.router.failure_analysis import FailureCause as FC
+        from kicad_tools.router.primitives import Route
+
+        # Build a failure with empty blocking_components -- this matches
+        # the observed behaviour on board 02 (charlieplex 3x3) where the
+        # find_blocking_nets direct-line scan returns nothing.
+        ar = self._make_autorouter_with_failure([], FC.BLOCKED_PATH)
+
+        # Pre-populate self.routes for net 2 so it is a routed sibling
+        # candidate.  Net 2's pads sit on D5 -- the same component as the
+        # failed net's pads -- so the destination-component fallback must
+        # discover net 2 even though blocking_components=[] in the failure.
+        sibling_route = Route(net=2, net_name="NET_2", segments=[], vias=[])
+        ar.routes.append(sibling_route)
+
+        def fake_targeted_ripup(
+            *,
+            failed_net,
+            blocking_nets,
+            net_routes,
+            routes_list,
+            pads_by_net,
+            present_cost_factor,
+            mark_route_callback,
+            ripup_history=None,
+            max_ripups_per_net=3,
+            per_net_timeout=None,
+        ):
+            new_route = Route(net=failed_net, net_name="NET_1", segments=[], vias=[])
+            routes_list.append(new_route)
+            return True
+
+        with patch(
+            "kicad_tools.router.algorithms.negotiated.NegotiatedRouter.targeted_ripup",
+            side_effect=fake_targeted_ripup,
+        ):
+            result = ar._attempt_blocked_component_ripup(failed_net=1)
+
+        # Despite blocking_components=[], the fallback finds net 2 and
+        # the rip-up rescues net 1.
+        assert len(result) == 1
+        assert result[0].net == 1
 
     def test_rejects_equal_priority_sibling(self):
         """Helper does not rip up a sibling with equal priority.

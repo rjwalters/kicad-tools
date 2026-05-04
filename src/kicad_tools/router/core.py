@@ -2815,13 +2815,24 @@ class Autorouter:
             return []
         if recent_failure.failure_cause != FailureCause.BLOCKED_PATH:
             return []
-        blocking_components = recent_failure.blocking_components
-        if not blocking_components:
-            return []
 
         # Budget check on the failed net itself.
         max_ripups = self._route_all_max_ripups_per_net
         if self._route_all_ripup_history.get(failed_net, 0) >= max_ripups:
+            return []
+
+        # Determine which components to consider as "blocking" for the
+        # purpose of sibling search.  When the failure analyser populates
+        # ``blocking_components`` (Bresenham scan caught a sibling on the
+        # direct path) we honour that list verbatim.  Otherwise we fall
+        # back to the failed net's own destination components -- on
+        # charlieplex / matrix topologies the LEDs that the failed net
+        # touches are exactly the components where lower-priority siblings
+        # have laid traces that consume the inter-row corridor.
+        blocking_components: list[str] | set[str] = recent_failure.blocking_components
+        if not blocking_components:
+            blocking_components = self._get_net_destination_components(failed_net)
+        if not blocking_components:
             return []
 
         # Identify lower-priority siblings whose pads sit on the blocking
@@ -2876,9 +2887,12 @@ class Autorouter:
 
         sibling_names = [self.net_names.get(s, f"Net_{s}") for s in siblings]
         failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+        # ``blocking_components`` may be a list (from RoutingFailure) or a set
+        # (from the destination-component fallback) -- normalise for printing.
+        components_str = ", ".join(sorted(blocking_components))
         flush_print(
             f"  BLOCKED_BY_COMPONENT rip-up for {failed_name}: "
-            f"displacing {len(siblings)} sibling(s) on {', '.join(blocking_components)}: "
+            f"displacing {len(siblings)} sibling(s) on {components_str}: "
             f"{', '.join(sibling_names)}"
         )
 
