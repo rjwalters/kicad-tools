@@ -19,6 +19,7 @@ from kicad_tools.router.drc_nudge import (
     _perpendicular_unit,
     _reconnect_segments,
     _segment_endpoints_anchored_to_net_pads,
+    _segment_endpoints_anchored_to_net_vias,
     _segment_length,
     drc_verify_and_nudge,
 )
@@ -964,3 +965,220 @@ class TestNoSilentDisconnectFromNudge:
         assert not math.isclose(seg_b.x2, seg_c.x1), (
             "Legacy nudge leaves seg_c stranded -- chain breaks"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for via-anchor preservation in chain-aware nudge (Issue #2483)
+# ---------------------------------------------------------------------------
+
+
+class TestSegmentEndpointsAnchoredToNetVias:
+    """Via-anchor detection used by chain-aware nudge to preserve layer transitions."""
+
+    def test_segment_with_endpoint_on_via_is_detected(self):
+        """A segment endpoint coincident with a via centre is detected as anchored."""
+        via = Via(
+            x=10.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(net=1, net_name="N", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route])
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is True
+
+    def test_segment_with_second_endpoint_on_via_is_detected(self):
+        """The helper checks both endpoints, not just the first."""
+        via = Via(
+            x=15.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(net=1, net_name="N", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route])
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is True
+
+    def test_segment_close_but_not_at_via_is_not_detected(self):
+        """Endpoints outside the 0.02mm tolerance are not treated as anchored."""
+        via = Via(
+            x=10.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(net=1, net_name="N", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route])
+        # 0.05 mm offset -- outside the 0.02 mm via anchor tolerance.
+        seg = Segment(x1=10.05, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is False
+
+    def test_segment_with_no_via_endpoint_returns_false(self):
+        """Segments far from any via on the net are not anchored."""
+        via = Via(
+            x=0.0, y=0.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(net=1, net_name="N", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route])
+        seg = Segment(x1=10.0, y1=10.0, x2=15.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is False
+
+    def test_via_of_different_net_does_not_match(self):
+        """Vias on a different net should not anchor segments of this net."""
+        via = Via(
+            x=10.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        route = Route(net=2, net_name="Other", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route])
+        # Segment on net 1 has an endpoint at the via centre, but the via
+        # belongs to net 2 -- not an anchor for this net.
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is False
+
+    def test_no_routes_returns_false(self):
+        """An empty router (no routes / no vias) returns False without error."""
+        router = _StubAutorouter()
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is False
+
+    def test_via_in_different_route_same_net_is_detected(self):
+        """A via on a different route but the same net is still an anchor."""
+        # Same net, two routes -- the via lives on the second route while
+        # the segment under inspection is on the first.  We must still
+        # consider the via because it's on the same net.
+        via = Via(
+            x=10.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route_with_seg = Route(net=1, net_name="N", segments=[], vias=[])
+        route_with_via = Route(net=1, net_name="N", segments=[], vias=[via])
+        router = _StubAutorouter(routes=[route_with_seg, route_with_via])
+        seg = Segment(x1=10.0, y1=5.0, x2=15.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        assert _segment_endpoints_anchored_to_net_vias(seg, 1, router) is True
+
+
+class TestNudgeSegmentWithChainViaAnchor:
+    """Regression tests for Issue #2483: chain-aware nudge must respect via anchors."""
+
+    def test_via_anchored_segment_not_nudged(self):
+        """A segment whose endpoint sits on a via centre must not be translated.
+
+        Regression for #2483: chain-aware nudge must treat via centres as
+        anchors, just like pad centres.  Otherwise the segment slides off
+        the via and the layer transition breaks because the same-layer
+        chain walk cannot drag the via (and its other-layer continuation)
+        along.
+        """
+        # Build a 3-pad net: P1 (top), P2 (top), P3 (bottom).
+        # Route: P1 --seg_a(top)--> via --seg_b(bottom)--> P3
+        #        P1 --seg_c(top)--> P2
+        p1 = Pad(
+            x=0.0, y=0.0, width=1.0, height=1.0,
+            net=1, net_name="N", layer=Layer.F_CU, ref="J1", pin="1",
+        )
+        p2 = Pad(
+            x=0.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="N", layer=Layer.F_CU, ref="J1", pin="2",
+        )
+        p3 = Pad(
+            x=10.0, y=10.0, width=1.0, height=1.0,
+            net=1, net_name="N", layer=Layer.B_CU, ref="J1", pin="3",
+        )
+        via = Via(
+            x=10.0, y=0.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        # seg_a runs top-layer from P1 to the via centre
+        seg_a = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
+        # seg_b runs bottom-layer from via centre to P3
+        seg_b = Segment(x1=10.0, y1=0.0, x2=10.0, y2=10.0, width=0.2, layer=Layer.B_CU, net=1)
+        # seg_c provides a pad-anchored stub on the top layer for P2
+        seg_c = Segment(x1=0.0, y1=0.0, x2=0.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(
+            net=1, net_name="N",
+            segments=[seg_a, seg_b, seg_c],
+            vias=[via],
+        )
+        router = _StubAutorouter(
+            routes=[route],
+            pads={
+                ("J1", "1"): p1,
+                ("J1", "2"): p2,
+                ("J1", "3"): p3,
+            },
+            nets={1: [("J1", "1"), ("J1", "2"), ("J1", "3")]},
+        )
+
+        # seg_a has an endpoint at the via centre AND another at a pad centre.
+        # Capture pre-nudge state.
+        pre_x1, pre_y1, pre_x2, pre_y2 = seg_a.x1, seg_a.y1, seg_a.x2, seg_a.y2
+        via_x, via_y = via.x, via.y
+
+        # Attempt to nudge seg_a perpendicular to its run (push it +y by 0.1mm).
+        result = _nudge_segment_with_chain(seg_a, 0.0, 1.0, 0.1, router)
+
+        # The chain-aware nudge must decline this nudge.
+        assert result is False, (
+            "Nudge must be declined: seg_a is via-anchored at (10, 0) "
+            "and pad-anchored at (0, 0); translating it disconnects the chain."
+        )
+        # seg_a unchanged.
+        assert seg_a.x1 == pre_x1 and seg_a.y1 == pre_y1
+        assert seg_a.x2 == pre_x2 and seg_a.y2 == pre_y2
+        # via unchanged.
+        assert via.x == via_x and via.y == via_y
+        # The chain-walk must not have been applied: seg_b's endpoint at the
+        # via centre is still there, so the layer transition is intact.
+        assert seg_b.x1 == 10.0 and seg_b.y1 == 0.0
+
+    def test_via_anchored_segment_not_pad_anchored_still_declines(self):
+        """A segment with only a via anchor (no pad anchor) is still declined.
+
+        This isolates the via-anchor guard from the pre-existing pad-anchor
+        guard to confirm the new logic actually runs.
+        """
+        # No pads on this net at the segment endpoints; only a via.
+        via = Via(
+            x=10.0, y=5.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        # seg has its x2/y2 endpoint coincident with the via centre, but its
+        # x1/y1 endpoint is in free space (not a pad and not a via).
+        seg = Segment(x1=0.0, y1=5.0, x2=10.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="N", segments=[seg], vias=[via])
+        router = _StubAutorouter(routes=[route])
+
+        pre_x1, pre_y1, pre_x2, pre_y2 = seg.x1, seg.y1, seg.x2, seg.y2
+
+        result = _nudge_segment_with_chain(seg, 0.0, 1.0, 0.1, router)
+
+        assert result is False, "Via-anchor guard alone must decline the nudge"
+        # Segment unchanged byte-for-byte.
+        assert seg.x1 == pre_x1 and seg.y1 == pre_y1
+        assert seg.x2 == pre_x2 and seg.y2 == pre_y2
+        # Via unchanged.
+        assert via.x == 10.0 and via.y == 5.0
+
+    def test_segment_far_from_any_via_is_still_nudged(self):
+        """Vias that don't coincide with the segment do not block the nudge.
+
+        Regression guard: the via-anchor check must use the per-via
+        coordinate test, not just the presence of any via in the route.
+        """
+        # A via exists on this net but is far from the segment we'll nudge.
+        via = Via(
+            x=50.0, y=50.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        seg = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="N", segments=[seg], vias=[via])
+        router = _StubAutorouter(routes=[route])
+
+        result = _nudge_segment_with_chain(seg, 0.0, 1.0, 0.2, router)
+
+        assert result is True, (
+            "Segments far from any via should still be nudgable -- "
+            "the guard must be position-sensitive, not route-presence-sensitive."
+        )
+        # Segment moved as expected.
+        assert math.isclose(seg.y1, 0.2)
+        assert math.isclose(seg.y2, 0.2)

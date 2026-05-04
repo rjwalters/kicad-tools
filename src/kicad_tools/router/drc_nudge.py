@@ -158,6 +158,20 @@ def _nudge_segment_with_chain(
         )
         return False
 
+    # Via-anchor guard (Issue #2483).  A chain segment whose endpoint sits
+    # on a via centre is anchored to that layer transition: translating the
+    # segment slides it off the via and breaks the chain at the layer
+    # change, since the same-layer chain walk below cannot drag the via
+    # (and the via's other-layer continuation) along with it.  Decline the
+    # nudge so the original DRC violation surfaces instead of producing a
+    # silent disconnect.
+    if _segment_endpoints_anchored_to_net_vias(seg, seg.net, router):
+        logger.debug(
+            "Skipping nudge for net %s: segment is via-anchored",
+            seg.net,
+        )
+        return False
+
     # Capture pre-nudge endpoints so we can update neighbour segments.
     old_x1, old_y1 = seg.x1, seg.y1
     old_x2, old_y2 = seg.x2, seg.y2
@@ -219,6 +233,12 @@ def _nudge_segment_with_chain(
 # *actual* pad anchors, not nearby segment intersections.
 _PAD_ANCHOR_TOL = 0.02
 
+# Tolerance in mm for considering a segment endpoint anchored to a via
+# centre.  Vias also terminate segments at exact centres within float
+# rounding, so the same tolerance as ``_PAD_ANCHOR_TOL`` is appropriate
+# (Issue #2483).
+_VIA_ANCHOR_TOL = 0.02
+
 
 def _segment_endpoints_anchored_to_net_pads(
     seg: Segment,
@@ -272,6 +292,61 @@ def _segment_endpoints_anchored_to_net_pads(
             and abs(seg.y2 - pad.y) < _PAD_ANCHOR_TOL
         ):
             return True
+    return False
+
+
+def _segment_endpoints_anchored_to_net_vias(
+    seg: Segment,
+    net: int,
+    router: Autorouter,
+) -> bool:
+    """Return True when either endpoint of ``seg`` sits on a via centre of ``net``.
+
+    Companion to :func:`_segment_endpoints_anchored_to_net_pads`.  Vias are
+    layer transitions: the chain walk in :func:`_nudge_segment_with_chain`
+    intentionally restricts itself to same-layer same-net segments, which
+    means a via that links a top-layer segment to a bottom-layer segment
+    is invisible to the snap-update logic.  Translating a segment off a
+    via centre therefore disconnects the chain at the layer transition.
+
+    Issue #2483: the chain-aware nudge introduced by #2479 fixed the
+    same-layer chain disconnection case (board 05 PHASE_B) but did not
+    consider vias.  When a net routes through a via, a nudge can slide
+    the segment off the via centre, leaving the via dangling on the
+    other-layer continuation.
+
+    The conservative fix mirrors the pad-anchor guard: decline the nudge
+    when an endpoint is via-anchored.  Declining surfaces the original
+    DRC violation as a detectable signal rather than a silent disconnect.
+
+    Args:
+        seg: The segment about to be nudged.
+        net: The net the segment belongs to.
+        router: The autorouter, used to look up via positions per route.
+
+    Returns:
+        True if either endpoint of ``seg`` is within ``_VIA_ANCHOR_TOL`` of
+        any via on ``net``; False otherwise (or when route data is
+        unavailable).  Note that vias live on per-route ``Route.vias``
+        lists, not on a top-level ``router.vias`` attribute.
+    """
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        if route.net != net:
+            continue
+        for via in route.vias:
+            # Endpoint 1
+            if (
+                abs(seg.x1 - via.x) < _VIA_ANCHOR_TOL
+                and abs(seg.y1 - via.y) < _VIA_ANCHOR_TOL
+            ):
+                return True
+            # Endpoint 2
+            if (
+                abs(seg.x2 - via.x) < _VIA_ANCHOR_TOL
+                and abs(seg.y2 - via.y) < _VIA_ANCHOR_TOL
+            ):
+                return True
     return False
 
 
