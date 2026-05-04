@@ -256,4 +256,13 @@ NB_MODULE(router_cpp, m) {
     // Version info
     m.def("version", []() { return "1.0.0"; });
     m.def("is_available", []() { return true; });
+
+    // Build version (Issue #2501): exposed both as a module attribute (for cheap
+    // identity checks at import time) and a callable (for parity with version()).
+    // The Python side mirrors this as _REQUIRED_CPP_BUILD_VERSION in
+    // cpp_backend.py; mismatch indicates the compiled .so is stale relative to
+    // the cpp/ source tree and the C++ backend is disabled with an actionable
+    // "kct build-native" hint.
+    m.attr("BUILD_VERSION") = router::ROUTER_CPP_BUILD_VERSION;
+    m.def("build_version", []() { return router::ROUTER_CPP_BUILD_VERSION; });
 }

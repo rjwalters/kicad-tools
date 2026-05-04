@@ -114,6 +114,57 @@ kicad-tools/
 
 ---
 
+## C++ Native Extensions
+
+The router and placement optimizer ship optional C++ acceleration modules
+(`router_cpp`, `placement_cpp`) for 10-100x speedup over the pure-Python
+implementation. They are built with nanobind + CMake and live under
+`src/kicad_tools/router/cpp/` and `src/kicad_tools/placement/cpp/`.
+
+### Building the C++ extensions
+
+```bash
+# Build (requires CMake 3.15+ and a C++20 compiler)
+bash scripts/build-cpp.sh build
+
+# Or via the CLI:
+kct build-native
+
+# Clean build artifacts:
+bash scripts/build-cpp.sh clean
+```
+
+### Build version discipline (Issue #2501)
+
+The Python side caches a compiled `.so` matching `cpython-<X>-<platform>.so`.
+If the `.cpp` source moves ahead of the compiled `.so`, the import will
+succeed but new symbols (`PadBounds`, `FAILURE_NONE`, etc.) will be missing,
+causing hard `AttributeError` crashes deep in the routing code.
+
+To prevent this, the build surface is gated by an integer constant
+`ROUTER_CPP_BUILD_VERSION`, mirrored on both sides:
+
+- `src/kicad_tools/router/cpp/include/types.hpp` (C++ source)
+- `src/kicad_tools/router/cpp_backend.py` as `_REQUIRED_CPP_BUILD_VERSION`
+  (Python side)
+
+**When you change anything under `src/kicad_tools/router/cpp/` that affects
+the binding surface (added/removed/renamed symbols, struct fields, function
+signatures), you MUST:**
+
+1. Bump `ROUTER_CPP_BUILD_VERSION` in `cpp/include/types.hpp`.
+2. Bump `_REQUIRED_CPP_BUILD_VERSION` to the same value in `cpp_backend.py`.
+3. Rebuild with `kct build-native` (or `bash scripts/build-cpp.sh build`).
+
+If the two constants disagree at import time, the C++ backend is disabled
+with a clear `kct build-native` rebuild hint and the router falls back to
+pure Python rather than crashing at routing time. The CI `cpp-build-check`
+job rebuilds from a clean checkout and asserts the guard reports the
+backend as available, so a forgotten version bump or stale `.so` will fail
+CI rather than silently regress production.
+
+---
+
 ## Running Tests
 
 ### Run All Tests

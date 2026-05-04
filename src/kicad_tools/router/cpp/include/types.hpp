@@ -12,6 +12,16 @@
 
 namespace router {
 
+// Build version for the C++ binding surface (Issue #2501).
+//
+// Bump this constant in any PR that changes the bindings.cpp surface
+// (added/removed/renamed symbols, struct fields, function signatures).
+// The Python side mirrors this as ``_REQUIRED_CPP_BUILD_VERSION`` in
+// ``cpp_backend.py``; on import the two are compared and a mismatch
+// disables the C++ backend with a clear "kct build-native" error,
+// preventing silent ``AttributeError`` failures from a stale .so.
+constexpr int ROUTER_CPP_BUILD_VERSION = 2;
+
 // Grid cell state
 struct GridCell {
     bool blocked = false;

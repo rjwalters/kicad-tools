@@ -1,5 +1,7 @@
 """Tests for C++ router backend fallback behavior."""
 
+import importlib
+
 from kicad_tools.router.cpp_backend import (
     LARGE_GRID_THRESHOLD,
     format_backend_status,
@@ -1163,3 +1165,108 @@ class TestCppPathfinderPythonFallback:
             pf.route(start, end)
             # Same Router instance should be reused
             assert pf._py_router is first_router
+
+
+class TestCppBuildVersionGuard:
+    """Test the stale-.so detection added in Issue #2501.
+
+    The guard compares ``router_cpp.BUILD_VERSION`` (compiled into the .so)
+    against ``_REQUIRED_CPP_BUILD_VERSION`` (mirrored in cpp_backend.py).
+    On mismatch the C++ backend is disabled with a "kct build-native" hint
+    routed through the existing fallback path, preventing downstream
+    ``AttributeError`` from missing symbols at routing time.
+    """
+
+    def test_required_build_version_constant_exists(self):
+        """The Python-side required build version is defined as an int."""
+        from kicad_tools.router import cpp_backend
+
+        assert hasattr(cpp_backend, "_REQUIRED_CPP_BUILD_VERSION")
+        assert isinstance(cpp_backend._REQUIRED_CPP_BUILD_VERSION, int)
+        assert cpp_backend._REQUIRED_CPP_BUILD_VERSION >= 1
+
+    def test_build_version_exposed_when_cpp_available(self):
+        """When C++ loads successfully, router_cpp.BUILD_VERSION matches required."""
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router import cpp_backend
+
+        assert cpp_backend.router_cpp is not None
+        actual = getattr(cpp_backend.router_cpp, "BUILD_VERSION", None)
+        assert actual == cpp_backend._REQUIRED_CPP_BUILD_VERSION
+
+    def test_stale_so_disables_cpp_with_actionable_error(self, monkeypatch):
+        """A mismatched BUILD_VERSION on a fresh import disables the C++ backend.
+
+        Simulates the failure mode from Issue #2501: the .so loads cleanly but
+        is older than the cpp/ source tree, so it lacks symbols (or has the
+        wrong build version constant). The guard must short-circuit to the
+        Python fallback with a "kct build-native" hint instead of allowing
+        a downstream AttributeError.
+        """
+        import sys
+
+        # Ensure cpp_backend is freshly imported so we see the live router_cpp.
+        sys.modules.pop("kicad_tools.router.cpp_backend", None)
+        original = importlib.import_module("kicad_tools.router.cpp_backend")
+
+        # Snapshot the live router_cpp module (None if backend already disabled)
+        router_cpp_mod = original.router_cpp
+        if router_cpp_mod is None:
+            import pytest
+
+            pytest.skip("C++ backend not available - guard already engaged")
+
+        # Force BUILD_VERSION to a mismatched value before re-importing
+        monkeypatch.setattr(
+            router_cpp_mod, "BUILD_VERSION", 999_999, raising=False
+        )
+
+        # Drop the cached cpp_backend so the module-level guard re-runs
+        sys.modules.pop("kicad_tools.router.cpp_backend", None)
+        try:
+            reloaded = importlib.import_module("kicad_tools.router.cpp_backend")
+
+            assert reloaded.is_cpp_available() is False
+            reason = reloaded.get_cpp_unavailable_reason()
+            assert reason is not None
+            assert "build-native" in reason
+            assert "stale" in reason.lower() or "999999" in reason
+        finally:
+            # Restore the real cpp_backend module so subsequent tests see the
+            # true backend state (monkeypatch will restore BUILD_VERSION).
+            sys.modules.pop("kicad_tools.router.cpp_backend", None)
+            importlib.import_module("kicad_tools.router.cpp_backend")
+
+    def test_missing_build_version_attr_disables_cpp(self, monkeypatch):
+        """If router_cpp lacks BUILD_VERSION (very old .so) the guard fires."""
+        import sys
+
+        # Ensure cpp_backend is freshly imported so we see the live router_cpp.
+        sys.modules.pop("kicad_tools.router.cpp_backend", None)
+        original = importlib.import_module("kicad_tools.router.cpp_backend")
+
+        router_cpp_mod = original.router_cpp
+        if router_cpp_mod is None:
+            import pytest
+
+            pytest.skip("C++ backend not available - guard already engaged")
+
+        # Remove the attribute entirely
+        if hasattr(router_cpp_mod, "BUILD_VERSION"):
+            monkeypatch.delattr(router_cpp_mod, "BUILD_VERSION", raising=False)
+
+        sys.modules.pop("kicad_tools.router.cpp_backend", None)
+        try:
+            reloaded = importlib.import_module("kicad_tools.router.cpp_backend")
+
+            assert reloaded.is_cpp_available() is False
+            reason = reloaded.get_cpp_unavailable_reason()
+            assert reason is not None
+            assert "build-native" in reason
+        finally:
+            sys.modules.pop("kicad_tools.router.cpp_backend", None)
+            importlib.import_module("kicad_tools.router.cpp_backend")

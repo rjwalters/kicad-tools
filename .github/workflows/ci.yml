@@ -69,3 +69,71 @@ jobs:
       - name: Run tests
         run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow"
         continue-on-error: true
+
+  cpp-build-check:
+    # Issue #2501: catch source/.so drift by rebuilding the C++ extension
+    # from a clean checkout and asserting the version-guard reports the
+    # backend as available. If anyone changes cpp/ source without bumping
+    # ROUTER_CPP_BUILD_VERSION (or vice versa) the import-time guard will
+    # fall back to Python and fail this check with an actionable message.
+    name: C++ Build Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        run: uv sync --extra dev
+
+      - name: Install nanobind
+        run: uv pip install nanobind
+
+      - name: Clean any committed .so artifacts
+        run: bash scripts/build-cpp.sh clean
+
+      - name: Build C++ extension from source
+        run: |
+          source .venv/bin/activate
+          bash scripts/build-cpp.sh build
+
+      - name: Verify version-guard reports backend available
+        run: |
+          uv run python -c "
+          from kicad_tools.router.cpp_backend import (
+              is_cpp_available,
+              get_cpp_unavailable_reason,
+              _REQUIRED_CPP_BUILD_VERSION,
+              router_cpp,
+          )
+          if not is_cpp_available():
+              raise SystemExit(
+                  f'C++ backend unavailable after clean rebuild: '
+                  f'{get_cpp_unavailable_reason()}'
+              )
+          actual = getattr(router_cpp, 'BUILD_VERSION', None)
+          if actual != _REQUIRED_CPP_BUILD_VERSION:
+              raise SystemExit(
+                  f'BUILD_VERSION mismatch after clean rebuild: '
+                  f'compiled={actual!r} required={_REQUIRED_CPP_BUILD_VERSION!r}. '
+                  f'Did you forget to bump ROUTER_CPP_BUILD_VERSION in both '
+                  f'cpp/include/types.hpp and cpp_backend.py?'
+              )
+          print(f'C++ backend OK: BUILD_VERSION={actual}')
+          "
+
+      - name: Smoke test C++ router
+        run: |
+          uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov

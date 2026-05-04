@@ -34,6 +34,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Required C++ binding-surface version (Issue #2501).
+#
+# This MUST match ``ROUTER_CPP_BUILD_VERSION`` in
+# ``src/kicad_tools/router/cpp/include/types.hpp``.  Bump both constants in any
+# PR that changes the bindings.cpp surface (added/removed/renamed symbols,
+# struct fields, function signatures).
+#
+# When ``router_cpp.BUILD_VERSION`` does not match this value, the compiled
+# ``.so`` is older than the source tree and would otherwise raise
+# ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
+# missing).  The guard below catches that at import time and falls back to the
+# pure-Python router with an actionable ``kct build-native`` hint.
+_REQUIRED_CPP_BUILD_VERSION = 2
+
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
 try:
@@ -63,6 +77,23 @@ except ImportError as e:
                 f"but running Python {sys.version_info.major}.{sys.version_info.minor} "
                 f"({_running_tag}). Rebuild with: kicad-tools build-native"
             )
+
+# Stale-.so guard (Issue #2501): the import succeeded, but the compiled
+# binding surface may predate the current source tree.  A mismatch here
+# means new symbols (e.g. ``PadBounds``, ``FAILURE_NONE``) referenced by
+# this module are absent from the loaded ``.so`` and would otherwise
+# raise ``AttributeError`` at routing time.  Disable the backend cleanly
+# with a clear rebuild hint that routes through the existing fallback path.
+if _CPP_AVAILABLE:
+    _actual_build_version = getattr(router_cpp, "BUILD_VERSION", None)
+    if _actual_build_version != _REQUIRED_CPP_BUILD_VERSION:
+        _CPP_AVAILABLE = False
+        _CPP_IMPORT_ERROR = (
+            f"router_cpp build version {_actual_build_version!r} does not match "
+            f"required {_REQUIRED_CPP_BUILD_VERSION}. The compiled .so is stale "
+            f"relative to the C++ source tree. Rebuild with: kct build-native"
+        )
+        router_cpp = None  # type: ignore
 
 
 def is_cpp_available() -> bool:
