@@ -149,3 +149,39 @@ jobs:
       - name: Smoke test C++ router
         run: |
           uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov
+
+  kicad-cli-smoke:
+    name: kicad-cli Round-trip Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Separate job: a regression gate that PCB files emitted by kicad-tools'
+    # writers are loadable by kicad-cli. Two writer bugs (unquoted
+    # generator_version, embedded kct_marking subfield) shipped to main and
+    # broke every demo board's manufacturing export — this gate prevents
+    # that class of regression from re-landing.
+    #
+    # Runs as its own job so the apt install of KiCad does not slow down
+    # the main test job. The smoke surface itself is small (<30 s of test
+    # runtime); the dominant cost is the kicad apt install.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install KiCad (kicad-cli)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends kicad
+          kicad-cli --version
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run kicad-cli round-trip smoke tests
+        run: uv run pytest tests/test_kicad_cli_roundtrip.py -v --no-cov
