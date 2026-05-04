@@ -86,9 +86,13 @@ jobs:
         with:
           version: "latest"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # Note: deliberately NOT using actions/setup-python@v5 here. That action
+      # exports Python_ROOT_DIR=/opt/hostedtoolcache/Python/.../x64, which is
+      # sticky for cmake's find_package(Python ...) — even after activating
+      # the uv venv with `source .venv/bin/activate`, cmake locates the
+      # tool-cache Python (which has no nanobind) instead of the venv's
+      # Python with nanobind installed. We rely on uv to manage the Python
+      # version (pinned via .python-version / pyproject) and create the venv.
 
       - name: Install build dependencies
         run: |
@@ -96,7 +100,11 @@ jobs:
           sudo apt-get install -y cmake build-essential
 
       - name: Install Python dependencies
-        run: uv sync --extra dev
+        # Pin Python via uv (parity with the other jobs that use
+        # actions/setup-python with python-version: "3.12"). uv will install
+        # the requested interpreter into its managed cache and create
+        # .venv from it.
+        run: uv sync --extra dev --python 3.12
 
       - name: Install nanobind
         run: uv pip install nanobind
@@ -107,6 +115,10 @@ jobs:
       - name: Build C++ extension from source
         run: |
           source .venv/bin/activate
+          # Belt-and-suspenders: explicitly point cmake at the venv Python in
+          # case any future runner image starts setting Python_ROOT_DIR.
+          export Python_ROOT_DIR="$PWD/.venv"
+          unset Python2_ROOT_DIR Python3_ROOT_DIR
           bash scripts/build-cpp.sh build
 
       - name: Verify version-guard reports backend available
