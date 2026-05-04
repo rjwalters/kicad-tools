@@ -1,0 +1,449 @@
+"""KiCad CLI round-trip smoke tests.
+
+Closes a regression class where kicad-tools' PCB writer produces files that
+``kicad-cli pcb drc`` rejects with "Failed to load board" (exit 3). Two such
+bugs shipped to ``main`` recently and broke every demo board's manufacturing
+export until they were diagnosed by hand-bisecting the emitted files (see
+fix in commit ``30256d40``):
+
+1. ``generator_version`` was emitted unquoted (``(generator_version 9.0)``)
+   because the SExp serializer's ``_needs_quoting`` returned False for
+   strings that parse as numeric. Fixed via
+   ``_FORCE_QUOTED_STRING_VALUE = {"generator_version"}`` in
+   ``src/kicad_tools/sexp/parser.py``.
+
+2. ``SilkscreenGenerator`` embedded a ``(kct_marking "kct:name")`` subfield
+   inside ``gr_text`` for re-run idempotency. KiCad's parser rejects
+   unknown subfields inside ``gr_text``. Fixed in
+   ``src/kicad_tools/silkscreen/generator.py``.
+
+The test in this file builds an in-suite PCB spec that exercises both
+regression vectors plus a footprint, a net, and a zone. It then calls
+``PCB.save()`` and round-trips the output through ``kicad-cli pcb drc``,
+asserting the file *loads* (DRC violations are not the concern here —
+only that kicad-cli accepts the syntax).
+
+If the load fails, the assertion message names the producing kicad-tools
+component, prints the verbatim kicad-cli stderr, and points at the emitted
+file so the failure is debuggable from the CI log alone.
+
+When ``find_kicad_cli()`` returns ``None`` the entire module is skipped
+(matching the existing convention at
+``tests/test_pcb_import_from_schematic.py:296``).
+"""
+
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.runner import find_kicad_cli, run_drc
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp.builders import gr_text_node, zone_node
+from kicad_tools.sexp.parser import parse_string
+from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+pytestmark = pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_load_failure(
+    producer: str,
+    pcb_path: Path,
+    return_code: int,
+    stderr: str,
+) -> str:
+    """Build a clear, attributed error message for a kicad-cli load failure.
+
+    Per the issue's acceptance criteria, the message must:
+    - Name the producing kicad-tools component.
+    - Include the PCB path so the file can be inspected.
+    - Print the verbatim kicad-cli stderr (this was the critical signal that
+      made the recent regression fix tractable).
+    """
+    return (
+        "kicad-cli rejected PCB emitted by kicad-tools writer.\n"
+        f"  Producer: {producer}\n"
+        f"  PCB: {pcb_path}\n"
+        f"  kicad-cli return code: {return_code}\n"
+        "  kicad-cli stderr:\n"
+        f"    {stderr.strip() or '<empty>'}\n"
+        "\n"
+        f"Inspect the emitted file: head -20 {pcb_path}"
+    )
+
+
+def _assert_kicad_cli_loads(
+    pcb_path: Path,
+    producer: str,
+    tmp_path: Path,
+) -> None:
+    """Assert that kicad-cli successfully loads the given PCB.
+
+    Uses ``run_drc`` as the load primitive — kicad-cli only writes a DRC
+    report when the file loads, so report-presence is the load signal.
+    Exit code 3 specifically indicates "Failed to load board".
+
+    DRC violations themselves are NOT a failure for this test — we only
+    care that the file is well-formed enough for kicad-cli to parse it.
+    """
+    output_path = tmp_path / f"{pcb_path.stem}_drc.rpt"
+    result = run_drc(
+        pcb_path,
+        output_path=output_path,
+        format="report",
+        # Disable schematic parity — we have no schematic for this synthetic
+        # PCB, and the load-check doesn't need it.
+        schematic_parity=False,
+    )
+
+    # ``run_drc`` returns success=True iff the report was produced, which is
+    # exactly the load-success condition.
+    assert result.success, _format_load_failure(
+        producer, pcb_path, result.return_code, result.stderr
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestPCBSaveRoundtrip:
+    """``PCB.create()`` + ``PCB.save()`` must produce a kicad-cli-loadable file.
+
+    Targets the ``generator_version`` quoting regression: ``PCB.create()``
+    writes ``(generator_version "9.0")`` via the library writer, and
+    ``PCB.save()`` round-trips through the SExp serializer.
+    """
+
+    def test_blank_pcb_roundtrip(self, tmp_path: Path) -> None:
+        """A minimal blank PCB from ``PCB.create()`` must load via kicad-cli."""
+        pcb = PCB.create(
+            width=50.0,
+            height=50.0,
+            title="kicad-cli roundtrip blank",
+            revision="A",
+        )
+        pcb_path = tmp_path / "blank.kicad_pcb"
+        pcb.save(pcb_path)
+
+        # Sanity: the writer must emit the field that triggered the regression
+        # in quoted form. If this fails, the rest of the test is meaningless.
+        contents = pcb_path.read_text()
+        assert '(generator_version "9.0")' in contents, (
+            'Regression guard: PCB.save() must emit (generator_version "9.0") '
+            "with the value quoted. Bare numeric form is rejected by kicad-cli "
+            "with 'Failed to load board' (exit 3). See "
+            "src/kicad_tools/sexp/parser.py:_FORCE_QUOTED_STRING_VALUE."
+        )
+
+        _assert_kicad_cli_loads(pcb_path, producer="PCB.save (blank)", tmp_path=tmp_path)
+
+    def test_pcb_with_silkscreen_text_roundtrip(self, tmp_path: Path) -> None:
+        """A PCB with ``gr_text`` silkscreen markings must load via kicad-cli.
+
+        Targets the ``kct_marking`` subfield regression — KiCad's parser
+        rejects unknown subfields inside ``gr_text``. Exercises the same
+        ``gr_text_node`` builder used by ``SilkscreenGenerator``.
+        """
+        pcb = PCB.create(width=60.0, height=40.0, title="silkscreen roundtrip")
+        # Two silkscreen texts — one a project-name-style marking, one a
+        # date-style marking. Mirrors what SilkscreenGenerator.add_board_markings
+        # produces.
+        pcb._sexp.append(gr_text_node("kicad-tools v0.1", 5.0, 5.0, uuid_str="rt-name"))
+        pcb._sexp.append(gr_text_node("2026-05-04", 5.0, 7.0, uuid_str="rt-date"))
+
+        pcb_path = tmp_path / "silkscreen.kicad_pcb"
+        pcb.save(pcb_path)
+
+        # Regression guard: the previous bug embedded (kct_marking ...) inside
+        # gr_text. If the writer ever reintroduces it, the file will fail to
+        # load. We assert the field is absent before invoking kicad-cli so the
+        # test fails with a clear, attributed message even on systems where
+        # kicad-cli's stderr is unhelpful.
+        contents = pcb_path.read_text()
+        assert "kct_marking" not in contents, (
+            "Regression guard: emitted PCB must not contain (kct_marking ...) "
+            "subfields inside gr_text. KiCad's parser rejects them with "
+            "'Failed to load board'. See src/kicad_tools/silkscreen/generator.py."
+        )
+
+        _assert_kicad_cli_loads(pcb_path, producer="PCB.save + gr_text_node", tmp_path=tmp_path)
+
+    def test_pcb_with_net_and_zone_roundtrip(self, tmp_path: Path) -> None:
+        """A PCB with a named net + a copper zone must load via kicad-cli.
+
+        Exercises ``PCB.add_net()`` and the ``zone_node`` builder in addition
+        to the basic save path, broadening writer coverage beyond the two
+        recent regression vectors.
+        """
+        pcb = PCB.create(width=80.0, height=60.0, title="net+zone roundtrip")
+        gnd = pcb.add_net("GND")
+
+        # A modest GND zone covering most of the board on F.Cu.
+        pcb._sexp.append(
+            zone_node(
+                net=gnd.number,
+                net_name="GND",
+                layer="F.Cu",
+                points=[(10.0, 10.0), (70.0, 10.0), (70.0, 50.0), (10.0, 50.0)],
+                uuid_str="rt-zone",
+            )
+        )
+
+        pcb_path = tmp_path / "zone.kicad_pcb"
+        pcb.save(pcb_path)
+
+        _assert_kicad_cli_loads(pcb_path, producer="PCB.save + zone_node", tmp_path=tmp_path)
+
+    def test_full_writer_surface_roundtrip(self, tmp_path: Path) -> None:
+        """A PCB exercising silkscreen + net + zone simultaneously.
+
+        This is the closest in-suite analog to a real demo-board emit. If any
+        single writer path regresses, this test will fire alongside the more
+        targeted ones above, but with a more diagnostic name.
+        """
+        pcb = PCB.create(width=100.0, height=80.0, title="full surface roundtrip")
+        gnd = pcb.add_net("GND")
+        pcb.add_net("VCC")
+
+        pcb._sexp.append(
+            gr_text_node("kicad-tools full Rev A", 10.0, 10.0, uuid_str="rt-full-name")
+        )
+        pcb._sexp.append(gr_text_node("2026-05-04", 10.0, 12.0, uuid_str="rt-full-date"))
+        pcb._sexp.append(
+            zone_node(
+                net=gnd.number,
+                net_name="GND",
+                layer="B.Cu",
+                points=[(15.0, 15.0), (85.0, 15.0), (85.0, 65.0), (15.0, 65.0)],
+                uuid_str="rt-full-zone",
+            )
+        )
+
+        pcb_path = tmp_path / "full_surface.kicad_pcb"
+        pcb.save(pcb_path)
+
+        _assert_kicad_cli_loads(
+            pcb_path, producer="PCB.save (full writer surface)", tmp_path=tmp_path
+        )
+
+
+class TestSilkscreenGeneratorRoundtrip:
+    """``SilkscreenGenerator.add_board_markings()`` must emit loadable files.
+
+    This is the direct regression gate for the ``kct_marking`` bug — the
+    fix lives in ``src/kicad_tools/silkscreen/generator.py``, so the test
+    that drives it must call into ``SilkscreenGenerator``, not just the
+    underlying ``gr_text_node`` builder.
+    """
+
+    def _minimal_pcb_with_outline(self, tmp_path: Path) -> Path:
+        """Write a minimal-but-valid PCB containing an Edge.Cuts outline.
+
+        ``SilkscreenGenerator._get_marking_position`` reads the Edge.Cuts
+        outline to position markings; without one it falls back to a
+        default. Including the outline exercises a slightly larger surface.
+        """
+        pcb_text = textwrap.dedent("""\
+            (kicad_pcb
+                (version 20240108)
+                (generator "kicad_tools")
+                (generator_version "9.0")
+                (general
+                    (thickness 1.6)
+                    (legacy_teardrops no)
+                )
+                (paper "A4")
+                (layers
+                    (0 "F.Cu" signal)
+                    (31 "B.Cu" signal)
+                    (36 "B.SilkS" user "B.Silkscreen")
+                    (37 "F.SilkS" user "F.Silkscreen")
+                    (44 "Edge.Cuts" user)
+                )
+                (setup)
+                (net 0 "")
+                (gr_line (start 10 10) (end 60 10) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "edge-1"))
+                (gr_line (start 60 10) (end 60 50) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "edge-2"))
+                (gr_line (start 60 50) (end 10 50) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "edge-3"))
+                (gr_line (start 10 50) (end 10 10) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "edge-4"))
+            )
+        """)
+        # Validate the input fixture itself parses (catches typos in the test).
+        parse_string(pcb_text)
+        path = tmp_path / "silk_input.kicad_pcb"
+        path.write_text(pcb_text)
+        return path
+
+    def test_silkscreen_generator_add_markings_roundtrip(self, tmp_path: Path) -> None:
+        """``add_board_markings()`` output must load via kicad-cli."""
+        input_path = self._minimal_pcb_with_outline(tmp_path)
+
+        gen = SilkscreenGenerator(input_path)
+        result = gen.add_board_markings(
+            name="kicad-tools roundtrip",
+            revision="A",
+            date="2026-05-04",
+        )
+        # At least one marking should have been added — sanity check that the
+        # generator did its job (otherwise the round-trip is meaningless).
+        assert result.markings_added >= 1, (
+            f"Expected SilkscreenGenerator to add markings, got "
+            f"{result.markings_added}. Messages: {result.messages}"
+        )
+
+        out_path = tmp_path / "silk_output.kicad_pcb"
+        gen.save(out_path)
+
+        # Regression guard: the bug we are gating against was the embedding
+        # of (kct_marking "kct:name") subfields inside gr_text. If the
+        # generator ever reintroduces them, this assertion fires with a
+        # clear attribution before kicad-cli is even invoked.
+        contents = out_path.read_text()
+        assert "kct_marking" not in contents, (
+            "Regression guard: SilkscreenGenerator must not emit "
+            "(kct_marking ...) subfields. KiCad rejects them with "
+            "'Failed to load board'. Fix is in "
+            "src/kicad_tools/silkscreen/generator.py."
+        )
+
+        _assert_kicad_cli_loads(
+            out_path, producer="SilkscreenGenerator.add_board_markings", tmp_path=tmp_path
+        )
+
+
+class TestFootprintWithGrTextRoundtrip:
+    """A PCB containing a footprint with ``fp_text`` properties must load.
+
+    The recent regressions touched the silkscreen-adjacent code path; a
+    footprint-with-text spec exercises a third writer surface (footprint
+    serialization, including its own text effects).
+    """
+
+    def test_footprint_with_silkscreen_property_roundtrip(self, tmp_path: Path) -> None:
+        """A footprint carrying an ``fp_text`` reference must round-trip."""
+        # Build a PCB with one inline footprint. We construct the SExp
+        # directly rather than going through ``add_footprint`` because the
+        # latter requires KiCad's footprint libraries to be installed, which
+        # is not the regression class under test.
+        pcb_text = textwrap.dedent("""\
+            (kicad_pcb
+                (version 20240108)
+                (generator "kicad_tools")
+                (generator_version "9.0")
+                (general
+                    (thickness 1.6)
+                    (legacy_teardrops no)
+                )
+                (paper "A4")
+                (layers
+                    (0 "F.Cu" signal)
+                    (31 "B.Cu" signal)
+                    (36 "B.SilkS" user "B.Silkscreen")
+                    (37 "F.SilkS" user "F.Silkscreen")
+                    (44 "Edge.Cuts" user)
+                )
+                (setup)
+                (net 0 "")
+                (footprint "Test:R_0805"
+                    (layer "F.Cu")
+                    (uuid "fp-uuid-1")
+                    (at 30 30)
+                    (fp_text reference "R1" (at 0 -2) (layer "F.SilkS")
+                        (uuid "fp-text-1")
+                        (effects (font (size 1 1) (thickness 0.15)))
+                    )
+                    (fp_text value "10k" (at 0 2) (layer "F.Fab")
+                        (uuid "fp-text-2")
+                        (effects (font (size 1 1) (thickness 0.15)))
+                    )
+                )
+            )
+        """)
+        # Round-trip through our parser/serializer to make sure the writer
+        # path is exercised (this is what catches generator_version-style
+        # bugs in the serializer).
+        doc = parse_string(pcb_text)
+        path = tmp_path / "fp.kicad_pcb"
+        path.write_text(doc.to_string())
+
+        _assert_kicad_cli_loads(
+            path, producer="parse_string + SExp.to_string (footprint)", tmp_path=tmp_path
+        )
+
+
+class TestLoadFailureMessage:
+    """Verify that load-failures produce clear, attributed error messages.
+
+    Constructs a deliberately broken PCB (unquoted ``generator_version``,
+    matching the recent regression) and confirms that ``run_drc`` reports
+    the failure in a way that surfaces the offending kicad-cli stderr.
+    The goal is to guarantee that, when the gate fires in CI, maintainers
+    can diagnose the failure from the CI log without re-running locally.
+    """
+
+    def test_unquoted_generator_version_reproduces_failure(self, tmp_path: Path) -> None:
+        """An unquoted ``generator_version`` must trip kicad-cli's loader.
+
+        This is the canary test: if it ever stops failing, kicad-cli has
+        changed its parser strictness and the regression class has shifted
+        — a signal to revisit ``_FORCE_QUOTED_STRING_VALUE``.
+        """
+        broken = textwrap.dedent("""\
+            (kicad_pcb
+                (version 20240108)
+                (generator "kicad_tools")
+                (generator_version 9.0)
+                (general
+                    (thickness 1.6)
+                    (legacy_teardrops no)
+                )
+                (paper "A4")
+                (layers
+                    (0 "F.Cu" signal)
+                    (31 "B.Cu" signal)
+                    (44 "Edge.Cuts" user)
+                )
+                (setup)
+                (net 0 "")
+            )
+        """)
+        broken_path = tmp_path / "broken.kicad_pcb"
+        broken_path.write_text(broken)
+
+        output_path = tmp_path / "broken_drc.rpt"
+        result = run_drc(
+            broken_path,
+            output_path=output_path,
+            format="report",
+            schematic_parity=False,
+        )
+
+        # The file should fail to load (canary test). If this assertion ever
+        # fails — i.e., kicad-cli accepts the unquoted form — the regression
+        # class has changed and the test infrastructure should be revisited.
+        assert not result.success, (
+            "Canary failed: kicad-cli accepted an unquoted generator_version. "
+            "The regression class this test gates against has shifted; "
+            "review src/kicad_tools/sexp/parser.py:_FORCE_QUOTED_STRING_VALUE "
+            "and decide whether the force-quote set is still needed."
+        )
+
+        # And the failure message must contain enough context to debug.
+        message = _format_load_failure(
+            "PCB.save (canary)",
+            broken_path,
+            result.return_code,
+            result.stderr,
+        )
+        assert str(broken_path) in message
+        assert "kicad-cli return code:" in message
+        assert "Producer: PCB.save (canary)" in message

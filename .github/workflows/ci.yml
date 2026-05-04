@@ -149,3 +149,75 @@ jobs:
       - name: Smoke test C++ router
         run: |
           uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov
+
+  kicad-cli-smoke:
+    name: kicad-cli Round-trip Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Separate job: a regression gate that PCB files emitted by kicad-tools'
+    # writers are loadable by kicad-cli. Two writer bugs (unquoted
+    # generator_version, embedded kct_marking subfield) shipped to main and
+    # broke every demo board's manufacturing export — this gate prevents
+    # that class of regression from re-landing.
+    #
+    # Uses the official kicad/kicad:9.0 Docker image rather than installing
+    # KiCad via apt+PPA. Earlier attempts to install from
+    # ppa:kicad/kicad-9.0-releases on ubuntu-latest were unreliable: both
+    # api.launchpad.net and ppa.launchpadcontent.net failed back-to-back from
+    # the Azure GitHub runner, and apt then silently fell back to KiCad 7
+    # from noble/universe — producing confusing "DRC produced no output"
+    # errors instead of an attributable infrastructure failure. The official
+    # container ships kicad-cli 9 already and is immune to Launchpad outages.
+    container:
+      image: kicad/kicad:9.0
+      # Run as root so uv/pip installs go to the system site-packages and
+      # actions/checkout can write into $GITHUB_WORKSPACE without permission
+      # juggling.
+      options: --user 0:0
+    defaults:
+      run:
+        # The kicad/kicad:9.0 image links /bin/sh to dash, which does not
+        # support `set -o pipefail`. GitHub Actions invokes each step with
+        # `sh -e {0}` by default, so our `set -euo pipefail` headers fail
+        # immediately with `set: Illegal option -o pipefail` and exit code 2
+        # before any of the actual setup runs. Force bash for all run steps
+        # in this job so the pipefail option is recognised.
+        shell: bash
+    steps:
+      # The kicad/kicad image is Ubuntu-based and ships Python 3 + git, but
+      # we install ca-certificates and curl defensively in case the image
+      # variant we land on is missing one of them (uv's installer needs curl,
+      # and HTTPS pulls need ca-certificates).
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+          # Sanity: the container should have kicad-cli 9 already.
+          # Use a permissive regex anchored to either the start of the line
+          # or whitespace so we still match if `kicad-cli --version` prefixes
+          # its output (e.g., `KiCad 9.0.x`) instead of emitting the bare
+          # version string.
+          kicad-cli --version | tee /tmp/kicad-cli-version
+          grep -qE '(^|[[:space:]])9\.' /tmp/kicad-cli-version || {
+            echo "::error::kicad/kicad:9.0 container does not provide kicad-cli 9.x"
+            exit 1
+          }
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        # setup-uv@v4 should work inside the container, but installing via
+        # the official one-liner avoids any action-host coupling and keeps
+        # the install deterministic across image refreshes.
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # uv installs to ~/.local/bin by default; surface it for later steps.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run kicad-cli round-trip smoke tests
+        run: uv run pytest tests/test_kicad_cli_roundtrip.py -v --no-cov
