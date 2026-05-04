@@ -21,6 +21,17 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 ROUTER_DIR="$PROJECT_ROOT/src/kicad_tools/router"
 
+# Prefer the project's uv-managed virtualenv interpreter when present so that
+# nanobind (installed via `uv sync --extra dev`) is visible to both the
+# preflight import check and the cmake configure step. Fall back to the first
+# `python3` on PATH so non-uv workflows continue to work.
+VENV_PY="$PROJECT_ROOT/.venv/bin/python3"
+if [ -x "$VENV_PY" ]; then
+    PY="$VENV_PY"
+else
+    PY="$(command -v python3)"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,7 +49,7 @@ case "${1:-build}" in
 
     check)
         echo "Checking C++ router backend availability..."
-        python3 -c "
+        "$PY" -c "
 from kicad_tools.router.cpp_backend import is_cpp_available, get_backend_info
 info = get_backend_info()
 print(f'Backend: {info[\"backend\"]}')
@@ -52,7 +63,7 @@ if info['available']:
         echo -e "${YELLOW}Building C++ router extension...${NC}"
 
         # Check for nanobind
-        if ! python3 -c "import nanobind" 2>/dev/null; then
+        if ! "$PY" -c "import nanobind" 2>/dev/null; then
             echo -e "${RED}Error: nanobind not installed${NC}"
             echo "Install with: pip install nanobind"
             exit 1
@@ -69,10 +80,16 @@ if info['available']:
         mkdir -p "$BUILD_DIR"
 
         # Configure with CMake
+        # NOTE: pass `-DPython_EXECUTABLE` (the variable cmake's FindPython
+        # module actually consumes), not `-DPYTHON_EXECUTABLE`. The per-module
+        # CMakeLists only forwards `PYTHON_EXECUTABLE` -> `Python_EXECUTABLE`
+        # under `if(SKBUILD)`, which is unset on this manual path, so the
+        # uppercase form is silently dropped and find_package(Python ...)
+        # falls back to whatever python3 is first on PATH.
         echo "Configuring..."
         cmake -B "$BUILD_DIR" -S "$PROJECT_ROOT" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DPYTHON_EXECUTABLE="$(which python3)"
+            -DPython_EXECUTABLE="$PY"
 
         # Build
         echo "Building..."
