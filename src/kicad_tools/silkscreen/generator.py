@@ -135,14 +135,11 @@ class SilkscreenGenerator:
 
         y_offset = 0.0
         for tag, text in markings:
-            marker = f"{_MARKING_PREFIX}{tag}"
-            if self._has_marking(marker):
+            if self._has_marking(text):
                 result.markings_skipped += 1
                 result.messages.append(f"Marking '{tag}' already exists, skipped")
                 continue
 
-            # Embed the marker tag as a second line so we can detect duplicates
-            # later; KiCad renders multi-line gr_text fine.
             node = gr_text_node(
                 text,
                 base_x,
@@ -152,11 +149,6 @@ class SilkscreenGenerator:
                 font_thickness=font_thickness,
                 uuid_str=str(uuid_module.uuid4()),
             )
-
-            # Store the idempotency marker as a custom child node so that
-            # re-running the generator can detect existing markings without
-            # relying on fragile text matching.
-            node.append(SExp.list("kct_marking", marker))
 
             self.doc.append(node)
             result.markings_added += 1
@@ -315,12 +307,10 @@ class SilkscreenGenerator:
         # Fallback: default KiCad origin area
         return 100.0, 115.0
 
-    def _has_marking(self, marker: str) -> bool:
-        """Check if a marking with the given idempotency tag already exists."""
+    def _has_marking(self, text: str) -> bool:
+        """Return True if a gr_text with the given visible label already exists."""
         for gr_text in self.doc.find_all("gr_text"):
-            kct_node = gr_text.find("kct_marking")
-            if kct_node is not None:
-                atom = kct_node.get_first_atom()
-                if atom is not None and str(atom) == marker:
-                    return True
+            atom = gr_text.get_first_atom()
+            if atom is not None and str(atom) == text:
+                return True
         return False

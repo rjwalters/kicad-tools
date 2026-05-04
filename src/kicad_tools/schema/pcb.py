@@ -1183,7 +1183,7 @@ class PCB:
         # Version and generator info
         pcb.append(SExp.list("version", 20240108))
         pcb.append(SExp.list("generator", "kicad_tools"))
-        pcb.append(SExp.list("generator_version", "8.0"))
+        pcb.append(SExp.list("generator_version", "9.0"))
 
         # General settings
         pcb.append(

@@ -326,10 +326,25 @@ class SExp:
         tab = "\t"
         tabs = tab * indent
 
+        # Some KiCad fields require their atom child to be a quoted string even
+        # when the value parses as a number (e.g. (generator_version "9.0")).
+        force_quote_atom_str = self.name in _FORCE_QUOTED_STRING_VALUE
+
+        def _atom_str(child: SExp) -> str:
+            if (
+                force_quote_atom_str
+                and child.is_atom
+                and isinstance(child.value, str)
+            ):
+                escaped = child.value.replace("\\", "\\\\").replace('"', '\\"')
+                escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
+                return f'"{escaped}"'
+            return child.to_string(compact=True)
+
         # Check if should render inline
         if compact or self._should_inline():
             parts = [self.name] if self.name else []
-            parts.extend(c.to_string(compact=True) for c in self.children)
+            parts.extend(_atom_str(c) for c in self.children)
             return "(" + " ".join(parts) + ")"
 
         # Multi-line formatting matching KiCad style
@@ -351,11 +366,11 @@ class SExp:
             if child.is_atom:
                 if indent == 0 or started_new_lines:
                     # Already on new lines, continue that way
-                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
+                    lines.append(f"{tabs}{tab}{_atom_str(child)}")
                     started_new_lines = True
                 else:
                     # Atoms go on same line as parent opener
-                    lines[-1] += " " + child.to_string(compact=True)
+                    lines[-1] += " " + _atom_str(child)
             elif child._should_inline():
                 if indent == 0:
                     # Root level: each child on own line
@@ -902,6 +917,13 @@ _STRUCTURAL_ELEMENTS = frozenset({
 _FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset({
     "gr_arc",
     "gr_poly",
+})
+
+# Fields whose string atom value must be emitted quoted even when it looks
+# numeric. KiCad's parser strictly types these as string tokens, so the bare
+# form (e.g. `(generator_version 9.0)`) is rejected by kicad-cli on load.
+_FORCE_QUOTED_STRING_VALUE = frozenset({
+    "generator_version",
 })
 
 # Elements that should never be rendered inline (used in _should_inline())

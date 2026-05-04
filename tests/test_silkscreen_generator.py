@@ -228,7 +228,7 @@ class TestBoardMarkings:
 
         # Check gr_text nodes were added
         gr_texts = [n for n in gen.doc.find_all("gr_text")]
-        marking_texts = [n for n in gr_texts if n.find("kct_marking") is not None]
+        marking_texts = [n for n in gr_texts if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
         assert len(marking_texts) == 2
 
     def test_idempotent(self, tmp_path):
@@ -277,7 +277,7 @@ class TestBoardMarkings:
         gen = SilkscreenGenerator(pcb_path)
         gen.add_board_markings(name="PosTest", revision="A")
 
-        marking_texts = [n for n in gen.doc.find_all("gr_text") if n.find("kct_marking")]
+        marking_texts = [n for n in gen.doc.find_all("gr_text") if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
         assert len(marking_texts) == 1
 
         at_node = marking_texts[0].find("at")
@@ -297,7 +297,7 @@ class TestBoardMarkings:
         gen = SilkscreenGenerator(pcb_path)
         gen.add_board_markings(name="Fallback")
 
-        marking_texts = [n for n in gen.doc.find_all("gr_text") if n.find("kct_marking")]
+        marking_texts = [n for n in gen.doc.find_all("gr_text") if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
         assert len(marking_texts) == 1
 
         at_node = marking_texts[0].find("at")

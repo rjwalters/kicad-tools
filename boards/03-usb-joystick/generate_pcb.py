@@ -69,7 +69,7 @@ def generate_header() -> str:
     return """(kicad_pcb
   (version 20240108)
   (generator "kicad-tools-demo")
-  (generator_version "8.0")
+  (generator_version "9.0")
   (general
     (thickness 1.6)
     (legacy_teardrops no)
