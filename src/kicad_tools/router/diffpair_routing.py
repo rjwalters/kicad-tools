@@ -245,6 +245,7 @@ class CoupledPathfinder:
         p_start: GridPos | None = None,
         n_start: GridPos | None = None,
         target_spacing_cells: int | None = None,
+        approach_radius_override: int | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -263,6 +264,15 @@ class CoupledPathfinder:
                 ``route_coupled`` can widen it for a single call
                 (e.g. when start pads sit further apart than the
                 configured spacing) without mutating instance state.
+            approach_radius_override: Per-call effective approach
+                radius (Manhattan distance, in grid cells, from each
+                trace to its goal at which the pair-spacing tolerance
+                is widened).  When ``None``, falls back to
+                ``max(target_spacing_cells, 6)``.  Issue #2490: scaled
+                up by ``route_coupled`` when start and end pad pitches
+                differ so the search has room to converge from the
+                wider start spacing to the narrower goal spacing
+                (USB-C vs MCU).
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -272,20 +282,29 @@ class CoupledPathfinder:
         neighbors: list[tuple[CoupledState, float, bool]] = []
 
         # Issue #2473: Relax the spacing constraint when both traces
-        # are within a short "approach radius" of their goal pads.
-        # This lets a coupled run that started at one pad pitch
-        # converge onto a goal pair with a different pad pitch (e.g.,
-        # USB-C 0.5mm pad spacing reached from MCU 0.8mm pad spacing).
-        # The relaxation only fires near the goals so the bulk of the
+        # are within an "approach radius" of their goal pads.  This
+        # lets a coupled run that started at one pad pitch converge
+        # onto a goal pair with a different pad pitch (e.g., USB-C
+        # 0.5mm pad spacing reached from MCU 0.8mm pad spacing).  The
+        # relaxation only fires near the goals so the bulk of the
         # run still maintains constant spacing.
         approach_relaxed = False
         if p_goal is not None and n_goal is not None:
             p_dist_to_goal = abs(state.p_pos.x - p_goal.x) + abs(state.p_pos.y - p_goal.y)
             n_dist_to_goal = abs(state.n_pos.x - n_goal.x) + abs(state.n_pos.y - n_goal.y)
-            # ``approach_radius`` is generous enough to admit the goal
-            # pair's spacing difference but small enough that the
-            # relaxation does not infect the rest of the search.
-            approach_radius = max(target_spacing_cells, 6)
+            # Issue #2490: ``approach_radius`` is sized to admit the
+            # *full* spacing transition between the start and goal
+            # pad pitches.  When they match (e.g., both at the
+            # connector), the legacy default of ``max(target, 6)``
+            # is retained.  When they differ (USB device side: MCU
+            # 0.8mm pitch vs USB-C 0.5mm pitch), ``route_coupled``
+            # passes a wider override so the convergence zone has
+            # room to reduce spacing one cell at a time without
+            # exceeding the approach tolerance per step.
+            if approach_radius_override is not None:
+                approach_radius = approach_radius_override
+            else:
+                approach_radius = max(target_spacing_cells, 6)
             if p_dist_to_goal <= approach_radius and n_dist_to_goal <= approach_radius:
                 approach_relaxed = True
 
@@ -339,25 +358,101 @@ class CoupledPathfinder:
             new_state = CoupledState(new_p, new_n, new_direction)
             neighbors.append((new_state, cost, False))
 
+        # Issue #2490: Asymmetric "converge" moves during approach
+        # phase only.  When start and goal pad pitches differ
+        # (e.g., USB device-side: MCU 0.8mm pitch -> USB-C 0.5mm
+        # pitch), the symmetric step moves above preserve spacing
+        # exactly, so the search can never land both traces on
+        # endpoint cells whose pitch is narrower than the start
+        # pitch.  Within the approach radius, allow one trace to
+        # advance toward its goal while the other holds, which
+        # closes the spacing one cell at a time.  Restricted to
+        # the approach phase so the bulk of the run still
+        # maintains constant spacing.
+        if approach_relaxed and p_goal is not None and n_goal is not None:
+            for dx, dy in self.directions:
+                # P advances, N holds.
+                cand_p = GridPos(state.p_pos.x + dx, state.p_pos.y + dy, state.p_pos.layer)
+                cand_n = state.n_pos
+                p_is_endpoint = self._is_at_goal(cand_p, p_goal) or self._is_at_goal(
+                    cand_p, p_start
+                )
+                if p_is_endpoint or not self._is_trace_blocked(
+                    cand_p.x, cand_p.y, cand_p.layer, p_net
+                ):
+                    spacing_dx = cand_p.x - cand_n.x
+                    spacing_dy = cand_p.y - cand_n.y
+                    new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
+                    tolerance = max(1, target_spacing_cells)
+                    if abs(new_spacing - target_spacing_cells) <= tolerance:
+                        # Direction tracking only reflects P's motion;
+                        # tag with the new direction so the cost-of-turn
+                        # logic still fires when the path bends.
+                        cost = self.rules.cost_straight
+                        if state.direction != (0, 0) and state.direction != (dx, dy):
+                            cost += self.rules.cost_turn
+                        new_state = CoupledState(cand_p, cand_n, (dx, dy))
+                        neighbors.append((new_state, cost, False))
+
+                # N advances, P holds.
+                cand_p2 = state.p_pos
+                cand_n2 = GridPos(state.n_pos.x + dx, state.n_pos.y + dy, state.n_pos.layer)
+                n_is_endpoint = self._is_at_goal(cand_n2, n_goal) or self._is_at_goal(
+                    cand_n2, n_start
+                )
+                if not n_is_endpoint and self._is_trace_blocked(
+                    cand_n2.x, cand_n2.y, cand_n2.layer, n_net
+                ):
+                    continue
+                spacing_dx = cand_p2.x - cand_n2.x
+                spacing_dy = cand_p2.y - cand_n2.y
+                new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
+                tolerance = max(1, target_spacing_cells)
+                if abs(new_spacing - target_spacing_cells) > tolerance:
+                    continue
+                cost = self.rules.cost_straight
+                if state.direction != (0, 0) and state.direction != (dx, dy):
+                    cost += self.rules.cost_turn
+                new_state = CoupledState(cand_p2, cand_n2, (dx, dy))
+                neighbors.append((new_state, cost, False))
+
+        # Issue #2490: Endpoint via exception.  When the current state
+        # sits exactly on a start or goal pad, the pad's footprint is
+        # already part of the board geometry — the same cells that
+        # ``_is_via_blocked`` would inspect are occupied by the pad
+        # whose net we are trying to drop a via for.  Without this
+        # exception, ``_is_via_blocked`` rejects via placement at the
+        # source pad of the coupled run on dense pad fields (e.g.,
+        # USB-C 0.5mm pitch), trapping the search on layer 0 even when
+        # an inner/back layer is wide open.  We mirror the existing
+        # trace-blocked exception at endpoints (lines 311-316).
+        p_at_endpoint = self._is_at_goal(state.p_pos, p_goal) or self._is_at_goal(
+            state.p_pos, p_start
+        )
+        n_at_endpoint = self._is_at_goal(state.n_pos, n_goal) or self._is_at_goal(
+            state.n_pos, n_start
+        )
+
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
                 continue
 
-            # Check if vias can be placed at both positions
-            if self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+            # Check if vias can be placed at both positions.  Skip the
+            # via-blocked check at endpoint pads — see comment above.
+            if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
                 continue
-            if self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+            if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
                 continue
 
             new_p = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
             new_n = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
 
             # Check if new layer positions are valid
-            if self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+            if not p_at_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
                 continue
-            if self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+            if not n_at_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
                 continue
 
             # Via cost for both traces
@@ -378,9 +473,12 @@ class CoupledPathfinder:
 
                 # Both pads must be able to host a via at their current
                 # position on every layer (the via spans through-hole).
-                if self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+                # Issue #2490: Endpoint pads are exempt — the pad
+                # footprint already occupies the cells the via would
+                # span.
+                if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
                     continue
-                if self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+                if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
                     continue
 
                 # After the swap, the P-trace continues from where N was,
@@ -477,9 +575,24 @@ class CoupledPathfinder:
         actual_start_spacing = math.sqrt(
             (p_start_gx - n_start_gx) ** 2 + (p_start_gy - n_start_gy) ** 2
         )
+        actual_end_spacing = math.sqrt((p_end_gx - n_end_gx) ** 2 + (p_end_gy - n_end_gy) ** 2)
         effective_target_spacing = self.target_spacing_cells
         if actual_start_spacing > effective_target_spacing:
             effective_target_spacing = int(round(actual_start_spacing))
+
+        # Issue #2490: Size the approach radius to accommodate the
+        # full pitch transition between start and goal pads.  When
+        # start and end pad pitches differ (USB device-side: MCU
+        # 0.8mm pitch vs USB-C 0.5mm pitch), the legacy
+        # ``max(target, 6)`` radius can be smaller than the
+        # number of single-cell spacing reductions required to
+        # converge, leaving the search no room to relax spacing
+        # without exceeding the per-step tolerance.  Scale the
+        # radius with the absolute spacing difference plus a small
+        # buffer so each cell of the approach can drop spacing by
+        # at most one cell.
+        spacing_delta = int(round(abs(actual_start_spacing - actual_end_spacing)))
+        effective_approach_radius = max(effective_target_spacing, 6, spacing_delta * 2 + 4)
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
@@ -527,6 +640,7 @@ class CoupledPathfinder:
                 p_start_pos,
                 n_start_pos,
                 target_spacing_cells=effective_target_spacing,
+                approach_radius_override=effective_approach_radius,
             ):
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
                 if neighbor_key in closed_set:
