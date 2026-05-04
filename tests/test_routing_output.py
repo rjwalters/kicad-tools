@@ -605,3 +605,140 @@ class TestUnroutedListFiltering:
         output = capsys.readouterr().out
         # With no filter, GND should still appear as unrouted (legacy behavior)
         assert "GND" in output
+
+
+# ---------------------------------------------------------------------------
+# Issue #2498: Pour/skip nets must not be reported as failed routes
+# ---------------------------------------------------------------------------
+
+
+class TestIssue2498SkipNetFallback:
+    """The fallback branch (when ``nets_to_route_ids`` is None) must use
+    ``router.nets`` instead of ``net_map``.
+
+    ``load_pcb_for_routing`` rewrites pads on user-skipped nets (e.g. pour
+    nets like GND/VCC, named nets in route_demo.py's ``skip_nets`` list) to
+    net=0, so those net IDs no longer appear in ``router.nets``.  But they
+    *do* still appear in ``net_map`` for diagnostics, which previously caused
+    them to be reported as "No path found" failures.
+    """
+
+    def _make_route(self, net_id):
+        route = MagicMock()
+        route.net = net_id
+        route.segments = []
+        route.vias = []
+        return route
+
+    def test_skipped_pour_nets_not_reported_when_filter_omitted(self, capsys):
+        """When ``nets_to_route_ids`` is None but ``router.nets`` is a real
+        dict that excludes skipped pour nets, those nets must not show up
+        as 'No path found'.  Mirrors boards/03-usb-joystick where
+        VBUS/VCC/GND/USB_CC1/USB_CC2 are skipped via ``skip_nets``.
+        """
+        # Net 2 is a multi-pad signal net that got routed.
+        # Nets 1 (GND), 3 (VBUS) appeared in net_map (KiCad keeps them for
+        # diagnostics) but their pads were rewritten to net=0 on load, so
+        # they're absent from router.nets.
+        # Net 4 is a multi-pad signal net that genuinely failed to route.
+        router = _make_router(routes=[self._make_route(2)])
+        # Real-shape dict: keys are net IDs, values are pad-key lists.
+        router.nets = {
+            2: [("U1", "1"), ("U1", "2")],  # SIG_A, routed
+            4: [("U2", "1"), ("U2", "2")],  # SIG_B, unrouted
+        }
+        # Pads attribute set so connectivity validation block is skipped
+        # (router.pads is None here).
+        router.pads = None
+        net_map = {
+            "GND": 1,
+            "SIG_A": 2,
+            "VBUS": 3,
+            "SIG_B": 4,
+        }
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        output = capsys.readouterr().out
+        # Skipped pour nets must NOT appear as 'No path found'
+        assert "GND: No path found" not in output
+        assert "VBUS: No path found" not in output
+        # Genuine signal failure must still appear
+        assert "SIG_B" in output
+
+    def test_single_pad_nets_excluded_from_fallback(self, capsys):
+        """Even when present in ``router.nets``, single-pad nets are not
+        routing candidates and must not appear as failed routes."""
+        router = _make_router(routes=[self._make_route(1)])
+        router.nets = {
+            1: [("U1", "1"), ("U1", "2")],  # SIG_A (routed)
+            2: [("TP1", "1")],  # LATCH single-pad — not routable
+        }
+        router.pads = None
+        net_map = {"SIG_A": 1, "LATCH": 2}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=1,
+        )
+
+        output = capsys.readouterr().out
+        assert "LATCH" not in output
+
+    def test_router_nets_absent_falls_back_to_net_map(self, capsys):
+        """Backward compat: when ``router.nets`` isn't a real dict (e.g. a
+        MagicMock as in older tests), fall back to ``net_map`` so legacy
+        callers see unchanged behavior."""
+        router = _make_router(routes=[self._make_route(2)])
+        # router.nets is a MagicMock attribute — not a real dict.
+        net_map = {"GND": 1, "SIG_A": 2}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        output = capsys.readouterr().out
+        # Without router.nets, we keep the legacy behavior of using net_map
+        assert "GND" in output
+
+    def test_route_demo_pattern_with_explicit_filter(self, capsys):
+        """Smoke-test the route_demo.py call pattern (Option A from the
+        curator analysis): pass ``nets_to_route_ids`` derived from
+        ``router.nets``.  Skipped nets must not be reported and the
+        unrouted-list count must match (denominator - numerator).
+        """
+        # Same shape as the route_demo fix: one routed signal net, one
+        # unrouted signal net, and a skipped pour net that's absent from
+        # router.nets but present in net_map.
+        router = _make_router(routes=[self._make_route(2)])
+        router.nets = {
+            2: [("U1", "1"), ("U1", "2")],
+            3: [("U1", "3"), ("U1", "4")],
+        }
+        router.pads = None
+        net_map = {"GND": 1, "SIG_A": 2, "SIG_B": 3}
+
+        # Builder-side pattern from boards/03-usb-joystick/route_demo.py
+        multi_pad_net_ids = {
+            net_id for net_id, pads in router.nets.items() if net_id > 0 and len(pads) >= 2
+        }
+        total_nets = len(multi_pad_net_ids)
+
+        show_routing_summary(
+            router,
+            net_map,
+            total_nets,
+            nets_to_route_ids=multi_pad_net_ids,
+        )
+
+        output = capsys.readouterr().out
+        assert "GND" not in output
+        assert "SIG_B" in output  # genuine failure shown
+        assert "1/2" in output  # 1 routed of 2 candidates

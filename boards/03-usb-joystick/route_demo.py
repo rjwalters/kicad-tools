@@ -252,7 +252,16 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    total_nets = len([n for n in router.nets if n > 0])
+    # Issue #2498: Restrict the routing-summary target population to multi-pad
+    # nets that are still routable post-skip.  ``router.nets`` reflects the
+    # state after ``load_pcb_for_routing`` rewrote skip-net pads to net=0, so
+    # this matches the convention used by ``cli/route_cmd.py`` and prevents
+    # skipped power nets (VCC/VBUS/GND/USB_CC1/USB_CC2) from being mis-reported
+    # as "No path found".
+    multi_pad_net_ids = {
+        net_id for net_id, pads in router.nets.items() if net_id > 0 and len(pads) >= 2
+    }
+    total_nets = len(multi_pad_net_ids)
     all_nets_routed = stats["nets_routed"] == total_nets
 
     if all_nets_routed and drc_passed:
@@ -265,7 +274,12 @@ def main():
         if not drc_passed:
             print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
         # Show comprehensive routing summary with successes, failures, and suggestions
-        show_routing_summary(router, net_map, total_nets)
+        show_routing_summary(
+            router,
+            net_map,
+            total_nets,
+            nets_to_route_ids=multi_pad_net_ids,
+        )
     print("=" * 60)
 
     # Partial routing is acceptable for this board; the USB-C connector
