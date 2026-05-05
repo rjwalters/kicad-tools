@@ -284,7 +284,7 @@ class DRCChecker:
             results.add(
                 DRCViolation(
                     rule_id="pad_grid",
-                    severity="error",
+                    severity="warning",
                     message=message,
                     location=(pad.x, pad.y),
                     actual_value=pad.offset_mm,

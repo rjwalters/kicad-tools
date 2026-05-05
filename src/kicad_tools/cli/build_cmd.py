@@ -1012,18 +1012,17 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 grid_resolution=float(grid_for_preflight),
                 clearance=float(clearance_for_preflight),
             )
-            if not report.passed:
-                if not ctx.quiet:
-                    console.print(report.summary())
-                return BuildResult(
-                    step="route",
-                    success=False,
-                    message=(
-                        "Pad grid preflight failed: "
-                        f"{len(report.off_grid_pads)} off-grid pad(s) at "
-                        f"grid {report.grid_resolution}mm.\n" + report.summary()
-                    ),
+            if not report.passed and not ctx.quiet:
+                # Off-grid pads are advisory: surface the report so the user can
+                # round pad coords or pick a finer grid, but don't block routing.
+                # The router's own off-grid check is the authoritative gate.
+                console.print(
+                    f"  [warning] Pad grid preflight: "
+                    f"{len(report.off_grid_pads)} off-grid pad(s) at "
+                    f"grid {report.grid_resolution}mm (continuing)"
                 )
+                if ctx.verbose:
+                    console.print(report.summary())
         except Exception as e:
             # Preflight is advisory; never block routing on a bug in the
             # check itself.  Surface the error in verbose mode.

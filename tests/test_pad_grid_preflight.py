@@ -325,10 +325,10 @@ class TestDRCCheckerIntegration:
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
 
         results = checker.check_pad_grid_alignment(grid_resolution=0.1)
-        assert results.error_count == 1
+        assert results.warning_count == 1
         violation = results.violations[0]
         assert violation.rule_id == "pad_grid"
-        assert violation.severity == "error"
+        assert violation.severity == "warning"
         assert violation.location == pytest.approx((101.236, 100.0))
         assert "U1.2" in violation.message
 
