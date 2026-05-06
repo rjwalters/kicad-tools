@@ -1,4 +1,11 @@
-"""CLI tests for `kct check --only single_pad_net` against board 04."""
+"""CLI tests for `kct check --only single_pad_net`.
+
+The fixture used here is board 05 (BLDC motor controller), which still
+emits a stub PCB without its STM32G4 MCU and therefore generates the
+single-pad-net errors the rule is designed to catch.  Board 04 used to
+serve this purpose but was fixed by issue #2531 (MCU placed) -- see
+``test_single_pad_net_integration.py`` for the regression guard there.
+"""
 
 from __future__ import annotations
 
@@ -8,32 +15,33 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_BOARD_04_PCB = _REPO_ROOT / "boards" / "04-stm32-devboard" / "output" / "stm32_devboard.kicad_pcb"
+_BOARD_05_PCB = (
+    _REPO_ROOT / "boards" / "05-bldc-motor-controller" / "output" / "bldc_controller.kicad_pcb"
+)
 
 
 @pytest.mark.skipif(
-    not _BOARD_04_PCB.exists(),
+    not _BOARD_05_PCB.exists(),
     reason=(
-        "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb not generated; "
-        "run 'uv run python boards/04-stm32-devboard/generate_design.py' first"
+        "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb not generated; "
+        "run 'uv run python boards/05-bldc-motor-controller/design.py' first"
     ),
 )
 class TestCheckSinglePadNetCli:
-    """End-to-end CLI tests for the new rule on board 04."""
+    """End-to-end CLI tests for the new rule on a stub-MCU board."""
 
-    def test_only_single_pad_net_reports_four_errors(self, capsys):
-        """`kct check --only single_pad_net` exits 2 with 4 errors."""
+    def test_only_single_pad_net_reports_errors(self, capsys):
+        """`kct check --only single_pad_net` exits 2 with errors."""
         from kicad_tools.cli.check_cmd import main
 
-        rc = main([str(_BOARD_04_PCB), "--only", "single_pad_net"])
+        rc = main([str(_BOARD_05_PCB), "--only", "single_pad_net"])
         assert rc == 2  # Errors found.
 
         captured = capsys.readouterr()
-        # Each of the 4 SWD signals should appear in the output.
-        for net_name in ("SWDIO", "SWCLK", "SWO", "NRST"):
-            assert net_name in captured.out, f"Expected '{net_name}' in output:\n{captured.out}"
-        # All four pads should be on J1.
-        assert "J1" in captured.out
+        # Some single-pad-net signal should be flagged on the stub board.
+        assert "single_pad_net" in captured.out
+        # The output should list at least one offending net.
+        assert "Net '" in captured.out
 
     def test_skip_single_pad_net_excludes_rule(self, capsys):
         """`kct check --skip single_pad_net` does not include this rule_id."""
@@ -41,7 +49,7 @@ class TestCheckSinglePadNetCli:
 
         # We don't care about the exit code (other rules may fire on
         # this board); only that the single_pad_net rule is excluded.
-        main([str(_BOARD_04_PCB), "--skip", "single_pad_net"])
+        main([str(_BOARD_05_PCB), "--skip", "single_pad_net"])
 
         captured = capsys.readouterr()
         assert "single_pad_net" not in captured.out
@@ -52,7 +60,7 @@ class TestCheckSinglePadNetCli:
 
         rc = main(
             [
-                str(_BOARD_04_PCB),
+                str(_BOARD_05_PCB),
                 "--only",
                 "single_pad_net",
                 "--format",
@@ -64,11 +72,11 @@ class TestCheckSinglePadNetCli:
         captured = capsys.readouterr()
         data = json.loads(captured.out)
 
-        assert data["summary"]["errors"] == 4
+        assert data["summary"]["errors"] >= 1
         assert data["summary"]["passed"] is False
 
         violations = data["violations"]
-        assert len(violations) == 4
+        assert len(violations) >= 1
         for v in violations:
             assert v["rule_id"] == "single_pad_net"
             # Critical: must NOT resolve to 'unknown' -- verifies the

@@ -15,28 +15,33 @@ kct build boards/04-stm32-devboard --step schematic
 kct build boards/04-stm32-devboard --dry-run
 ```
 
-> **Note:** This board is currently schematic-only. PCB layout and routing are not yet implemented.
-
 ## Overview
 
-We create a simple **STM32 Development Board** (Blue Pill style) with:
+We create a simple **STM32 Development Board** (Blue Pill style) with both
+schematic and a fully-placed PCB:
 
-- USB-C connector for power/programming
-- 3.3V LDO voltage regulator
-- STM32F103C8T6 MCU placeholder
-- 8MHz crystal oscillator
-- SWD debug header
-- User LED with current-limiting resistor
+- 5V → 3.3V LDO voltage regulator (AMS1117-3.3) with input/output decoupling
+- **STM32F103C8T6 MCU** (LQFP-48, 0.5mm pitch) -- placed and wired:
+  - PA13/PA14 → SWDIO/SWCLK
+  - PB3       → SWO
+  - PD0/PD1   → OSC_IN/OSC_OUT (HSE crystal)
+  - PB12      → USER_LED (active-low)
+  - NRST      → SWD reset pin
+  - BOOT0     → 10k pull-down (R2) for flash boot
+  - VDD/VDDA/VBAT → +3.3V; VSS/VSSA → GND
+  - Bypass: C12-C15 (100nF per VDD pin) + C16 (4.7uF bulk)
+- 8MHz HSE crystal Y1 with 20pF load caps C10/C11
+- 6-pin SWD debug header J1 (+3.3V, SWDIO, SWCLK, SWO, NRST, GND)
+- User LED D1 with 330R series resistor R1 (active-low on PB12)
 
 ## Circuit Blocks Used
 
 | Block | Purpose | Components Created |
 |-------|---------|-------------------|
-| `USBConnector` | USB-C power input with ESD protection | J1, TVS diodes |
 | `LDOBlock` | 5V to 3.3V voltage regulation | U1, C1-C3 |
-| `CrystalOscillator` | 8MHz clock with load caps | Y1, C10-C11 |
-| `DebugHeader` | SWD programming interface | J2 |
-| `LEDIndicator` | User LED with resistor | D1, R1 |
+| `CrystalOscillator` | 8MHz HSE crystal with load caps | Y1, C10-C11 |
+| `DebugHeader` | SWD programming interface | J1 |
+| `LEDIndicator` | User LED with current-limiting resistor | D1, R1 |
 
 ## Advanced: Manual Build
 
@@ -44,10 +49,10 @@ For more control, run the Python script directly:
 
 ```bash
 # From repository root
-uv run python boards/04-stm32-devboard/design.py
+uv run python boards/04-stm32-devboard/generate_design.py
 
 # Or specify output directory
-uv run python boards/04-stm32-devboard/design.py /path/to/output
+uv run python boards/04-stm32-devboard/generate_design.py /path/to/output
 ```
 
 ## Output Files
@@ -56,7 +61,10 @@ The script generates:
 
 ```
 output/
-└── stm32_devboard.kicad_sch    # Complete schematic file
+├── stm32_devboard.kicad_pro          # KiCad project file
+├── stm32_devboard.kicad_sch          # Schematic
+├── stm32_devboard.kicad_pcb          # Unrouted PCB with all footprints placed
+└── stm32_devboard_routed.kicad_pcb   # Auto-routed PCB
 ```
 
 Open the schematic in KiCad to view and continue the design.
@@ -193,16 +201,14 @@ The `kicad_tools.schematic.blocks` module provides these reusable blocks:
 
 ## Next Steps
 
-After generating the schematic:
+The generator already builds a complete schematic + placed PCB and runs the
+auto-router.  After generating, you can:
 
-1. **Open in KiCad** - Review and complete the design
-2. **Add MCU Symbol** - Add STM32F103C8Tx from KiCad library
-3. **Complete Connections** - Wire MCU to peripherals
-4. **Run ERC** - Check for electrical rule violations
-5. **Create PCB** - Layout components on the board
-6. **Route Traces** - Connect components with copper traces
-7. **Run DRC** - Check design rules
-8. **Export Files** - Generate Gerbers, BOM, and CPL
+1. **Open in KiCad** - inspect the schematic and PCB visually
+2. **Run ERC** - `kct erc boards/04-stm32-devboard/output/stm32_devboard.kicad_sch`
+3. **Run DRC** - `kct check boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb --mfr jlcpcb`
+4. **Re-route** - `kct route boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb -o ./routed.kicad_pcb --timeout 240`
+5. **Export Files** - generate Gerbers, BOM, and CPL via `kct export`
 
 ## Future API Features
 

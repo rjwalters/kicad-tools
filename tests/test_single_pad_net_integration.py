@@ -3,18 +3,17 @@
 These tests load the canonical board fixtures (boards/0X-...) and verify
 that:
 
-- Board 04 (STM32 dev board, no MCU) reports exactly 4 single-pad-net
-  errors for SWDIO, SWCLK, SWO, NRST -- the four SWD signals that have
-  no MCU footprint to terminate on.
-- Boards 01, 02, 03 do not report any single-pad-net violations
+- Board 04 (STM32 dev board, **with** STM32F103C8T6 MCU now placed) does
+  not produce any single-pad-net violations.  Historical context: before
+  issue #2531 the board generator emitted a stub PCB without the MCU
+  footprint, leaving SWDIO/SWCLK/SWO/NRST as ghost nets; this test now
+  serves as a regression guard that the MCU placement keeps those signals
+  multi-pad.
+- Boards 01, 02, 03 also do not report any single-pad-net violations
   (regression guard against the rule firing on legitimate designs).
   Board 05 is intentionally excluded -- its STM32G4 MCU is a placeholder
   in the schematic generator, so the gate-driver and SWD nets legitimately
   trip the rule (a real finding, not a false positive).
-- The DRC checker's ``check_all()`` plumbing routes the violations
-  through to ``error_count`` and ``DRCStatus.blocking_count``, which
-  in turn drives ``AuditVerdict.NOT_READY`` -- exactly the behaviour
-  the issue asks for.
 """
 
 from __future__ import annotations
@@ -41,10 +40,14 @@ _BOARD_04_PCB = _REPO_ROOT / "boards" / "04-stm32-devboard" / "output" / "stm32_
     ),
 )
 class TestBoard04SwdSignals:
-    """Board 04 (no MCU) should report exactly 4 single-pad SWD nets."""
+    """Regression: with the STM32F103C8T6 MCU placed, board 04 should not
+    report any single-pad-net violations.  The four SWD signals
+    (SWDIO/SWCLK/SWO/NRST) that historically formed ghost nets now
+    terminate on PA13/PA14/PB3/NRST of U2.
+    """
 
-    def test_check_all_includes_single_pad_errors(self):
-        """DRCChecker.check_all() emits >=4 single_pad_net errors on board 04."""
+    def test_check_all_no_single_pad_errors(self):
+        """DRCChecker.check_all() emits 0 single_pad_net errors on board 04."""
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate import DRCChecker
 
@@ -53,25 +56,14 @@ class TestBoard04SwdSignals:
         results = checker.check_all()
 
         single_pad_violations = [v for v in results.violations if v.rule_id == "single_pad_net"]
-        assert len(single_pad_violations) == 4
-
-        # All four are errors (not warnings).
-        for v in single_pad_violations:
-            assert v.severity == "error"
-
-        flagged_nets = {v.nets[0] for v in single_pad_violations}
-        assert flagged_nets == {"SWDIO", "SWCLK", "SWO", "NRST"}
-
-        # All four pads should be on J1 (the SWD header).
-        flagged_refs = {v.items[0].split("-")[0] for v in single_pad_violations}
-        assert flagged_refs == {"J1"}
-
-        # The total error count should be at least 4 (other rules may
-        # also fire on this board, hence >=, not ==).
-        assert results.error_count >= 4
+        assert len(single_pad_violations) == 0, (
+            f"Board 04 (post-#2531) should have 0 single_pad_net errors, "
+            f"got {len(single_pad_violations)}: "
+            f"{[v.message for v in single_pad_violations]}"
+        )
 
     def test_check_single_pad_nets_in_isolation(self):
-        """check_single_pad_nets() returns exactly 4 errors on board 04."""
+        """check_single_pad_nets() returns 0 errors on board 04 (post-#2531)."""
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate import DRCChecker
 
@@ -79,41 +71,39 @@ class TestBoard04SwdSignals:
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
         results = checker.check_single_pad_nets()
 
-        assert len(results.violations) == 4
-        assert all(v.rule_id == "single_pad_net" for v in results.violations)
-        assert all(v.severity == "error" for v in results.violations)
-
-    def test_audit_verdict_not_ready(self):
-        """A board with single-pad signal nets fails the audit gate.
-
-        This test exercises the same code path as ``Auditor.audit()``
-        without requiring the rest of the project structure (project
-        file, schematic, etc.).  We hand-build a DRCStatus from the
-        same ``_check_drc`` method the auditor uses internally and
-        verify the verdict mapping wires it up to NOT_READY.
-        """
-        from kicad_tools.audit.auditor import (
-            AuditResult,
-            AuditVerdict,
-            ManufacturingAudit,
+        assert len(results.violations) == 0, (
+            f"Board 04 (post-#2531) unexpectedly produced "
+            f"{len(results.violations)} single_pad_net violations: "
+            f"{[v.message for v in results.violations]}"
         )
+
+    def test_swd_nets_have_two_pads(self):
+        """Each SWD signal connects MCU U2 -> SWD header J1 (two pads each).
+
+        This is the constructive flip-side of test_check_single_pad_nets:
+        not just absent of errors, but explicitly multi-pad.
+        """
+        from collections import defaultdict
+
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(_BOARD_04_PCB))
-        # ManufacturingAudit needs a path argument for project resolution
-        # but we only need its _check_drc helper for this assertion.
-        auditor = ManufacturingAudit(_BOARD_04_PCB, manufacturer="jlcpcb", layers=2)
-        drc_status = auditor._check_drc(pcb)
+        net_pad_counts: dict[str, int] = defaultdict(int)
+        net_refs: dict[str, set[str]] = defaultdict(set)
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_name:
+                    net_pad_counts[pad.net_name] += 1
+                    net_refs[pad.net_name].add(fp.reference or fp.name)
 
-        # The single_pad_net rule should drive blocking_count >= 4.
-        assert drc_status.blocking_count >= 4
-        # Verify the rule fires through the DRC plumbing.
-        assert drc_status.violations_by_type.get("single_pad_net", 0) == 4
-
-        result = AuditResult()
-        result.drc = drc_status
-        # Verdict is NOT_READY because drc.blocking_count > 0.
-        assert result.verdict == AuditVerdict.NOT_READY
+        for net in ("SWDIO", "SWCLK", "SWO", "NRST"):
+            assert net_pad_counts[net] >= 2, (
+                f"Net {net} should connect both U2 (MCU) and J1 (SWD header), "
+                f"got {net_pad_counts[net]} pads on {net_refs[net]}"
+            )
+            # Both U2 and J1 should appear on each SWD signal.
+            assert "U2" in net_refs[net], f"{net} missing MCU U2 connection"
+            assert "J1" in net_refs[net], f"{net} missing SWD header J1 connection"
 
 
 _REGRESSION_BOARDS = [
@@ -139,14 +129,15 @@ class TestRegressionBoards:
     single_pad_net violation here would indicate a false positive in
     the rule logic.
 
+    Board 04 (STM32 devboard) is now also single-pad-net clean -- see
+    ``TestBoard04SwdSignals`` for its dedicated regression coverage.
+
     Board 05 (BLDC motor controller) is intentionally excluded -- its
     schematic uses a placeholder for the STM32G4 MCU, so the gate-driver
     nets, current-sense returns, Hall sensor inputs, and SWD signals all
     have only one pad on the PCB.  This is exactly the design defect
     the rule is meant to catch, and would be a legitimate finding (not
-    a false positive) if the test fired against board 05.  Board 04
-    (also missing its MCU but otherwise simpler) is the canonical
-    "expected to fail" fixture covered by ``TestBoard04SwdSignals``.
+    a false positive) if the test fired against board 05.
     """
 
     @pytest.mark.parametrize(

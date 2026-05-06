@@ -12,9 +12,10 @@ This script demonstrates the complete PCB design workflow:
 
 The design includes:
 - LDO voltage regulator (5V to 3.3V)
-- 8MHz crystal oscillator
-- SWD debug header
-- User LED indicator
+- STM32F103C8T6 MCU (LQFP-48) with full power, decoupling and reset wiring
+- 8MHz HSE crystal oscillator on PD0/PD1
+- SWD debug header (PA13/PA14/PB3/NRST)
+- User LED indicator on PB12 (active-low)
 
 Usage:
     python generate_design.py [output_dir]
@@ -73,13 +74,21 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     )
 
     # Define power rail Y coordinates for organized layout
-    RAIL_5V = 30  # 5V input power
-    RAIL_3V3 = 50  # 3.3V regulated
-    RAIL_GND = 200  # Ground
+    # NOTE: With the MCU symbol added (LQFP-48 ~80mm tall), the schematic now
+    # spans a much wider Y range. The MCU is centered around y=120, with VDD/
+    # VBAT pins reaching up to y=80 and VSS/VSSA pins reaching down to y=160.
+    # Power rails are placed above and below the MCU body so pin stubs don't
+    # cross the rails.
+    RAIL_5V = 30  # 5V input power (top, used only by LDO input)
+    RAIL_3V3 = 70  # 3.3V regulated (above MCU body)
+    RAIL_GND = 200  # Ground (below MCU body)
 
-    # Schematic boundaries
+    # Schematic boundaries.  X_RIGHT terminates the +3.3V and GND rails at
+    # the SWD header J1's pin column (computed at runtime below to avoid
+    # dangling wire endpoints).  X_LEFT marks the +5V/GND power-symbol column.
     X_LEFT = 25
-    X_RIGHT = 280
+    # Position of the SWD header (used for rail termination too)
+    X_SWD = 290
 
     # =========================================================================
     # Section 1: Power Rails
@@ -92,14 +101,20 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     #
     # Rail endpoints based on component positions:
     # - 5V: Power symbol (25) to LDO VIN (~93)
-    # - 3.3V: LDO VOUT (~108) to debug header (~245)
-    # - GND: Power symbol (25) to debug header (~245)
+    # - 3.3V: LDO VOUT (~108) to debug header / MCU bypass caps / SWD header
+    # - GND: Power symbol (25) across the full width to MCU VSS pins / SWD header
+    # Rails extend from their leftmost power-symbol column to the SWD header
+    # column (X_SWD - 5.52mm = pin-1 column after the header symbol's internal
+    # offset).  Choosing the rail endpoint to coincide with an actual tap
+    # point keeps the validator from flagging dangling wire endpoints.
+    rail_3v3_xend = X_SWD - 5.52
+    rail_gnd_xend = X_SWD - 5.52
     sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=93, net_label="+5V")
-    sch.add_rail(RAIL_3V3, x_start=80, x_end=245, net_label="+3.3V")
-    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=245, net_label="GND")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3.3V")
+    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend, net_label="GND")
     print("   Added +5V, +3.3V, and GND rails")
 
-    # Add power symbols
+    # Add power symbols at the left ends of the rails.
     sch.add_power("power:+5V", x=X_LEFT, y=RAIL_5V - 10, rotation=0)
     sch.add_power("power:+3V3", x=80, y=RAIL_3V3 - 10, rotation=0)
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND + 10, rotation=0)
@@ -177,14 +192,110 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     print("   Wired LDO and decoupling caps to power rails")
 
     # =========================================================================
-    # Section 3: Crystal Oscillator (8MHz)
+    # Section 3: STM32F103C8T6 MCU (LQFP-48)
     # =========================================================================
-    print("\n3. Adding 8MHz crystal oscillator...")
+    print("\n3. Adding STM32F103C8T6 MCU...")
 
-    # Crystal with load capacitors (using the CrystalOscillator block)
+    # MCU position - centered, with room for pin stubs and labels on all sides.
+    # The STM32F103CxTx symbol spans roughly x=±20mm and y=±42mm around its
+    # placement origin (after the 2.54mm pin lengths).  With MCU at (210, 120)
+    # the bounding box is approximately x=[190,230], y=[78,162], which fits
+    # between RAIL_3V3 (y=70) and RAIL_GND (y=200) with stub clearance.
+    MCU_X = 210
+    MCU_Y = 120
+
+    mcu = sch.add_symbol(
+        "MCU_ST_STM32F1:STM32F103C8Tx",
+        x=MCU_X,
+        y=MCU_Y,
+        ref="U2",
+        value="STM32F103C8T6",
+        footprint="Package_QFP:LQFP-48_7x7mm_P0.5mm",
+    )
+    print(f"   {mcu.reference}: STM32F103C8T6 (LQFP-48)")
+
+    # Wire MCU power pins to +3.3V rail.  STM32F103C8 has VDD on pins 24/36/48,
+    # VBAT on pin 1, and VDDA on pin 9 -- all tie to +3.3V on a single-supply
+    # design.  Each pin emerges from the top of the symbol so we route a short
+    # stub up to the +3.3V rail.
+    for pwr_pin in ("VDD", "VBAT", "VDDA"):
+        # The symbol has multiple pins named "VDD" (24, 36, 48); pin_position
+        # returns the first match.  Walk all pins by number to wire each one.
+        for p in mcu.symbol_def.pins:
+            if p.name == pwr_pin:
+                pos = mcu.pin_position(p.number)
+                sch.add_wire(pos, (pos[0], RAIL_3V3), warn_on_collision=False)
+                sch.add_junction(pos[0], RAIL_3V3)
+
+    # Wire MCU ground pins to GND rail.  VSS on pins 23/35/47 and VSSA on
+    # pin 8 emerge from the bottom of the symbol.
+    for gnd_pin in ("VSS", "VSSA"):
+        for p in mcu.symbol_def.pins:
+            if p.name == gnd_pin:
+                pos = mcu.pin_position(p.number)
+                sch.add_wire(pos, (pos[0], RAIL_GND), warn_on_collision=False)
+                sch.add_junction(pos[0], RAIL_GND)
+
+    print("   Wired MCU VDD/VBAT/VDDA to +3.3V and VSS/VSSA to GND")
+
+    # MCU decoupling caps (one per VDD/VBAT/VDDA pin, plus a bulk cap)
+    # Place between MCU and 3.3V rail, on the left side of the symbol.
+    c_dec1 = sch.add_symbol(
+        "Device:C_Small",
+        x=160,
+        y=85,
+        ref="C12",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_dec2 = sch.add_symbol(
+        "Device:C_Small",
+        x=170,
+        y=85,
+        ref="C13",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_dec3 = sch.add_symbol(
+        "Device:C_Small",
+        x=180,
+        y=85,
+        ref="C14",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_dec4 = sch.add_symbol(
+        "Device:C_Small",
+        x=190,
+        y=85,
+        ref="C15",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_bulk = sch.add_symbol(
+        "Device:C_Small",
+        x=200,
+        y=85,
+        ref="C16",
+        value="4.7uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    for cap in (c_dec1, c_dec2, c_dec3, c_dec4, c_bulk):
+        sch.wire_decoupling_cap(cap, RAIL_3V3, RAIL_GND)
+    print("   C12-C15 (100nF) + C16 (4.7uF) bypass caps")
+
+    # =========================================================================
+    # Section 4: Crystal Oscillator (8MHz) - connects to MCU PD0/PD1
+    # =========================================================================
+    print("\n4. Adding 8MHz crystal oscillator...")
+
+    # Place crystal to the LEFT of the MCU, where PD0 (pin 5, OSC_IN) and PD1
+    # (pin 6, OSC_OUT) emerge.  PD0 is at (MCU_X - 17.78, MCU_Y - 22.86) =
+    # (192.22, 97.14) and PD1 at (192.22, 99.68) in screen coords.  Place the
+    # crystal block well to the left so its IN/OUT labels align cleanly.
     xtal = CrystalOscillator(
         sch,
-        x=200,
+        x=140,
         y=100,
         frequency="8MHz",
         load_caps="20pF",
@@ -198,25 +309,25 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Connect crystal ground to GND rail
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
 
-    # Add labels for oscillator connections
-    # Wire stubs must be added BEFORE labels to avoid "label not on wire" warnings
+    # Wire crystal IN/OUT to OSC_IN / OSC_OUT labels (on stubs).  Labels at the
+    # MCU side are added below when we wire the MCU pins.
     in_pos = xtal.port("IN")
     out_pos = xtal.port("OUT")
     sch.add_wire(in_pos, (in_pos[0] - 10, in_pos[1]))
     sch.add_label("OSC_IN", in_pos[0] - 10, in_pos[1], rotation=0)
     sch.add_wire(out_pos, (out_pos[0] + 10, out_pos[1]))
     sch.add_label("OSC_OUT", out_pos[0] + 10, out_pos[1], rotation=0)
-    print("   Added OSC_IN and OSC_OUT labels")
+    print("   Added OSC_IN and OSC_OUT labels at crystal")
 
     # =========================================================================
-    # Section 4: Debug Header (SWD)
+    # Section 5: Debug Header (SWD)
     # =========================================================================
-    print("\n4. Adding SWD debug header...")
+    print("\n5. Adding SWD debug header...")
 
-    # 6-pin SWD header
+    # 6-pin SWD header on the far right of the MCU
     debug = DebugHeader(
         sch,
-        x=250,
+        x=X_SWD,
         y=100,
         interface="swd",
         pins=6,
@@ -230,38 +341,141 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
 
     # =========================================================================
-    # Section 5: User LED
+    # Section 6: MCU peripheral wiring (SWD, oscillator, USER_LED)
     # =========================================================================
-    print("\n5. Adding user LED...")
+    print("\n6. Wiring MCU peripheral signals...")
 
-    # LED with current-limiting resistor
+    # Helper: route a short stub from a left-side MCU pin out to a label.
+    # Left-side pins (PA0 family on the right, the rest on the left) emerge
+    # along x=MCU_X-17.78, so the stub goes -10mm to the left.
+    def _label_left_pin(pin_name: str, label_text: str, stub_len: float = -8) -> None:
+        pos = mcu.pin_position(pin_name)
+        sch.add_wire(pos, (pos[0] + stub_len, pos[1]), warn_on_collision=False)
+        sch.add_label(label_text, pos[0] + stub_len, pos[1], rotation=0)
+
+    def _label_right_pin(pin_name: str, label_text: str, stub_len: float = 8) -> None:
+        pos = mcu.pin_position(pin_name)
+        sch.add_wire(pos, (pos[0] + stub_len, pos[1]), warn_on_collision=False)
+        sch.add_label(label_text, pos[0] + stub_len, pos[1], rotation=0)
+
+    # Oscillator inputs (left side of symbol)
+    _label_left_pin("PD0", "OSC_IN")
+    _label_left_pin("PD1", "OSC_OUT")
+    print("   PD0 -> OSC_IN, PD1 -> OSC_OUT")
+
+    # Reset (left side)
+    _label_left_pin("NRST", "NRST")
+    print("   NRST -> NRST (reset header pin)")
+
+    # SWD signals (right side of symbol -- PA13, PA14; left side -- PB3)
+    _label_right_pin("PA13", "SWDIO")
+    _label_right_pin("PA14", "SWCLK")
+    _label_left_pin("PB3", "SWO")
+    print("   PA13 -> SWDIO, PA14 -> SWCLK, PB3 -> SWO")
+
+    # User LED on PB12 (left side, lower half).  Active-low: MCU sinks current.
+    _label_left_pin("PB12", "USER_LED")
+    print("   PB12 -> USER_LED")
+
+    # No-connect markers on every MCU pin we don't drive.  Without these the
+    # internal `Schematic.validate()` flags ~30 "pin not connected" errors and
+    # KiCad ERC may warn about unconnected bidirectional pins.
+    _connected_pin_names: set[str] = {
+        # Power
+        "VBAT",
+        "VDD",
+        "VDDA",
+        "VSS",
+        "VSSA",
+        # Signals we explicitly wire below
+        "NRST",
+        "BOOT0",
+        "PD0",
+        "PD1",
+        "PA13",
+        "PA14",
+        "PB3",
+        "PB12",
+    }
+    _nc_count = 0
+    for p in mcu.symbol_def.pins:
+        if p.name in _connected_pin_names:
+            continue
+        pos = mcu.pin_position(p.number)
+        sch.add_no_connect(pos[0], pos[1])
+        _nc_count += 1
+    print(f"   Added {_nc_count} no-connect markers on unused MCU pins")
+
+    # BOOT0 pull-down (left side, top half).  Tying BOOT0 low forces normal
+    # flash boot at reset; this is the typical configuration for development.
+    boot0_pos = mcu.pin_position("BOOT0")
+    r_boot = sch.add_symbol(
+        "Device:R",
+        x=boot0_pos[0] - 20,
+        y=boot0_pos[1],
+        ref="R2",
+        value="10k",
+        footprint="Resistor_SMD:R_0805_2012Metric",
+        rotation=270,
+    )
+    # R2 pin 1 connects to BOOT0 stub, pin 2 connects down to GND rail
+    r1 = r_boot.pin_position("1")
+    r2 = r_boot.pin_position("2")
+    sch.add_wire(boot0_pos, r1, warn_on_collision=False)
+    sch.add_wire(r2, (r2[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(r2[0], RAIL_GND)
+    print("   R2 (10k) BOOT0 pull-down to GND")
+
+    # =========================================================================
+    # Section 7: User LED (driven by MCU PB12, active-low)
+    # =========================================================================
+    print("\n7. Adding user LED (driven by MCU PB12)...")
+
+    # LED + current-limiting resistor.  Wired so 3.3V -> D1 anode -> D1 cathode
+    # -> R1 pad1; R1 pad2 -> USER_LED net -> MCU PB12.  When MCU pulls PB12
+    # low, the LED illuminates (active-low).
     led = LEDIndicator(
         sch,
-        x=175,
-        y=140,
+        x=265,
+        y=160,
         ref_prefix="D1",
         label="USER",
         resistor_value="330R",
         led_footprint="LED_SMD:LED_0805_2012Metric",
         resistor_footprint="Resistor_SMD:R_0805_2012Metric",
     )
-    print(f"   LED: {led.led.reference} with current-limiting resistor")
+    print(f"   LED: {led.led.reference} with current-limiting resistor (active-low)")
 
-    # Connect LED to power rails
-    led.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
+    # Connect anode to +3.3V rail (top of LEDIndicator vertical block)
+    vcc_pos = led.ports["VCC"]
+    sch.add_wire(vcc_pos, (vcc_pos[0], RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(vcc_pos[0], RAIL_3V3)
+
+    # Bottom port of LEDIndicator is r.pad2 -- route this to USER_LED label.
+    # We do NOT connect this to GND -- the MCU drives the cathode side via
+    # the USER_LED net.
+    led_user = led.ports["GND"]  # this is r.pad2 (intentional misnomer in block)
+    sch.add_wire(led_user, (led_user[0], led_user[1] + 10), warn_on_collision=False)
+    sch.add_label("USER_LED", led_user[0], led_user[1] + 10, rotation=0)
+    print("   D1/R1 wired between +3.3V and USER_LED (MCU PB12)")
 
     # =========================================================================
-    # Section 6: Design Notes
+    # Section 8: Design Notes
     # =========================================================================
-    print("\n6. Adding design notes...")
+    print("\n8. Adding design notes...")
 
     sch.add_text(
-        "Design Notes:\n"
-        "1. Add STM32F103C8T6 MCU from KiCad library\n"
-        "2. Connect OSC_IN/OSC_OUT to PA0/PA1\n"
-        "3. Connect SWDIO/SWCLK to PA13/PA14\n"
-        "4. Connect USER LED to PA5\n"
-        "5. Add reset button between NRST and GND",
+        "STM32F103C8T6 Pin Assignments:\n"
+        "  PA13 = SWDIO    (pin 34)\n"
+        "  PA14 = SWCLK    (pin 37)\n"
+        "  PB3  = SWO      (pin 39)\n"
+        "  NRST = Reset    (pin 7)\n"
+        "  PD0  = OSC_IN   (pin 5, HSE)\n"
+        "  PD1  = OSC_OUT  (pin 6, HSE)\n"
+        "  PB12 = USER_LED (pin 25, active-low)\n"
+        "  BOOT0 pulled low via R2 (10k) for flash boot\n"
+        "  HSE: 8MHz crystal Y1 with 20pF load caps C10/C11\n"
+        "  Decoupling: C12-C15 (100nF) per VDD pin, C16 (4.7uF) bulk",
         x=X_LEFT,
         y=230,
     )
@@ -269,7 +483,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # =========================================================================
     # Validate Schematic
     # =========================================================================
-    print("\n7. Validating schematic...")
+    print("\n9. Validating schematic...")
 
     # Run validation
     issues = sch.validate()
@@ -298,7 +512,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # =========================================================================
     # Write Output Files
     # =========================================================================
-    print("\n8. Writing output files...")
+    print("\n10. Writing output files...")
 
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -386,13 +600,16 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     print("Creating STM32 Development Board PCB...")
     print("=" * 60)
 
-    # Board dimensions (mm) - from project.kct spec
-    BOARD_WIDTH = 50.0
-    BOARD_HEIGHT = 25.0
+    # Board dimensions (mm) -- expanded to fit the LQFP-48 MCU + decoupling caps
+    BOARD_WIDTH = 60.0
+    BOARD_HEIGHT = 40.0
     BOARD_ORIGIN_X = 100.0
     BOARD_ORIGIN_Y = 100.0
 
     # Net definitions - must match schematic nets
+    # LED_K is the intermediate node between D1 cathode and R1: gives the
+    # PCB generator a name to apply to those two pads so they are not
+    # left as net 0 (unconnected).
     NETS = {
         "": 0,
         "+5V": 1,
@@ -405,23 +622,56 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         "SWO": 8,
         "NRST": 9,
         "USER_LED": 10,
+        "LED_K": 11,
+        "BOOT0": 12,
     }
 
-    # Component positions for a sensible layout
-    # Left side: Power input and regulation
-    # Center: Crystal and LED
-    # Right side: Debug header
-    # Spacing increased to avoid pad overlap (min 3mm between components)
-    U1_POS = (BOARD_ORIGIN_X + 10, BOARD_ORIGIN_Y + 10)  # LDO
-    C1_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 18)  # Input cap
-    C2_POS = (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 10)  # Output cap 1
-    C3_POS = (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 15)  # Output cap 2
-    Y1_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 10)  # Crystal
-    C10_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 16)  # Crystal cap 1
-    C11_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 21)  # Crystal cap 2
-    D1_POS = (BOARD_ORIGIN_X + 38, BOARD_ORIGIN_Y + 12)  # LED
-    R1_POS = (BOARD_ORIGIN_X + 38, BOARD_ORIGIN_Y + 6)  # LED resistor
-    J1_POS = (BOARD_ORIGIN_X + 46, BOARD_ORIGIN_Y + 12)  # Debug header
+    # Component positions for a sensible layout on the 60x40mm board.
+    # All passive caps/resistors use 0805 SMD packages: pad span 2mm and pad
+    # size 1mm x 1.3mm, so neighbours need ~3mm centre-to-centre to keep
+    # 0.127mm minimum pad-pad clearance (JLCPCB rule).  The LQFP-48 MCU
+    # footprint spans 9.3mm tip-to-tip, so we leave at least 5mm on every
+    # side.
+    #
+    # Layout (x increases left-to-right, y increases top-to-bottom):
+    #   col 1  (x= 5..14): U1 LDO + LDO caps
+    #   col 2  (x=15..26): crystal Y1 + load caps C10/C11
+    #   col 3  (x=27..40): U2 STM32 MCU (centered around x=33)
+    #   col 4  (x=41..50): R1/D1 LED stack + R2 BOOT0 pull-down
+    #   col 5  (x=51..58): J1 SWD header
+    U1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 10)  # LDO (SOT-223)
+    C1_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 18)  # LDO input cap (left of LDO)
+    C2_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 10)  # LDO output cap 1 (right of LDO)
+    C3_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 16)  # LDO output cap 2
+
+    # MCU center placement.  LQFP-48 footprint extends ~4.6mm in each
+    # direction from its origin, so we leave at least 5mm clearance from
+    # surrounding components.
+    U2_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 22)  # STM32F103C8T6
+
+    # Crystal section: above the MCU's top edge.  Y1 sits between the LDO
+    # and MCU horizontally, with OSC_IN/OSC_OUT load caps below it.
+    # OSC_IN/OSC_OUT escape through the open space above the MCU's left
+    # edge (PD0=pin 5, PD1=pin 6).
+    Y1_POS = (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 10)  # 8MHz crystal
+    C10_POS = (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 16)  # OSC_IN load cap
+    C11_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 16)  # OSC_OUT load cap
+
+    # MCU decoupling caps (cluster below MCU footprint, near VSS/VDD pins)
+    # Spaced 4mm apart to keep pad-pad clearance well above 0.127mm.
+    C12_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/1)
+    C13_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/24)
+    C14_POS = (BOARD_ORIGIN_X + 36, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/48)
+    C15_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 36)  # 100nF (VDDA/9)
+    C16_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 36)  # 4.7uF bulk
+
+    # Right column (x=46..50): user LED + BOOT0 pull-down
+    R1_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 8)  # LED current-limiting R (3.3V to LED_K)
+    D1_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 12)  # User LED (LED_K to USER_LED)
+    R2_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 22)  # BOOT0 pull-down 10k
+
+    # SWD header at far right (uses 1x06 vertical pin header, 2.54mm pitch)
+    J1_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 22)
 
     def generate_header() -> str:
         """Generate the PCB file header."""
@@ -531,9 +781,14 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_OUT"]} "OSC_OUT"))
   )"""
 
-    def generate_led_0805(ref: str, pos: tuple) -> str:
-        """Generate 0805 LED footprint."""
+    def generate_led_0805(ref: str, pos: tuple, anode_net: str, cathode_net: str) -> str:
+        """Generate 0805 LED footprint with explicit anode/cathode nets.
+
+        Pad 1 is the anode, pad 2 is the cathode (KiCad LED_SMD convention).
+        """
         x, y = pos
+        a_num = NETS.get(anode_net, 0)
+        k_num = NETS.get(cathode_net, 0)
         return f"""  (footprint "LED_SMD:LED_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -544,8 +799,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["USER_LED"]} "USER_LED"))
-    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["GND"]} "GND"))
+    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {a_num} "{anode_net}"))
+    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {k_num} "{cathode_net}"))
   )"""
 
     def generate_resistor_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
@@ -565,6 +820,71 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     )
     (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
+  )"""
+
+    def generate_lqfp48(ref: str, pos: tuple, value: str, pin_nets: dict[int, str]) -> str:
+        """Generate LQFP-48 footprint (7x7mm, 0.5mm pitch) for STM32F103C8T6.
+
+        Pad layout (origin at footprint center, y-down):
+          - pads 1..12  on the left edge   (x=-4.1625, y=-2.75..+2.75)
+          - pads 13..24 on the bottom edge (y=+4.1625, x=-2.75..+2.75)
+          - pads 25..36 on the right edge  (x=+4.1625, y=+2.75..-2.75)
+          - pads 37..48 on the top edge    (y=-4.1625, x=+2.75..-2.75)
+
+        ``pin_nets`` maps each 1..48 pad number to a net name from ``NETS``;
+        missing entries default to net 0 (unconnected, which is correct for
+        unused GPIOs on this devboard).
+        """
+        x, y = pos
+        pad_layers = '(layers "F.Cu" "F.Paste" "F.Mask")'
+        pad_attrs = "(roundrect_rratio 0.25)"
+
+        # Pad coordinates (in footprint-local mm, relative to component origin)
+        # Left edge: pads 1..12, x=-4.1625, y from -2.75 step +0.5
+        # Bottom edge: pads 13..24, y=+4.1625, x from -2.75 step +0.5
+        # Right edge: pads 25..36, x=+4.1625, y from +2.75 step -0.5
+        # Top edge: pads 37..48, y=-4.1625, x from +2.75 step -0.5
+        pad_positions: list[tuple[int, float, float]] = []
+        for i in range(12):  # left
+            pad_positions.append((1 + i, -4.1625, -2.75 + 0.5 * i))
+        for i in range(12):  # bottom
+            pad_positions.append((13 + i, -2.75 + 0.5 * i, 4.1625))
+        for i in range(12):  # right
+            pad_positions.append((25 + i, 4.1625, 2.75 - 0.5 * i))
+        for i in range(12):  # top
+            pad_positions.append((37 + i, 2.75 - 0.5 * i, -4.1625))
+
+        # Build pad lines.  Pads on horizontal edges use rotated size.
+        # Pad dimensions (1.475x0.3 mm) come straight from the official
+        # Package_QFP:LQFP-48_7x7mm_P0.5mm KiCad footprint.
+        pad_lines: list[str] = []
+        for pad_num, px, py in pad_positions:
+            net_name = pin_nets.get(pad_num, "")
+            net_num = NETS.get(net_name, 0)
+            # Left and right edges: pad long axis along x.
+            # Top and bottom edges: pad long axis along y -- rotate 90.
+            if pad_num <= 12 or (25 <= pad_num <= 36):
+                size = "(size 1.475 0.3)"
+            else:
+                size = "(size 0.3 1.475)"
+            pad_lines.append(
+                f'    (pad "{pad_num}" smd roundrect '
+                f"(at {px} {py}) {size} {pad_layers} {pad_attrs} "
+                f'(net {net_num} "{net_name}"))'
+            )
+
+        pads_block = "\n".join(pad_lines)
+        return f"""  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -5.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 5.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{pads_block}
   )"""
 
     def generate_pin_header_6(ref: str, pos: tuple) -> str:
@@ -612,6 +932,34 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     print(f"   C2 (10uF) at {C2_POS}")
     print(f"   C3 (100nF) at {C3_POS}")
 
+    # U2: STM32F103C8T6 MCU (LQFP-48)
+    # Full pinmap for the LQFP-48 package.  Connected pins drive nets
+    # the SWD header / crystal / LED expect; unused pins default to net 0
+    # (unconnected) by being absent from the dict.
+    mcu_pin_nets: dict[int, str] = {
+        # Power pins
+        1: "+3.3V",  # VBAT
+        9: "+3.3V",  # VDDA
+        24: "+3.3V",  # VDD
+        36: "+3.3V",  # VDD
+        48: "+3.3V",  # VDD
+        8: "GND",  # VSSA
+        23: "GND",  # VSS
+        35: "GND",  # VSS
+        47: "GND",  # VSS
+        # Signals
+        5: "OSC_IN",  # PD0
+        6: "OSC_OUT",  # PD1
+        7: "NRST",  # NRST
+        25: "USER_LED",  # PB12
+        34: "SWDIO",  # PA13
+        37: "SWCLK",  # PA14
+        39: "SWO",  # PB3
+        44: "BOOT0",  # BOOT0 (pulled low via R2)
+    }
+    parts.append(generate_lqfp48("U2", U2_POS, "STM32F103C8T6", mcu_pin_nets))
+    print(f"   U2 (STM32F103C8T6) at {U2_POS}")
+
     # Y1: Crystal oscillator
     parts.append(generate_crystal_hc49("Y1", Y1_POS, "8MHz"))
     print(f"   Y1 (8MHz) at {Y1_POS}")
@@ -621,13 +969,29 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     parts.append(generate_cap_0805("C11", C11_POS, "20pF", "OSC_OUT", "GND"))
     print(f"   C10, C11 (20pF) at {C10_POS}, {C11_POS}")
 
-    # R1: LED current-limiting resistor
-    parts.append(generate_resistor_0805("R1", R1_POS, "330R", "+3.3V", "USER_LED"))
+    # C12-C15: MCU per-pin decoupling caps (100nF, 3.3V to GND)
+    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+3.3V", "GND"))
+    print("   C12-C15 (100nF MCU bypass)")
+
+    # C16: Bulk decoupling cap (4.7uF)
+    parts.append(generate_cap_0805("C16", C16_POS, "4.7uF", "+3.3V", "GND"))
+    print(f"   C16 (4.7uF bulk decoupling) at {C16_POS}")
+
+    # R1: LED current-limiting resistor (3.3V -> LED_K).  D1 pulls LED_K
+    # toward USER_LED net; when MCU PB12 sinks current the LED illuminates.
+    parts.append(generate_resistor_0805("R1", R1_POS, "330R", "+3.3V", "LED_K"))
     print(f"   R1 (330R) at {R1_POS}")
 
-    # D1: User LED
-    parts.append(generate_led_0805("D1", D1_POS))
+    # D1: User LED -- anode = LED_K (after R1), cathode = USER_LED (MCU drain)
+    parts.append(generate_led_0805("D1", D1_POS, anode_net="LED_K", cathode_net="USER_LED"))
     print(f"   D1 (LED) at {D1_POS}")
+
+    # R2: BOOT0 pull-down (10k) so the MCU boots from flash by default.
+    parts.append(generate_resistor_0805("R2", R2_POS, "10k", "BOOT0", "GND"))
+    print(f"   R2 (10k BOOT0 pull-down) at {R2_POS}")
 
     # J1: SWD debug header
     parts.append(generate_pin_header_6("J1", J1_POS))
@@ -644,7 +1008,9 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     print(f"   PCB: {pcb_path}")
 
     print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print("   Components: 1 LDO, 5 caps, 1 crystal, 1 resistor, 1 LED, 1 header")
+    print(
+        "   Components: U1 LDO, U2 STM32F103C8T6, 10 caps, 1 crystal, 2 resistors, 1 LED, 1 header"
+    )
     print(f"   Nets: {len([n for n in NETS.values() if n > 0])}")
 
     return pcb_path
@@ -835,10 +1201,14 @@ def main() -> int:
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
         print("\nBoard description:")
         print("  - U1: AMS1117-3.3 LDO (5V to 3.3V)")
-        print("  - C1-C3: Decoupling capacitors")
-        print("  - Y1: 8MHz crystal oscillator")
-        print("  - C10-C11: Crystal load capacitors")
-        print("  - R1, D1: User LED with resistor")
+        print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")
+        print("  - C1-C3: LDO decoupling capacitors")
+        print("  - Y1: 8MHz crystal oscillator (HSE on PD0/PD1)")
+        print("  - C10-C11: Crystal load capacitors (20pF)")
+        print("  - C12-C15: MCU bypass caps (100nF per VDD pin)")
+        print("  - C16: Bulk decoupling (4.7uF)")
+        print("  - R1, D1: User LED on PB12 (active-low)")
+        print("  - R2: BOOT0 pull-down (10k)")
         print("  - J1: 6-pin SWD debug header")
 
         # For this demo board, partial routing is acceptable
