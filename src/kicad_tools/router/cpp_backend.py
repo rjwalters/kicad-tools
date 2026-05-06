@@ -69,7 +69,21 @@ except ImportError as e:
     ) + glob.glob(
         str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so")
     )
-    if _so_files:
+    # Issue #2514: Distinguish "no compiled extension" from a genuine
+    # circular import.  When ``from . import router_cpp`` runs while
+    # ``kicad_tools.router.__init__`` is still mid-import, Python's
+    # ``ImportError.__str__`` mentions "partially initialized module
+    # (most likely due to a circular import)" -- even when the actual
+    # root cause is a missing ``.so`` file (e.g. fresh checkout where
+    # ``kct build-native`` was never run).  Replace the misleading
+    # message with an actionable hint when no ``.so`` is present at all.
+    if not _so_files:
+        _CPP_IMPORT_ERROR = (
+            "C++ router extension not built (no router_cpp.*.so found in "
+            f"{pathlib.Path(__file__).parent}). "
+            "Run: kct build-native"
+        )
+    else:
         _running_tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
         if _running_tag not in " ".join(_so_files):
             _CPP_IMPORT_ERROR = (

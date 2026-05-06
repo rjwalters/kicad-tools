@@ -1,6 +1,9 @@
 """Tests for C++ router backend fallback behavior."""
 
+import glob
 import importlib
+import pathlib
+import sys
 
 from kicad_tools.router.cpp_backend import (
     LARGE_GRID_THRESHOLD,
@@ -106,6 +109,96 @@ class TestFormatBackendStatus:
         """Test that the large grid threshold is a reasonable value."""
         assert LARGE_GRID_THRESHOLD > 10_000
         assert LARGE_GRID_THRESHOLD <= 200_000
+
+
+class TestCppBackendDiagnosticMessages:
+    """Tests for Issue #2514: when the C++ extension is missing the
+    fallback warning must blame the missing ``.so`` file (not a fictional
+    "circular import").
+
+    The actual import-time logic lives at module top of
+    ``router/cpp_backend.py``.  We re-import the module under controlled
+    conditions to verify each branch produces an actionable message.
+    """
+
+    def test_unavailable_reason_is_actionable_when_so_missing(self, monkeypatch):
+        """Re-import ``cpp_backend`` from a location with no ``.so`` and
+        verify the diagnostic mentions ``kct build-native`` and does NOT
+        blame a circular import.
+        """
+        import pytest
+
+        # Force a reload while pretending no compiled extension exists.
+        # We do this by patching ``glob.glob`` so the no-``.so`` branch
+        # is exercised regardless of whether the dev machine has built
+        # the C++ extension.
+        original_glob = glob.glob
+
+        def fake_glob(pattern, *args, **kwargs):
+            if "router_cpp.cpython" in pattern:
+                return []
+            return original_glob(pattern, *args, **kwargs)
+
+        # Drop any existing router_cpp from sys.modules so the import
+        # actually executes the try/except block.
+        sys.modules.pop("kicad_tools.router.router_cpp", None)
+        # Also evict cpp_backend so its module-level code re-runs.
+        cpp_backend_name = "kicad_tools.router.cpp_backend"
+        original_module = sys.modules.pop(cpp_backend_name, None)
+        try:
+            monkeypatch.setattr(glob, "glob", fake_glob)
+            cpp_backend = importlib.import_module(cpp_backend_name)
+            reason = cpp_backend.get_cpp_unavailable_reason()
+            if reason is None:
+                # The C++ extension was actually built and importable
+                # despite our glob patch -- skip in that case (the
+                # diagnostic branch is unreachable on this machine).
+                pytest.skip("router_cpp extension is available; cannot test missing-.so diagnostic")
+            assert "kct build-native" in reason, (
+                f"Diagnostic must mention build command. Got: {reason!r}"
+            )
+            assert "circular import" not in reason, (
+                f"Diagnostic must NOT blame circular import when .so is missing. Got: {reason!r}"
+            )
+            assert "not built" in reason or "router_cpp" in reason, (
+                f"Diagnostic must identify the missing extension. Got: {reason!r}"
+            )
+        finally:
+            # Restore original module so subsequent tests see the
+            # real backend state.
+            if original_module is not None:
+                sys.modules[cpp_backend_name] = original_module
+            else:
+                sys.modules.pop(cpp_backend_name, None)
+
+    def test_get_backend_info_python_fallback_has_clear_hint(self):
+        """When backend is unavailable, ``get_backend_info`` must include
+        a build hint that does NOT misattribute the cause to a circular
+        import.
+        """
+        info = get_backend_info()
+        if info["available"]:
+            # On machines where the .so is built, this path is
+            # unreachable -- the diagnostic-only contract is irrelevant.
+            return
+        assert "build_hint" in info
+        # The build hint itself must always be actionable (this is a
+        # fixed string, independent of the import-error branch).
+        assert "kct build-native" in info["build_hint"]
+        # The unavailable_reason is the ImportError text -- on a fresh
+        # checkout (no .so) it must NOT contain "circular import" any
+        # more.  We only enforce this when the .so is genuinely absent
+        # to avoid false failures in CI environments that build it.
+        from kicad_tools.router import cpp_backend as _cb
+
+        so_files = glob.glob(
+            str(pathlib.Path(_cb.__file__).parent / "router_cpp.cpython-*-darwin.so")
+        ) + glob.glob(str(pathlib.Path(_cb.__file__).parent / "router_cpp.cpython-*-linux-*.so"))
+        if not so_files and "unavailable_reason" in info:
+            assert "circular import" not in info["unavailable_reason"], (
+                f"Missing-.so case must not blame circular import. "
+                f"Got: {info['unavailable_reason']!r}"
+            )
 
 
 class TestCppPathfinderRouteSignature:
