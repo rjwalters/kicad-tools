@@ -69,6 +69,70 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _emit_single_pad_net_warning(
+    router: "Autorouter",
+    single_pad_nets: list[int],
+) -> None:
+    """Print a top-of-output warning when single-pad signal nets exist.
+
+    These nets are structurally unroutable -- the router silently skips
+    them, which makes "13/13 routed, DRC clean" look like a successful
+    build even when 4 SWD signals are floating.  Pour nets (POWER /
+    GROUND) are silently allowed because a single test point or
+    pour-only net is a legitimate design pattern.
+
+    See ``kct check --only single_pad_net`` for the full DRC-style
+    report (this banner exists to surface the defect early in the
+    pipeline; the actionable error lives in the check command).
+
+    Args:
+        router: The Autorouter (used for ``router.net_names`` lookup).
+        single_pad_nets: Net IDs that have exactly one pad assigned.
+    """
+    if not single_pad_nets:
+        return
+
+    from kicad_tools.cli.progress import flush_print
+
+    try:
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        single_pad_name_map = {
+            net_num: router.net_names.get(net_num, "") for net_num in single_pad_nets
+        }
+        # Drop unnamed nets so we don't classify the empty string.
+        single_pad_name_map = {num: name for num, name in single_pad_name_map.items() if name}
+        pour_rules = classify_and_apply_rules(single_pad_name_map) if single_pad_name_map else {}
+        signal_single_pad_names = sorted(
+            name
+            for num, name in single_pad_name_map.items()
+            if not (pour_rules.get(name) and pour_rules[name].is_pour_net)
+        )
+    except Exception:
+        # Conservative: if classification blows up, surface every named
+        # single-pad net so we don't hide real defects.
+        signal_single_pad_names = sorted(
+            router.net_names.get(num, "")
+            for num in single_pad_nets
+            if router.net_names.get(num, "")
+        )
+
+    if not signal_single_pad_names:
+        return
+
+    flush_print("")
+    flush_print(
+        f"  WARNING: {len(signal_single_pad_names)} single-pad signal "
+        "net(s) detected (likely missing footprint or schematic/PCB drift):"
+    )
+    for name in signal_single_pad_names:
+        flush_print(f"    - {name}")
+    flush_print(
+        "  Run 'kct check --only single_pad_net <pcb>' for details. "
+        "Routing will proceed but these nets cannot be connected."
+    )
+
+
 def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     """Insert S-expression fragments before the final closing parenthesis of a PCB file.
 
@@ -182,8 +246,7 @@ def _finalize_routes(
         )
         if vias_removed > 0:
             flush_print(
-                f"  Vias:     {pre_cleanup_vias} -> {post_cleanup_vias} "
-                f"({vias_removed} removed)"
+                f"  Vias:     {pre_cleanup_vias} -> {post_cleanup_vias} ({vias_removed} removed)"
             )
         if cleanup_stats.get("segments_restored", 0) > 0:
             flush_print(
@@ -833,9 +896,7 @@ def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
         new_layers = "\n    ".join(layer_defs[target_layers])
         # Append non-copper layers after copper layers
         if non_copper_entries:
-            non_copper_lines = "\n".join(
-                entry.strip() for entry in non_copper_entries
-            )
+            non_copper_lines = "\n".join(entry.strip() for entry in non_copper_entries)
             return f"(layers\n    {new_layers}\n    {non_copper_lines}\n  )"
         return f"(layers\n    {new_layers}\n  )"
 
@@ -885,16 +946,11 @@ def _print_power_stall_suggestions(
     pour_arg = ",".join(pour_assignments)
 
     print()
-    print(
-        f"Routing did not complete: {nets_csv} could not be routed on "
-        f"{layer_count} layer(s)."
-    )
+    print(f"Routing did not complete: {nets_csv} could not be routed on {layer_count} layer(s).")
     print("Suggestions:")
-    print(f"  1. Add copper zones for power nets:  --power-nets \"{pour_arg}\"")
+    print(f'  1. Add copper zones for power nets:  --power-nets "{pour_arg}"')
     print("  2. Increase layer count:              --layers 4 (or --max-layers 6)")
-    print(
-        f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)"
-    )
+    print(f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)")
     print()
 
 
@@ -1100,12 +1156,11 @@ def route_with_layer_escalation(
         # this stack provides dedicated planes for them, auto-skip those
         # plane nets so the router doesn't try to route them as signals.
         attempt_skip_nets = list(skip_nets)
-        plane_nets_in_stack = {
-            lyr.plane_net for lyr in layer_stack.plane_layers if lyr.plane_net
-        }
+        plane_nets_in_stack = {lyr.plane_net for lyr in layer_stack.plane_layers if lyr.plane_net}
         if last_power_stall_nets and plane_nets_in_stack:
             auto_plane_skip = [
-                n for n in last_power_stall_nets
+                n
+                for n in last_power_stall_nets
                 if n in plane_nets_in_stack and n not in attempt_skip_nets
             ]
             if auto_plane_skip:
@@ -1152,11 +1207,15 @@ def route_with_layer_escalation(
         multi_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
         ]
+        single_pad_nets = [
+            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
+        ]
         nets_to_route = len(multi_pad_nets)
 
         if not quiet:
             flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
             flush_print(f"  Nets to route: {nets_to_route}")
+            _emit_single_pad_net_warning(router, single_pad_nets)
 
         # Route
         if not quiet:
@@ -1264,8 +1323,7 @@ def route_with_layer_escalation(
             # Report attempt result before breaking
             if not quiet:
                 flush_print(
-                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
-                    f"({completion * 100:.0f}%)"
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)"
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (zero overflow)")
             break
@@ -1283,8 +1341,7 @@ def route_with_layer_escalation(
             # Report attempt result before breaking
             if not quiet:
                 flush_print(
-                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
-                    f"({completion * 100:.0f}%)"
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)"
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (stagnation)")
             break
@@ -1299,8 +1356,7 @@ def route_with_layer_escalation(
             last_power_stall_nets = list(getattr(router, "power_stall_nets", []))
             if not quiet and last_power_stall_nets:
                 flush_print(
-                    f"  Power-net stall on this attempt: "
-                    f"{', '.join(last_power_stall_nets)}"
+                    f"  Power-net stall on this attempt: {', '.join(last_power_stall_nets)}"
                 )
         else:
             last_power_stall_nets = []
@@ -1404,9 +1460,7 @@ def route_with_layer_escalation(
             print(f"  {nudge_result.summary()}")
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
-    _final_multi_pad_ids = {
-        n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
-    }
+    _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
     route_sexp, final_stats, _cleanup_stats = _finalize_routes(
         final_result.router,
         _final_multi_pad_ids,
@@ -1690,11 +1744,15 @@ def route_with_rule_relaxation(
         multi_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
         ]
+        single_pad_nets = [
+            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
+        ]
         nets_to_route = len(multi_pad_nets)
 
         if not quiet:
             flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
             flush_print(f"  Nets to route: {nets_to_route}")
+            _emit_single_pad_net_warning(router, single_pad_nets)
 
         # Route
         if not quiet:
@@ -1904,9 +1962,7 @@ def route_with_rule_relaxation(
             print(f"  {nudge_result.summary()}")
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
-    _final_multi_pad_ids = {
-        n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
-    }
+    _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
     route_sexp, final_stats, _cleanup_stats = _finalize_routes(
         final_result.router,
         _final_multi_pad_ids,
@@ -2214,7 +2270,8 @@ def route_with_combined_escalation(
                         corridor_width_factor=2.0,
                         timeout=args.timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
+                        max_iterations=getattr(args, "two_phase_iterations", None)
+                        or args.iterations,
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -2426,9 +2483,7 @@ def route_with_combined_escalation(
             print(f"  {nudge_result.summary()}")
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
-    _final_multi_pad_ids = {
-        n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
-    }
+    _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
     route_sexp, final_stats, _cleanup_stats = _finalize_routes(
         final_result.router,
         _final_multi_pad_ids,
@@ -3615,10 +3670,7 @@ def main(argv: list[str] | None = None) -> int:
     if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
         router.fine_zones = list(multi_res_plan.fine_zones)
         if not quiet:
-            flush_print(
-                f"  Fine zones: {len(router.fine_zones)} "
-                f"(sub-grid escape routing enabled)"
-            )
+            flush_print(f"  Fine zones: {len(router.fine_zones)} (sub-grid escape routing enabled)")
 
     # Issue #1841: Tell the autorouter which pour nets lack zones
     router._pour_nets_without_zones = set(_no_zone)
@@ -3667,6 +3719,14 @@ def main(argv: list[str] | None = None) -> int:
                     pad_count = len(router.nets.get(net_num, []))
                     print(f"    {net_name}: {pad_count} pads")
 
+    # Surface single-pad signal nets as a top-of-output warning before
+    # routing starts.  These nets are structurally unroutable -- the router
+    # silently skips them, which makes "13/13 routed, DRC clean" look like
+    # a successful build even when 4 SWD signals are floating.  See
+    # `kct check --only single_pad_net` for the full DRC-style report.
+    if not quiet:
+        _emit_single_pad_net_warning(router, single_pad_nets)
+
     # Analyze fine-pitch components for grid compatibility warnings
     # This runs automatically to warn users about potential routing issues
     if not quiet:
@@ -3692,14 +3752,10 @@ def main(argv: list[str] | None = None) -> int:
                 # Still show full per-component detail at verbose (-v)
                 if args.verbose:
                     flush_print("\n--- Fine-Pitch Component Analysis (verbose) ---")
-                    show_fine_pitch_warnings(
-                        fine_pitch_report, quiet=quiet, verbose=True
-                    )
+                    show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=True)
             else:
                 flush_print("\n--- Fine-Pitch Component Analysis ---")
-                show_fine_pitch_warnings(
-                    fine_pitch_report, quiet=quiet, verbose=args.verbose
-                )
+                show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
 
     # Show pre-route RUDY congestion estimation (Issue #2278)
     if getattr(args, "show_congestion", False):
@@ -3715,14 +3771,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(estimator.format_ascii_heatmap())
                 # Summary stats
                 max_demand = max(
-                    (estimator.demand[r][c]
-                     for r in range(estimator.grid.rows)
-                     for c in range(estimator.grid.cols)),
+                    (
+                        estimator.demand[r][c]
+                        for r in range(estimator.grid.rows)
+                        for c in range(estimator.grid.cols)
+                    ),
                     default=0.0,
                 )
-                scored_nets = [
-                    (nid, s) for nid, s in estimator.net_scores.items() if s > 0
-                ]
+                scored_nets = [(nid, s) for nid, s in estimator.net_scores.items() if s > 0]
                 scored_nets.sort(key=lambda x: -x[1])
                 print(f"\n  Peak tile demand: {max_demand:.2f}")
                 print(f"  Nets with congestion score: {len(scored_nets)}")
@@ -3956,7 +4012,7 @@ def main(argv: list[str] | None = None) -> int:
     if cached_result is not None:
         # Skip routing - using cached result
         if not quiet:
-            flush_print(f"\n--- Using cached result (skipping routing) ---")
+            flush_print("\n--- Using cached result (skipping routing) ---")
     else:
         # Route
         if not quiet:
@@ -4008,10 +4064,8 @@ def main(argv: list[str] | None = None) -> int:
                     # The strategy then routes the remaining nets; diff-pair
                     # nets are filtered from the negotiated loop via the
                     # prerouted-net skip in route_all_negotiated.
-                    if (
-                        args.differential_pairs
-                        and args.strategy in ("negotiated", "basic")
-                    ):
+                    if args.differential_pairs and args.strategy in ("negotiated", "basic"):
+
                         def _phase2_strategy():
                             if args.strategy == "negotiated":
                                 return router.route_all_negotiated(
@@ -4055,7 +4109,8 @@ def main(argv: list[str] | None = None) -> int:
                             corridor_width_factor=2.0,
                             timeout=args.timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
+                            max_iterations=getattr(args, "two_phase_iterations", None)
+                            or args.iterations,
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
@@ -4232,10 +4287,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except Exception:
                 FinePitchEscapeFailure = None  # type: ignore[assignment]
-            if (
-                FinePitchEscapeFailure is not None
-                and isinstance(e, FinePitchEscapeFailure)
-            ):
+            if FinePitchEscapeFailure is not None and isinstance(e, FinePitchEscapeFailure):
                 print(
                     f"Error during routing: {e}",
                     file=sys.stderr,
@@ -4301,9 +4353,7 @@ def main(argv: list[str] | None = None) -> int:
         # Issue #2303: Use overflow-tolerant collision checking when
         # the router finished with residual overflow.
         has_overflow = router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            router.grid, ignore_overflow=has_overflow
-        )
+        collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
@@ -4514,14 +4564,12 @@ def main(argv: list[str] | None = None) -> int:
         if disconnected_nets:
             output_has_disconnected = True
             if not quiet:
-                print(f"\n--- Output Connectivity Verification ---")
+                print("\n--- Output Connectivity Verification ---")
                 print(
                     f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
                     f"pads in written output"
                 )
-                for nid, info in sorted(
-                    disconnected_nets.items(), key=lambda x: x[1]["net_name"]
-                ):
+                for nid, info in sorted(disconnected_nets.items(), key=lambda x: x[1]["net_name"]):
                     disc_str = ", ".join(info["disconnected_pads"][:5])
                     if len(info["disconnected_pads"]) > 5:
                         disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"

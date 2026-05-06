@@ -82,7 +82,7 @@ class DRCChecker:
 
     def check_all(
         self,
-        filters: "list[ViolationFilter] | None" = None,
+        filters: list[ViolationFilter] | None = None,
     ) -> DRCResults:
         """Run all DRC checks.
 
@@ -105,6 +105,7 @@ class DRCChecker:
         results.merge(self.check_solder_mask_pads())
         results.merge(self.check_footprint_placement())
         results.merge(self.check_netlist())
+        results.merge(self.check_single_pad_nets())
         results.merge(self.check_zones())
 
         # Apply filters if provided
@@ -217,6 +218,23 @@ class DRCChecker:
         from .rules.netlist import NetlistRule
 
         rule = NetlistRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_single_pad_nets(self) -> DRCResults:
+        """Check for signal nets that are connected to only one pad.
+
+        A declared signal net with exactly one pad assignment is
+        structurally unroutable and almost always indicates a missing
+        footprint or schematic/PCB drift.  Pour nets (POWER/GROUND) are
+        silently allowed because a single test point or pour-only net
+        is a legitimate design pattern.
+
+        Returns:
+            DRCResults containing single-pad-net errors.
+        """
+        from .rules.single_pad_net import SinglePadNetRule
+
+        rule = SinglePadNetRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_zones(self) -> DRCResults:
