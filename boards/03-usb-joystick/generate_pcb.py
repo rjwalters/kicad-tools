@@ -167,12 +167,31 @@ def generate_mcu() -> str:
         23: ("GND", 3),
         24: ("VCC", 2),
         # Top (right to left) - USB signals (closest to USB connector)
+        # Issue #2527: pad x-positions on U1's north edge are
+        #     pin25 = +2.8, pin26 = +2.0, pin27 = +1.2, pin28 = +0.4,
+        #     pin29 = -0.4, pin30 = -1.2, pin31 = -2.0, pin32 = -2.8 mm
+        # (relative to U1 center).  J1 sources the four MCU-side USB
+        # nets at x_J1 = -1.0 (CC1), -0.25 (D+), +0.25 (D-), +1.0 (CC2)
+        # relative to J1 center.  Both ICs share x_center = 140 mm, so
+        # for short, non-crossing parallel stubs we want the U1 sink
+        # pin x-order to match the J1 source x-order:
+        #     CC1 -> pin30 (-1.2), D+ -> pin29 (-0.4),
+        #     D-  -> pin28 (+0.4), CC2 -> pin27 (+1.2)
+        # The previous mapping placed CC1 at pin27 (+1.2) and CC2 at
+        # pin26 (+2.0), which forced USB_CC1 to traverse the entire
+        # bundle width and cross USB_D+ / USB_D- on the same outer
+        # layer.  This routing-aware repinning eliminates the
+        # geometric crossing without altering U1's package, J1's
+        # package, the board outline, or any other component.
+        # VBUS moves to pin26 (it's a power net stitched via the VBUS
+        # pour, so its perpendicular escape from the U1 north edge
+        # has no routing-corridor consequences).
         25: ("GND", 3),
-        26: ("USB_CC2", 7),
-        27: ("USB_CC1", 6),
+        26: ("VBUS", 1),
+        27: ("USB_CC2", 7),
         28: ("USB_D-", 5),
         29: ("USB_D+", 4),
-        30: ("VBUS", 1),
+        30: ("USB_CC1", 6),
         31: ("GND", 3),  # Unused input tied to GND
         32: ("GND", 3),
     }
