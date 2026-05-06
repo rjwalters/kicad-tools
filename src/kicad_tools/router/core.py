@@ -2968,6 +2968,166 @@ class Autorouter:
             )
         return new_failed_routes
 
+    def _attempt_blocked_component_ripup_negotiated(
+        self,
+        failed_net: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        ripup_history: dict[int, int],
+        present_cost_factor: float,
+        max_ripups_per_net: int,
+        per_net_timeout: float | None = None,
+    ) -> bool:
+        """Negotiated-strategy variant of :meth:`_attempt_blocked_component_ripup`.
+
+        Issue #2517: ``_attempt_blocked_component_ripup`` is invoked from
+        ``route_all`` only -- the negotiated path's stall fallback knows
+        about via-vs-via blockers (``via_blocked_ripup``) and direct-line
+        Bresenham blockers (``find_blocking_nets_for_connection``), but
+        not about *destination-component sibling* blockers.  This is the
+        exact failure pattern that hit chorus-test-revA (``DAC_CLK`` 0/3,
+        ``Net-(LED3-2)`` 0/4) and that #2511 fixed for ``route_all``.
+
+        Differences from the route_all variant:
+
+        - Operates against the negotiated loop's local ``net_routes`` /
+          ``pads_by_net`` / ``ripup_history`` state, rather than reading
+          ``self.routes`` and using the separate
+          ``self._route_all_ripup_history``.  Sharing state with the
+          enclosing iteration prevents double-marking of grid usage and
+          keeps per-net rip-up budget accounting consistent.
+        - Uses the caller's existing ``NegotiatedRouter`` instance so any
+          accumulated state (history costs, EMA cells, perturbation
+          state) is preserved.
+        - Returns a boolean (success / failure to rescue) instead of a
+          list of new routes, matching the contract the negotiated stall
+          fallback uses for ``targeted_ripup``.
+
+        Args:
+            failed_net: Net ID that just failed in the negotiated loop.
+            neg_router: The active ``NegotiatedRouter`` instance.
+            net_routes: Mutable per-net route mapping owned by the loop.
+            pads_by_net: Pad list per net (already escape-pad-aware).
+            ripup_history: Per-net rip-up budget counters (mutated).
+            present_cost_factor: Current congestion cost factor.
+            max_ripups_per_net: Per-net rip-up budget cap.
+            per_net_timeout: Optional per-A* wall-clock timeout.
+
+        Returns:
+            True iff at least one new route was added for ``failed_net``.
+        """
+        # Find the most recent failure for this net.
+        recent_failure = None
+        for failure in reversed(self.routing_failures):
+            if failure.net == failed_net:
+                recent_failure = failure
+                break
+        if recent_failure is None:
+            return False
+        if recent_failure.failure_cause != FailureCause.BLOCKED_PATH:
+            return False
+
+        # Budget check on the failed net itself.
+        if ripup_history.get(failed_net, 0) >= max_ripups_per_net:
+            return False
+
+        # Honour explicit blocking_components from the failure analyser when
+        # present; otherwise fall back to the failed net's own destination
+        # components (charlieplex / matrix case where the Bresenham scan
+        # leaves blocking_components empty).
+        blocking_components: list[str] | set[str] = recent_failure.blocking_components
+        if not blocking_components:
+            blocking_components = self._get_net_destination_components(failed_net)
+        if not blocking_components:
+            return False
+
+        # Identify lower-priority siblings whose pads sit on the blocking
+        # components.  Restrict candidates to nets that currently have
+        # routes in ``net_routes``.
+        routed_net_ids = {n for n, routes in net_routes.items()
+                          if routes and n != failed_net}
+        siblings = self._find_lower_priority_siblings_on_components(
+            failed_net=failed_net,
+            blocking_components=blocking_components,
+            candidate_nets=routed_net_ids,
+        )
+        # Drop siblings that have hit the budget cap.
+        siblings = {s for s in siblings if ripup_history.get(s, 0) < max_ripups_per_net}
+        if not siblings:
+            return False
+
+        # Verify the failed net has resolvable pads in the loop's
+        # pads_by_net mapping.  If not (escape-pad miss / off-grid),
+        # nothing we can do here.
+        if failed_net not in pads_by_net or len(pads_by_net[failed_net]) < 2:
+            return False
+
+        sibling_names = [self.net_names.get(s, f"Net_{s}") for s in siblings]
+        failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+        components_str = ", ".join(sorted(blocking_components))
+        flush_print(
+            f"  BLOCKED_BY_COMPONENT rip-up (negotiated) for {failed_name}: "
+            f"displacing {len(siblings)} sibling(s) on {components_str}: "
+            f"{', '.join(sibling_names)}"
+        )
+
+        # Bump the failed-net budget *before* invoking targeted_ripup so a
+        # subsequent stall iteration cannot re-enter for the same net even
+        # if targeted_ripup bails out.  ``targeted_ripup`` itself bumps
+        # the budget for each sibling it actually rips.
+        ripup_history[failed_net] = ripup_history.get(failed_net, 0) + 1
+
+        # If the failed net somehow has stale routes still in net_routes
+        # (e.g. a partial route from an earlier iteration), rip them so
+        # the reroute below starts from a clean slate.
+        if net_routes.get(failed_net):
+            neg_router.rip_up_nets([failed_net], net_routes, self.routes)
+
+        def _mark_route(route: Route) -> None:
+            self._mark_route(route)
+
+        # Snapshot pre-rip-up state for the failed net so we can detect
+        # whether targeted_ripup actually placed new routes for it.
+        pre_failed_routes = len(net_routes.get(failed_net, []))
+
+        try:
+            success = neg_router.targeted_ripup(
+                failed_net=failed_net,
+                blocking_nets=siblings,
+                net_routes=net_routes,
+                routes_list=self.routes,
+                pads_by_net=pads_by_net,
+                present_cost_factor=present_cost_factor,
+                mark_route_callback=_mark_route,
+                ripup_history=ripup_history,
+                max_ripups_per_net=max_ripups_per_net,
+                per_net_timeout=per_net_timeout,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            flush_print(
+                f"  BLOCKED_BY_COMPONENT rip-up (negotiated) raised "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
+
+        # Did targeted_ripup actually attach new routes for the failed net?
+        post_failed_routes = len(net_routes.get(failed_net, []))
+        rescued = post_failed_routes > pre_failed_routes
+
+        if rescued:
+            # Drop any stale failure entries for the rescued net so the
+            # summary output reflects the rescued state.
+            self.routing_failures = [
+                f for f in self.routing_failures if f.net != failed_net
+            ]
+        elif not success:
+            flush_print(
+                f"  BLOCKED_BY_COMPONENT rip-up (negotiated) for {failed_name}: "
+                f"reroute did not converge"
+            )
+        return rescued
+
     def route_all_interleaved(
         self,
         progress_callback: ProgressCallback | None = None,
@@ -4495,6 +4655,54 @@ class Autorouter:
                                 if n not in net_routes and n in pads_by_net
                                 and n not in off_grid_nets
                             ]
+
+                        # Issue #2517: Drive a destination-component sibling
+                        # rip-up next.  ``via_blocked_ripup`` only handles
+                        # via-vs-via clearance failures; the chorus-test-revA
+                        # signature (DAC_CLK 0/3, Net-(LED3-2) 0/4) is a
+                        # destination-component escape-corridor saturation
+                        # where a lower-priority sibling has consumed the
+                        # only viable channel out of a dense IC pin field.
+                        # The Bresenham-based fallback below cannot find
+                        # those siblings because the conflict is geometric
+                        # (pad escape congestion), not direct-line.  This
+                        # is the negotiated-strategy counterpart of the
+                        # PR #2511 helper that ``route_all`` already
+                        # invokes.  Per-net budget is shared with the
+                        # negotiated loop's ``ripup_history`` so we cannot
+                        # double-charge a net that the loop subsequently
+                        # rerouted.
+                        component_ripup_count = 0
+                        if still_failed and not timed_out:
+                            for failed_net in list(still_failed):
+                                if check_timeout():
+                                    timed_out = True
+                                    break
+                                rescued = self._attempt_blocked_component_ripup_negotiated(
+                                    failed_net=failed_net,
+                                    neg_router=neg_router,
+                                    net_routes=net_routes,
+                                    pads_by_net=pads_by_net,
+                                    ripup_history=ripup_history,
+                                    present_cost_factor=present_factor,
+                                    max_ripups_per_net=max_ripups_per_net,
+                                    per_net_timeout=per_net_timeout,
+                                )
+                                if rescued:
+                                    component_ripup_count += 1
+                            if component_ripup_count > 0:
+                                flush_print(
+                                    f"  BLOCKED_BY_COMPONENT (negotiated) rip-up resolved "
+                                    f"{component_ripup_count}/{len(still_failed)} net(s) "
+                                    f"({elapsed_str()})"
+                                )
+                                # Recompute still_failed for the Bresenham
+                                # fallback below.
+                                still_failed = [
+                                    n for n in net_order
+                                    if n not in net_routes and n in pads_by_net
+                                    and n not in off_grid_nets
+                                ]
 
                         targeted_fallback_count = 0
                         for failed_net in still_failed:
