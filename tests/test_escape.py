@@ -149,6 +149,90 @@ def create_qfn_pads(pins_per_side: int, pitch: float = 0.5, ref: str = "U1") -> 
     return pads
 
 
+def create_usbc_smt_pads(
+    signal_pads_per_row: int = 8,
+    row_pitch: float = 1.0,
+    pad_pitch: float = 0.5,
+    mounting_tab_offset: float = 1.5,
+    ref: str = "J1",
+) -> list[Pad]:
+    """Create pads simulating a USB-C SMT receptacle (e.g. GCT USB4105).
+
+    Layout:
+      Row A (y=0):              N SMT pads, evenly spaced in X
+      Row B (y=row_pitch):      N SMT pads, evenly spaced in X
+      Tab S1 (TH, y=tab_offset, x=-half_extent - tab_clear)
+      Tab S2 (TH, y=tab_offset, x=+half_extent + tab_clear)
+
+    Real USB-C variants put A1/A12 and B1/B12 on the same row but pin spacing
+    is irregular due to the USB-C cluster pattern; this helper uses uniform
+    pitch which is sufficient for classifier tests (issue #2513).
+
+    Args:
+        signal_pads_per_row: Number of SMT pads per row (default 8 -> total 16
+            SMT + 2 tabs = 18, matching the simplified board-03 USB-C).
+        row_pitch: Vertical distance between rows A and B in mm.
+        pad_pitch: Horizontal distance between adjacent pads in mm.
+        mounting_tab_offset: Y position of the mounting tabs relative to row A.
+        ref: Component reference designator.
+
+    Returns:
+        List of Pad objects (SMT signal pads + 2 through-hole tabs).
+    """
+    pads: list[Pad] = []
+    half = (signal_pads_per_row - 1) * pad_pitch / 2
+    net = 1
+    # Row A
+    for i in range(signal_pads_per_row):
+        pads.append(
+            Pad(
+                x=-half + i * pad_pitch,
+                y=0.0,
+                width=0.25,
+                height=0.35,
+                net=net,
+                net_name=f"NET_{net}",
+                layer=Layer.F_CU,
+                ref=ref,
+                through_hole=False,
+            )
+        )
+        net += 1
+    # Row B (offset by row_pitch)
+    for i in range(signal_pads_per_row):
+        pads.append(
+            Pad(
+                x=-half + i * pad_pitch,
+                y=row_pitch,
+                width=0.25,
+                height=0.35,
+                net=net,
+                net_name=f"NET_{net}",
+                layer=Layer.F_CU,
+                ref=ref,
+                through_hole=False,
+            )
+        )
+        net += 1
+    # Mounting tabs (TH, off-row)
+    for tab_x in (-half - 1.0, half + 1.0):
+        pads.append(
+            Pad(
+                x=tab_x,
+                y=mounting_tab_offset,
+                width=1.0,
+                height=1.0,
+                net=3,  # GND
+                net_name="GND",
+                layer=Layer.F_CU,
+                ref=ref,
+                through_hole=True,
+                drill=0.6,
+            )
+        )
+    return pads
+
+
 def create_sop_pads(pins: int, pitch: float = 1.27, ref: str = "U1") -> list[Pad]:
     """Create pads simulating a SOP package with 2 rows."""
     pads = []
@@ -244,24 +328,32 @@ class TestIsDensePackage:
         assert is_dense_package([]) is False
 
     def test_tqfp32_08mm_pitch_with_clearance(self):
-        """TQFP-32 with 0.8mm pitch is dense when clearance requirements are considered.
+        """TQFP-32 with 0.8mm pitch is dense regardless of clearance.
 
-        With 0.2mm trace and 0.2mm clearance, the routing space needed between
-        pins is 2 * (0.2 + 0.2) = 0.8mm, which equals the pin pitch, meaning
-        there's no room to route between adjacent pins.
+        Issue #2513: TQFP-32-class quad packages (>= 32 pins, quad layout,
+        pitch <= 0.8 mm) are now flagged as dense unconditionally.  This
+        is because with common board-house defaults (trace=0.2 mm,
+        clearance=0.15 mm) the dynamic threshold of 2*(0.2+0.15) = 0.7 mm
+        is just below 0.8 mm, so the inner pins of the QFP would otherwise
+        get blocked at routing time even though they sit at the largest
+        pitch one of the still-needs-escape-routing tier.
 
-        Issue #795: This package was NOT being detected as dense without
-        considering clearance requirements.
+        Issue #795 (original): This package was NOT being detected as dense
+        without considering clearance requirements; we now treat it as
+        dense even without explicit clearance numbers because the failure
+        mode is reproducible at JLCPCB defaults.
         """
         pads = create_qfp_pads(8, pitch=0.8)  # 32 pins, 0.8mm pitch
         assert len(pads) == 32
 
-        # Without design rules, 0.8mm pitch is NOT dense (threshold is 0.5mm)
-        assert is_dense_package(pads) is False
+        # Issue #2513: TQFP-32 with 0.8mm pitch is dense even without
+        # design rules (the TQFP-32-class rule fires at >= 32 pads + quad
+        # layout + pitch <= 0.8mm)
+        assert is_dense_package(pads) is True
 
         # WITH design rules, 0.8mm pitch IS dense because:
         # threshold = 2 * (trace_width + clearance) = 2 * (0.2 + 0.2) = 0.8mm
-        # and 0.8mm pitch < 0.8mm threshold
+        # and 0.8mm pitch < 0.8mm threshold (also dense via TQFP-32 rule)
         assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is True
 
     def test_wide_pitch_not_dense_with_clearance(self):
@@ -309,6 +401,116 @@ class TestIsDensePackage:
         # 8 pins at 2.54mm pitch, not dense
         assert is_dense_package(pads) is False
         assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is False
+
+
+class TestTQFP32DenseRule:
+    """Tests for the TQFP-32-class dense-package rule (Issue #2513).
+
+    TQFP-32 (32 pins, quad layout, 0.8mm pitch) packages were previously
+    not flagged as dense at common board-house defaults (trace=0.2mm,
+    clearance=0.15mm) because the dynamic threshold of 2*(0.2+0.15)=0.7mm
+    is just below the 0.8mm pitch.  This made the inner pins of the QFP
+    unable to escape the perimeter routing, blocking USB_D+/CC1/CC2/XTAL2
+    on board 03 (USB joystick).
+    """
+
+    def test_tqfp32_at_0_8mm_pitch_is_dense_without_rules(self):
+        """TQFP-32 at 0.8mm pitch is dense even without explicit design rules."""
+        pads = create_qfp_pads(8, pitch=0.8)  # 32 pins, 0.8mm pitch
+        assert len(pads) == 32
+        # The TQFP-32-class rule fires unconditionally
+        assert is_dense_package(pads) is True
+
+    def test_tqfp32_at_jlcpcb_defaults_is_dense(self):
+        """TQFP-32 is dense at JLCPCB defaults (trace=0.2mm, clearance=0.15mm).
+
+        Without the new rule, the dynamic threshold would be
+        2*(0.2+0.15) = 0.7mm, which is < 0.8mm pitch -> NOT dense.
+        With the new rule, it is dense regardless.
+        """
+        pads = create_qfp_pads(8, pitch=0.8)
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is True
+
+    def test_tqfp48_is_dense(self):
+        """A larger TQFP-48 (12 pins/side, 0.5mm pitch) is dense via fine pitch."""
+        pads = create_qfp_pads(12, pitch=0.5)
+        assert len(pads) == 48
+        assert is_dense_package(pads) is True
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is True
+
+    def test_qfp16_at_1mm_pitch_not_dense(self):
+        """A QFP-16 (4 pins/side, 1.0mm pitch) is NOT dense -- below 32-pin gate."""
+        pads = create_qfp_pads(4, pitch=1.0)
+        assert len(pads) == 16
+        # Below 32-pin gate; pitch = 1.0 > dynamic threshold 0.7
+        assert is_dense_package(pads) is False
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is False
+
+    def test_sop16_at_1_27mm_not_caught_by_tqfp32_rule(self):
+        """SOIC-16 (dual-row, 1.27mm pitch) is correctly NOT dense.
+
+        Confirms the TQFP-32 rule doesn't fire for non-quad layouts.
+        SOIC has fewer than 20 pins so it doesn't trigger the existing
+        multi-row dense path either.
+        """
+        pads = create_sop_pads(16, pitch=1.27)
+        assert len(pads) == 16
+        assert is_dense_package(pads) is False
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is False
+
+    def test_qfn32_at_0_5mm_pitch_dense_via_fine_pitch(self):
+        """QFN-32 at 0.5mm pitch is dense (fine-pitch path), not via the new rule.
+
+        QFN-32 with thermal pad (33 total pads) at 0.5mm pitch is dense
+        because the dynamic threshold at any reasonable trace/clearance
+        catches it; this test exists to ensure the new TQFP-32 rule does
+        not regress small-pitch QFN behavior.
+        """
+        pads = create_qfn_pads(8, pitch=0.5)
+        assert is_dense_package(pads) is True
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is True
+
+
+class TestUSBCBGAMisclassification:
+    """Tests for the BGA-misclassification fix on 2-row connectors (Issue #2513).
+
+    USB-C SMT connectors (e.g. GCT USB4105) have 2 close SMT rows + 2 mounting
+    tabs.  The mounting tabs introduce a third unique-Y group so the previous
+    grid-pattern check would classify them as BGA, applying ring-based escape
+    routing that wastes the bottom layer for what is really a 2-row connector.
+    """
+
+    def test_usbc_smt_18pad_not_bga(self):
+        """A 2x8 SMT USB-C with 2 mounting tabs (18 pads) is NOT BGA."""
+        pads = create_usbc_smt_pads(signal_pads_per_row=8)
+        assert len(pads) == 18  # 16 SMT + 2 TH tabs
+        assert detect_package_type(pads) != PackageType.BGA
+
+    def test_usbc_smt_24pad_not_bga(self):
+        """A larger 2x12 SMT USB-C variant with mounting tabs is NOT BGA."""
+        pads = create_usbc_smt_pads(signal_pads_per_row=12)
+        assert len(pads) == 26  # 24 SMT + 2 TH tabs
+        assert detect_package_type(pads) != PackageType.BGA
+
+    def test_real_bga_still_detected(self):
+        """A real 8x8 BGA must still be detected as BGA after the fix."""
+        pads = create_bga_pads(8, 8, pitch=0.8)
+        assert detect_package_type(pads) == PackageType.BGA
+
+    def test_small_bga_4x4_still_detected(self):
+        """A 4x4 BGA-16 must still be classified as BGA after the fix."""
+        pads = create_bga_pads(4, 4, pitch=0.8)
+        assert detect_package_type(pads) == PackageType.BGA
+
+    def test_three_row_connector_with_outlier_not_bga(self):
+        """3-row connector with one short outlier row stays out of BGA path.
+
+        Confirms _count_substantive_axis_groups filters the short row.
+        """
+        pads = create_usbc_smt_pads(signal_pads_per_row=10)
+        # 20 SMT + 2 tabs; 3 unique Y values but tab row only has 2 pads
+        assert len(pads) == 22
+        assert detect_package_type(pads) != PackageType.BGA
 
 
 class TestDetectPackageType:
