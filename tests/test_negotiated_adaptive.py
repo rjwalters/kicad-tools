@@ -652,10 +652,19 @@ class TestNegotiatedRouterCongestionEstimator:
         mock_est.grid = mock_grid
         mock_est.get_tile_demand.return_value = 3.0
 
-        # Build a NegotiatedRouter with the mock estimator
+        # Build a NegotiatedRouter with the mock estimator.
+        # Issue #2530: Provide a MagicMock grid that satisfies the
+        # interface used by `_collect_route_cells` (introduced by
+        # PR #2315 after these tests were added in PR #2290).
+        nr_grid = MagicMock()
+        nr_grid.world_to_grid.return_value = (0, 0)
+        nr_grid.layer_to_index.return_value = 0
+        nr_grid.get_routable_indices.return_value = []
+
         nr = NegotiatedRouter.__new__(NegotiatedRouter)
-        nr.grid = None
+        nr.grid = nr_grid
         nr.router = MagicMock()
+        nr.router.route.return_value = None  # Avoid _collect_route_cells path
         nr.rules = None
         nr.net_class_map = {}
         nr.congestion_estimator = mock_est
@@ -699,9 +708,18 @@ class TestNegotiatedRouterCongestionEstimator:
         from kicad_tools.router.layers import Layer
         from kicad_tools.router.primitives import Pad
 
+        # Issue #2530: Provide a MagicMock grid that satisfies the
+        # interface used by `_collect_route_cells` (introduced by
+        # PR #2315 after these tests were added in PR #2290).
+        nr_grid = MagicMock()
+        nr_grid.world_to_grid.return_value = (0, 0)
+        nr_grid.layer_to_index.return_value = 0
+        nr_grid.get_routable_indices.return_value = []
+
         nr = NegotiatedRouter.__new__(NegotiatedRouter)
-        nr.grid = None
+        nr.grid = nr_grid
         nr.router = MagicMock()
+        nr.router.route.return_value = None  # Avoid _collect_route_cells path
         nr.rules = None
         nr.net_class_map = {}
         nr.congestion_estimator = None
@@ -735,9 +753,18 @@ class TestNegotiatedRouterCongestionEstimator:
 
         mock_est = MagicMock()
 
+        # Issue #2530: Provide a MagicMock grid that satisfies the
+        # interface used by `_collect_route_cells` (introduced by
+        # PR #2315 after these tests were added in PR #2290).
+        nr_grid = MagicMock()
+        nr_grid.world_to_grid.return_value = (0, 0)
+        nr_grid.layer_to_index.return_value = 0
+        nr_grid.get_routable_indices.return_value = []
+
         nr = NegotiatedRouter.__new__(NegotiatedRouter)
-        nr.grid = None
+        nr.grid = nr_grid
         nr.router = MagicMock()
+        nr.router.route.return_value = None  # Avoid _collect_route_cells path
         nr.rules = None
         nr.net_class_map = {}
         nr.congestion_estimator = mock_est

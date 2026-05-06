@@ -3510,7 +3510,14 @@ class TestIncrementalSteinerRouting:
     """Tests for Issue #2306: incremental Steiner target-set expansion."""
 
     def test_multi_terminal_net_routes_successfully(self):
-        """A multi-terminal net (>2 pads) should route via incremental Steiner."""
+        """A multi-terminal net (>2 pads) should route via incremental Steiner.
+
+        Issue #2530: This test guards against the targeted rip-up
+        fallback (added in PR #2479) destroying a partial RSMT route
+        when there are no blockers to displace.  Even on a single-net
+        board the partial route should be preserved when ``targeted_ripup``
+        cannot run, ensuring ``len(routes) > 0`` after a single iteration.
+        """
         router = Autorouter(width=50.0, height=40.0)
 
         # Create a high-fanout net with 5 pads spread across the board.

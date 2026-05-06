@@ -4994,13 +4994,9 @@ class Autorouter:
                             if len(pads_for_net) < 2:
                                 continue
 
-                            # Issue #2475: Rip up partially routed net's
-                            # existing routes before re-attempting.
-                            if failed_net in net_routes and net_routes[failed_net]:
-                                neg_router.rip_up_nets(
-                                    [failed_net], net_routes, self.routes
-                                )
-
+                            # Identify blockers BEFORE rip-up so we don't
+                            # destroy a partial route when targeted_ripup
+                            # would not run anyway (Issue #2530).
                             blocking_nets: set[int] = set()
                             for j in range(len(pads_for_net) - 1):
                                 blockers = neg_router.find_blocking_nets_for_connection(
@@ -5015,7 +5011,19 @@ class Autorouter:
                             )
                             blocking_nets |= sibling_blockers
 
+                            # Issue #2475/#2530: Rip up the partially-routed
+                            # net's existing routes only when we have blockers
+                            # to displace; otherwise targeted_ripup would skip
+                            # and we'd permanently lose the partial route on
+                            # single-net boards (or any board where no blockers
+                            # exist), regressing the prior partial connectivity
+                            # to zero routed segments.
                             if blocking_nets:
+                                if failed_net in net_routes and net_routes[failed_net]:
+                                    neg_router.rip_up_nets(
+                                        [failed_net], net_routes, self.routes
+                                    )
+
                                 def _mark_route_fallback(route: Route) -> None:
                                     self._mark_route(route)
 
