@@ -143,6 +143,13 @@ def is_dense_package(
     - Pin pitch < 0.5mm (when no clearance info provided), OR
     - Pin count > 48
     - Fine-pitch SSOP/TSSOP (0.65mm pitch or less) - always dense
+    - TQFP-32-class quad packages: >= 32 pins on a quad arrangement with
+      pitch <= 0.8 mm are always dense.  At common board-house defaults
+      (trace=0.2 mm, clearance=0.15 mm) the dynamic threshold of
+      2*(0.2+0.15) = 0.7 mm is JUST below the 0.8 mm pitch, so without
+      this rule TQFP-32 packages are not flagged as dense and the inner
+      pins of nets that route to them get blocked by the surrounding
+      perimeter routing.  See issue #2513.
 
     When trace_width and clearance are provided, the threshold is calculated
     dynamically: a package is dense if there's insufficient space between
@@ -186,6 +193,20 @@ def is_dense_package(
     if min_pitch <= 0.75 and _is_dual_row(pads):
         return True
 
+    # TQFP-32-class quad packages (issue #2513).
+    # A quad arrangement with >= 32 pins at <= 0.8 mm pitch is dense
+    # regardless of trace/clearance.  At common JLCPCB-style defaults
+    # (trace=0.2, clearance=0.15) the dynamic threshold below works out
+    # to 0.70 mm which is just under the 0.8 mm pitch of a TQFP-32, so
+    # the dynamic check would otherwise miss this class of MCU.  This
+    # is intentionally conservative: it requires both a quad layout AND
+    # >= 32 pins, so leaded SOIC-32 (dual row) and small QFP/QFN parts
+    # at 32 pins (e.g. QFN-32 at 0.5mm pitch) are unaffected -- the
+    # SOIC case fails the quad arrangement check and the small-pitch
+    # case is already covered by the TSSOP/dynamic threshold rules.
+    if len(pads) >= 32 and min_pitch <= 0.8 + 1e-3 and _looks_like_quad_layout(pads):
+        return True
+
     # Dynamic threshold based on design rules
     # A trace needs: trace_width + clearance on each side from adjacent pins
     # So minimum pitch to route between pins is: 2 * (trace_width/2 + clearance) + trace_width
@@ -203,6 +224,31 @@ def is_dense_package(
         return True
 
     return False
+
+
+def _looks_like_quad_layout(pads: list[Pad]) -> bool:
+    """Convenience wrapper around _is_quad_arrangement using the pads' bbox.
+
+    Used by is_dense_package() so the TQFP-32 rule does not need to
+    duplicate bbox-and-center math at the call site.
+
+    Args:
+        pads: List of pads from a single component
+
+    Returns:
+        True if pads form a QFP/QFN-style quad arrangement
+    """
+    if len(pads) < 8:
+        return False
+    xs = [p.x for p in pads]
+    ys = [p.y for p in pads]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    if width <= 0 or height <= 0:
+        return False
+    center_x = (max(xs) + min(xs)) / 2
+    center_y = (max(ys) + min(ys)) / 2
+    return _is_quad_arrangement(pads, center_x, center_y, width, height)
 
 
 def is_fine_pitch_ssop(pads: list[Pad], pitch_threshold: float = 0.75) -> bool:
@@ -488,6 +534,17 @@ def _is_grid_pattern(pads: list[Pad], center_x: float, center_y: float) -> bool:
 
     BGA packages have pads distributed throughout the interior,
     not just on edges. This distinguishes them from QFP/QFN.
+
+    Grid (BGA) detection requires:
+    - At least 16 pads (room for at least a 4x4 grid)
+    - At least 3 substantial rows AND 3 substantial cols (BGA is at least
+      a 3x3 grid; this guards against 2-row connectors with mounting tabs
+      that produce a tiny "third row" being misclassified as BGA -- see
+      issue #2513 for USB-C with 2 SMT rows + 2 mounting tabs being
+      reported as BGA-18 with 3 unique Y values).
+    - Significant interior pads (not just edge pads, distinguishing BGA
+      from QFP/QFN)
+    - Roughly balanced quadrant distribution
     """
     if len(pads) < 16:  # Need at least 4x4 for BGA
         return False
@@ -501,6 +558,17 @@ def _is_grid_pattern(pads: list[Pad], center_x: float, center_y: float) -> bool:
     height = max_y - min_y
 
     if width < 0.1 or height < 0.1:
+        return False
+
+    # Issue #2513: A real BGA grid has many rows AND many cols, with each
+    # row and col having a substantial number of pads.  A 2-row connector
+    # (USB-C, etc.) with mounting tabs may produce a third "row" with just
+    # 2 pads in it.  Filter outlier rows/cols (those whose pad count is
+    # less than half the median) before counting -- only substantive rows
+    # and cols qualify as BGA "axes".
+    substantive_rows = _count_substantive_axis_groups(pads, axis="y")
+    substantive_cols = _count_substantive_axis_groups(pads, axis="x")
+    if substantive_rows < 3 or substantive_cols < 3:
         return False
 
     # For BGA, check that there are pads in the interior (not just on edges)
@@ -535,6 +603,49 @@ def _is_grid_pattern(pads: list[Pad], center_x: float, center_y: float) -> bool:
     # BGA should have roughly equal distribution across quadrants
     avg = len(pads) / 4
     return all(0.3 * avg <= q <= 1.7 * avg for q in quadrants if avg > 0)
+
+
+def _count_substantive_axis_groups(pads: list[Pad], axis: str) -> int:
+    """Count rows or columns that hold a substantial fraction of total pads.
+
+    Used by _is_grid_pattern (and other classifiers) to ignore outlier
+    "rows" or "cols" that are really just a few off-axis pads -- e.g.
+    USB-C mounting tabs or alignment posts that share neither a row nor
+    a column with the main signal grid.
+
+    A group is "substantive" if its pad count is at least 50% of the
+    median group count along that axis.  Singletons and tiny groups are
+    therefore filtered out.
+
+    Args:
+        pads: List of pads from a single component
+        axis: Which axis to group by - "x" counts unique X (i.e. column
+            count), "y" counts unique Y (row count).
+
+    Returns:
+        Number of substantive groups along that axis.  Returns 0 for
+        empty input.
+    """
+    if not pads:
+        return 0
+    if axis == "y":
+        coords = [round(p.y, 2) for p in pads]
+    else:
+        coords = [round(p.x, 2) for p in pads]
+    counts: dict[float, int] = {}
+    for c in coords:
+        counts[c] = counts.get(c, 0) + 1
+    if not counts:
+        return 0
+    sorted_counts = sorted(counts.values())
+    n = len(sorted_counts)
+    median = (
+        sorted_counts[n // 2]
+        if n % 2 == 1
+        else (sorted_counts[n // 2 - 1] + sorted_counts[n // 2]) / 2
+    )
+    threshold = max(1.0, median * 0.5)
+    return sum(1 for v in counts.values() if v >= threshold)
 
 
 def _is_quad_arrangement(
@@ -1036,6 +1147,15 @@ class EscapeRouter:
             if abs(pad.x - center_x) < edge_margin and abs(pad.y - center_y) < edge_margin:
                 continue
 
+            # Issue #2513: Skip pads that belong to skipped/plane nets (net=0).
+            # Plane nets (GND, VCC, etc.) are stitched via planes, not routed
+            # via escapes.  Generating escapes for them wastes perimeter
+            # routing space (a TQFP-32 MCU may have 19/32 pins on plane nets;
+            # without this filter the escape phase blocks the perimeter for
+            # the actual signal nets that need to escape).
+            if pad.net == 0:
+                continue
+
             if abs(pad.y - max_y) < edge_margin:
                 north_pads.append(pad)
             elif abs(pad.y - min_y) < edge_margin:
@@ -1051,6 +1171,16 @@ class EscapeRouter:
         east_pads.sort(key=lambda p: p.y)
         west_pads.sort(key=lambda p: p.y)
 
+        # Issue #2513: For lower-density QFP/TQFP (pitch >= 0.65 mm) the
+        # alternating perpendicular/parallel scheme blocks more perimeter
+        # space than it saves -- a TQFP-32 at 0.8 mm pitch has plenty of
+        # room between pins to fit a 0.2 mm trace with 0.15 mm clearance,
+        # so every pin can escape perpendicular and the parallel arms of
+        # the alternating pattern just consume routing real-estate.  Use
+        # the simpler perpendicular-only escape for these packages and
+        # reserve the alternating pattern for true fine-pitch QFP/QFN.
+        use_perpendicular_only = package.pin_pitch >= 0.65
+
         # Generate escapes for each edge
         for pads, primary_dir, alt_dir_cw, alt_dir_ccw in [
             (north_pads, EscapeDirection.NORTH, EscapeDirection.EAST, EscapeDirection.WEST),
@@ -1059,7 +1189,7 @@ class EscapeRouter:
             (west_pads, EscapeDirection.WEST, EscapeDirection.NORTH, EscapeDirection.SOUTH),
         ]:
             for i, pad in enumerate(pads):
-                if i % 2 == 0:
+                if use_perpendicular_only or i % 2 == 0:
                     direction = primary_dir
                 else:
                     direction = alt_dir_cw if (i // 2) % 2 == 0 else alt_dir_ccw
@@ -2043,6 +2173,11 @@ class EscapeRouter:
         center_x, center_y = package.center
 
         for pad in package.pads:
+            # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
+            # via planes, not routed via escapes.
+            if pad.net == 0:
+                continue
+
             direction = self._get_quadrant_direction(pad.x, pad.y, center_x, center_y)
             dx, dy = self._direction_to_vector(direction)
 
