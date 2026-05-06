@@ -386,12 +386,23 @@ class TwoPhaseRouter:
                 net_routes[net_id].append(route)
                 self.grid.mark_route_usage(route)
 
+        # Issue #2518: Single ``timed_out`` flag propagates across nested
+        # loops so that hitting the wall-clock budget inside the per-net
+        # inner loop short-circuits the outer iteration loop too.  Without
+        # this, the inner ``break`` only exits one level and the iteration
+        # body's overflow recompute / history snapshot still runs, then the
+        # next iteration is started before the iteration-boundary check
+        # fires — wasting one full ``len(nets_to_reroute) * per_net_timeout``
+        # tail (~1080s in the chorus-test repro for issue #2518).
+        timed_out = False
+
         # Initial routing pass
         for i, net in enumerate(net_order):
             if check_timeout():
                 flush_print(
                     f"  ⚠ Timeout during detailed routing at net {i}/{total_nets} ({elapsed_str()})"
                 )
+                timed_out = True
                 break
 
             net_name = self.net_names.get(net, f"Net {net}")
@@ -420,14 +431,18 @@ class TwoPhaseRouter:
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_iteration = 0  # 0 = initial pass
 
-        # Rip-up and reroute iterations if needed
-        if overflow > 0:
+        # Rip-up and reroute iterations if needed.
+        # Issue #2518: skip the entire iteration loop if the initial pass
+        # was cut short by the wall-clock budget — otherwise we burn another
+        # ~iteration-budget of work after the budget is already exhausted.
+        if overflow > 0 and not timed_out:
             history_increment = 1.0
             present_factor_increment = 0.5
 
             for iteration in range(1, max_iterations + 1):
                 if check_timeout():
                     flush_print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
+                    timed_out = True
                     break
 
                 if progress_callback is not None:
@@ -464,6 +479,16 @@ class TwoPhaseRouter:
 
                 for i, net in enumerate(nets_to_reroute):
                     if check_timeout():
+                        # Issue #2518: set the propagating flag so the
+                        # outer iteration loop exits immediately too,
+                        # without running the post-loop bookkeeping
+                        # (overflow recompute, history snapshot,
+                        # convergence check).
+                        flush_print(
+                            f"    ⚠ Timeout during reroute at net "
+                            f"{i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                        )
+                        timed_out = True
                         break
                     net_name = self.net_names.get(net, f"Net {net}")
                     flush_print(
@@ -476,6 +501,16 @@ class TwoPhaseRouter:
                         for route in routes:
                             self.grid.mark_route_usage(route)
                             self.routes.append(route)
+
+                # Issue #2518: short-circuit immediately if the per-net
+                # inner loop tripped the budget.  Skip overflow recompute,
+                # history snapshot, convergence/early-stop checks, and the
+                # next iteration so partial-state restore can run.
+                if timed_out:
+                    flush_print(
+                        f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})"
+                    )
+                    break
 
                 overflow = self.grid.get_total_overflow()
                 flush_print(f"  Iteration {iteration} complete: overflow={overflow}")
