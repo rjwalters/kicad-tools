@@ -4213,3 +4213,110 @@ class TestSinglePadNetExclusion:
         assert "SWDIO" in captured or "SWCLK" in captured, (
             f"Expected single-pad net names in diagnostic. Got:\n{captured}"
         )
+class TestStagnationRecovery:
+    """Tests for Issue #2515: stagnation-driven recovery for never-routed nets.
+
+    When the rip-up cohort is the same set across N consecutive iterations
+    AND overflow oscillates within a small band, the orchestrator must fire
+    a recovery pass that re-enables stalled nets and rips up the cohort
+    plus same-tier destination siblings, then re-routes them with elevated
+    present_factor.
+
+    The recovery prevents the "Excluding N stalled net(s) ... No nets to
+    rip up, terminating" silent-drop pattern observed on board 05 where
+    PHASE_A/B/C + SW_OUT oscillate forever.
+    """
+
+    def test_termination_diagnostic_lists_unrouted_nets(self, capsys):
+        """Early-termination must surface unroutable / partial nets by name.
+
+        Without the diagnostic, the operator only sees a count and cannot
+        distinguish "stuck on a single pin field" from "structural failure".
+        """
+        # Build a tightly contended board where 3 signal nets compete for
+        # the same connector pin field (similar shape to board 05 J2).
+        router = Autorouter(width=20.0, height=20.0)
+        # Source ICs spread across the left half of the board.
+        for i in range(3):
+            router.add_component(
+                f"U{i + 1}",
+                [
+                    {"number": "1", "x": 2.0 + i * 0.5, "y": 5.0 + i * 2.0,
+                     "net": i + 1, "net_name": f"PHASE_{chr(ord('A') + i)}"},
+                ],
+            )
+        # Shared destination connector with all three pads inside one
+        # narrow pin field.
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 18.0, "y": 6.0, "net": 1, "net_name": "PHASE_A"},
+                {"number": "2", "x": 18.0, "y": 6.5, "net": 2, "net_name": "PHASE_B"},
+                {"number": "3", "x": 18.0, "y": 7.0, "net": 3, "net_name": "PHASE_C"},
+            ],
+        )
+
+        # Use a very small iteration budget so the test runs quickly.
+        router.route_all_negotiated(max_iterations=10, timeout=20.0)
+        captured = capsys.readouterr()
+
+        # Either we converge (no diagnostic), or termination must include
+        # the named diagnostic.  If terminated, the output should NOT
+        # contain only a bare iteration-count -- it should name the
+        # unrouted/partial nets.
+        if "Early termination" in captured.out or "No nets to rip up" in captured.out:
+            named_diagnostic = (
+                "Unrouted nets:" in captured.out
+                or "Partially routed nets:" in captured.out
+            )
+            assert named_diagnostic, (
+                "Termination must include named diagnostic, got:\n"
+                + captured.out[-2000:]
+            )
+
+    def test_stagnation_recovery_fires_on_oscillating_cohort(self, capsys):
+        """When the same cohort oscillates with non-zero overflow, recovery should fire.
+
+        Constructs a board with three motor-phase-style nets terminating
+        on a shared connector to trigger the same-tier-sibling stall
+        pattern from board 05.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+        # Three nets, source on the left, destination on a shared connector.
+        for i in range(3):
+            router.add_component(
+                f"Q{i + 1}",
+                [
+                    {"number": "1", "x": 2.0, "y": 5.0 + i * 4.0,
+                     "net": i + 1, "net_name": f"PHASE_{chr(ord('A') + i)}"},
+                ],
+            )
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 18.0, "y": 6.0, "net": 1, "net_name": "PHASE_A"},
+                {"number": "2", "x": 18.0, "y": 6.5, "net": 2, "net_name": "PHASE_B"},
+                {"number": "3", "x": 18.0, "y": 7.0, "net": 3, "net_name": "PHASE_C"},
+            ],
+        )
+
+        # Run with adaptive (oscillation detection) enabled and enough
+        # iterations to let the stagnation-recovery condition trigger.
+        router.route_all_negotiated(max_iterations=12, timeout=30.0)
+        captured = capsys.readouterr()
+
+        # The test asserts on observable behaviour: either the recovery
+        # path fires (announced by "Stagnation recovery #N:") OR the
+        # routing converges immediately without stagnation (which is also
+        # acceptable -- this is a sanity check that recovery doesn't
+        # destabilise the simple case).
+        if (
+            "Excluding" in captured.out
+            and "stalled net(s) from rip-up" in captured.out
+        ):
+            # Stalls were detected; recovery should have been attempted at
+            # least once before final termination.
+            assert "Stagnation recovery" in captured.out, (
+                "Stalls were detected without stagnation recovery firing.\n"
+                + captured.out[-2000:]
+            )

@@ -3541,6 +3541,17 @@ class Autorouter:
         # Issue #1295: Filter out pour nets before negotiated routing
         net_order = self._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
+        # Issue #2515 / #2514: structurally unroutable single-pad nets
+        # (e.g. board 05 GATE_*, HALL_*, SWD signals whose second
+        # connection is missing from the netlist) are NOT filtered out of
+        # ``net_order`` here.  Instead we identify them downstream into the
+        # ``single_pad_nets`` set built alongside ``pads_by_net``.  That
+        # set is the canonical source for the rip-up loop's recovery
+        # filter, the early-termination diagnostic ("structurally
+        # unroutable single-pad net"), and the "complete except for
+        # single-pad" success message.  Filtering them out of
+        # ``net_order`` here would silence the diagnostic by leaving
+        # ``single_pad_nets`` empty.
 
         # Issue #2464: Filter out nets that have already been routed by a
         # pre-pass (e.g., the differential pair pre-pass).  Without this
@@ -3681,6 +3692,19 @@ class Autorouter:
         # ``failed_nets_to_recover`` excludes them via the implicit
         # ``n in pads_by_net`` clause.
         single_pad_nets: set[int] = set()
+        # Issue #2515: Track the rip-up cohort across iterations so we can
+        # detect "non-zero overflow stagnation" -- the same set of nets
+        # being re-routed every iteration with overflow oscillating in a
+        # narrow band but never converging.  When this happens, fire a
+        # stagnation recovery pass that re-enables stalled nets and rips
+        # up the cohort plus their same-tier destination siblings.
+        # ``cohort_stagnation_window`` (=3, defined inside the loop) is the
+        # number of consecutive iterations the cohort must remain stable
+        # before recovery fires.  ``max_stagnation_recoveries`` (=2) is
+        # the budget for how many such recoveries we attempt per route_all.
+        cohort_history: list[frozenset[int]] = []
+        stagnation_recovery_count = 0
+        max_stagnation_recoveries = 2
         for net in net_order:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
@@ -3844,8 +3868,35 @@ class Autorouter:
                             f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
                         )
                     else:
+                        # Issue #2515: Surface unroutable nets by name so the
+                        # operator can act on the diagnostic instead of guessing
+                        # what was dropped.
+                        unrouted_names = sorted(
+                            self.net_names.get(n, f"Net_{n}")
+                            for n in net_order
+                            if n not in net_routes and n in pads_by_net
+                        )
+                        partial_at_term = self._get_partially_routed_nets(
+                            net_routes, pads_by_net
+                        )
+                        partial_names = sorted(
+                            self.net_names.get(n, f"Net_{n}") for n in partial_at_term
+                        )
+                        full_routed = sum(
+                            1 for n, r in net_routes.items()
+                            if r and n not in partial_at_term
+                        )
                         print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
                         print(f"    Overflow history: {overflow_history[-5:]}")
+                        print(
+                            f"    Routed: {full_routed}/{total_nets}, "
+                            f"unrouted: {len(unrouted_names)}, "
+                            f"partial: {len(partial_names)}"
+                        )
+                        if unrouted_names:
+                            print(f"    Unrouted nets: {', '.join(unrouted_names)}")
+                        if partial_names:
+                            print(f"    Partially routed nets: {', '.join(partial_names)}")
                         self._reset_perturbation()
                         break
 
@@ -4003,6 +4054,144 @@ class Autorouter:
                         f"{', '.join(stalled_names)}"
                     )
 
+                # Issue #2515: Track the unfiltered rip-up cohort identity so
+                # we can detect non-zero overflow stagnation -- the same set
+                # of nets oscillating in a narrow overflow band but never
+                # converging.  Captured *before* the stalled-net filter so
+                # the cohort signature is stable when nets transition into
+                # ``stalled_nets``.
+                cohort_history.append(frozenset(nets_to_reroute))
+
+                # Issue #2515: Non-zero overflow stagnation recovery.
+                # When PHASE_A/B/C + SW_OUT compete for the same J2 pin field,
+                # the rip-up loop oscillates the same 4 nets indefinitely with
+                # overflow stuck in [2, 4, 7, 4, ...].  Eventually the per-net
+                # stall detector marks them all stalled and the iteration
+                # terminates with "No nets to rip up", silently leaving them
+                # unrouted.  Detect this case and fire a recovery pass that:
+                #
+                #   1. Re-enables stalled nets so they are not orphaned.
+                #   2. Rips up the entire cohort *plus* any same-tier
+                #      destination siblings (e.g. PHASE_*  on J2) that may
+                #      have reserved cells in the contended pin field.
+                #   3. Re-routes them with elevated ``present_factor`` to
+                #      bias the A* search toward unexplored corridors.
+                #
+                # Trigger condition: the unfiltered cohort has been
+                # identical (or a strict subset) for the last
+                # ``cohort_stagnation_window`` iterations, the overflow
+                # window has not improved, and the recovery budget has not
+                # been exhausted.
+                cohort_stagnation_window = 3
+                if (
+                    iteration >= cohort_stagnation_window
+                    and stagnation_recovery_count < max_stagnation_recoveries
+                    and len(cohort_history) >= cohort_stagnation_window
+                    and not timed_out
+                ):
+                    recent_cohorts = cohort_history[-cohort_stagnation_window:]
+                    base_cohort = recent_cohorts[0]
+                    # Same set OR subsequent cohorts are a subset of base
+                    # (handles the case where some nets get marked stalled
+                    # mid-window but the active subset stabilises).
+                    cohorts_stable = (
+                        bool(base_cohort)
+                        and all(c <= base_cohort and c for c in recent_cohorts)
+                    )
+                    overflow_stable = False
+                    if len(overflow_history) >= cohort_stagnation_window:
+                        recent_ov = overflow_history[-cohort_stagnation_window:]
+                        # All non-zero AND no new global minimum AND band <= 5
+                        if (
+                            min(recent_ov) > 0
+                            and min(recent_ov) >= min(overflow_history)
+                            and (max(recent_ov) - min(recent_ov)) <= 5
+                        ):
+                            overflow_stable = True
+                    if cohorts_stable and overflow_stable:
+                        stagnation_recovery_count += 1
+                        recovery_cohort = set(base_cohort)
+                        # Augment with same-tier destination siblings so the
+                        # contended pin-field reservations are also released.
+                        sibling_extension: set[int] = set()
+                        for n in recovery_cohort:
+                            sibling_extension |= self._find_same_tier_destination_siblings(
+                                n, list(net_routes.keys())
+                            )
+                        recovery_cohort |= sibling_extension
+                        # Re-enable previously stalled nets so they don't get
+                        # orphaned by the recovery sweep.
+                        if stalled_nets:
+                            recovery_cohort |= stalled_nets
+                            stalled_nets.clear()
+                            net_ripup_stall.clear()
+                        cohort_names = sorted(
+                            self.net_names.get(n, f"Net_{n}")
+                            for n in recovery_cohort
+                            if n in pads_by_net
+                        )
+                        flush_print(
+                            f"  Stagnation recovery #{stagnation_recovery_count}: "
+                            f"cohort stable for {cohort_stagnation_window} iter(s), "
+                            f"overflow band {overflow_history[-cohort_stagnation_window:]}, "
+                            f"rerouting {len(cohort_names)} net(s) with "
+                            f"elevated present_factor ({elapsed_str()})"
+                        )
+                        flush_print(f"    Cohort: {', '.join(cohort_names)}")
+                        # Rip up all cohort routes (only the ones currently routed)
+                        ripup_targets = [
+                            n for n in recovery_cohort if n in net_routes and net_routes[n]
+                        ]
+                        if ripup_targets:
+                            neg_router.rip_up_nets(ripup_targets, net_routes, self.routes)
+                        # Re-route each cohort member fresh with elevated cost
+                        recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
+                        recovered_count = 0
+                        for rn in sorted(recovery_cohort, key=lambda n: self._get_net_priority(n)):
+                            if check_timeout():
+                                timed_out = True
+                                break
+                            if rn not in pads_by_net:
+                                continue
+                            routes = self._route_net_negotiated(
+                                rn, recovery_factor, per_net_timeout=per_net_timeout
+                            )
+                            if routes:
+                                net_routes[rn] = routes
+                                for route in routes:
+                                    self.grid.mark_route_usage(route)
+                                    self.routes.append(route)
+                                recovered_count += 1
+                        # Recompute overflow & cohort tracking after recovery
+                        current_overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        # Update the latest overflow_history entry to reflect
+                        # post-recovery state so subsequent oscillation
+                        # detection sees the recovery's effect.
+                        overflow_history[-1] = current_overflow
+                        # Reset cohort history so we don't immediately
+                        # re-trigger on the same window.
+                        cohort_history.clear()
+                        flush_print(
+                            f"  Stagnation recovery rerouted {recovered_count}/"
+                            f"{len(recovery_cohort)} net(s), overflow now: "
+                            f"{current_overflow} ({elapsed_str()})"
+                        )
+                        # Recompute nets_to_reroute for this iteration based
+                        # on post-recovery state.
+                        nets_to_reroute = neg_router.find_nets_through_overused_cells(
+                            net_routes, overused
+                        )
+                        # Re-add still-failed nets and partial nets after recovery
+                        for fn in net_order:
+                            if (
+                                fn not in net_routes
+                                and fn in pads_by_net
+                                and fn not in off_grid_nets
+                                and fn not in nets_to_reroute
+                            ):
+                                nets_to_reroute.append(fn)
+
                 if stalled_nets:
                     nets_to_reroute = [
                         n for n in nets_to_reroute if n not in stalled_nets
@@ -4085,10 +4274,31 @@ class Autorouter:
                             f"at iteration {iteration}/{max_iterations} ({elapsed_str()})"
                         )
                     else:
+                        # Issue #2515: Surface unroutable / partial nets by
+                        # name so operators see what the loop gave up on.
+                        unrouted_names = sorted(
+                            self.net_names.get(n, f"Net_{n}")
+                            for n in net_order
+                            if n not in net_routes and n in pads_by_net
+                        )
+                        partial_at_term = self._get_partially_routed_nets(
+                            net_routes, pads_by_net
+                        )
+                        partial_names = sorted(
+                            self.net_names.get(n, f"Net_{n}") for n in partial_at_term
+                        )
                         flush_print(
                             f"  No nets to rip up, terminating at iteration "
                             f"{iteration}/{max_iterations} ({elapsed_str()})"
                         )
+                        if unrouted_names:
+                            flush_print(
+                                f"    Unrouted nets: {', '.join(unrouted_names)}"
+                            )
+                        if partial_names:
+                            flush_print(
+                                f"    Partially routed nets: {', '.join(partial_names)}"
+                            )
                     break
 
                 # Issue #2388: Early-abort heuristic for power-net stalls.
