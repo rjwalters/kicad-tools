@@ -5,14 +5,17 @@ Three-phase brushless DC motor controller for validating kicad-tools thermal ana
 ## Quick Start
 
 ```bash
-# Build schematic (PCB layout not yet implemented)
-kct build boards/05-bldc-motor-controller --step schematic
-
-# Or run directly
+# Build schematic + PCB + auto-route in one shot
 uv run python boards/05-bldc-motor-controller/design.py
 ```
 
-> **Status**: Schematic generation implemented. PCB layout and routing pending.
+> **Status**: Schematic, PCB layout (with STM32G431K8Tx MCU + complete
+> DRV8301 QFN-56 footprint) and autorouting are all implemented.  After
+> regeneration, every net has at least two pads so the autorouter can
+> attempt full connectivity.  The autorouter still leaves a few segment
+> clearance violations on this complex high-density board; those are
+> tracked separately and do not affect the schematic correctness or
+> the BOM/netlist.
 
 ## Overview
 
@@ -44,18 +47,20 @@ This board drives a 3-phase BLDC motor with:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Components (~42 total)
+## Components (~46 total)
 
 | Section | Key Components | Count |
 |---------|----------------|-------|
-| Power Input | J1 screw terminal, F1 fuse, D1 TVS, C1-C3 bulk caps | 5 |
-| 5V Supply | U1 LM2596, L1 inductor, D2 Schottky, C4-C5 | 5 |
-| 3.3V Supply | U2 AMS1117, C6-C7 | 3 |
-| MCU | U3 STM32G431, C8-C11 bypass, Y1 crystal | 6 |
-| Gate Driver | U4 DRV8301, C12-C17 bootstrap/bypass | 8 |
-| Power Stage | Q1-Q6 MOSFETs (3 half-bridges) | 6 |
-| Current Sense | R1-R3 shunts, U5 amplifier, C18 | 5 |
-| Connectors | J2 motor, J3 hall, J4 SWD, J5 aux | 4 |
+| Power Input | J1 screw terminal, F1 fuse, D1 TVS, C1-C2 bulk caps | 5 |
+| 5V Supply | U1 LM2596, L1 inductor, D2 Schottky, C3-C4 | 5 |
+| 3.3V Supply | U2 AMS1117, C5-C6 | 3 |
+| MCU | U10 STM32G431K8Tx (LQFP-32), C7-C9 bypass, Y1 8MHz crystal, C10-C11 load caps | 7 |
+| Gate Driver | U3 DRV8301 (QFN-56), C12-C14 bootstrap, C15-C16 bypass | 6 |
+| Power Stage | Q1-Q6 IRLZ44N MOSFETs (3 half-bridges) | 6 |
+| Current Sense | R10-R12 5mR 2512 shunts | 3 |
+| LEDs | D3-D4 status/power, R3-R4 1k limiter | 4 |
+| Connectors | J1 power, J2 motor, J3 hall, J4 SWD | 4 |
+| Mechanical | 4x M3 mounting holes | 4 |
 
 ## Design Challenges
 
