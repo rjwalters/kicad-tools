@@ -854,7 +854,11 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
     and power nets are distributed across In2.Cu / F.Cu.
 
     Zones are *defined* here (unfilled polygons).  Filling happens later
-    after routing, typically via kicad-cli.
+    after routing -- ``kct route`` calls :func:`route_cmd._fill_zones_after_route`
+    once routing succeeds, and :func:`pipeline_cmd._run_step_zones` performs
+    the same fill via ``kct zones fill``.  ``kct export`` also runs a
+    safety-net fill if the PCB still has unfilled zones at export time
+    (see :func:`export.gerber.GerberExporter._export_gerbers`).
     """
     if not ctx.pcb_file or not ctx.pcb_file.exists():
         return BuildResult(
