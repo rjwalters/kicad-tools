@@ -98,6 +98,21 @@ class TestNamePatternClassification:
         assert classify_from_name("VBUS") == NetClass.POWER
         assert classify_from_name("AVDD") == NetClass.POWER
         assert classify_from_name("DVDD") == NetClass.POWER
+        # No-decimal voltage forms (European-style, KiCad templates)
+        assert classify_from_name("+3V3") == NetClass.POWER
+        assert classify_from_name("+5V0") == NetClass.POWER
+        assert classify_from_name("+1V8") == NetClass.POWER
+        assert classify_from_name("+1V2") == NetClass.POWER
+        assert classify_from_name("+12V0") == NetClass.POWER
+        assert classify_from_name("+24V0") == NetClass.POWER
+        assert classify_from_name("-5V0") == NetClass.POWER
+        assert classify_from_name("-12V0") == NetClass.POWER
+        assert classify_from_name("3V3") == NetClass.POWER  # bare, no leading sign
+        assert classify_from_name("1V8") == NetClass.POWER
+        # Regression guards: digit+V containing names that must NOT classify
+        # as POWER (priority ordering protects HIGH_CURRENT_SIGNAL).
+        assert classify_from_name("MOTOR_A") != NetClass.POWER
+        assert classify_from_name("PHASE_5V0") == NetClass.HIGH_CURRENT_SIGNAL
 
     def test_ground_net_patterns(self):
         """Test ground net name detection."""

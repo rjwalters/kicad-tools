@@ -173,6 +173,30 @@ class TestSinglePadNetRule:
         results = SinglePadNetRule().check(pcb, RULES)
         assert len(results.violations) == 0
 
+    def test_single_pad_3v3_no_decimal_marker_allowed(self):
+        """A single-pad +3V3 (no-decimal) marker is silently allowed.
+
+        Mirrors test_single_pad_power_suppressed but uses the European-style
+        no-decimal voltage name (+3V3) that PR for issue #2528 added support
+        for in NET_CLASS_PATTERNS.
+        """
+        pcb = _StubPCB(
+            _nets={
+                0: _StubNet(0, ""),
+                4: _StubNet(4, "+3V3"),
+            },
+            _footprints=[
+                _StubFootprint(
+                    reference="TP4",
+                    pads=[
+                        _StubPad(number="1", net_number=4, net_name="+3V3"),
+                    ],
+                ),
+            ],
+        )
+        results = SinglePadNetRule().check(pcb, RULES)
+        assert len(results.violations) == 0
+
     def test_single_pad_vcc_suppressed(self):
         """A single-pad VCC net is silently allowed (pour-net pattern)."""
         pcb = _StubPCB(

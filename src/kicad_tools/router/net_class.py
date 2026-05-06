@@ -118,6 +118,7 @@ NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
     NetClass.POWER: [
         r"^(VCC|VDD|VBUS|VIN|VOUT|PWR|POWER|AVDD|DVDD)",
         r"^[+-]?\d+\.?\d*V[ADPS]?$",  # +3.3V, -5V, 1.8VA, 3.3VD
+        r"^[+-]?\d+V\d+[ADPS]?$",  # +3V3, +5V0, +1V8, +12V0, -5V0 (no-decimal)
         r"^(PVDD|PVCC|VBAT|VCORE|VCAP|VIO)$",
         r"_VCC$|_VDD$|_PWR$",
         r"^V\d+",  # V5, V3.3, etc.
