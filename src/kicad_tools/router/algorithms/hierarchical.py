@@ -73,6 +73,7 @@ class HierarchicalRouter:
         use_negotiated: bool = True,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using hierarchical global-to-detailed flow.
 
@@ -82,7 +83,9 @@ class HierarchicalRouter:
             corridor_width_factor: Corridor width as multiple of clearance (default: 2.0)
             use_negotiated: Use negotiated congestion routing in detailed phase
             progress_callback: Optional callback for progress updates
-            timeout: Optional timeout in seconds
+            timeout: Optional global wall-clock timeout in seconds
+            per_net_timeout: Optional per-net A* timeout forwarded to
+                ``_route_net_with_corridor`` (Issue #2518; mirrors #2307).
 
         Returns:
             List of Route objects (may be partial if timeout reached)
@@ -216,6 +219,7 @@ class HierarchicalRouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
                 start_time=start_time,
+                per_net_timeout=per_net_timeout,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -259,8 +263,16 @@ class HierarchicalRouter:
         progress_callback: ProgressCallback | None,
         timeout: float | None,
         start_time: float,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
-        """Detailed phase using negotiated congestion routing."""
+        """Detailed phase using negotiated congestion routing.
+
+        Issue #2518: ``per_net_timeout`` is now forwarded to the per-net
+        ``_route_net_with_corridor`` calls (echo of #2307 fix for two-phase),
+        and a ``timed_out`` flag propagates from the inner per-net break up
+        through the iteration loop so the wall-clock budget is enforced
+        immediately rather than at the next iteration boundary.
+        """
         from ..algorithms import NegotiatedRouter
 
         def check_timeout() -> bool:
@@ -274,12 +286,17 @@ class HierarchicalRouter:
         net_routes: dict[int, list[Route]] = {}
         present_factor = 0.5
 
+        # Issue #2518: propagating timeout flag (matches the pattern in
+        # core.py::route_all_negotiated and TwoPhaseRouter._detailed_negotiated)
+        timed_out = False
+
         # Initial routing pass
         for i, net in enumerate(net_order):
             if check_timeout():
                 flush_print(
                     f"  Timeout during detailed routing at net {i}/{total_nets}"
                 )
+                timed_out = True
                 break
 
             if progress_callback is not None:
@@ -288,7 +305,9 @@ class HierarchicalRouter:
                 if not progress_callback(progress, f"Routing {net_name}", True):
                     break
 
-            routes = self._route_net_with_corridor(net, present_factor)
+            routes = self._route_net_with_corridor(
+                net, present_factor, per_net_timeout=per_net_timeout
+            )
             if routes:
                 net_routes[net] = routes
                 for route in routes:
@@ -300,8 +319,10 @@ class HierarchicalRouter:
             f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}"
         )
 
-        # Rip-up and reroute if overflow remains
-        if overflow > 0:
+        # Rip-up and reroute if overflow remains.
+        # Issue #2518: skip the iteration loop entirely if the initial pass
+        # was already cut short by the wall-clock budget.
+        if overflow > 0 and not timed_out:
             max_iterations = 10
             history_increment = 1.0
             present_factor_increment = 0.5
@@ -309,6 +330,7 @@ class HierarchicalRouter:
             for iteration in range(1, max_iterations + 1):
                 if check_timeout():
                     flush_print(f"  Timeout at iteration {iteration}")
+                    timed_out = True
                     break
 
                 if progress_callback is not None:
@@ -331,15 +353,31 @@ class HierarchicalRouter:
 
                 neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-                for net in nets_to_reroute:
+                for i_inner, net in enumerate(nets_to_reroute):
                     if check_timeout():
+                        # Issue #2518: propagate to the iteration loop so we
+                        # don't run another round of overflow recompute and
+                        # spawn a new iteration after the budget expires.
+                        flush_print(
+                            f"    Timeout during reroute at net "
+                            f"{i_inner}/{len(nets_to_reroute)}"
+                        )
+                        timed_out = True
                         break
-                    routes = self._route_net_with_corridor(net, present_factor)
+                    routes = self._route_net_with_corridor(
+                        net, present_factor, per_net_timeout=per_net_timeout
+                    )
                     if routes:
                         net_routes[net] = routes
                         for route in routes:
                             self.grid.mark_route_usage(route)
                             self.routes.append(route)
+
+                # Issue #2518: short-circuit immediately if the per-net loop
+                # tripped the budget — preserve net_routes as-is for the
+                # partial-state return below.
+                if timed_out:
+                    break
 
                 new_overflow = self.grid.get_total_overflow()
                 if new_overflow == 0:

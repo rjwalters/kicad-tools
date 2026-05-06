@@ -4636,6 +4636,15 @@ class Autorouter:
                     print(f"  Convergence achieved at iteration {iteration}!")
                     break
 
+                # Issue #2518: short-circuit out of the iteration loop if a
+                # nested per-net loop already tripped the wall-clock budget.
+                # ``escape_local_minimum`` below can run for tens of seconds
+                # per strategy and would otherwise blow past the budget by
+                # ~iteration tail before the next iteration's check_timeout()
+                # finally fires.
+                if timed_out:
+                    break
+
                 # Adaptive oscillation detection and escape (Issue #633)
                 # Guard: skip escape strategies when overflow is already 0 (#2262)
                 if adaptive and overflow > 0 and detect_oscillation(overflow_history):
@@ -5117,6 +5126,7 @@ class Autorouter:
         use_negotiated: bool = True,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using hierarchical global-to-detailed flow.
 
@@ -5129,7 +5139,9 @@ class Autorouter:
             corridor_width_factor: Corridor width as multiple of clearance (default: 2.0)
             use_negotiated: Use negotiated congestion routing in detailed phase
             progress_callback: Optional callback for progress updates
-            timeout: Optional timeout in seconds
+            timeout: Optional global wall-clock timeout in seconds
+            per_net_timeout: Optional per-net A* timeout (Issue #2518) forwarded
+                to the hierarchical router's per-net pathfinder calls.
 
         Returns:
             List of Route objects (may be partial if timeout reached)
@@ -5142,6 +5154,7 @@ class Autorouter:
             use_negotiated=use_negotiated,
             progress_callback=progress_callback,
             timeout=timeout,
+            per_net_timeout=per_net_timeout,
         )
 
     def _reset_for_new_trial(self):
