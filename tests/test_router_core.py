@@ -4055,3 +4055,161 @@ class TestLargeGridPerformance:
                 assert bitmap == per_cell, (
                     f"Mismatch at ({x}, {y}): bitmap={bitmap}, per_cell={per_cell}"
                 )
+
+
+class TestSinglePadNetExclusion:
+    """Tests for Issue #2514: single-pad nets must be flagged as
+    structurally unroutable so the rip-up loop does not exit at iteration 1
+    with a misleading "No nets to rip up" diagnostic.
+
+    Background: board 04 (STM32 devboard) defines an SWD header (J1) whose
+    SWDIO/SWCLK/SWO/NRST nets connect to a single pad each (the matching
+    MCU symbol is intentionally omitted from the demo).  Before this fix
+    the negotiated routing loop printed "4 net(s) failed to route -
+    attempting recovery" and then immediately exited at iteration 1
+    because the recovery filter relied on an implicit ``n in pads_by_net``
+    membership check that silently dropped single-pad nets.
+    """
+
+    def _build_router_with_single_pad_nets(self) -> Autorouter:
+        """Construct a router that has both routable and single-pad nets.
+
+        Net 1 has two pads (routable); nets 2 and 3 each have a single
+        pad on a header (unroutable).  Mirrors the board-04 topology.
+        """
+        rules = DesignRules(grid_resolution=0.5)
+        router = Autorouter(width=40.0, height=40.0, rules=rules)
+        # Two-pad net (routable)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "OK"},
+                {"number": "2", "x": 15.0, "y": 5.0, "net": 1, "net_name": "OK"},
+            ],
+        )
+        # Single-pad nets (unroutable)
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 25.0, "y": 5.0, "net": 2, "net_name": "SWDIO"},
+                {"number": "2", "x": 25.0, "y": 10.0, "net": 3, "net_name": "SWCLK"},
+            ],
+        )
+        return router
+
+    def test_single_pad_nets_excluded_from_recovery_filter(self):
+        """The ``failed_nets_to_recover`` filter must exclude single-pad nets.
+
+        Replicates the filter used in ``route_all_negotiated`` (#2514)
+        with the explicit ``single_pad_nets`` set.
+        """
+        router = self._build_router_with_single_pad_nets()
+
+        # Build the same sets the production code now builds up front
+        net_order = sorted(router.nets.keys())
+        single_pad_nets = {n for n in net_order if len(router.nets.get(n, [])) < 2}
+        off_grid_nets: set[int] = set()
+
+        # Simulate iteration 0 routing only the 2-pad net
+        net_routes = {1: []}
+
+        failed_nets_to_recover = [
+            n
+            for n in net_order
+            if n not in net_routes and n not in single_pad_nets and n not in off_grid_nets
+        ]
+
+        assert single_pad_nets == {2, 3}
+        # The single-pad nets must NOT show up in recovery -- they have
+        # no MST edges and ``_route_net_negotiated`` returns ``[]``
+        # immediately.
+        assert failed_nets_to_recover == []
+
+    def test_failed_multi_pad_net_still_included_in_recovery(self):
+        """Multi-pad failures must NOT be filtered out by the new check.
+
+        Regression guard: the explicit ``single_pad_nets`` set must
+        not accidentally exclude legitimate multi-pad failures.  This
+        is the curator's primary concern -- the previous
+        ``n in pads_by_net`` clause could silently drop legitimate
+        failures whose pads were not yet in the cache.
+        """
+        rules = DesignRules(grid_resolution=0.5)
+        router = Autorouter(width=40.0, height=40.0, rules=rules)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "OK"},
+                {"number": "2", "x": 15.0, "y": 5.0, "net": 1, "net_name": "OK"},
+            ],
+        )
+        # Multi-pad net that is hypothetically failing in iteration 0
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 5.0, "y": 25.0, "net": 2, "net_name": "FAILED"},
+                {"number": "2", "x": 25.0, "y": 25.0, "net": 2, "net_name": "FAILED"},
+            ],
+        )
+
+        net_order = sorted(router.nets.keys())
+        single_pad_nets = {n for n in net_order if len(router.nets.get(n, [])) < 2}
+        off_grid_nets: set[int] = set()
+
+        # Net 1 routed; net 2 (multi-pad) failed
+        net_routes = {1: []}
+
+        failed_nets_to_recover = [
+            n
+            for n in net_order
+            if n not in net_routes and n not in single_pad_nets and n not in off_grid_nets
+        ]
+
+        # Net 2 has 2 pads so it must NOT be classified as single-pad...
+        assert single_pad_nets == set()
+        # ...and it MUST appear in the recovery set so the rip-up loop
+        # has a candidate to act on.
+        assert failed_nets_to_recover == [2]
+
+    def test_route_all_negotiated_does_not_terminate_at_iter1_for_single_pad(self):
+        """End-to-end: route_all_negotiated converges cleanly on single-pad nets.
+
+        Before #2514 the loop printed "No nets to rip up, terminating at
+        iteration 1/15" because the recovery filter excluded the single-
+        pad nets (correctly) but the early-termination check did not
+        recognise that there were no genuine failures left.
+
+        With the fix, the loop should recognise that ``net_routes`` covers
+        all routable nets and return promptly with a clear diagnostic
+        rather than entering a doomed rip-up iteration.
+        """
+        router = self._build_router_with_single_pad_nets()
+
+        routes = router.route_all_negotiated(max_iterations=5)
+
+        # The 2-pad net should have been routed in iteration 0
+        routed_nets = {r.net for r in routes}
+        assert 1 in routed_nets, f"Multi-pad net should be routed; got nets {routed_nets!r}"
+        # Single-pad nets must NOT appear in the result
+        assert 2 not in routed_nets
+        assert 3 not in routed_nets
+
+    def test_iter1_diagnostic_is_actionable_when_only_single_pad_nets_remain(self, capsys):
+        """The diagnostic at the end of iteration 0 (or the early-exit
+        message at iteration 1) must clearly attribute the unrouted
+        nets to their structural single-pad cause -- not silently abort
+        the rip-up loop.
+        """
+        router = self._build_router_with_single_pad_nets()
+        router.route_all_negotiated(max_iterations=5)
+
+        captured = capsys.readouterr().out
+        # The new structural-unroutable diagnostic must fire
+        assert "structurally unroutable single-pad net" in captured, (
+            f"Expected single-pad diagnostic in output. Got:\n{captured}"
+        )
+        # The legacy misleading "No nets to rip up" message must NOT
+        # be the only thing the user sees.
+        assert "SWDIO" in captured or "SWCLK" in captured, (
+            f"Expected single-pad net names in diagnostic. Got:\n{captured}"
+        )

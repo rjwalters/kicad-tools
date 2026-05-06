@@ -3671,6 +3671,16 @@ class Autorouter:
         neighborhood_stall_count = 0
         prev_routed_count = 0
         full_reorder_used_this_iter = False
+        # Issue #2514: Identify single-pad nets up front so the recovery
+        # loop can distinguish "structurally unroutable" from "failed but
+        # retry-able".  A net with <2 routable pads has no edges in its
+        # MST and ``_route_net_negotiated`` returns ``[]`` immediately --
+        # if we don't filter these out explicitly the rip-up loop counts
+        # them in the "X net(s) failed to route" diagnostic and then
+        # silently exits at iteration 1 because the recovery filter at
+        # ``failed_nets_to_recover`` excludes them via the implicit
+        # ``n in pads_by_net`` clause.
+        single_pad_nets: set[int] = set()
         for net in net_order:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
@@ -3681,6 +3691,13 @@ class Autorouter:
                         self._escape_pad_overrides.get(p, self.pads[p])
                         for p in pads_for_routing
                     ]
+                else:
+                    single_pad_nets.add(net)
+            else:
+                # Net referenced by net_order but absent from self.nets --
+                # treat as structurally unroutable so the recovery loop
+                # does not spin trying to route it.
+                single_pad_nets.add(net)
 
         def check_timeout() -> bool:
             """Check if timeout has been reached."""
@@ -3755,17 +3772,38 @@ class Autorouter:
             f"  Routed {len(net_routes)}/{total_nets} nets, overflow: {overflow} ({elapsed_str()})"
         )
 
+        # Issue #2514: Surface structurally unroutable nets (single-pad)
+        # before the rip-up loop so the user understands why some nets in
+        # ``net_order`` will never enter ``net_routes``.
+        if single_pad_nets:
+            single_pad_names = [self.net_names.get(n, f"Net {n}") for n in sorted(single_pad_nets)]
+            flush_print(
+                f"  Excluding {len(single_pad_nets)} structurally unroutable "
+                f"single-pad net(s): {', '.join(single_pad_names)}"
+            )
+
         if timed_out:
             print("  ⚠ Returning partial result due to timeout")
-        elif overflow == 0 and len(net_routes) == total_nets:
-            # Only declare complete if ALL nets were routed AND no conflicts
-            print("  No conflicts - routing complete!")
+        elif overflow == 0 and len(net_routes) == total_nets - len(single_pad_nets):
+            # Only declare complete if all routable nets were routed AND no conflicts.
+            # Single-pad nets cannot be routed (no MST edges) so they don't
+            # contribute to the "complete" check.
+            if single_pad_nets:
+                print(
+                    f"  No conflicts - routing complete! "
+                    f"({len(net_routes)} routable net(s) routed; "
+                    f"{len(single_pad_nets)} single-pad net(s) skipped)"
+                )
+            else:
+                print("  No conflicts - routing complete!")
             if progress_callback is not None:
                 progress_callback(1.0, "Routing complete - no conflicts", False)
             return list(self.routes)
-        elif overflow == 0 and len(net_routes) < total_nets:
-            # Some nets failed to route but no overflow - need rip-up
-            failed_count = total_nets - len(net_routes)
+        elif overflow == 0 and len(net_routes) < total_nets - len(single_pad_nets):
+            # Some routable nets failed to route but no overflow - need rip-up.
+            # Exclude single-pad nets from the failed count: they have no
+            # edges and cannot be "failed" in any meaningful sense.
+            failed_count = total_nets - len(net_routes) - len(single_pad_nets)
             print(f"  ⚠ {failed_count} net(s) failed to route - attempting recovery")
 
         # Issue #1605: Collect nets that are structurally unroutable (off-grid pads)
@@ -3877,10 +3915,17 @@ class Autorouter:
                 # Issue #858: Also include nets that completely failed to route
                 # (not in net_routes) - these need recovery via targeted rip-up
                 # Issue #1605: Exclude structurally unroutable nets (PADS_OFF_GRID)
+                # Issue #2514: Exclude single-pad nets explicitly.  The previous
+                # ``n in pads_by_net`` clause silently dropped them but also
+                # masked legitimate failures whose pads were not yet in the
+                # ``pads_by_net`` cache.  We now make the structural-unroutable
+                # filter explicit via the ``single_pad_nets`` set built up front.
                 failed_nets_to_recover = [
                     n
                     for n in net_order
-                    if n not in net_routes and n in pads_by_net and n not in off_grid_nets
+                    if n not in net_routes
+                    and n not in single_pad_nets
+                    and n not in off_grid_nets
                 ]
                 if failed_nets_to_recover:
                     # Add failed nets to reroute list if not already present
@@ -3976,9 +4021,11 @@ class Autorouter:
                 ):
                     recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
                     recovered = 0
+                    attempted = 0
                     for fn in list(failed_net_ids):
                         if fn in stalled_nets or fn in net_routes:
                             continue
+                        attempted += 1
                         routes = self._route_net_negotiated(
                             fn, recovery_factor, per_net_timeout=per_net_timeout
                         )
@@ -3988,11 +4035,17 @@ class Autorouter:
                             for route in routes:
                                 self.grid.mark_route_usage(route)
                                 self.routes.append(route)
-                    if recovered > 0:
+                    # Issue #2514: Always log the attempt summary so the
+                    # operator can see that recovery ran -- previously the
+                    # log was silent on ``recovered == 0``, which made it
+                    # appear that the recovery path never executed.
+                    if attempted > 0:
                         flush_print(
-                            f"  Zero-overflow recovery: routed {recovered}/{len(failed_net_ids)} "
-                            f"previously-failed net(s) with elevated cost"
+                            f"  Zero-overflow recovery: routed {recovered}/{attempted} "
+                            f"previously-failed net(s) with elevated cost "
+                            f"(factor={recovery_factor:.2f})"
                         )
+                    if recovered > 0:
                         # Recompute overflow after recovery
                         current_overflow = self.grid.get_total_overflow()
                         overused = self.grid.find_overused_cells()
@@ -4014,10 +4067,28 @@ class Autorouter:
                 # All conflicting nets have been excluded by the stall detector,
                 # so further iterations cannot make progress.
                 if not nets_to_reroute:
-                    flush_print(
-                        f"  No nets to rip up, terminating at iteration "
-                        f"{iteration}/{max_iterations} ({elapsed_str()})"
-                    )
+                    # Issue #2514: Distinguish "genuine convergence" from
+                    # "remaining unrouted nets are all structurally
+                    # unroutable" so the operator understands why the loop
+                    # exited at iteration 1 with nets still missing.
+                    remaining_unrouted = [n for n in net_order if n not in net_routes]
+                    structurally_unroutable = [
+                        n for n in remaining_unrouted if n in single_pad_nets or n in off_grid_nets
+                    ]
+                    if remaining_unrouted and len(structurally_unroutable) == len(
+                        remaining_unrouted
+                    ):
+                        flush_print(
+                            f"  No rip-up candidates: {len(remaining_unrouted)} "
+                            f"remaining unrouted net(s) are structurally "
+                            f"unroutable (single-pad or off-grid). Terminating "
+                            f"at iteration {iteration}/{max_iterations} ({elapsed_str()})"
+                        )
+                    else:
+                        flush_print(
+                            f"  No nets to rip up, terminating at iteration "
+                            f"{iteration}/{max_iterations} ({elapsed_str()})"
+                        )
                     break
 
                 # Issue #2388: Early-abort heuristic for power-net stalls.
