@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,31 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.cli.runner import find_kicad_cli
 
 logger = logging.getLogger(__name__)
+
+
+def _pcb_has_unfilled_zones(pcb_path: Path) -> bool:
+    """Return True if the PCB defines copper-pour zones with no fill data.
+
+    Cheap text scan that avoids parsing the full S-expression: a properly
+    filled zone contains ``(filled_polygon ...)`` children; an unfilled zone
+    has only the outline definition.  Used by :meth:`GerberExporter._export_gerbers`
+    to decide whether to invoke the safety-net fill pass before exporting
+    Gerbers (issue #2516).
+
+    The serializer wraps zones in two forms -- ``(zone (net ...)`` on a
+    single line, or ``(zone\\n  (net ...)`` with a newline after the
+    opening token -- so we accept either.
+    """
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return False
+    has_zone = "(zone " in text or "(zone\n" in text or "(zone\t" in text
+    if not has_zone:
+        return False
+    # If we have zones but no filled_polygon, the zones are unfilled and
+    # the resulting Gerbers would lack G36..G37 polygon-fill regions.
+    return "filled_polygon" not in text
 
 
 @dataclass
@@ -342,12 +368,61 @@ class GerberExporter:
 
     def _export_gerbers(self, config: GerberConfig, output_dir: Path) -> None:
         """Export Gerber files using kicad-cli."""
+        # Safety-net fill (issue #2516): if the PCB has zone definitions
+        # but no fill polygons, the resulting Gerbers would contain zero
+        # G36..G37 polygon-fill regions and the manufactured board would
+        # lack plane copper.  Fill zones into a temp PCB so we never
+        # silently mutate the user's file, then export Gerbers from the
+        # temp file.
+        pcb_for_export = self.pcb_path
+        tmpdir: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            if _pcb_has_unfilled_zones(self.pcb_path):
+                from kicad_tools.cli.runner import run_fill_zones
+
+                tmpdir = tempfile.TemporaryDirectory(prefix="kct_gerber_fill_")
+                # Reuse the original filename so kicad-cli's per-layer
+                # output naming is unaffected.
+                filled_pcb = Path(tmpdir.name) / self.pcb_path.name
+                logger.info(
+                    "Gerber export: PCB has unfilled zones; filling to temp file %s",
+                    filled_pcb,
+                )
+                fill_result = run_fill_zones(
+                    self.pcb_path,
+                    output_path=filled_pcb,
+                    kicad_cli=self.kicad_cli,
+                )
+                if fill_result.success and filled_pcb.exists():
+                    pcb_for_export = filled_pcb
+                else:
+                    # Non-fatal: fall back to the unfilled PCB and let the
+                    # downstream Gerber export proceed.  The user will see
+                    # missing plane copper in the Gerbers but the export
+                    # itself will still succeed.
+                    logger.warning(
+                        "Gerber export: zone fill failed (%s); Gerbers may lack plane copper",
+                        fill_result.stderr or "(no stderr)",
+                    )
+
+            self._export_gerbers_impl(config, output_dir, pcb_for_export)
+        finally:
+            if tmpdir is not None:
+                tmpdir.cleanup()
+
+    def _export_gerbers_impl(
+        self,
+        config: GerberConfig,
+        output_dir: Path,
+        pcb_path: Path,
+    ) -> None:
+        """Invoke ``kicad-cli pcb export gerbers`` against ``pcb_path``."""
         cmd = [
             str(self.kicad_cli),
             "pcb",
             "export",
             "gerbers",
-            str(self.pcb_path),
+            str(pcb_path),
             "--output",
             str(output_dir) + "/",
         ]

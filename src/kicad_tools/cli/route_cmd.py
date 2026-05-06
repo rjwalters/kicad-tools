@@ -597,6 +597,99 @@ def _should_auto_fix(args) -> bool:
     return True
 
 
+def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
+    """Fill copper-pour zones after routing completes.
+
+    Routing produces traces; copper pour zones must be filled *after* the
+    trace geometry exists so the fill polygons respect trace clearances.
+    Without this step, exported Gerbers contain ``(zone ...)`` definitions
+    but zero ``G36...G37`` polygon-fill regions, so manufactured boards have
+    no plane copper -- the bug fixed by issue #2516.
+
+    This function mirrors :func:`pipeline_cmd._run_step_zones`:
+
+    - Skips silently when ``kicad-cli`` is not installed (no-op with warning).
+    - Delegates to :func:`runner.run_fill_zones` so the existing
+      net-corruption snapshot/restore guard (``_snapshot_net_declarations`` /
+      ``_restore_net_declarations``) runs.
+    - Validates net format afterwards via :func:`runner.validate_net_format`
+      and logs a warning when corruption is detected.
+
+    The function is idempotent: filling a PCB whose zones are already filled
+    simply rewrites the same fill polygons.  When the input PCB has no
+    ``(zone ...)`` blocks at all, kicad-cli has nothing to fill and this is
+    effectively a no-op.
+
+    Args:
+        output_path: Path to the routed PCB file (modified in place).
+        quiet: Suppress informational output.
+    """
+    from kicad_tools.cli.runner import (
+        find_kicad_cli,
+        run_fill_zones,
+        validate_net_format,
+    )
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        if not quiet:
+            print("  Zone fill: skipped (kicad-cli not installed)")
+        return
+
+    # Quick check: does the PCB even have any zones to fill?
+    # KiCad's serializer wraps zones either as "(zone (net ...)" on one
+    # line OR as "(zone\n  (net ...)" with a newline after the opening
+    # token, so we need to detect both forms.
+    try:
+        text = output_path.read_text()
+    except OSError as exc:
+        logger.warning("Zone fill: could not read %s: %s", output_path, exc)
+        return
+    if "(zone " not in text and "(zone\n" not in text and "(zone\t" not in text:
+        # Nothing to fill -- skip silently to avoid log noise on the
+        # majority of boards that have no copper pours.
+        return
+
+    if not quiet:
+        print("\n--- Filling Copper Zones ---")
+        print(f"  Filling zones in {output_path.name}...")
+
+    result = run_fill_zones(output_path, kicad_cli=kicad_cli)
+
+    if not result.success:
+        # Non-fatal: log warning and continue.  The board may still be
+        # usable for partial inspection but the manufacturing artifacts
+        # will lack plane copper.
+        logger.warning(
+            "Zone fill failed for %s: %s",
+            output_path,
+            result.stderr or "(no stderr)",
+        )
+        if not quiet:
+            print("  Warning: zone fill failed -- Gerbers will lack plane copper")
+        return
+
+    # Validate net format after zone fill -- kicad-cli may corrupt nets.
+    report = validate_net_format(output_path)
+    if not report.valid:
+        logger.warning(
+            "Net format corruption detected after zone fill: "
+            "%d element(s) have non-canonical net format "
+            "(name_only_segments=%d, name_only_vias=%d, name_only_pads=%d, "
+            "empty_net_segments=%d, empty_net_vias=%d, empty_net_pads=%d)",
+            report.total_corrupt,
+            report.name_only_segments,
+            report.name_only_vias,
+            report.name_only_pads,
+            report.empty_net_segments,
+            report.empty_net_vias,
+            report.empty_net_pads,
+        )
+
+    if not quiet:
+        print("  Zone fill: complete")
+
+
 @dataclass
 class LayerEscalationResult:
     """Result of a layer escalation routing attempt."""
@@ -1375,6 +1468,13 @@ def route_with_layer_escalation(
         print(f"  Saved to: {output_path}")
         print(f"  Layer count: {final_result.layer_count}")
 
+    # Fill copper-pour zones now that traces exist (issue #2516).
+    # Must run BEFORE DRC so the DRC sees filled zones rather than bare
+    # zone outlines and does not flag zone-to-trace clearance against
+    # unfilled polygons.
+    if final_result.nets_routed > 0:
+        _fill_zones_after_route(output_path, quiet=quiet)
+
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
@@ -1858,6 +1958,10 @@ def route_with_rule_relaxation(
         print(f"  Saved to: {output_path}")
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
+
+    # Fill copper-pour zones now that traces exist (issue #2516).
+    if final_result.nets_routed > 0:
+        _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
@@ -2388,6 +2492,10 @@ def route_with_combined_escalation(
         print(f"  Layer count: {final_result.layer_count}")
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
+
+    # Fill copper-pour zones now that traces exist (issue #2516).
+    if final_result.nets_routed > 0:
+        _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
@@ -4463,6 +4571,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not quiet:
                 print("  No power plane nets found (no zones with assigned nets)")
+
+    # Fill copper-pour zones now that traces (and any stitching vias)
+    # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
+    # filled zones rather than bare zone outlines.
+    if not args.dry_run and stats["nets_routed"] > 0:
+        _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped or dry-run
     drc_errors = 0
