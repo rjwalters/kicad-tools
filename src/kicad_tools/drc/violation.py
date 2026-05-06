@@ -78,6 +78,7 @@ def _init_type_category_map() -> None:
             ViolationType.UNCONNECTED_ITEMS: ViolationCategory.CONNECTIVITY,
             ViolationType.SHORTING_ITEMS: ViolationCategory.CONNECTIVITY,
             ViolationType.NET_UNDECLARED: ViolationCategory.CONNECTIVITY,
+            ViolationType.SINGLE_PAD_NET: ViolationCategory.CONNECTIVITY,
             # Cosmetic: visual only
             ViolationType.SILK_OVER_COPPER: ViolationCategory.COSMETIC,
             ViolationType.SILK_OVERLAP: ViolationCategory.COSMETIC,
@@ -161,6 +162,7 @@ class ViolationType(Enum):
     FOOTPRINT_OUTSIDE_BOARD = "footprint_outside_board"
     # Netlist integrity
     NET_UNDECLARED = "net_undeclared"
+    SINGLE_PAD_NET = "single_pad_net"
 
     # Misc
     FOOTPRINT = "footprint"
@@ -236,6 +238,7 @@ class ViolationType(Enum):
             "footprint_outside_board": cls.FOOTPRINT_OUTSIDE_BOARD,
             # netlist integrity rule from validate netlist checker
             "net_undeclared": cls.NET_UNDECLARED,
+            "single_pad_net": cls.SINGLE_PAD_NET,
             # zone fill rules from validate zone_fill checker
             "zone_unfilled": cls.ZONE_UNFILLED,
             "zone_fill_disabled": cls.ZONE_FILL_DISABLED,

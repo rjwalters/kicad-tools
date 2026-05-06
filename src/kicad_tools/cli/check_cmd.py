@@ -65,6 +65,7 @@ CHECK_CATEGORIES = [
     "pad_grid",
     "placement",
     "silkscreen",
+    "single_pad_net",
     "solder_mask",
     "zones",
 ]
@@ -274,6 +275,7 @@ def run_selected_checks(
         "pad_grid": checker.check_pad_grid_alignment,
         "placement": checker.check_footprint_placement,
         "silkscreen": checker.check_silkscreen,
+        "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
         "zones": checker.check_zones,
     }
