@@ -46,9 +46,7 @@ JOB_NAME = "routed-pcb-drc-check"
 
 def _load_helper_module():
     """Import scripts/ci/check_routed_drc.py as a module."""
-    spec = importlib.util.spec_from_file_location(
-        "check_routed_drc", HELPER_SCRIPT_PATH
-    )
+    spec = importlib.util.spec_from_file_location("check_routed_drc", HELPER_SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["check_routed_drc"] = module
@@ -104,7 +102,11 @@ class TestWorkflowYAML:
         breaks the diff with 'unknown revision'."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         checkout = next(
-            (s for s in steps if isinstance(s, dict) and s.get("uses", "").startswith("actions/checkout")),
+            (
+                s
+                for s in steps
+                if isinstance(s, dict) and s.get("uses", "").startswith("actions/checkout")
+            ),
             None,
         )
         assert checkout is not None, "routed-pcb-drc-check must use actions/checkout"
@@ -118,11 +120,7 @@ class TestWorkflowYAML:
         the call site prevents an inadvertent refactor (e.g., to inline
         bash) from silently dropping the allowlist comparison."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
-        run_blocks = [
-            s.get("run", "")
-            for s in steps
-            if isinstance(s, dict) and "run" in s
-        ]
+        run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
         assert "scripts/ci/check_routed_drc.py" in joined, (
             "routed-pcb-drc-check must invoke scripts/ci/check_routed_drc.py "
@@ -138,10 +136,7 @@ class TestWorkflowYAML:
         ``uv sync`` + ``kct check`` cost unnecessarily."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         guarded = [
-            s for s in steps
-            if isinstance(s, dict)
-            and "if" in s
-            and "files" in str(s["if"])
+            s for s in steps if isinstance(s, dict) and "if" in s and "files" in str(s["if"])
         ]
         assert guarded, (
             "Expected at least one step guarded by `if: "
@@ -170,9 +165,7 @@ class TestAllowlist:
 
     @pytest.fixture
     def allowlist_data(self) -> dict:
-        assert ALLOWLIST_PATH.is_file(), (
-            f"Allowlist file expected at {ALLOWLIST_PATH}"
-        )
+        assert ALLOWLIST_PATH.is_file(), f"Allowlist file expected at {ALLOWLIST_PATH}"
         with ALLOWLIST_PATH.open() as f:
             return yaml.safe_load(f)
 
@@ -199,9 +192,7 @@ class TestAllowlist:
             assert isinstance(value, int) and not isinstance(value, bool), (
                 f"Allowlist value for {key!r} must be an int, got {type(value).__name__}"
             )
-            assert value >= 0, (
-                f"Allowlist value for {key!r} must be non-negative, got {value}"
-            )
+            assert value >= 0, f"Allowlist value for {key!r} must be non-negative, got {value}"
 
     def test_allowlist_files_exist_on_disk(self, allowlist_data: dict) -> None:
         """A grandfather entry pointing at a missing file is dead config --

@@ -73,9 +73,7 @@ def load_allowlist(allowlist_path: Path) -> dict[str, int]:
     result: dict[str, int] = {}
     for key, value in tolerances.items():
         if not isinstance(key, str):
-            raise ValueError(
-                f"Allowlist {allowlist_path}: key {key!r} must be a string path"
-            )
+            raise ValueError(f"Allowlist {allowlist_path}: key {key!r} must be a string path")
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(
                 f"Allowlist {allowlist_path}: value for {key!r} must be a "
@@ -137,9 +135,7 @@ def count_errors(pcb_path: Path) -> int:
     summary = data.get("summary", {})
     errors = summary.get("errors")
     if not isinstance(errors, int):
-        raise RuntimeError(
-            f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}"
-        )
+        raise RuntimeError(f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}")
     return errors
 
 
