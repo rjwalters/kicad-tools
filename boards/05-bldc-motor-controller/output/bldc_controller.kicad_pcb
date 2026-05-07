@@ -68,16 +68,16 @@
 		)
 		(fill none)
 		(layer "Edge.Cuts")
-		(uuid "da8e53d5-13b4-482e-a263-525cf6524dba")
+		(uuid "6bc59d6b-0d73-4257-8bc6-5d8f9f41800a")
 	)
 	(footprint "MountingHole:MountingHole_3.2mm_M3"
 		(layer "F.Cu")
-		(uuid "64ebc5ef-1b90-4b50-8cbe-b88091617d14")
+		(uuid "5e74465e-02a3-4e46-8a0b-6f073eb01c2b")
 		(at 103.0 103.0)
 		(fp_text reference "MH1"
 			(at 0 -3)
 			(layer "F.SilkS")
-			(uuid "001c0ce8-9ada-402d-a4cc-a9c5629c54d9")
+			(uuid "fcc99ac6-456c-49b6-a7b2-0622f0efa126")
 			(effects
 				(font
 					(size 1 1)
@@ -88,7 +88,7 @@
 		(fp_text value "MountingHole"
 			(at 0 3)
 			(layer "F.Fab")
-			(uuid "d25ee671-b6a4-462e-aafe-1ab758c37b5f")
+			(uuid "af4e3c68-8ee7-4706-9e07-bc4aa06067bd")
 			(effects
 				(font
 					(size 1 1)
@@ -106,12 +106,12 @@
 	)
 	(footprint "MountingHole:MountingHole_3.2mm_M3"
 		(layer "F.Cu")
-		(uuid "c62af9a1-706f-4193-9abc-f33cd8ad64ed")
+		(uuid "cc6a00f1-ff21-4ecc-94b5-687cd0bb93ab")
 		(at 167.0 103.0)
 		(fp_text reference "MH2"
 			(at 0 -3)
 			(layer "F.SilkS")
-			(uuid "38291e29-eeb2-492d-b27f-e91325d1b08f")
+			(uuid "61ea5c59-8023-4229-af1a-a8620a5356c2")
 			(effects
 				(font
 					(size 1 1)
@@ -122,7 +122,7 @@
 		(fp_text value "MountingHole"
 			(at 0 3)
 			(layer "F.Fab")
-			(uuid "9ed7c452-40b4-4970-874f-d82d6eabf65c")
+			(uuid "574c947f-6d9f-40aa-a1ff-de2ce83a36b4")
 			(effects
 				(font
 					(size 1 1)
@@ -140,12 +140,12 @@
 	)
 	(footprint "MountingHole:MountingHole_3.2mm_M3"
 		(layer "F.Cu")
-		(uuid "bde33492-ef17-427b-81ab-4d64d0da9bdc")
+		(uuid "dba9d559-a107-4f63-982b-f0d955e5c919")
 		(at 103.0 187.0)
 		(fp_text reference "MH3"
 			(at 0 -3)
 			(layer "F.SilkS")
-			(uuid "49445cb0-c694-4140-b387-bfdf0056e0d0")
+			(uuid "7d0c261b-73ac-4fae-84d1-6970f43ea79b")
 			(effects
 				(font
 					(size 1 1)
@@ -156,7 +156,7 @@
 		(fp_text value "MountingHole"
 			(at 0 3)
 			(layer "F.Fab")
-			(uuid "6b545cd6-01d8-4f1e-aa8b-e9985fda0cc3")
+			(uuid "ffcd52bf-ae6f-417e-b426-bb59c11e1e46")
 			(effects
 				(font
 					(size 1 1)
@@ -174,12 +174,12 @@
 	)
 	(footprint "MountingHole:MountingHole_3.2mm_M3"
 		(layer "F.Cu")
-		(uuid "63b4b282-2f54-4cbd-8d1c-9081bba109b3")
+		(uuid "3f4f327b-16d1-47d2-8bba-5cd866178f77")
 		(at 167.0 187.0)
 		(fp_text reference "MH4"
 			(at 0 -3)
 			(layer "F.SilkS")
-			(uuid "d248d0f6-f69a-440e-826e-cfa392ba2e08")
+			(uuid "d6d2959a-c91b-4b6f-8fa5-8889bca2f5ad")
 			(effects
 				(font
 					(size 1 1)
@@ -190,7 +190,7 @@
 		(fp_text value "MountingHole"
 			(at 0 3)
 			(layer "F.Fab")
-			(uuid "b6d5b390-5d51-409f-b02c-8da6854f7b45")
+			(uuid "9b4dead4-bba7-4957-90fb-530dd34cb301")
 			(effects
 				(font
 					(size 1 1)
@@ -208,12 +208,12 @@
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
 		(layer "F.Cu")
-		(uuid "4a6567df-acc4-45f7-828c-65818a660ada")
+		(uuid "a3b97b77-df0d-4cce-b681-1bccd43cbc95")
 		(at 105.0 108.0)
 		(fp_text reference "J1"
 			(at 0 -3.5)
 			(layer "F.SilkS")
-			(uuid "f05a9d8e-69f8-47f3-b66e-d208ee0e1fd6")
+			(uuid "4935f273-98b9-4f18-811b-192a387279b9")
 			(effects
 				(font
 					(size 1 1)
@@ -224,7 +224,7 @@
 		(fp_text value "Power Input"
 			(at 0 3.5)
 			(layer "F.Fab")
-			(uuid "0a40279a-dbc9-4e00-8867-1568f2985c70")
+			(uuid "b83dd4dc-0b9f-42aa-afc6-172075b76dc9")
 			(effects
 				(font
 					(size 1 1)
@@ -249,12 +249,12 @@
 	)
 	(footprint "Fuse:Fuse_1206_3216Metric"
 		(layer "F.Cu")
-		(uuid "3fc998f0-3cce-457c-ba97-0795bf405e5b")
+		(uuid "cb7dfa44-e71f-45ca-879b-d6a991c3baa0")
 		(at 114.0 108.0)
 		(fp_text reference "F1"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "dbaecf5b-61ce-4827-aeca-530f6604b625")
+			(uuid "10152043-ccf9-4e09-8612-73ed2fc401cd")
 			(effects
 				(font
 					(size 1 1)
@@ -265,7 +265,7 @@
 		(fp_text value "15A"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "e2fa4a1e-66c7-4b3a-8eec-bbd18f1a4be2")
+			(uuid "dd76dece-8deb-4e5b-b923-9ad337cc3731")
 			(effects
 				(font
 					(size 1 1)
@@ -290,12 +290,12 @@
 	)
 	(footprint "Diode_SMD:D_SMA"
 		(layer "F.Cu")
-		(uuid "8e8c6f03-beda-4a6e-8c95-96020317ee0a")
+		(uuid "1c050840-b5be-49c2-a938-ec408e263e07")
 		(at 122.0 108.0)
 		(fp_text reference "D1"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "f9a4484c-9b1e-4f8c-87c0-e6f10d172bae")
+			(uuid "fd5aaa3a-427f-46bd-a598-cd6911e32773")
 			(effects
 				(font
 					(size 1 1)
@@ -306,7 +306,7 @@
 		(fp_text value "SMBJ24A"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "05999354-ac20-4297-9f65-cc10f3808b9d")
+			(uuid "75eaff83-0af3-4ef4-8a60-954b40a5ccf1")
 			(effects
 				(font
 					(size 1 1)
@@ -331,12 +331,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "04fdb291-cdcc-4261-8b85-cde7d53eb018")
+		(uuid "3f97939a-b7f5-4647-939c-8d578d2be093")
 		(at 130.0 108.0)
 		(fp_text reference "C1"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "d0c04fd7-4841-40bc-a028-78e8823e85df")
+			(uuid "f95b1923-753d-4e50-bd3a-85aa53821735")
 			(effects
 				(font
 					(size 1 1)
@@ -347,7 +347,7 @@
 		(fp_text value "470uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "e8449da9-0f28-4f0f-b762-e041646aed9f")
+			(uuid "869d5abc-c4ad-4293-8331-1f1a301eda1d")
 			(effects
 				(font
 					(size 1 1)
@@ -372,12 +372,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "e6b18e1b-9719-4d80-b454-1c92a10d96f9")
+		(uuid "635742c5-57b0-4db8-973b-6421ca1c5cf1")
 		(at 130.0 114.0)
 		(fp_text reference "C2"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "62b02b8e-38f8-42e7-86e5-1e0053d1ed78")
+			(uuid "31ec3f49-e865-4a56-810b-ffa39516281b")
 			(effects
 				(font
 					(size 1 1)
@@ -388,7 +388,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "ffb15a54-6c01-4de2-9da9-f71ba63997bc")
+			(uuid "70c2107b-4d4a-4cf3-b2af-2bda8053a734")
 			(effects
 				(font
 					(size 1 1)
@@ -413,12 +413,12 @@
 	)
 	(footprint "Package_TO_SOT_SMD:TO-263-5_TabPin3"
 		(layer "F.Cu")
-		(uuid "daae9533-82fb-4cdf-b1d0-9776ddd6f9ac")
+		(uuid "02bea1ff-a1ca-44d0-a754-f4828b59f573")
 		(at 112.0 122.0)
 		(fp_text reference "U1"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "1b254e88-996f-42c8-9bf5-f89cb94d4673")
+			(uuid "f22f548d-4e3f-40d8-b2e6-61a834b11255")
 			(effects
 				(font
 					(size 1 1)
@@ -429,7 +429,7 @@
 		(fp_text value "LM2596-5.0"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "d4868f6d-917e-4d0d-9a07-ccfbfacec260")
+			(uuid "84311246-8520-4c0b-966f-cc8ac2cef8cd")
 			(effects
 				(font
 					(size 1 1)
@@ -470,12 +470,12 @@
 	)
 	(footprint "Inductor_SMD:L_1210_3225Metric"
 		(layer "F.Cu")
-		(uuid "368b0fa5-7e3b-440a-bf23-6152cdeb8d13")
+		(uuid "46249e26-6ebd-4a97-832a-8f03b0c01b34")
 		(at 126.0 122.0)
 		(fp_text reference "L1"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "d576d992-41cb-4ea3-85de-0d6a093999a2")
+			(uuid "8f507268-bf7f-4500-8cc7-4015b3d36ba6")
 			(effects
 				(font
 					(size 1 1)
@@ -486,7 +486,7 @@
 		(fp_text value "33uH"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "4599579a-ccb1-47d3-9b04-a29af10b70a6")
+			(uuid "f791c07b-4c45-4d0c-8843-4bf82b410a4d")
 			(effects
 				(font
 					(size 1 1)
@@ -511,12 +511,12 @@
 	)
 	(footprint "Diode_SMD:D_SMA"
 		(layer "F.Cu")
-		(uuid "a330905c-86f5-4ecb-b3a8-14c4f1240eb1")
+		(uuid "fcc0df83-d6b4-473d-8eb1-5a64157e1100")
 		(at 119.0 130.0)
 		(fp_text reference "D2"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "dcc87d7b-e052-402c-a056-597904b56525")
+			(uuid "ea8b2bba-3f75-4a5d-9c90-acffcb1518d7")
 			(effects
 				(font
 					(size 1 1)
@@ -527,7 +527,7 @@
 		(fp_text value "SS34"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "f61cf845-ca0c-4a40-bb0d-0c5d47072517")
+			(uuid "0aa7d557-458e-4b5b-ab04-cd54d69e68d7")
 			(effects
 				(font
 					(size 1 1)
@@ -552,12 +552,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "c8cb4c44-40f9-43e8-9d79-0025c201733a")
+		(uuid "aa61e27a-344b-4c74-82a2-12f26e3fbe19")
 		(at 106.0 130.0)
 		(fp_text reference "C3"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "7a1223f1-d7df-4739-b828-2e9b2a3f5356")
+			(uuid "0b08fa7c-8624-4cc5-a5ea-735e992648b6")
 			(effects
 				(font
 					(size 1 1)
@@ -568,7 +568,7 @@
 		(fp_text value "220uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "3011036a-e9b1-4a99-a304-cfd654cc92c1")
+			(uuid "6cb74016-2e0d-4198-9176-1168ed18fd82")
 			(effects
 				(font
 					(size 1 1)
@@ -593,12 +593,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "df7536b2-fc6c-4c65-ac99-1c1a1db9cb33")
+		(uuid "a5a97827-6425-45e9-a1ef-542289de217d")
 		(at 130.0 130.0)
 		(fp_text reference "C4"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "c89998e5-294c-4899-94f0-a4f7a1ecb327")
+			(uuid "dc05586f-4c89-4399-87af-e7c71ae1e801")
 			(effects
 				(font
 					(size 1 1)
@@ -609,7 +609,7 @@
 		(fp_text value "220uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "34cd61a6-6c87-40f5-bef9-04261e15fa2a")
+			(uuid "7bf6f8f2-3da7-4dde-b8e7-c07cbb27da29")
 			(effects
 				(font
 					(size 1 1)
@@ -634,12 +634,12 @@
 	)
 	(footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
 		(layer "F.Cu")
-		(uuid "02790f6e-b0fa-47db-9de6-08e01f0671be")
+		(uuid "bba3421c-8b5d-40dc-9659-6165bd632fd1")
 		(at 144.0 122.0)
 		(fp_text reference "U2"
 			(at 0 -4)
 			(layer "F.SilkS")
-			(uuid "f447c97e-59e7-4f85-ad22-0e62313da43c")
+			(uuid "0673dbd9-7fd3-4146-82a0-6a348cbf803b")
 			(effects
 				(font
 					(size 1 1)
@@ -650,7 +650,7 @@
 		(fp_text value "AMS1117-3.3"
 			(at 0 4)
 			(layer "F.Fab")
-			(uuid "1b300c13-eaf8-4e32-9f60-a1998839849e")
+			(uuid "d0c6d420-a815-41f1-872c-32ae3ba10962")
 			(effects
 				(font
 					(size 1 1)
@@ -685,12 +685,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "c204cd8a-2267-4f26-877c-8ffa95bc18e5")
+		(uuid "7ed6773f-3dbe-4198-b33b-04de8f629249")
 		(at 138.0 130.0)
 		(fp_text reference "C5"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "34071ba3-794c-4c97-aaba-067cc3f5db9b")
+			(uuid "557ee7fe-d017-442b-972a-add95e36b5bd")
 			(effects
 				(font
 					(size 1 1)
@@ -701,7 +701,7 @@
 		(fp_text value "10uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "f8b80bde-472c-4235-adf7-3edc30bf0f31")
+			(uuid "1dad9d54-a8d9-4d36-8a14-f0929ebca9c3")
 			(effects
 				(font
 					(size 1 1)
@@ -726,12 +726,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "57a6e16a-9f59-493b-b763-f3900d3ba061")
+		(uuid "9ad211c2-880c-469b-9c93-3890a6ea592d")
 		(at 150.0 130.0)
 		(fp_text reference "C6"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "4db83653-cd6c-469f-a0c0-0c6501b3c6e8")
+			(uuid "38cc9b1a-ecbe-48aa-aa31-cc09f84710b4")
 			(effects
 				(font
 					(size 1 1)
@@ -742,7 +742,7 @@
 		(fp_text value "10uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "a29e7f08-5ec5-4013-aed3-f30e72514bc9")
+			(uuid "6d70ea1c-56a5-4a97-a426-cd026c0dc078")
 			(effects
 				(font
 					(size 1 1)
@@ -767,12 +767,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "b0236f33-9ce1-4b9b-99f5-305144e16e2b")
+		(uuid "f1cbf351-685b-4307-9931-0a08bf5bf264")
 		(at 134.0 137.0)
 		(fp_text reference "C7"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "f9e5c3ad-bbf8-42c9-b64e-e4da1b73ef32")
+			(uuid "a65ef877-e851-4ddf-a456-4a1840253285")
 			(effects
 				(font
 					(size 1 1)
@@ -783,7 +783,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "b90e46f2-bd48-4fab-8f02-1ab702010832")
+			(uuid "ea5796fb-0187-4829-a52e-6d6439ee0311")
 			(effects
 				(font
 					(size 1 1)
@@ -808,12 +808,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "f2f42871-30b7-4241-9ef2-b33782ae2f02")
+		(uuid "177db108-41ce-4c61-8925-5b6537a327d9")
 		(at 140.0 137.0)
 		(fp_text reference "C8"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "09c573d1-40b8-486c-99b6-0e5019804591")
+			(uuid "dc652881-5518-47b7-b07b-437658f4bb0d")
 			(effects
 				(font
 					(size 1 1)
@@ -824,7 +824,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "97400596-0404-4e50-b72f-09a0bdb2a5e0")
+			(uuid "ab310e86-7ae8-4be2-bd2c-bce8c70b86bf")
 			(effects
 				(font
 					(size 1 1)
@@ -849,12 +849,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "447b7bc4-b062-4fe3-96fc-b8fe6576728b")
+		(uuid "b06a17a1-0a91-4105-9a8f-f88e4b2e8791")
 		(at 146.0 137.0)
 		(fp_text reference "C9"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "b5150861-3b14-4022-b00f-6b88e4d17263")
+			(uuid "fb6acd50-cfdd-4f0c-8744-d6f6642071a3")
 			(effects
 				(font
 					(size 1 1)
@@ -865,7 +865,7 @@
 		(fp_text value "4.7uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "b01551eb-c959-43f1-aa55-aae957ac8201")
+			(uuid "278a3ae1-4b5c-47be-a786-bdcb814950e4")
 			(effects
 				(font
 					(size 1 1)
@@ -890,12 +890,12 @@
 	)
 	(footprint "Crystal:Crystal_HC49-4H_Vertical"
 		(layer "F.Cu")
-		(uuid "c2f30b59-7f7e-4ef4-ab90-aaf366e1eadc")
+		(uuid "4728a636-0ced-4c01-8c1a-7b9612f84670")
 		(at 152.0 137.0)
 		(fp_text reference "Y1"
 			(at 0 -3)
 			(layer "F.SilkS")
-			(uuid "41f2029c-a89f-494d-a9e0-5daee364f4b1")
+			(uuid "bc9d6461-2ed8-4724-b909-2202130254fc")
 			(effects
 				(font
 					(size 1 1)
@@ -906,7 +906,7 @@
 		(fp_text value "8MHz"
 			(at 0 3)
 			(layer "F.Fab")
-			(uuid "9a26325c-b638-4d6a-a6c6-83af46903c74")
+			(uuid "a60c184e-4f20-4dff-b459-8db5e9b6ecb8")
 			(effects
 				(font
 					(size 1 1)
@@ -931,12 +931,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "42771a55-ee7b-48dc-bf31-a476601a7aa1")
+		(uuid "72356e74-bbc4-4f70-9e34-974adf6999a8")
 		(at 160.0 137.0)
 		(fp_text reference "C10"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "ef023cd7-b808-4bd0-9410-73d82600e9ee")
+			(uuid "26bdc803-ede5-4db0-be00-a3992081b6c8")
 			(effects
 				(font
 					(size 1 1)
@@ -947,7 +947,7 @@
 		(fp_text value "20pF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "58f9d88c-ea41-4e12-a638-93d1c4ef3f83")
+			(uuid "0c0596d6-24e9-424c-8a31-efe8040ed749")
 			(effects
 				(font
 					(size 1 1)
@@ -972,12 +972,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "9b08543e-5249-47e8-833d-a63fa795bdfc")
+		(uuid "a8c6a564-7788-4093-b13e-b489ab1a219b")
 		(at 160.0 143.0)
 		(fp_text reference "C11"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "e0c1b0f6-b6d8-46a2-b022-aab3a6519b06")
+			(uuid "be5b2689-7a95-4cda-87b0-af60c27cc2c4")
 			(effects
 				(font
 					(size 1 1)
@@ -988,7 +988,7 @@
 		(fp_text value "20pF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "9af7bd63-7558-413c-89cb-b4d8bd1dfa48")
+			(uuid "ef8bf0d1-799f-4b2a-b998-56bd4359ce27")
 			(effects
 				(font
 					(size 1 1)
@@ -1013,12 +1013,12 @@
 	)
 	(footprint "Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm"
 		(layer "F.Cu")
-		(uuid "9a64f9f4-a8d0-459b-882c-94491d2d0ffe")
+		(uuid "dfd21a7b-1cc8-46bb-b524-6a65d6af8b17")
 		(at 114.0 150.0)
 		(fp_text reference "U3"
 			(at 0 -8)
 			(layer "F.SilkS")
-			(uuid "6512e1c3-9fea-4f1d-bfc9-d7b1b6345306")
+			(uuid "06ee06bb-3a3a-4ec9-98bb-040c535219da")
 			(effects
 				(font
 					(size 1 1)
@@ -1029,7 +1029,7 @@
 		(fp_text value "DRV8301"
 			(at 0 8)
 			(layer "F.Fab")
-			(uuid "dd9c4d4e-2104-42e3-9131-4fe585ab89d9")
+			(uuid "6b7b5a60-769f-4be7-afc3-d75e8afcc605")
 			(effects
 				(font
 					(size 1 1)
@@ -1438,12 +1438,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "766f705e-e039-4422-b1b5-0c0eef06baf3")
+		(uuid "5afb8d4c-63ca-4f30-be37-86a38d0461bf")
 		(at 104.0 147.0)
 		(fp_text reference "C12"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "906ef397-4dbc-43a6-942c-f425526ef2ca")
+			(uuid "6c8b42f8-6e2e-4ba8-b00b-217086683ed0")
 			(effects
 				(font
 					(size 1 1)
@@ -1454,7 +1454,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "5eef293b-488a-4bda-b029-bf12cdab9967")
+			(uuid "ca1a8bf5-f896-4a51-a84d-0535264dc84f")
 			(effects
 				(font
 					(size 1 1)
@@ -1479,12 +1479,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "d4a1c42c-b645-451e-abce-8a1a94f8afa9")
+		(uuid "82b79506-4ae1-4546-9db8-9bfb8182df75")
 		(at 104.0 153.0)
 		(fp_text reference "C13"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "f7e34c0d-d4b4-4ba0-b25e-85d4168b0f65")
+			(uuid "8251bd2b-9d29-4f9e-82f0-4646a408a3fe")
 			(effects
 				(font
 					(size 1 1)
@@ -1495,7 +1495,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "7f5a16a6-e7c5-4651-9da9-32fd96481ead")
+			(uuid "1887df9b-be80-4889-a36f-347ad640360a")
 			(effects
 				(font
 					(size 1 1)
@@ -1520,12 +1520,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "546509ea-9f09-4d22-8e62-373892cb2e83")
+		(uuid "2fe1a374-8424-4d8c-a3f5-8380c19e1e41")
 		(at 104.0 159.0)
 		(fp_text reference "C14"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "6d5d5901-2fa3-41d9-8592-9f6f56ef95f4")
+			(uuid "59593cba-3938-4fdd-8a4d-42006690c3d6")
 			(effects
 				(font
 					(size 1 1)
@@ -1536,7 +1536,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "530694a3-bce7-490a-8df7-fbac42bc5e7e")
+			(uuid "dcf7f903-150a-4b7d-a369-f5176daa60ee")
 			(effects
 				(font
 					(size 1 1)
@@ -1561,12 +1561,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "29d415bb-2f76-4908-8cc5-cf85a77898c0")
+		(uuid "fea824ce-6d75-4469-bcda-6974f7ee7911")
 		(at 124.0 147.0)
 		(fp_text reference "C15"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "76fa1037-aba6-4409-8de1-e17513bd5f6b")
+			(uuid "42dd53e5-8f58-4b86-8146-9198bdaae26a")
 			(effects
 				(font
 					(size 1 1)
@@ -1577,7 +1577,7 @@
 		(fp_text value "100nF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "e2bce809-205f-4aae-bac0-adab7dfa069d")
+			(uuid "91733ba6-55ff-43b0-ab8f-0f29a9c8bd76")
 			(effects
 				(font
 					(size 1 1)
@@ -1602,12 +1602,12 @@
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "66ac70a9-ec4b-4f8c-862a-4895d82ebbf0")
+		(uuid "1d943185-006e-4de3-aea5-03f2b10aeec6")
 		(at 124.0 153.0)
 		(fp_text reference "C16"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "21e97285-917e-432e-a2fb-2a5ba2fdf878")
+			(uuid "a6dd4c63-2b1c-4004-ac3a-e0a67accd67f")
 			(effects
 				(font
 					(size 1 1)
@@ -1618,7 +1618,7 @@
 		(fp_text value "10uF"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "1e8fb45f-b730-471b-9262-28d63a773abe")
+			(uuid "391f38e1-4816-4044-83ac-4a5de7372ab8")
 			(effects
 				(font
 					(size 1 1)
@@ -1643,12 +1643,12 @@
 	)
 	(footprint "Package_QFP:LQFP-32_7x7mm_P0.8mm"
 		(layer "F.Cu")
-		(uuid "503c4946-f957-416d-a713-8ebcdf69bf8f")
+		(uuid "fcbdac4d-399d-4da8-8e80-27ef8d6246b1")
 		(at 140.0 150.0)
 		(fp_text reference "U10"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "6b42a522-36ce-43d6-b2b1-2ad65ff67d1a")
+			(uuid "20c547a4-b88a-40fa-be2d-0c15097b7e4a")
 			(effects
 				(font
 					(size 1 1)
@@ -1659,7 +1659,7 @@
 		(fp_text value "STM32G431K8Tx"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "907b2d6a-928f-474e-99d9-a0170ce1b376")
+			(uuid "844a20fa-9db4-4543-8b98-43168670f5a9")
 			(effects
 				(font
 					(size 1 1)
@@ -1894,12 +1894,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "375e9552-8250-4675-81be-4570fc03528d")
+		(uuid "5189f10b-9262-4e1c-94d8-211589c09fd8")
 		(at 108.0 168.0)
 		(fp_text reference "Q1"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "2be30b52-518e-480a-9a9d-888907da4c18")
+			(uuid "6a41d957-eaf5-489b-be97-395bafd1c5b1")
 			(effects
 				(font
 					(size 1 1)
@@ -1910,7 +1910,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "10b30dc2-276a-41d9-89bc-c60987520517")
+			(uuid "55586054-2618-4f40-889e-4cf07467a197")
 			(effects
 				(font
 					(size 1 1)
@@ -1942,12 +1942,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "cc6e0762-3470-4fb8-9e84-7821d4c4a37f")
+		(uuid "8d2ed7a8-ef5a-424f-a1a1-08a2f0998c74")
 		(at 108.0 176.0)
 		(fp_text reference "Q2"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "44def5c7-bd87-42ca-8e92-f819bb0480d3")
+			(uuid "3de6d0b2-7e0a-4ca8-822b-12ec1c2527a0")
 			(effects
 				(font
 					(size 1 1)
@@ -1958,7 +1958,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "6bffe22a-4324-44e7-b5f6-74a4083046aa")
+			(uuid "501d8e38-0fe2-44d5-85be-b992cc075231")
 			(effects
 				(font
 					(size 1 1)
@@ -1990,12 +1990,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "700fd8f1-67db-4355-95e4-935e8d66039e")
+		(uuid "48033827-44b0-4821-9518-16050a4ed85a")
 		(at 124.0 168.0)
 		(fp_text reference "Q3"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "63d3a75d-0774-4143-ab73-e109307ec48c")
+			(uuid "731b15c9-ecc3-4f11-9d6c-04480e5a1695")
 			(effects
 				(font
 					(size 1 1)
@@ -2006,7 +2006,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "40f07ffc-1393-4400-9884-f29880c38caf")
+			(uuid "276bc7f7-9acf-4b07-9625-08bfcb1d75a0")
 			(effects
 				(font
 					(size 1 1)
@@ -2038,12 +2038,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "e9833460-e94c-4f2e-9cbe-07b8a01af6dc")
+		(uuid "0c7cb58d-da7f-454a-8bc9-30694f08ae8f")
 		(at 124.0 176.0)
 		(fp_text reference "Q4"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "755923ff-0c68-4e04-92c2-2531eeb5721c")
+			(uuid "7d1126a4-8f95-4b4b-9cda-4ad9dd9a2250")
 			(effects
 				(font
 					(size 1 1)
@@ -2054,7 +2054,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "531f43fa-1d89-4383-b629-0a28236443bf")
+			(uuid "e74fee93-b490-4fba-a136-2c14d2e34485")
 			(effects
 				(font
 					(size 1 1)
@@ -2086,12 +2086,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "30776a78-e4e9-4669-8212-e717768e4f67")
+		(uuid "870e8422-da99-4095-a9a8-2deb2d914d15")
 		(at 140.0 168.0)
 		(fp_text reference "Q5"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "a464ce1a-ded4-42d2-880c-6136209ed8bb")
+			(uuid "22e5b2fd-e203-4e40-be17-6fa86ed54110")
 			(effects
 				(font
 					(size 1 1)
@@ -2102,7 +2102,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "88699c2a-5095-4f49-a66f-52e423d1674d")
+			(uuid "60fda026-21b4-4c6e-80de-af18f14ab231")
 			(effects
 				(font
 					(size 1 1)
@@ -2134,12 +2134,12 @@
 	)
 	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
 		(layer "F.Cu")
-		(uuid "4a097d1d-dedd-4b02-8439-2094a7fd05b0")
+		(uuid "15f07941-644a-477b-a07a-2b4700992ef1")
 		(at 140.0 176.0)
 		(fp_text reference "Q6"
 			(at 0 -5)
 			(layer "F.SilkS")
-			(uuid "aa330e8c-d22b-40ad-8db7-4ff14b7d687d")
+			(uuid "9c53e7c4-97ea-4e39-a3ad-d5da6ae96d49")
 			(effects
 				(font
 					(size 1 1)
@@ -2150,7 +2150,7 @@
 		(fp_text value "IRLZ44N"
 			(at 0 5)
 			(layer "F.Fab")
-			(uuid "7e12da0f-6945-43d6-bf60-fecc4055f819")
+			(uuid "c8074d3b-0072-4383-8b1b-af1e342dd91d")
 			(effects
 				(font
 					(size 1 1)
@@ -2182,12 +2182,12 @@
 	)
 	(footprint "Resistor_SMD:R_2512_6332Metric"
 		(layer "F.Cu")
-		(uuid "0f35368e-418f-4042-976e-a10b1b009ca2")
+		(uuid "d18c4bff-3eef-4fcc-a516-5e1782a167b7")
 		(at 108.0 184.0)
 		(fp_text reference "R10"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "9be10934-49f0-4a41-b8b7-27c16ffee82b")
+			(uuid "b7c730e9-0b5a-4da1-b9a1-d1376d495223")
 			(effects
 				(font
 					(size 1 1)
@@ -2198,7 +2198,7 @@
 		(fp_text value "5mR"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "5d5ee312-7dcc-42e5-b8c9-747b0455a565")
+			(uuid "bdfe26f0-adc3-4b5c-9e00-9a76d1006197")
 			(effects
 				(font
 					(size 1 1)
@@ -2223,12 +2223,12 @@
 	)
 	(footprint "Resistor_SMD:R_2512_6332Metric"
 		(layer "F.Cu")
-		(uuid "64ea209d-e603-431a-b6dd-5ecd0d74e953")
+		(uuid "4c4f802f-f842-4486-9156-9114fbd87c0c")
 		(at 124.0 184.0)
 		(fp_text reference "R11"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "cbcfb4a4-95db-461f-a488-92b301882102")
+			(uuid "61adc9d8-2ee8-469a-9fff-49c45fccf066")
 			(effects
 				(font
 					(size 1 1)
@@ -2239,7 +2239,7 @@
 		(fp_text value "5mR"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "81a408a0-b286-45fc-8dd9-f97549f2ab9e")
+			(uuid "346e2466-b983-49e0-9200-fca709d80dcd")
 			(effects
 				(font
 					(size 1 1)
@@ -2264,12 +2264,12 @@
 	)
 	(footprint "Resistor_SMD:R_2512_6332Metric"
 		(layer "F.Cu")
-		(uuid "123694c6-2a99-4db6-88d1-3d9f982cd486")
+		(uuid "f6b6b28a-a407-467a-a55d-0f4d37ce714f")
 		(at 140.0 184.0)
 		(fp_text reference "R12"
 			(at 0 -2)
 			(layer "F.SilkS")
-			(uuid "f409cc87-64c2-483c-9d65-97d3dbac14de")
+			(uuid "78370c14-3a7b-4818-91f7-638349b9dc40")
 			(effects
 				(font
 					(size 1 1)
@@ -2280,7 +2280,7 @@
 		(fp_text value "5mR"
 			(at 0 2)
 			(layer "F.Fab")
-			(uuid "903d72ff-cbbb-4e2e-accc-959a8e89d13e")
+			(uuid "2547d2e7-4508-44fa-b275-2b9e7ca200dc")
 			(effects
 				(font
 					(size 1 1)
@@ -2305,12 +2305,12 @@
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"
 		(layer "F.Cu")
-		(uuid "0b0d92ce-8e60-45ec-9b9d-686642c495d6")
+		(uuid "e039ea3f-bd64-47f5-bb8d-3753f1cefaae")
 		(at 165.0 176.0)
 		(fp_text reference "J2"
 			(at 0 -4.8)
 			(layer "F.SilkS")
-			(uuid "ecd77671-bc79-445b-87fd-c29bea57414f")
+			(uuid "014d554e-38c6-4148-9158-ce8c506a1dd7")
 			(effects
 				(font
 					(size 1 1)
@@ -2321,7 +2321,7 @@
 		(fp_text value "Motor Output"
 			(at 0 4.8)
 			(layer "F.Fab")
-			(uuid "3715b367-d5b2-4867-b13a-421c9814b6f8")
+			(uuid "b6ff46ae-3e0d-4aa5-8585-f808d440f5d3")
 			(effects
 				(font
 					(size 1 1)
@@ -2353,12 +2353,12 @@
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical"
 		(layer "F.Cu")
-		(uuid "6c9faa5a-8295-4183-80fd-3030600524e2")
+		(uuid "7bf67ee7-e7c3-4a69-be3e-e029f39a1468")
 		(at 165.0 158.0)
 		(fp_text reference "J3"
 			(at 0 -7.3)
 			(layer "F.SilkS")
-			(uuid "e0127002-4367-4da3-8111-7cfbbdc3446b")
+			(uuid "c7fe4e56-545e-40e5-880c-e3968c5a11eb")
 			(effects
 				(font
 					(size 1 1)
@@ -2369,7 +2369,7 @@
 		(fp_text value "Hall Sensors"
 			(at 0 7.3)
 			(layer "F.Fab")
-			(uuid "0941b7c0-98e4-4f08-baca-0e1bc3bb6b26")
+			(uuid "b5b7bac4-a2d2-4e60-ab2c-ba74758cabf5")
 			(effects
 				(font
 					(size 1 1)
@@ -2415,12 +2415,12 @@
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
 		(layer "F.Cu")
-		(uuid "6f0c4f72-303c-4843-b43f-6c8aeb165fbf")
+		(uuid "4754ee39-c3d7-441c-9dbd-2bc593bf51b1")
 		(at 165.0 122.0)
 		(fp_text reference "J4"
 			(at 0 -8.6)
 			(layer "F.SilkS")
-			(uuid "f9976116-be79-4d52-a45d-e4a01e38a18e")
+			(uuid "598e177a-df63-470b-9a15-d42d06cabb55")
 			(effects
 				(font
 					(size 1 1)
@@ -2431,7 +2431,7 @@
 		(fp_text value "SWD Debug"
 			(at 0 8.6)
 			(layer "F.Fab")
-			(uuid "267b1d5c-cc84-486b-ab53-9be242c6da12")
+			(uuid "3ecdfd43-9b7f-4851-827c-c0af2c90f1c7")
 			(effects
 				(font
 					(size 1 1)
@@ -2484,12 +2484,12 @@
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "63ead8be-4c43-4d78-a86a-0db2168f2373")
+		(uuid "10aadae3-c434-414e-b2c7-4e352c151fee")
 		(at 156.0 113.0)
 		(fp_text reference "R3"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "23ddc28c-d48a-44b2-a19b-cd293fc9b7a2")
+			(uuid "60592efa-aae7-4059-88ea-a43085fcc171")
 			(effects
 				(font
 					(size 1 1)
@@ -2500,7 +2500,7 @@
 		(fp_text value "1k"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "8848d522-5413-4b6b-815a-d0b68de67af2")
+			(uuid "2b28a85f-f06f-447a-8b49-a56cb97c6638")
 			(effects
 				(font
 					(size 1 1)
@@ -2525,12 +2525,12 @@
 	)
 	(footprint "LED_SMD:LED_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "ff6df7bc-86ad-4baa-ac49-95e901ddc450")
+		(uuid "268d0b03-314d-40b1-85c2-2fbd3f0f1df8")
 		(at 156.0 108.0)
 		(fp_text reference "D3"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "b7953461-dc99-41f4-91c9-195b7d81ce31")
+			(uuid "7304065a-a49a-4016-b2f5-a27c02e35240")
 			(effects
 				(font
 					(size 1 1)
@@ -2541,7 +2541,7 @@
 		(fp_text value "LED"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "8062558a-ab3e-4ef9-9aa0-26669d91b2df")
+			(uuid "f2e1eb8f-1225-43d6-9c77-1d7e3769484a")
 			(effects
 				(font
 					(size 1 1)
@@ -2566,12 +2566,12 @@
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "9478c496-eec8-4374-983c-2bb73e5ce361")
+		(uuid "d78dab7a-cfbb-452c-9eda-242759987c79")
 		(at 162.0 113.0)
 		(fp_text reference "R4"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "e5e06e14-e589-4518-aa1b-3f5c5deace6f")
+			(uuid "72109d06-4f2a-4be1-a500-e7a88c0af769")
 			(effects
 				(font
 					(size 1 1)
@@ -2582,7 +2582,7 @@
 		(fp_text value "1k"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "c43cf62f-96de-4924-96d5-f0eab0377ef9")
+			(uuid "7170455e-62ed-491c-b5a9-1907e8872a6a")
 			(effects
 				(font
 					(size 1 1)
@@ -2607,12 +2607,12 @@
 	)
 	(footprint "LED_SMD:LED_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "f2fed1a5-77c1-4b8e-b11b-34e799cf47f4")
+		(uuid "ec13f988-1808-47e3-9482-40ff9a38a643")
 		(at 162.0 108.0)
 		(fp_text reference "D4"
 			(at 0 -1.5)
 			(layer "F.SilkS")
-			(uuid "3d5fe385-8fc1-4f77-afbc-aecd9ef610a8")
+			(uuid "736106fb-c10c-42ab-99ca-12c593391086")
 			(effects
 				(font
 					(size 1 1)
@@ -2623,7 +2623,7 @@
 		(fp_text value "LED"
 			(at 0 1.5)
 			(layer "F.Fab")
-			(uuid "8f5a443d-f3ec-4a43-b0fa-735d977823c4")
+			(uuid "2811d2a7-98ef-41e5-a807-e797b6db1861")
 			(effects
 				(font
 					(size 1 1)
@@ -2650,7 +2650,7 @@
 		(net 4)
 		(net_name "GND")
 		(layer "B.Cu")
-		(uuid "2fdfb1a3-6e9c-43ac-8ed5-7dcafe42e278")
+		(uuid "4ceb5e90-e0fd-4e62-8b57-8ae09657fd02")
 		(hatch edge 0.5)
 		(priority 1)
 		(connect_pads (clearance 0.3)
@@ -2666,7 +2666,7 @@
 		(net 1)
 		(net_name "VMOTOR")
 		(layer "F.Cu")
-		(uuid "5c1390d1-6430-4276-a446-ac88c1efe1c4")
+		(uuid "640ade76-67b4-46e9-8552-b5ad41260adb")
 		(hatch edge 0.5)
 		(priority 4)
 		(connect_pads (clearance 0.3)
@@ -2682,7 +2682,7 @@
 		(net 2)
 		(net_name "+5V")
 		(layer "F.Cu")
-		(uuid "8d745aab-676b-4dbb-940e-b21950a8819a")
+		(uuid "cd0a6905-58f2-4046-b7a3-37df91e18751")
 		(hatch edge 0.5)
 		(priority 3)
 		(connect_pads (clearance 0.3)
@@ -2698,7 +2698,7 @@
 		(net 3)
 		(net_name "+3.3V")
 		(layer "F.Cu")
-		(uuid "89ef7613-f32c-4a8f-a185-bcc2d9560e1a")
+		(uuid "2ac6dddc-0e2c-4ca5-b728-d469e4faa35c")
 		(hatch edge 0.5)
 		(priority 2)
 		(connect_pads (clearance 0.3)
@@ -2714,7 +2714,7 @@
 		(net 29)
 		(net_name "PWR_LED")
 		(layer "F.Cu")
-		(uuid "359ad84b-e280-499c-940b-2c9569ae70ac")
+		(uuid "abe478c0-3235-4cf7-b094-be836a507944")
 		(hatch edge 0.5)
 		(priority 1)
 		(connect_pads (clearance 0.3)
