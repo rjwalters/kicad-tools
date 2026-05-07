@@ -57,9 +57,7 @@ class TestRoutingAwareFlagExists:
 
         # Parse a minimal command line with --routing-aware
         # This should not raise an error if the flag exists
-        args = parser.parse_args(
-            ["placement", "optimize", "test.kicad_pcb", "--routing-aware"]
-        )
+        args = parser.parse_args(["placement", "optimize", "test.kicad_pcb", "--routing-aware"])
 
         assert hasattr(args, "routing_aware")
         assert args.routing_aware is True
@@ -70,9 +68,7 @@ class TestRoutingAwareFlagExists:
 
         parser = create_parser()
 
-        args = parser.parse_args(
-            ["placement", "optimize", "test.kicad_pcb", "--check-routability"]
-        )
+        args = parser.parse_args(["placement", "optimize", "test.kicad_pcb", "--check-routability"])
 
         assert hasattr(args, "check_routability")
         assert args.check_routability is True
@@ -286,3 +282,272 @@ class TestPlaceRouteOptimizer:
         assert result.has_placement_conflicts is False
         assert result.has_drc_violations is False
         assert result.routing_complete is False
+
+
+# =============================================================================
+# --fixed plumbing tests (issue #2537)
+# =============================================================================
+
+
+class TestFixedFlagWithRoutingAware:
+    """Tests that ``--fixed`` reaches the routing-aware path (issue #2537).
+
+    Before the fix, ``--fixed`` was parsed AFTER the routing-aware dispatch
+    so the constraint was silently dropped. These tests guard against that
+    regression at the CLI level.
+    """
+
+    def test_fixed_arg_parses_with_routing_aware(self):
+        """``--fixed`` and ``--routing-aware`` parse without conflict."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--routing-aware",
+                "--fixed",
+                "J1",
+            ]
+        )
+
+        assert args.routing_aware is True
+        assert args.fixed == "J1"
+
+    def test_fixed_arg_with_multiple_components(self):
+        """Comma-separated ``--fixed`` accumulates correctly."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--routing-aware",
+                "--fixed",
+                "J1,U1,H1",
+            ]
+        )
+
+        assert args.fixed == "J1,U1,H1"
+
+    def test_routing_aware_dispatch_receives_fixed_refs(self, tmp_path):
+        """``_cmd_optimize_routing_aware`` is called with parsed fixed_refs."""
+        import json
+        from unittest.mock import patch
+
+        from kicad_tools.cli import placement_cmd
+
+        # Create a tiny placeholder PCB so the path-existence check passes.
+        pcb_path = tmp_path / "fake.kicad_pcb"
+        pcb_path.write_text(
+            "(kicad_pcb (version 20240108) (generator test) "
+            "(generator_version 8.0) (general (thickness 1.6)) "
+            '(layers (0 "F.Cu" signal) (44 "Edge.Cuts" user)) '
+            "(setup (pad_to_mask_clearance 0)))\n"
+        )
+
+        captured: dict = {}
+
+        def fake_routing_aware(args, p, quiet, output_format, fixed_refs=None):
+            captured["fixed_refs"] = list(fixed_refs or [])
+            captured["pcb_path"] = p
+            print(json.dumps({"success": True, "captured": True}))
+            return 0
+
+        with patch.object(placement_cmd, "_cmd_optimize_routing_aware", fake_routing_aware):
+            placement_cmd.main(
+                [
+                    "optimize",
+                    str(pcb_path),
+                    "--routing-aware",
+                    "--fixed",
+                    "J1,U1",
+                    "--dry-run",
+                    "--quiet",
+                ]
+            )
+
+        assert captured.get("fixed_refs") == ["J1", "U1"]
+
+    def test_routing_aware_dispatch_default_fixed_refs_empty(self, tmp_path):
+        """Without ``--fixed``, the routing-aware path gets an empty list."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli import placement_cmd
+
+        pcb_path = tmp_path / "fake.kicad_pcb"
+        pcb_path.write_text(
+            "(kicad_pcb (version 20240108) (generator test) "
+            "(generator_version 8.0) (general (thickness 1.6)) "
+            '(layers (0 "F.Cu" signal) (44 "Edge.Cuts" user)) '
+            "(setup (pad_to_mask_clearance 0)))\n"
+        )
+
+        captured: dict = {}
+
+        def fake_routing_aware(args, p, quiet, output_format, fixed_refs=None):
+            captured["fixed_refs"] = list(fixed_refs or [])
+            return 0
+
+        with patch.object(placement_cmd, "_cmd_optimize_routing_aware", fake_routing_aware):
+            placement_cmd.main(
+                [
+                    "optimize",
+                    str(pcb_path),
+                    "--routing-aware",
+                    "--dry-run",
+                    "--quiet",
+                ]
+            )
+
+        assert captured.get("fixed_refs") == []
+
+    def test_fixed_refs_passed_to_optimizer_from_pcb(self, tmp_path, minimal_pcb):
+        """``_cmd_optimize_routing_aware`` forwards fixed_refs to from_pcb."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli import placement_cmd
+
+        captured: dict = {}
+
+        # Patch from_pcb to capture the fixed_refs kwarg without running
+        # the full optimization.
+        from kicad_tools.optim.place_route import PlaceRouteOptimizer
+
+        def fake_from_pcb(pcb, *, pcb_path=None, fixed_refs=None, **kwargs):
+            captured["fixed_refs"] = fixed_refs
+            # Build a stub optimizer that returns a successful result on
+            # ``optimize`` so the CLI saves the PCB and exits 0.
+            from unittest.mock import MagicMock
+
+            from kicad_tools.optim.workflow import OptimizationResult
+
+            stub = MagicMock(spec=PlaceRouteOptimizer)
+            stub.optimize.return_value = OptimizationResult(
+                success=True,
+                pcb_path=pcb_path,
+                routes=[],
+                iterations=1,
+                message="ok",
+            )
+            return stub
+
+        with patch.object(PlaceRouteOptimizer, "from_pcb", fake_from_pcb):
+            placement_cmd.main(
+                [
+                    "optimize",
+                    str(minimal_pcb),
+                    "--routing-aware",
+                    "--fixed",
+                    "R1,U1",
+                    "--dry-run",
+                    "--quiet",
+                ]
+            )
+
+        assert captured.get("fixed_refs") == {"R1", "U1"}
+
+
+class TestFixedRefsPositionInvariance:
+    """End-to-end tests that ``--fixed`` keeps a component's position fixed.
+
+    These tests exercise the whole optimization loop on small synthetic
+    PCBs to confirm the named component does not move regardless of
+    routing-aware / non-routing-aware dispatch.
+    """
+
+    @staticmethod
+    def _read_position(pcb_path: Path, ref: str) -> tuple[float, float]:
+        """Return ``(x, y)`` for the given component ref."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+        for fp in pcb.footprints:
+            if fp.reference == ref:
+                return (float(fp.position[0]), float(fp.position[1]))
+        raise AssertionError(f"Component {ref} not found in {pcb_path}")
+
+    def test_routing_aware_with_fixed_keeps_position(self, minimal_pcb, tmp_path):
+        """``--fixed R1 --routing-aware`` keeps R1's position unchanged.
+
+        The minimal PCB has a single resistor R1; fixing it should
+        guarantee its position is bit-identical post-optimization.
+        """
+        from kicad_tools.cli import placement_cmd
+
+        before_pos = self._read_position(minimal_pcb, "R1")
+        out_path = tmp_path / "out.kicad_pcb"
+
+        rc = placement_cmd.main(
+            [
+                "optimize",
+                str(minimal_pcb),
+                "--routing-aware",
+                "--fixed",
+                "R1",
+                "-o",
+                str(out_path),
+                "--quiet",
+            ]
+        )
+        assert rc in (0, 1)
+
+        # Optimization may not succeed on a single-component PCB, but the
+        # input must be preserved. The output is only saved if the run
+        # produced one; otherwise check the input file.
+        target = out_path if out_path.exists() else minimal_pcb
+        after_pos = self._read_position(target, "R1")
+
+        assert after_pos == before_pos, f"R1 moved from {before_pos} to {after_pos} despite --fixed"
+
+    def test_default_path_with_fixed_keeps_position(self, minimal_pcb, tmp_path):
+        """Non-routing-aware path also honors ``--fixed`` (regression guard)."""
+        from kicad_tools.cli import placement_cmd
+
+        before_pos = self._read_position(minimal_pcb, "R1")
+        out_path = tmp_path / "out.kicad_pcb"
+
+        placement_cmd.main(
+            [
+                "optimize",
+                str(minimal_pcb),
+                "--fixed",
+                "R1",
+                "-o",
+                str(out_path),
+                "--quiet",
+            ]
+        )
+
+        target = out_path if out_path.exists() else minimal_pcb
+        after_pos = self._read_position(target, "R1")
+
+        assert after_pos == before_pos
+
+    def test_routing_aware_unconstrained_path_unaffected(self, minimal_pcb, tmp_path):
+        """Without ``--fixed``, optimization runs as before (no regression).
+
+        We don't assert that R1 *did* move (a single-component PCB has
+        nothing to optimize) — only that the run completes cleanly.
+        """
+        from kicad_tools.cli import placement_cmd
+
+        out_path = tmp_path / "out.kicad_pcb"
+        rc = placement_cmd.main(
+            [
+                "optimize",
+                str(minimal_pcb),
+                "--routing-aware",
+                "-o",
+                str(out_path),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        # Should not error out due to missing fixed_refs handling.
+        assert rc in (0, 1)
