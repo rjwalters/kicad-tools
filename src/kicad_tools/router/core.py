@@ -5463,6 +5463,29 @@ class Autorouter:
 
     def _create_two_phase_router(self) -> TwoPhaseRouter:
         """Create a TwoPhaseRouter with access to Autorouter state."""
+        # Issue #2527: Provide a builder for ``pads_by_net`` that honours
+        # ``_escape_pad_overrides`` so the two-phase router's stall-recovery
+        # path sees the same virtual escape-endpoint pads the negotiated
+        # ``route_all`` path uses.  Without this the BLOCKED_BY_COMPONENT
+        # helper would receive raw pad-center coordinates and the rip-up
+        # would not connect to the actual escape-route endpoints that
+        # dense-package escape routing has already committed to the grid.
+        def _build_pads_by_net(
+            net_order: list[int],
+        ) -> dict[int, list[Pad]]:
+            mapping: dict[int, list[Pad]] = {}
+            for net in net_order:
+                if net not in self.nets:
+                    continue
+                pads_for_routing = self.nets[net]
+                if len(pads_for_routing) < 2:
+                    continue
+                mapping[net] = [
+                    self._escape_pad_overrides.get(p, self.pads[p])
+                    for p in pads_for_routing
+                ]
+            return mapping
+
         return TwoPhaseRouter(
             grid=self.grid,
             router=self.router,
@@ -5478,6 +5501,9 @@ class Autorouter:
             route_net_with_corridor=self._route_net_with_corridor,
             mark_route=self._mark_route,
             pour_nets_without_zones=self._pour_nets_without_zones,
+            attempt_blocked_component_ripup=self._attempt_blocked_component_ripup_negotiated,
+            build_pads_by_net=_build_pads_by_net,
+            get_partially_routed_nets=self._get_partially_routed_nets,
         )
 
     def route_all_two_phase(

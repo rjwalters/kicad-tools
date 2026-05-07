@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from kicad_tools.cli.progress import flush_print
 
@@ -55,6 +55,9 @@ class TwoPhaseRouter:
         route_net_with_corridor: callable,
         mark_route: callable,
         pour_nets_without_zones: set[str] | None = None,
+        attempt_blocked_component_ripup: Callable[..., Any] | None = None,
+        build_pads_by_net: Callable[..., Any] | None = None,
+        get_partially_routed_nets: Callable[..., Any] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -70,6 +73,17 @@ class TwoPhaseRouter:
         self._route_net_with_corridor = route_net_with_corridor
         self._mark_route = mark_route
         self._pour_nets_without_zones = pour_nets_without_zones or set()
+        # Issue #2527: Optional hooks that let the detailed-routing stall path
+        # invoke ``Autorouter._attempt_blocked_component_ripup_negotiated``.
+        # When the initial pass leaves overflow=0 with unrouted/partial nets
+        # (geometric / topology blocker, not congestion), the iteration loop
+        # below would otherwise short-circuit and never engage the
+        # destination-component sibling rip-up that PR #2523 wired into the
+        # negotiated route_all path.  Threading these callables in allows the
+        # two-phase path to share the same recovery mechanism.
+        self._attempt_blocked_component_ripup = attempt_blocked_component_ripup
+        self._build_pads_by_net = build_pads_by_net
+        self._get_partially_routed_nets = get_partially_routed_nets
 
     def route_all(
         self,
@@ -418,6 +432,82 @@ class TwoPhaseRouter:
 
         overflow = self.grid.get_total_overflow()
         flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
+
+        # Issue #2527: When the initial pass leaves ``overflow == 0`` but
+        # one or more nets are unrouted (or partially routed because an A*
+        # edge into a dense IC was blocked by a sibling net), the iteration
+        # loop below short-circuits on the ``overflow > 0`` guard and the
+        # destination-component sibling rip-up (``_attempt_blocked_component
+        # _ripup_negotiated``) is never invoked.  This is the exact failure
+        # signature on board 03 USB_CC1 / USB_CC2 (escape from U1 north
+        # edge collides with already-routed USB_D+/USB_D-).  Engage the
+        # helper here, before the iteration-loop guard, so the two-phase
+        # path benefits from the same recovery PR #2523 added to the
+        # ``route_all`` negotiated path.  Per-net rip-up budget is shared
+        # with the iteration loop's ``ripup_history`` (built below).
+        ripup_history: dict[int, int] = {}
+        if (
+            not timed_out
+            and overflow == 0
+            and self._attempt_blocked_component_ripup is not None
+            and self._build_pads_by_net is not None
+        ):
+            pads_by_net_local = self._build_pads_by_net(net_order)
+            partial_failed: set[int] = set()
+            if self._get_partially_routed_nets is not None:
+                partial_failed = self._get_partially_routed_nets(
+                    net_routes, pads_by_net_local
+                )
+            stall_failed = [
+                n
+                for n in net_order
+                if (n not in net_routes or n in partial_failed)
+                and n in pads_by_net_local
+                and len(pads_by_net_local[n]) >= 2
+            ]
+            if stall_failed:
+                flush_print(
+                    f"  Initial pass stall (overflow=0): {len(stall_failed)} "
+                    f"net(s) unrouted -- engaging BLOCKED_BY_COMPONENT rip-up "
+                    f"({elapsed_str()})"
+                )
+                rescued_count = 0
+                # Issue #2527: Use a per-net rip-up budget of at least 3 here
+                # (matching the negotiated ``route_all`` default).  Connector-
+                # adjacent escapes routinely need 2-3 rip-ups before they
+                # converge, and this stall path runs at most once before the
+                # iteration loop skips entirely.
+                stall_budget = 3
+                for failed_net in list(stall_failed):
+                    if check_timeout():
+                        timed_out = True
+                        break
+                    rescued = self._attempt_blocked_component_ripup(
+                        failed_net=failed_net,
+                        neg_router=neg_router,
+                        net_routes=net_routes,
+                        pads_by_net=pads_by_net_local,
+                        ripup_history=ripup_history,
+                        present_cost_factor=present_factor,
+                        max_ripups_per_net=stall_budget,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if rescued:
+                        rescued_count += 1
+                if rescued_count > 0:
+                    flush_print(
+                        f"  BLOCKED_BY_COMPONENT rip-up resolved "
+                        f"{rescued_count}/{len(stall_failed)} net(s) "
+                        f"({elapsed_str()})"
+                    )
+                    # Recompute overflow now that new routes may have been
+                    # placed by the helper -- if rip-ups introduced overflow
+                    # the iteration loop below will pick it up and converge.
+                    overflow = self.grid.get_total_overflow()
+                    flush_print(
+                        f"  Post-recovery overflow: {overflow}"
+                    )
+
 
         # Issue #2317: Track overflow history for early-stop detection.
         overflow_history: list[int] = [overflow]
