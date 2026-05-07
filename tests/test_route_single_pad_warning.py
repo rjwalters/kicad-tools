@@ -1,63 +1,72 @@
-"""Test that ``kct route`` emits a top-of-output warning for single-pad nets."""
+"""Test that ``kct route`` emits a top-of-output warning for single-pad nets.
+
+This is a unit-level test for ``_emit_single_pad_net_warning`` -- the
+helper that prints a banner before routing starts when the loaded PCB
+has any single-pad signal nets.  Earlier versions of this test relied on
+board 04 (which used to ship without its MCU and therefore had four
+ghost SWD nets); issue #2531 fixed board 04, so we now exercise the
+banner directly with a synthetic ``Autorouter`` shim.
+"""
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-import pytest
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_BOARD_04_PCB = _REPO_ROOT / "boards" / "04-stm32-devboard" / "output" / "stm32_devboard.kicad_pcb"
+import io
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 
 
-@pytest.mark.skipif(
-    not _BOARD_04_PCB.exists(),
-    reason=(
-        "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb not generated; "
-        "run 'uv run python boards/04-stm32-devboard/generate_design.py' first"
-    ),
-)
-class TestRouteSinglePadWarning:
-    """`kct route` should warn about SWDIO/SWCLK/SWO/NRST on board 04."""
+def test_warning_banner_lists_signal_nets() -> None:
+    """The banner prints exactly the named signal nets, suppressing pours."""
+    from kicad_tools.cli.route_cmd import _emit_single_pad_net_warning
 
-    def test_warning_block_naming_swd_signals(self):
-        """The route command surfaces the four floating SWD signals."""
-        # Use --dry-run so we don't actually route or write output.  The
-        # banner is printed before any routing work begins, so we do not
-        # need to wait for a full route.
-        env = os.environ.copy()
-        # Avoid stale-pipx noise polluting stdout in CI environments.
-        env["KCT_NO_DEV_WARN"] = "1"
+    # Synthetic router: only ``net_names`` is read by the helper.
+    router = SimpleNamespace(
+        net_names={
+            10: "SWDIO",
+            11: "SWCLK",
+            12: "SWO",
+            13: "NRST",
+            14: "+3.3V",  # pour-net classified -- should be suppressed
+            15: "GND",  # pour-net classified -- should be suppressed
+        }
+    )
+    single_pad_nets = [10, 11, 12, 13, 14, 15]
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "kicad_tools.cli",
-                "route",
-                str(_BOARD_04_PCB),
-                "--dry-run",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-            cwd=str(_REPO_ROOT),
-        )
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_single_pad_net_warning(router, single_pad_nets)
+    out = buf.getvalue()
 
-        # We don't care whether routing itself succeeded -- only that
-        # the banner printed.  Combine streams since output ordering
-        # varies between platforms.
-        combined = result.stdout + result.stderr
+    # The header mentions the count and "single-pad signal" wording.
+    assert "single-pad signal net" in out, out
+    # All four signal nets show up in the per-net list.
+    for net in ("SWDIO", "SWCLK", "SWO", "NRST"):
+        assert net in out, f"Expected '{net}' in output:\n{out}"
+    # Pour nets are suppressed (legitimate single-pad pour-only nets).
+    assert "+3.3V" not in out, out
+    assert "GND" not in out, out
+    # The banner points users at the check command for the full report.
+    assert "kct check" in out and "single_pad_net" in out
 
-        assert "single-pad signal net" in combined, (
-            f"Expected single-pad warning in route output:\n{combined[:4000]}"
-        )
-        # All four SWD signals named.
-        for net in ("SWDIO", "SWCLK", "SWO", "NRST"):
-            assert net in combined, f"Expected '{net}' in route output:\n{combined[:4000]}"
-        # The banner points users at the check command.
-        assert "kct check" in combined and "single_pad_net" in combined
+
+def test_warning_banner_silent_on_empty_input() -> None:
+    """No banner printed when there are no single-pad nets."""
+    from kicad_tools.cli.route_cmd import _emit_single_pad_net_warning
+
+    router = SimpleNamespace(net_names={})
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_single_pad_net_warning(router, [])
+    assert buf.getvalue() == ""
+
+
+def test_warning_banner_silent_when_only_pour_nets() -> None:
+    """No banner printed if every single-pad net is a pour net."""
+    from kicad_tools.cli.route_cmd import _emit_single_pad_net_warning
+
+    router = SimpleNamespace(net_names={1: "GND", 2: "+3.3V", 3: "+5V"})
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_single_pad_net_warning(router, [1, 2, 3])
+    # The banner is suppressed because every flagged net is pour-classified.
+    assert "single-pad signal net" not in buf.getvalue()
