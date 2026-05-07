@@ -147,9 +147,7 @@ class TestBackendAuto:
         kwargs = m.call_args.kwargs
         assert kwargs.get("force") is False
 
-    def test_auto_skips_when_already_available(
-        self, monkeypatch, no_env_optout
-    ):
+    def test_auto_skips_when_already_available(self, monkeypatch, no_env_optout):
         # Pretend the backend is already loaded
         monkeypatch.setattr(cpp_backend, "_CPP_AVAILABLE", True)
         m = _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
@@ -216,9 +214,7 @@ class TestAllowAutoBuildKwarg:
 class TestToolchainDetection:
     """No cmake / no compiler -> skip build silently (AG2, AG11)."""
 
-    def test_missing_toolchain_skips_build(
-        self, force_cpp_unavailable, no_env_optout, monkeypatch
-    ):
+    def test_missing_toolchain_skips_build(self, force_cpp_unavailable, no_env_optout, monkeypatch):
         monkeypatch.setattr(cpp_backend, "_toolchain_available", lambda: False)
         m = _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
 
@@ -292,9 +288,7 @@ class TestGracefulFailure:
 class TestStaleSoTriggersRebuild:
     """Stale .so / wrong cpython tag goes through the same auto-rebuild path (AG7)."""
 
-    def test_stale_so_triggers_rebuild(
-        self, toolchain_present, no_env_optout, monkeypatch
-    ):
+    def test_stale_so_triggers_rebuild(self, toolchain_present, no_env_optout, monkeypatch):
         # Simulate a stale .so: import "succeeded" but BUILD_VERSION
         # mismatch turned _CPP_AVAILABLE off.  The downstream code
         # path is identical to the "missing .so" case from the
@@ -324,11 +318,7 @@ class TestRouteCmdCallsHelper:
         """Static check: route_cmd.py imports/calls ensure_cpp_backend_available exactly 4 times."""
         import pathlib
 
-        path = (
-            pathlib.Path(cpp_backend.__file__).parent.parent
-            / "cli"
-            / "route_cmd.py"
-        )
+        path = pathlib.Path(cpp_backend.__file__).parent.parent / "cli" / "route_cmd.py"
         text = path.read_text()
         # The helper is called once per backend-selection block.
         # Four functions: route_with_layer_escalation, route_with_rule_relaxation,

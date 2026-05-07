@@ -66,9 +66,7 @@ except ImportError as e:
 
     _so_files = glob.glob(
         str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-darwin.so")
-    ) + glob.glob(
-        str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so")
-    )
+    ) + glob.glob(str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so"))
     # Issue #2514: Distinguish "no compiled extension" from a genuine
     # circular import.  When ``from . import router_cpp`` runs while
     # ``kicad_tools.router.__init__`` is still mid-import, Python's
@@ -288,10 +286,7 @@ def _toolchain_available() -> bool:
 
     if shutil.which("cmake") is None:
         return False
-    for compiler in ("clang++", "g++"):
-        if shutil.which(compiler) is not None:
-            return True
-    return False
+    return any(shutil.which(compiler) is not None for compiler in ("clang++", "g++"))
 
 
 def _attempt_auto_build(*, quiet: bool) -> bool:
@@ -309,8 +304,7 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
     if not _toolchain_available():
         if not quiet:
             print(
-                "Note: C++ router toolchain (cmake + clang++/g++) not found; "
-                "skipping auto-build.",
+                "Note: C++ router toolchain (cmake + clang++/g++) not found; skipping auto-build.",
                 flush=True,
             )
         return False
@@ -328,8 +322,7 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
     except Exception as exc:
         if not quiet:
             print(
-                f"Note: auto-build raised {type(exc).__name__}: {exc}; "
-                "falling back to Python.",
+                f"Note: auto-build raised {type(exc).__name__}: {exc}; falling back to Python.",
                 flush=True,
             )
         return False
@@ -558,16 +551,20 @@ class CppGrid:
 
             # Pre-compute clearance for this pad's component (Issue #1016)
             pin_pitch = component_pitches.get(pad.ref) if pad.ref else None
-            clearance_override = grid.rules.get_clearance_for_component(
-                pad.ref, pin_pitch
-            )
+            clearance_override = grid.rules.get_clearance_for_component(pad.ref, pin_pitch)
 
             # Deterministic FNV-1a hash of component reference
             ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
 
             cpp_grid._impl.add_pad(
-                pad.x, pad.y, pad.width, pad.height,
-                pad.net, layer_idx, ref_hash, clearance_override,
+                pad.x,
+                pad.y,
+                pad.width,
+                pad.height,
+                pad.net,
+                layer_idx,
+                ref_hash,
+                clearance_override,
             )
 
         return cpp_grid
@@ -862,17 +859,13 @@ class CppPathfinder:
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
         trace_radius_cells = max(
             1,
-            math.ceil(
-                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
-            ),
+            math.ceil((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution),
         )
 
         net_via_size = net_class.via_size if net_class else self._rules.via_diameter
         via_radius_cells = max(
             1,
-            math.ceil(
-                (net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution
-            ),
+            math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -936,9 +929,7 @@ class CppPathfinder:
                 )
 
             for attempt in range(max_resume_attempts + 1):
-                route = self._convert_result_to_route(
-                    result, start, net_class
-                )
+                route = self._convert_result_to_route(result, start, net_class)
 
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
                 # clearance validation via C++ validate_route().
@@ -976,15 +967,11 @@ class CppPathfinder:
                 # goal cell that A* reached.
                 last_seg = result.segments[-1] if result.segments else None
                 if last_seg is not None:
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
-                        last_seg.x2, last_seg.y2
-                    )
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
                     reject_layer = last_seg.layer
                 else:
                     # Fallback: use end pad grid coords
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
-                        end.x, end.y
-                    )
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
                     reject_layer = end_layer
 
                 # Resume A* from the preserved open set, skipping the
@@ -1180,7 +1167,8 @@ class CppPathfinder:
             cpp_vias.append(cv)
 
         vresult = self._grid._impl.validate_route(
-            cpp_segs, cpp_vias,
+            cpp_segs,
+            cpp_vias,
             start.net,
             exclude_ref_hashes,
             self._rules.trace_clearance,
@@ -1351,12 +1339,21 @@ class CppPathfinder:
             for seg in route.segments:
                 layer_idx = py_grid.layer_to_index(seg.layer.value)
                 self._grid._impl.add_stored_segment(
-                    seg.x1, seg.y1, seg.x2, seg.y2,
-                    seg.width, layer_idx, seg.net,
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    seg.width,
+                    layer_idx,
+                    seg.net,
                 )
             for via in route.vias:
                 self._grid._impl.add_stored_via(
-                    via.x, via.y, via.drill, via.diameter, via.net,
+                    via.x,
+                    via.y,
+                    via.drill,
+                    via.diameter,
+                    via.net,
                 )
 
         self._grid._synced_route_count = current_count
@@ -1411,10 +1408,7 @@ class CppPathfinder:
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
         trace_half_width_cells = max(
             1,
-            int(
-                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
-                + 0.5
-            ),
+            int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
         )
 
         while True:
@@ -1610,8 +1604,7 @@ def create_hybrid_router(
     if not force_python:
         reason = _CPP_IMPORT_ERROR or "unknown reason"
         logger.warning(
-            "C++ router backend not available -- using pure Python (10-100x slower). "
-            "Reason: %s",
+            "C++ router backend not available -- using pure Python (10-100x slower). Reason: %s",
             reason,
         )
 
