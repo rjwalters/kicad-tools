@@ -3546,10 +3546,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
-    # Auto-create copper pours for power nets (before skip detection)
+    # Auto-create copper pours for power nets (before skip detection).
+    # auto_pour_if_missing writes in-place; stage a copy at output_path
+    # first so the user's INPUT is left untouched (issue #2548).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
+        pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
         auto_pour_if_missing(
             pcb_path,
             quiet=args.quiet,
