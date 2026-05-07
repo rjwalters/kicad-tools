@@ -2297,6 +2297,18 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--no-auto-build-native",
+        action="store_true",
+        help=(
+            "Disable silent auto-build of the C++ router extension on first use "
+            "(Issue #2549). When --backend is 'auto' (the default) and the compiled "
+            "router_cpp.*.so is missing, kct route normally invokes 'kct build-native' "
+            "once and uses C++ for the rest of the session. Pass this flag (or set "
+            "KICAD_TOOLS_NO_AUTO_BUILD=1) to skip the build attempt and fall straight "
+            "through to pure Python."
+        ),
+    )
+    route_parser.add_argument(
         "--strict",
         action="store_true",
         help=(
