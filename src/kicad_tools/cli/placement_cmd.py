@@ -249,7 +249,11 @@ def cmd_fix(args) -> int:
             print("\nPer-pass progress:")
             for pr in result.pass_results:
                 resolved = pr.conflicts_before - pr.conflicts_after
-                esc_str = f" (escalation: {pr.escalation_factor:.1f}x)" if pr.escalation_factor > 1.0 else ""
+                esc_str = (
+                    f" (escalation: {pr.escalation_factor:.1f}x)"
+                    if pr.escalation_factor > 1.0
+                    else ""
+                )
                 print(
                     f"  Pass {pr.pass_number}: {pr.conflicts_before} conflicts "
                     f"-> {pr.conflicts_after} conflicts "
@@ -979,16 +983,35 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
         return (1.0, 0, 0)
 
 
-def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format: str) -> int:
+def _cmd_optimize_routing_aware(
+    args,
+    pcb_path: Path,
+    quiet: bool,
+    output_format: str,
+    fixed_refs: list[str] | None = None,
+) -> int:
     """
     Run routing-aware placement optimization.
 
     Uses PlaceRouteOptimizer to iterate between placement and routing
     for better overall results.
+
+    Args:
+        args: argparse Namespace with optimization options.
+        pcb_path: Path to the input .kicad_pcb file.
+        quiet: Suppress text output.
+        output_format: "text" or "json".
+        fixed_refs: Component references that must not move during
+            optimization (issue #2537). Passed through to the
+            ``PlaceRouteOptimizer.from_pcb`` factory so it reaches
+            both placement-conflict fixes and blocker-nudging.
     """
     from kicad_tools.cli.progress import spinner
     from kicad_tools.optim.place_route import PlaceRouteOptimizer
     from kicad_tools.schema.pcb import PCB
+
+    # Defensive: caller may not pass fixed_refs (legacy callers).
+    fixed_refs = fixed_refs or []
 
     # For JSON output, suppress text output
     if output_format == "json":
@@ -1019,6 +1042,8 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format
         print("=" * 50)
         print("This mode iterates between placement and routing")
         print("to find placements that are actually routable.")
+        if fixed_refs:
+            print(f"Fixed components: {', '.join(fixed_refs)}")
         print()
 
     # Load PCB
@@ -1037,6 +1062,7 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format
                 pcb,
                 pcb_path=pcb_path,
                 verbose=not quiet,
+                fixed_refs=set(fixed_refs),
             )
     except Exception as e:
         if output_format != "json":
@@ -1144,14 +1170,18 @@ def cmd_optimize(args) -> int:
             print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return output_result(False, f"File not found: {pcb_path}")
 
-    # Handle routing-aware optimization mode
-    if routing_aware:
-        return _cmd_optimize_routing_aware(args, pcb_path, quiet, output_format)
-
-    # Parse fixed components
+    # Parse fixed components (shared between routing-aware and default paths).
+    # IMPORTANT: parse this BEFORE dispatching to the routing-aware code path
+    # so the constraint reaches both paths (issue #2537).
     fixed_refs: list[str] = []
     if args.fixed:
         fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
+
+    # Handle routing-aware optimization mode
+    if routing_aware:
+        return _cmd_optimize_routing_aware(
+            args, pcb_path, quiet, output_format, fixed_refs=fixed_refs
+        )
 
     # Load constraints if specified
     constraints = []
@@ -1976,7 +2006,9 @@ def main(argv: list[str] | None = None) -> int:
         default="text",
         help="Output format (default: text)",
     )
-    place_unplaced_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    place_unplaced_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Verbose output"
+    )
     place_unplaced_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )

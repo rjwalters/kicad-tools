@@ -98,6 +98,7 @@ class PlaceRouteOptimizer:
         verbose: bool = True,
         escape_routing: bool | None = None,
         max_fix_attempts: int = 3,
+        fixed_refs: set[str] | list[str] | None = None,
     ) -> None:
         """Initialize the optimizer.
 
@@ -117,6 +118,11 @@ class PlaceRouteOptimizer:
                 None = auto-detect dense packages (default).
             max_fix_attempts: Maximum DRC fix attempts per optimization
                 iteration before giving up and reporting failure.
+            fixed_refs: Optional set/list of component references that must
+                not move during optimization. The optimizer wires this into
+                the ``PlacementFixer.anchored`` set so that placement-conflict
+                fixes won't move these components, and filters anchored refs
+                out of the blocker-nudge phase.
         """
         self.pcb_path = Path(pcb_path)
         self.analyzer = analyzer
@@ -126,6 +132,16 @@ class PlaceRouteOptimizer:
         self.verbose = verbose
         self.escape_routing = escape_routing
         self.max_fix_attempts = max_fix_attempts
+        # Normalize to a frozen set; expose as public attribute for inspection.
+        self.fixed_refs: set[str] = set(fixed_refs or [])
+
+        # Make sure the fixer honors the same anchored set. The fixer already
+        # supports ``anchored`` in ``_choose_component_to_move``; merge any
+        # refs the caller pre-configured on the fixer with our own list so
+        # the union is anchored.
+        if self.fixed_refs:
+            existing = getattr(self.fixer, "anchored", None) or set()
+            self.fixer.anchored = set(existing) | self.fixed_refs
 
         # Track state across iterations
         self._current_routes: list[Route] = []
@@ -142,6 +158,7 @@ class PlaceRouteOptimizer:
         board_width: float | None = None,
         board_height: float | None = None,
         verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
     ) -> PlaceRouteOptimizer:
         """Create optimizer from a PCB object.
 
@@ -155,6 +172,9 @@ class PlaceRouteOptimizer:
             board_width: Board width in mm (auto-detected if None)
             board_height: Board height in mm (auto-detected if None)
             verbose: Print progress messages
+            fixed_refs: Optional set/list of component references that must
+                not move during optimization. Forwarded to the constructor
+                and the underlying ``PlacementFixer.anchored`` set.
 
         Returns:
             Configured PlaceRouteOptimizer ready to run
@@ -165,6 +185,7 @@ class PlaceRouteOptimizer:
             ...     pcb,
             ...     manufacturer="jlcpcb",
             ...     layers=4,
+            ...     fixed_refs={"J1"},
             ... )
             >>> result = optimizer.optimize()
         """
@@ -187,9 +208,13 @@ class PlaceRouteOptimizer:
             board_width = board_width or width
             board_height = board_height or height
 
-        # Create components
+        # Normalize fixed_refs into a set early so we can pass it to the fixer.
+        anchored: set[str] = set(fixed_refs or [])
+
+        # Create components. PlacementFixer already honors ``anchored`` in
+        # ``_choose_component_to_move`` (see placement/fixer.py).
         analyzer = PlacementAnalyzer(verbose=verbose)
-        fixer = PlacementFixer(verbose=verbose)
+        fixer = PlacementFixer(verbose=verbose, anchored=anchored)
 
         # Router factory - creates fresh router for each attempt
         def router_factory() -> Autorouter:
@@ -213,6 +238,7 @@ class PlaceRouteOptimizer:
             router_factory=router_factory,
             drc_checker_factory=drc_checker_factory,
             verbose=verbose,
+            fixed_refs=anchored,
         )
 
     @staticmethod
@@ -670,7 +696,8 @@ class PlaceRouteOptimizer:
         """Move blocking components slightly to allow routing.
 
         Applies small displacements to potentially blocking components
-        to create routing channels.
+        to create routing channels. Components listed in ``self.fixed_refs``
+        are never nudged.
 
         Args:
             blockers: List of component references to nudge
@@ -678,10 +705,19 @@ class PlaceRouteOptimizer:
         from kicad_tools.placement.conflict import Point
         from kicad_tools.placement.fixer import PlacementFix
 
+        # Filter out anchored / fixed components before slicing.
+        if self.fixed_refs:
+            filtered_blockers = [b for b in blockers if b not in self.fixed_refs]
+            if self.verbose and len(filtered_blockers) != len(blockers):
+                skipped = [b for b in blockers if b in self.fixed_refs]
+                print(f"    Skipping fixed blockers: {skipped}")
+        else:
+            filtered_blockers = blockers
+
         # Create synthetic fixes to move blockers
         fixes: list[PlacementFix] = []
 
-        for ref in blockers[:3]:  # Limit to avoid too many changes
+        for ref in filtered_blockers[:3]:  # Limit to avoid too many changes
             # Try small moves in each direction
             # Pick direction based on component position relative to board center
             components = self.analyzer.get_components()
@@ -737,10 +773,7 @@ class PlaceRouteOptimizer:
         # Guard: respect per-iteration attempt limit
         if self._fix_attempts >= self.max_fix_attempts:
             if self.verbose:
-                print(
-                    f"    DRC fix: max attempts ({self.max_fix_attempts}) "
-                    f"reached, giving up"
-                )
+                print(f"    DRC fix: max attempts ({self.max_fix_attempts}) reached, giving up")
             return False
 
         self._fix_attempts += 1

@@ -811,9 +811,7 @@ class TestFixDrcViolations:
         return optimizer
 
     @patch("kicad_tools.optim.place_route.PlaceRouteOptimizer._fix_drc_violations")
-    def test_optimize_drc_failure_exercises_fix_path(
-        self, mock_fix, tmp_path
-    ):
+    def test_optimize_drc_failure_exercises_fix_path(self, mock_fix, tmp_path):
         """DRC failure with fixable violations triggers fix attempt before failing."""
         pcb_path = tmp_path / "test.kicad_pcb"
         pcb_path.write_text(SIMPLE_PCB)
@@ -1245,3 +1243,273 @@ class TestPeriodicCheckpoint:
         optimizer.optimize(max_iterations=3, checkpoint_interval=0)
 
         assert not checkpoint_path.exists()
+
+
+# =============================================================================
+# fixed_refs plumbing tests (issue #2537)
+# =============================================================================
+
+
+class TestPlaceRouteOptimizerFixedRefs:
+    """Tests for the ``fixed_refs`` plumbing added in issue #2537.
+
+    The ``--fixed`` CLI flag was previously silently ignored when combined
+    with ``--routing-aware``. The fix adds ``fixed_refs`` plumbing through
+    ``PlaceRouteOptimizer.__init__``, ``from_pcb``, and ``_nudge_blockers``,
+    and wires it into the underlying ``PlacementFixer.anchored`` set.
+    """
+
+    def test_init_accepts_fixed_refs(self, tmp_path):
+        """``__init__`` accepts ``fixed_refs`` and stores it as a set."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False)
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1", "U1"},
+        )
+
+        assert optimizer.fixed_refs == {"J1", "U1"}
+        # Anchored set was merged into the fixer.
+        assert "J1" in optimizer.fixer.anchored
+        assert "U1" in optimizer.fixer.anchored
+
+    def test_init_default_fixed_refs_is_empty(self, tmp_path):
+        """``fixed_refs`` defaults to an empty set."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=MagicMock(anchored=set()),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+        )
+
+        assert optimizer.fixed_refs == set()
+
+    def test_init_accepts_list_for_fixed_refs(self, tmp_path):
+        """``fixed_refs`` accepts a list (not just a set)."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=PlacementFixer(verbose=False),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs=["J1", "U1"],
+        )
+
+        assert optimizer.fixed_refs == {"J1", "U1"}
+
+    def test_init_merges_with_existing_fixer_anchored(self, tmp_path):
+        """``__init__`` merges fixed_refs with any pre-existing fixer.anchored."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False, anchored={"H1"})
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1"},
+        )
+
+        # Both sets are merged.
+        assert "H1" in optimizer.fixer.anchored
+        assert "J1" in optimizer.fixer.anchored
+
+    def test_from_pcb_propagates_fixed_refs(self, tmp_path):
+        """``from_pcb`` accepts ``fixed_refs`` and forwards to the fixer."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            verbose=False,
+            fixed_refs={"R1"},
+        )
+
+        assert optimizer.fixed_refs == {"R1"}
+        assert "R1" in optimizer.fixer.anchored
+
+    def test_from_pcb_default_fixed_refs(self, tmp_path):
+        """``from_pcb`` defaults to no fixed refs."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            verbose=False,
+        )
+
+        assert optimizer.fixed_refs == set()
+
+    def test_nudge_blockers_skips_fixed_refs(self, tmp_path):
+        """``_nudge_blockers`` filters out anchored components."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Mock components C1 (movable) and J1 (fixed)
+        comp_c1 = MagicMock()
+        comp_c1.reference = "C1"
+        comp_c1.position = MagicMock(x=100, y=100)
+        comp_j1 = MagicMock()
+        comp_j1.reference = "J1"
+        comp_j1.position = MagicMock(x=105, y=105)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = [comp_c1, comp_j1]
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+        mock_fixer.apply_fixes.return_value = MagicMock(fixes_applied=1)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1"},
+        )
+
+        # Provide BOTH C1 and J1 as candidate blockers.
+        optimizer._nudge_blockers(["C1", "J1"])
+
+        # Only C1 should be moved; J1 must be skipped.
+        mock_fixer.apply_fixes.assert_called_once()
+        call_args = mock_fixer.apply_fixes.call_args
+        fixes = call_args[0][1]
+        assert len(fixes) == 1
+        assert fixes[0].component == "C1"
+        moved_refs = {f.component for f in fixes}
+        assert "J1" not in moved_refs
+
+    def test_nudge_blockers_no_fixes_when_all_fixed(self, tmp_path):
+        """If every blocker is in ``fixed_refs``, no fixes are applied."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = []
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"C1", "J1"},
+        )
+
+        optimizer._nudge_blockers(["C1", "J1"])
+
+        # No movable blockers means no apply_fixes call.
+        mock_fixer.apply_fixes.assert_not_called()
+
+    def test_nudge_blockers_unconstrained_path_unchanged(self, tmp_path):
+        """Without ``fixed_refs``, ``_nudge_blockers`` behaves as before."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        comp = MagicMock()
+        comp.reference = "C1"
+        comp.position = MagicMock(x=100, y=100)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = [comp]
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+        mock_fixer.apply_fixes.return_value = MagicMock(fixes_applied=1)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            # No fixed_refs at all
+        )
+
+        optimizer._nudge_blockers(["C1"])
+
+        mock_fixer.apply_fixes.assert_called_once()
+        fixes = mock_fixer.apply_fixes.call_args[0][1]
+        assert len(fixes) == 1
+        assert fixes[0].component == "C1"
+
+    def test_placement_fixer_honors_anchored_via_choose_component_to_move(self, tmp_path):
+        """End-to-end: fixer's ``_choose_component_to_move`` honors anchored.
+
+        This is a regression guard: confirms the existing ``PlacementFixer``
+        machinery is the correct landing spot for our new wiring.
+        """
+        from kicad_tools.placement.conflict import (
+            Conflict,
+            ConflictSeverity,
+            ConflictType,
+            Point,
+        )
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False, anchored={"J1"})
+
+        def make_conflict(c1: str, c2: str) -> Conflict:
+            return Conflict(
+                type=ConflictType.COURTYARD_OVERLAP,
+                severity=ConflictSeverity.ERROR,
+                component1=c1,
+                component2=c2,
+                message="test overlap",
+                location=Point(0.0, 0.0),
+                overlap_amount=0.5,
+            )
+
+        # Conflict between J1 (anchored) and R1: must move R1.
+        chosen = fixer._choose_component_to_move(make_conflict("J1", "R1"))
+        assert chosen == "R1"
+
+        # Conflict between R1 and J1 (anchored): must move R1.
+        chosen2 = fixer._choose_component_to_move(make_conflict("R1", "J1"))
+        assert chosen2 == "R1"
+
+        # Conflict between two anchored: returns None (cannot fix).
+        fixer2 = PlacementFixer(verbose=False, anchored={"J1", "U1"})
+        assert fixer2._choose_component_to_move(make_conflict("J1", "U1")) is None
