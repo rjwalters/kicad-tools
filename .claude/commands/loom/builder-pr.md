@@ -522,6 +522,26 @@ These patterns are **WRONG** — the shepherd will reject PRs with titles matchi
 | `feat: implement feature from issue #N` | Generic — could be any feature |
 | `<copy of issue title>` | Issue titles describe problems; commits describe solutions |
 
+### Intermediate Commits from the Incremental Commit Protocol
+
+The builder Incremental Commit Protocol (`.claude/commands/loom/builder.md` / `.loom/roles/builder.md`) requires you to make `wip:`-prefixed commits at well-defined boundaries during a single agent run. When you reach PR creation, you may have several intermediate commits on the branch in addition to the final commit.
+
+**This is fine — the diff-derivation step still works correctly.** PR title derivation uses `git diff --stat` and `git diff` against the *base ref* (typically `origin/main`), which is unaffected by the number of intermediate commits on your feature branch. The diff against `main` is the same whether you made one commit or twelve.
+
+```bash
+# Even with intermediate commits, this still gives you the full diff
+# against main for title derivation:
+git diff --stat origin/main...HEAD
+git diff origin/main...HEAD
+```
+
+**At PR creation time:**
+- The PR title still describes what the *whole diff* does (squashed view), not the latest individual commit
+- Champion's `merge-pr.sh` uses squash-merge, collapsing all your intermediate `wip:` commits into the single PR title commit on main
+- Your intermediate `wip:` messages are preserved on the feature branch and remain visible in `git log feature/issue-<N>` after merge if archived, but they do not pollute `git log main`
+
+**Final commit before PR creation:** if you have residual uncommitted changes when you reach the PR-creation step, write the final commit with a descriptive (not `wip:`) message that describes the *delta since the last `wip:` commit*. The PR title separately describes the *whole diff*.
+
 ---
 
 ## Creating Pull Requests: Label and Auto-Close Requirements
