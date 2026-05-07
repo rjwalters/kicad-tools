@@ -175,8 +175,12 @@ class PlacementFixer:
         """Choose which component to move to resolve conflict."""
         c1, c2 = conflict.component1, conflict.component2
 
-        # Edge conflicts: always move the component
+        # Edge conflicts: only c1 is a real component (c2 is a board-edge sentinel
+        # like "left_edge"; see analyzer.py:533-542). If c1 is anchored, we cannot
+        # resolve this conflict by moving — return None to skip it.
         if conflict.type == ConflictType.EDGE_CLEARANCE:
+            if c1 in self.anchored:
+                return None
             return c1
 
         # If one is anchored, move the other

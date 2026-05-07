@@ -385,6 +385,65 @@ class TestPlacementFixer:
         for fix in fixes:
             assert fix.component != "R1"
 
+    # --- _choose_component_to_move with EDGE_CLEARANCE conflicts ---
+    #
+    # EDGE_CLEARANCE conflicts use component2 = "<edge>_edge" (e.g., "left_edge")
+    # as a sentinel; only component1 is a real, movable footprint.
+    # These tests guard against the regression where the EDGE_CLEARANCE branch
+    # short-circuited and bypassed the anchored set (issue #2541).
+
+    @staticmethod
+    def _make_edge_conflict(component: str = "J1", edge: str = "left_edge") -> Conflict:
+        """Build a synthetic EDGE_CLEARANCE conflict for fixer-level unit tests."""
+        return Conflict(
+            type=ConflictType.EDGE_CLEARANCE,
+            severity=ConflictSeverity.ERROR,
+            component1=component,
+            component2=edge,
+            message=f"{component} too close to {edge}",
+            location=Point(0.0, 0.0),
+            actual_clearance=0.1,
+            required_clearance=0.5,
+        )
+
+    def test_choose_component_edge_c1_anchored_returns_none(self):
+        """EDGE_CLEARANCE: when c1 is anchored, return None (cannot resolve)."""
+        fixer = PlacementFixer(anchored={"J1"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        # c1 is anchored and c2 is just an edge sentinel -- no movable component
+        # remains, so the fixer must skip this conflict.
+        assert fixer._choose_component_to_move(conflict) is None
+
+    def test_choose_component_edge_c2_anchored_still_moves_c1(self):
+        """EDGE_CLEARANCE: anchoring the edge sentinel is a no-op.
+
+        Note the asymmetry vs. overlap-style conflicts: ``c2`` for an
+        EDGE_CLEARANCE conflict is a sentinel string like ``"left_edge"`` (see
+        analyzer.py:533-542), not a real component reference. Adding it to
+        ``anchored`` therefore has no meaningful effect -- the fixer should
+        still choose to move ``c1``.
+        """
+        fixer = PlacementFixer(anchored={"left_edge"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        assert fixer._choose_component_to_move(conflict) == "J1"
+
+    def test_choose_component_edge_both_anchored_returns_none(self):
+        """EDGE_CLEARANCE: both anchored is the degenerate case of (a)."""
+        fixer = PlacementFixer(anchored={"J1", "left_edge"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        # c1 in anchored is sufficient on its own to short-circuit to None.
+        assert fixer._choose_component_to_move(conflict) is None
+
+    def test_choose_component_edge_neither_anchored_returns_c1(self):
+        """EDGE_CLEARANCE: with no anchors, behavior is unchanged (returns c1)."""
+        fixer = PlacementFixer()
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        assert fixer._choose_component_to_move(conflict) == "J1"
+
     def test_preview_fixes(self, overlapping_pcb: Path):
         """Test generating fix preview."""
         analyzer = PlacementAnalyzer()
