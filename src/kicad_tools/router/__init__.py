@@ -63,6 +63,7 @@ from .cpp_backend import (
     CppGrid,
     CppPathfinder,
     create_hybrid_router,
+    ensure_cpp_backend_available,
     get_backend_info,
     is_cpp_available,
 )
@@ -286,6 +287,7 @@ __all__ = [
     "RoutingResult",
     # C++ backend
     "is_cpp_available",
+    "ensure_cpp_backend_available",
     "get_backend_info",
     "create_hybrid_router",
     "CppGrid",
