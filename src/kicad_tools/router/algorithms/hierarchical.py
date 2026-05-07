@@ -11,6 +11,7 @@ before performing detailed routing. The flow is:
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import TYPE_CHECKING
 
@@ -319,6 +320,18 @@ class HierarchicalRouter:
             f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}"
         )
 
+        # Issue #2540: Track best-of-iterations so a mid-iteration timeout
+        # does not destroy successful routes from earlier iterations.
+        # Mirrors the snapshot/restore pattern in
+        # ``core.py::route_all_negotiated`` (and the original
+        # ``two_phase.py::_detailed_negotiated`` from #2305).  PR #2522 only
+        # ported the ``timed_out`` propagation flag; the best-state restore
+        # was never ported and this branch had the identical gap.
+        best_routes: list[Route] = copy.deepcopy(list(self.routes))
+        best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
+        best_routed_count = sum(1 for r in net_routes.values() if r)
+        best_iteration = 0  # 0 = initial pass
+
         # Rip-up and reroute if overflow remains.
         # Issue #2518: skip the iteration loop entirely if the initial pass
         # was already cut short by the wall-clock budget.
@@ -332,6 +345,16 @@ class HierarchicalRouter:
                     flush_print(f"  Timeout at iteration {iteration}")
                     timed_out = True
                     break
+
+                # Issue #2540: Snapshot at top of iteration (BEFORE the
+                # destructive ``rip_up_nets``).  Use route count as the
+                # comparison metric.
+                current_routed = sum(1 for r in net_routes.values() if r)
+                if current_routed > best_routed_count:
+                    best_routed_count = current_routed
+                    best_routes = copy.deepcopy(list(self.routes))
+                    best_net_routes = copy.deepcopy(net_routes)
+                    best_iteration = iteration - 1
 
                 if progress_callback is not None:
                     progress = 0.8 + 0.15 * (iteration / max_iterations)
@@ -384,6 +407,26 @@ class HierarchicalRouter:
                     flush_print(f"  Overflow resolved at iteration {iteration}")
                     break
                 overflow = new_overflow
+
+        # Issue #2540: Restore best-of-iterations state if a later iteration
+        # was aborted mid-rip-up (typically by ``check_timeout()`` in the
+        # per-net reroute loop) and left ``net_routes`` with fewer routes
+        # than a prior iteration produced.
+        current_routed = sum(1 for r in net_routes.values() if r)
+        if best_routed_count > current_routed:
+            flush_print(
+                f"  Restoring iteration {best_iteration} state "
+                f"(routed={best_routed_count}) instead of final "
+                f"(routed={current_routed})"
+            )
+            for route in list(self.routes):
+                self.grid.unmark_route_usage(route)
+            self.routes.clear()
+            self.routes.extend(best_routes)
+            for route in self.routes:
+                self.grid.mark_route_usage(route)
+            net_routes.clear()
+            net_routes.update(best_net_routes)
 
         # Collect all routes
         all_routes: list[Route] = []

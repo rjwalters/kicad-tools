@@ -3639,6 +3639,7 @@ class Autorouter:
         Returns:
             List of routes (may be partial if timeout reached)
         """
+        import copy
         import time
 
         start_time = time.time()
@@ -4003,6 +4004,25 @@ class Autorouter:
                 f"from rip-up: {', '.join(off_grid_names)}"
             )
 
+        # Issue #2540: Track best-of-iterations so a mid-iteration timeout
+        # does not destroy successful routes from earlier iterations.
+        # ``rip_up_nets`` destructively mutates both ``net_routes`` and
+        # ``self.routes`` BEFORE re-routing begins; if ``check_timeout()``
+        # fires during the per-net reroute loop, ``self.routes`` is left in
+        # the mid-rip-up state (e.g. only the few that survived being
+        # rerouted) instead of the iteration-N-1 stable state.  We snapshot
+        # at the top of each iteration so the post-loop restore can fall
+        # back to the pre-rip-up state from the previous iteration.
+        #
+        # Comparison metric is route count (== ``successful_nets``), not
+        # overflow: the user-visible regression is route count, and a
+        # half-restored rip-up can leave overflow numerically identical
+        # while dropping from 20 routes to 10.
+        best_routes: list[Route] = copy.deepcopy(list(self.routes))
+        best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
+        best_routed_count = sum(1 for r in net_routes.values() if r)
+        best_iteration = 0  # 0 = initial pass
+
         # Skip iteration loop if already timed out
         if not timed_out:
             for iteration in range(1, max_iterations + 1):
@@ -4011,6 +4031,20 @@ class Autorouter:
                     print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
                     timed_out = True
                     break
+
+                # Issue #2540: Snapshot state at top of each iteration BEFORE
+                # any destructive ``rip_up_nets`` call.  If a mid-iteration
+                # timeout escapes the per-net reroute loop (line ~4843), the
+                # post-loop restore can fall back to this pre-rip-up snapshot
+                # of the previous iteration's stable result.  Use route count
+                # (not overflow) as the comparison metric per acceptance
+                # criteria.
+                current_routed = sum(1 for r in net_routes.values() if r)
+                if current_routed > best_routed_count:
+                    best_routed_count = current_routed
+                    best_routes = copy.deepcopy(list(self.routes))
+                    best_net_routes = copy.deepcopy(net_routes)
+                    best_iteration = iteration - 1  # state captured is from end of prior iter
 
                 # Adaptive early termination check (Issue #633)
                 # Issue #2334: When perturbation is enabled, activate it
@@ -5193,6 +5227,32 @@ class Autorouter:
 
         # Issue #2334: Always reset perturbation at end of routing
         self._reset_perturbation()
+
+        # Issue #2540: Restore best-of-iterations state if a later iteration
+        # was aborted mid-rip-up (typically by ``check_timeout()`` in the
+        # per-net reroute loop) and left ``self.routes`` with FEWER routes
+        # than a prior iteration produced.  Without this, the saved-partial
+        # result drops to whatever survived the half-completed rip-up
+        # instead of the best stable iteration captured at iteration top.
+        current_routed = sum(1 for r in net_routes.values() if r)
+        if best_routed_count > current_routed:
+            flush_print(
+                f"  Restoring iteration {best_iteration} state "
+                f"(routed={best_routed_count}) instead of final "
+                f"(routed={current_routed})"
+            )
+            # Unmark all current routes from the grid
+            for route in list(self.routes):
+                self.grid.unmark_route_usage(route)
+            # Replace with best-state routes
+            self.routes.clear()
+            self.routes.extend(best_routes)
+            # Re-mark best routes on the grid
+            for route in self.routes:
+                self.grid.mark_route_usage(route)
+            # Update net_routes to best state
+            net_routes.clear()
+            net_routes.update(best_net_routes)
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time
