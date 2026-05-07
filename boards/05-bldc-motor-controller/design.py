@@ -841,9 +841,12 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     C10_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 37)
     C11_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 43)
 
-    # Gate driver (left, row 4) -- DRV8301 QFN-56 8x8mm body, leaving room
-    # for the MCU on the right side of the board.
-    U3_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 50)  # DRV8301 QFN-56
+    # Gate driver (left, row 4) -- DRV8301 HTSSOP-56 (DCA package), 14x8.1mm
+    # body per TI SLOS719F.  Pin 1 is on the top-left of the long-axis-vertical
+    # orientation, so the body extends ~7mm above and below U3_POS along Y and
+    # ~4mm left/right along X (with leads).  Centered to clear the bypass caps
+    # at x=4 and x=24 and the MCU at x=40.
+    U3_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 50)  # DRV8301 HTSSOP-56
     C12_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 47)  # Bootstrap A
     C13_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 53)  # Bootstrap B
     C14_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 59)  # Bootstrap C
@@ -1024,167 +1027,190 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (pad "5" smd rect (at 3.4 0) (size 3 8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
-    # DRV8301 QFN-56 (RHA package) pinout from TI datasheet SLOS719E.
-    # Pins are numbered counter-clockwise starting from the top-left index
-    # mark (pin 1 is on the top edge, near the corner).  The KiCad convention
-    # used for the QFN-56-1EP_8x8mm_P0.5mm_EP4.3x4.3mm footprint instead has
-    # pin 1 on the left edge near the top corner; we place pads matching
-    # that convention so that the first pin index aligns with the
-    # silkscreen's pin-1 marker.
+    # DRV8301 HTSSOP-56 (DCA package) pinout from TI datasheet SLOS719F
+    # (August 2011, revised January 2016).  The DRV8301 *only* ships in the
+    # 56-pin HTSSOP package (14.00 mm x 8.10 mm body, 0.5 mm pitch).  The
+    # KiCad library footprint used here is
+    # ``Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm`` -- pin 1
+    # is at the top-left, pins 1-28 run down the left edge, pins 29-56 run
+    # up the right edge from the bottom, and pin 57 is the exposed PowerPAD.
     #
-    # Pin -> net mapping (DRV8301 RHA datasheet, SLOS719E):
-    #   1  GVDD       (gate-drive supply, internal LDO output -> bypass to GND)
-    #   2  CP1        (charge pump capacitor 1)
-    #   3  CP2        (charge pump capacitor 2)
-    #   4  VCPH       (charge pump high-side reservoir)
-    #   5  VCP        (charge pump output, used for high-side bootstrap)
-    #   6  PVDD1      (motor supply, decoupled to PGND)
-    #   7  GH_A       (high-side gate output, phase A)  -> GATE_AH
-    #   8  SH_A       (phase A switch node)             -> PHASE_A
-    #   9  BST_A      (phase A bootstrap pin)           -> bootstrap C12 (VMOTOR)
-    #   10 SP_A       (sense + phase A)                 -> ISENSE_A+
-    #   11 SN_A       (sense - phase A)                 -> ISENSE_A-
-    #   12 GL_A       (low-side gate output, phase A)   -> GATE_AL
-    #   13 PVDD2      (motor supply phase B)
-    #   14 GH_B                                         -> GATE_BH
-    #   15 SH_B                                         -> PHASE_B
-    #   16 BST_B                                        -> bootstrap (VMOTOR via C13)
-    #   17 SP_B                                         -> ISENSE_B+
-    #   18 SN_B                                         -> ISENSE_B-
-    #   19 GL_B                                         -> GATE_BL
-    #   20 PVDD3
-    #   21 GH_C                                         -> GATE_CH
-    #   22 SH_C                                         -> PHASE_C
-    #   23 BST_C                                        -> bootstrap (VMOTOR via C14)
-    #   24 SP_C                                         -> ISENSE_C+
-    #   25 SN_C                                         -> ISENSE_C-
-    #   26 GL_C                                         -> GATE_CL
-    #   27 PGND       (power ground)                    -> GND
-    #   28 PGND
-    #   29 INH_A      (PWM input, high-side phase A)    <- GATE_AH
-    #   30 INL_A      (PWM input, low-side phase A)     <- GATE_AL
-    #   31 INH_B                                        <- GATE_BH
-    #   32 INL_B                                        <- GATE_BL
-    #   33 INH_C                                        <- GATE_CH
-    #   34 INL_C                                        <- GATE_CL
-    #   35 EN_GATE                                      -> +3.3V (always-on)
-    #   36 nFAULT                                       -> +3.3V (open-drain, pulled up)
-    #   37 nOCTW                                        -> +3.3V
-    #   38 DTC                                          -> GND   (programmable dead-time)
-    #   39 nSCS       (SPI chip select)                 -> +3.3V (idle high; SW SPI optional)
-    #   40 SCLK                                         -> +3.3V (SW pull-up)
-    #   41 SDI                                          -> +3.3V
-    #   42 SDO                                          -> +3.3V
-    #   43 REF        (current-sense reference)         -> +3.3V
-    #   44 SO1        (current-sense amp output 1)      -> ISENSE_A+   (shared with shunt)
-    #   45 SO2        (current-sense amp output 2)      -> ISENSE_B+
-    #   46 DC_CAL                                       -> GND
-    #   47 GAIN                                         -> +3.3V (40 V/V)
-    #   48 OC_ADJ                                       -> +3.3V
-    #   49 OCTW_MODE                                    -> GND
-    #   50 PWM_MODE                                     -> +3.3V (6-input PWM)
-    #   51 M_PWM                                        -> +3.3V
-    #   52 M_OC                                         -> +3.3V
-    #   53 AVDD                                         -> +3.3V
-    #   54 AGND                                         -> GND
-    #   55 PVDD       (analog supply, decoupled)        -> +5V (logic) / VMOTOR (gate path)
-    #   56 GVDD       (second GVDD pin)                 -> +5V
-    #   57 EP         (exposed pad, thermal/PGND)       -> GND
+    # Pin -> net mapping (DRV8301 datasheet SLOS719F, page 3 "5 Pin
+    # Configuration and Functions", and page 4-5 pin function table):
     #
-    # The mapping above is intentionally conservative: any DRV8301 pin that
-    # would otherwise float (mode/SPI pins) is tied to a power rail so the
-    # net has at least two endpoints (single_pad_net is satisfied).  Real
-    # DRV8301 designs would use the SPI pins for runtime configuration, but
-    # for a generated-from-Python demo board, the static pull resistors
-    # produce a working autoroutable PCB.
+    #   Buck regulator pins (1-7, 49-56):
+    #     1  RT_CLK   (buck timing R/clock)        -> GND   (R to GND, DC tie)
+    #     2  COMP     (buck error amp output)      -> GND   (cap to GND)
+    #     3  VSENSE   (buck output FB)             -> +5V   (=buck output)
+    #     4  PWRGD    (open-drain power-good)      -> +3.3V (pull-up)
+    #     5  nOCTW    (open-drain over-current/T)  -> +3.3V (pull-up)
+    #     6  nFAULT   (open-drain fault)           -> +3.3V (pull-up)
+    #     7  DTC      (dead-time, R to GND)        -> GND
+    #
+    #   SPI / control / charge-pump / GVDD (8-16):
+    #     8  nSCS     (SPI chip select)            -> +3.3V (idle high)
+    #     9  SDI                                   -> +3.3V (idle high)
+    #    10  SDO      (open-drain SPI output)      -> +3.3V (pull-up)
+    #    11  SCLK                                  -> +3.3V
+    #    12  DC_CAL                                -> GND   (normal operation)
+    #    13  GVDD     (gate-driver internal LDO)   -> +5V   (cap to GND ext.)
+    #    14  CP1      (charge pump cap 1)          -> +5V   (cap between CP1/CP2)
+    #    15  CP2                                   -> +5V
+    #    16  EN_GATE                               -> +3.3V (always-on)
+    #
+    #   PWM logic inputs (17-22):
+    #    17  INH_A                                 <- GATE_AH
+    #    18  INL_A                                 <- GATE_AL
+    #    19  INH_B                                 <- GATE_BH
+    #    20  INL_B                                 <- GATE_BL
+    #    21  INH_C                                 <- GATE_CH
+    #    22  INL_C                                 <- GATE_CL
+    #
+    #   Analog supplies / current-sense amps (23-33):
+    #    23  DVDD     (internal 3.3-V supply, cap) -> +3.3V
+    #    24  REF      (current-sense reference)    -> +3.3V (=VDD/2 nominally)
+    #    25  SO1      (current-sense amp 1 out)    -> ISENSE_A+ (tied to shunt+)
+    #    26  SO2      (current-sense amp 2 out)    -> ISENSE_B+
+    #    27  AVDD     (internal 6-V supply, cap)   -> +5V
+    #    28  AGND                                  -> GND
+    #    29  PVDD1    (gate-driver/SPI supply)     -> VMOTOR
+    #    30  SP2      (amp 2 + input)              -> ISENSE_B+
+    #    31  SN2      (amp 2 - input)              -> ISENSE_B-
+    #    32  SP1      (amp 1 + input)              -> ISENSE_A+
+    #    33  SN1      (amp 1 - input)              -> ISENSE_A-
+    #
+    #   Half-bridge C (34-38):
+    #    34  SL_C     (low-side source / VDS-)     -> ISENSE_C-
+    #    35  GL_C                                  -> GATE_CL
+    #    36  SH_C                                  -> PHASE_C
+    #    37  GH_C                                  -> GATE_CH
+    #    38  BST_C    (high-side bootstrap)        -> VMOTOR (via cap, DC tie)
+    #
+    #   Half-bridge B (39-43):
+    #    39  SL_B                                  -> ISENSE_B-
+    #    40  GL_B                                  -> GATE_BL
+    #    41  SH_B                                  -> PHASE_B
+    #    42  GH_B                                  -> GATE_BH
+    #    43  BST_B                                 -> VMOTOR
+    #
+    #   Half-bridge A (44-48):
+    #    44  SL_A                                  -> ISENSE_A-
+    #    45  GL_A                                  -> GATE_AL
+    #    46  SH_A                                  -> PHASE_A
+    #    47  GH_A                                  -> GATE_AH
+    #    48  BST_A                                 -> VMOTOR
+    #
+    #   SPI / buck pins (49-57):
+    #    49  VDD_SPI  (SPI logic supply)           -> +3.3V
+    #    50  PH       (buck high-side source)      -> SW_OUT
+    #    51  PH                                    -> SW_OUT (same node)
+    #    52  BST_BK   (buck bootstrap)             -> VMOTOR (via cap, DC tie)
+    #    53  PVDD2    (buck supply)                -> VMOTOR
+    #    54  PVDD2                                 -> VMOTOR
+    #    55  EN_BUCK                               -> +3.3V (always-on)
+    #    56  SS_TR    (buck soft-start)            -> GND   (cap to GND)
+    #    57  PowerPAD (GND)                        -> GND
+    #
+    # The mapping above ties any pin that would otherwise float (mode/SPI/
+    # open-drain reporting pins) to a power rail so the net has at least two
+    # endpoints (single_pad_net is satisfied).  This also matches realistic
+    # use of the part: open-drain outputs need a pull-up, mode pins are
+    # strapped, and the buck regulator needs its enable / soft-start / sense
+    # pins biased.  Fully-functional firmware would drive the SPI and PWM
+    # inputs from the MCU at runtime; for a generated demo board the static
+    # tie-up gives the autorouter sensible electrical endpoints.
     DRV8301_PINS: list[tuple[str, str]] = [
-        ("1",  "+5V"),         # GVDD
-        ("2",  "+5V"),         # CP1 (with cap externally; tied for autorouter)
-        ("3",  "+5V"),         # CP2
-        ("4",  "+5V"),         # VCPH
-        ("5",  "+5V"),         # VCP
-        ("6",  "VMOTOR"),      # PVDD1
-        ("7",  "GATE_AH"),     # GH_A
-        ("8",  "PHASE_A"),     # SH_A
-        ("9",  "VMOTOR"),      # BST_A (via bootstrap cap C12, but DC tie)
-        ("10", "ISENSE_A+"),   # SP_A
-        ("11", "ISENSE_A-"),   # SN_A
-        ("12", "GATE_AL"),     # GL_A
-        ("13", "VMOTOR"),      # PVDD2
-        ("14", "GATE_BH"),     # GH_B
-        ("15", "PHASE_B"),     # SH_B
-        ("16", "VMOTOR"),      # BST_B
-        ("17", "ISENSE_B+"),   # SP_B
-        ("18", "ISENSE_B-"),   # SN_B
-        ("19", "GATE_BL"),     # GL_B
-        ("20", "VMOTOR"),      # PVDD3
-        ("21", "GATE_CH"),     # GH_C
-        ("22", "PHASE_C"),     # SH_C
-        ("23", "VMOTOR"),      # BST_C
-        ("24", "ISENSE_C+"),   # SP_C
-        ("25", "ISENSE_C-"),   # SN_C
-        ("26", "GATE_CL"),     # GL_C
-        ("27", "GND"),         # PGND
-        ("28", "GND"),         # PGND
-        ("29", "GATE_AH"),     # INH_A
-        ("30", "GATE_AL"),     # INL_A
-        ("31", "GATE_BH"),     # INH_B
-        ("32", "GATE_BL"),     # INL_B
-        ("33", "GATE_CH"),     # INH_C
-        ("34", "GATE_CL"),     # INL_C
-        ("35", "+3.3V"),       # EN_GATE
-        ("36", "+3.3V"),       # nFAULT (pull-up)
-        ("37", "+3.3V"),       # nOCTW (pull-up)
-        ("38", "GND"),         # DTC
-        ("39", "+3.3V"),       # nSCS
-        ("40", "+3.3V"),       # SCLK
-        ("41", "+3.3V"),       # SDI
-        ("42", "+3.3V"),       # SDO
-        ("43", "+3.3V"),       # REF
-        ("44", "ISENSE_A+"),   # SO1 (op-amp output, shorted to shunt path)
-        ("45", "ISENSE_B+"),   # SO2
-        ("46", "GND"),         # DC_CAL
-        ("47", "+3.3V"),       # GAIN
-        ("48", "+3.3V"),       # OC_ADJ
-        ("49", "GND"),         # OCTW_MODE
-        ("50", "+3.3V"),       # PWM_MODE
-        ("51", "+3.3V"),       # M_PWM
-        ("52", "+3.3V"),       # M_OC
-        ("53", "+3.3V"),       # AVDD
-        ("54", "GND"),         # AGND
-        ("55", "+5V"),         # PVDD (logic supply)
-        ("56", "+5V"),         # GVDD second pin
+        # Pin, net               # Datasheet name (function)
+        ("1",  "GND"),           # RT_CLK   (buck timing R)
+        ("2",  "GND"),           # COMP     (buck error-amp output)
+        ("3",  "+5V"),           # VSENSE   (buck output FB = +5V rail)
+        ("4",  "+3.3V"),         # PWRGD    (open-drain, pull-up)
+        ("5",  "+3.3V"),         # nOCTW    (open-drain, pull-up)
+        ("6",  "+3.3V"),         # nFAULT   (open-drain, pull-up)
+        ("7",  "GND"),           # DTC      (R to GND, programmable)
+        ("8",  "+3.3V"),         # nSCS     (idle high)
+        ("9",  "+3.3V"),         # SDI
+        ("10", "+3.3V"),         # SDO      (open-drain, pull-up)
+        ("11", "+3.3V"),         # SCLK
+        ("12", "GND"),           # DC_CAL   (normal operation)
+        ("13", "+5V"),           # GVDD     (gate-driver LDO, cap to GND)
+        ("14", "+5V"),           # CP1      (charge pump cap 1)
+        ("15", "+5V"),           # CP2      (charge pump cap 2)
+        ("16", "+3.3V"),         # EN_GATE  (always-on)
+        ("17", "GATE_AH"),       # INH_A
+        ("18", "GATE_AL"),       # INL_A
+        ("19", "GATE_BH"),       # INH_B
+        ("20", "GATE_BL"),       # INL_B
+        ("21", "GATE_CH"),       # INH_C
+        ("22", "GATE_CL"),       # INL_C
+        ("23", "+3.3V"),         # DVDD     (internal 3.3-V LDO output)
+        ("24", "+3.3V"),         # REF      (current-sense reference)
+        ("25", "ISENSE_A+"),     # SO1      (op-amp 1 output)
+        ("26", "ISENSE_B+"),     # SO2      (op-amp 2 output)
+        ("27", "+5V"),           # AVDD     (internal 6-V LDO output)
+        ("28", "GND"),           # AGND
+        ("29", "VMOTOR"),        # PVDD1    (gate-driver supply)
+        ("30", "ISENSE_B+"),     # SP2      (amp 2 + input)
+        ("31", "ISENSE_B-"),     # SN2      (amp 2 - input)
+        ("32", "ISENSE_A+"),     # SP1      (amp 1 + input)
+        ("33", "ISENSE_A-"),     # SN1      (amp 1 - input)
+        ("34", "ISENSE_C-"),     # SL_C     (low-side source, half-bridge C)
+        ("35", "GATE_CL"),       # GL_C
+        ("36", "PHASE_C"),       # SH_C
+        ("37", "GATE_CH"),       # GH_C
+        ("38", "VMOTOR"),        # BST_C    (bootstrap, via cap)
+        ("39", "ISENSE_B-"),     # SL_B
+        ("40", "GATE_BL"),       # GL_B
+        ("41", "PHASE_B"),       # SH_B
+        ("42", "GATE_BH"),       # GH_B
+        ("43", "VMOTOR"),        # BST_B
+        ("44", "ISENSE_A-"),     # SL_A
+        ("45", "GATE_AL"),       # GL_A
+        ("46", "PHASE_A"),       # SH_A
+        ("47", "GATE_AH"),       # GH_A
+        ("48", "VMOTOR"),        # BST_A
+        ("49", "+3.3V"),         # VDD_SPI  (SPI logic supply)
+        ("50", "SW_OUT"),        # PH       (buck switch node)
+        ("51", "SW_OUT"),        # PH       (buck switch node, second pin)
+        ("52", "VMOTOR"),        # BST_BK   (buck bootstrap, via cap)
+        ("53", "VMOTOR"),        # PVDD2    (buck input supply)
+        ("54", "VMOTOR"),        # PVDD2    (buck input supply, 2nd pin)
+        ("55", "+3.3V"),         # EN_BUCK  (always-on)
+        ("56", "GND"),           # SS_TR    (cap to GND)
     ]
 
-    def _qfn56_pad_xy(pin_index: int) -> tuple[float, float, float, float]:
-        """Return (x, y, size_x, size_y) for the given QFN-56 pin (1-56).
+    def _htssop56_pad_xy(pin_index: int) -> tuple[float, float, float, float]:
+        """Return (x, y, size_x, size_y) for the given HTSSOP-56 pin (1-56).
 
-        Layout follows the KiCad ``QFN-56-1EP_8x8mm_P0.5mm_EP4.3x4.3mm`` foot-
-        print: 14 pads on each side, 0.5mm pitch, pin-1 at the top-left of the
-        left edge.  Pads on the left/right edges are 0.875 wide x 0.25 tall;
-        pads on the top/bottom edges are 0.25 wide x 0.875 tall.
+        Layout matches the KiCad library footprint
+        ``Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm``:
+        long axis vertical, pin 1 at the top-left, pins 1-28 down the left
+        edge (top to bottom), pins 29-56 up the right edge (bottom to top),
+        0.5 mm pitch, pad geometry 1.55 mm wide (perpendicular to body) by
+        0.30 mm tall (parallel to body).  Pad centre offsets are +/-3.75 mm
+        in X with Y stepping by 0.5 mm from +/-6.75 mm.
         """
-        if 1 <= pin_index <= 14:           # left edge, top->bottom
-            return (-3.9375, -3.25 + (pin_index - 1) * 0.5, 0.875, 0.25)
-        if 15 <= pin_index <= 28:          # bottom edge, left->right
-            return (-3.25 + (pin_index - 15) * 0.5, 3.9375, 0.25, 0.875)
-        if 29 <= pin_index <= 42:          # right edge, bottom->top
-            return (3.9375, 3.25 - (pin_index - 29) * 0.5, 0.875, 0.25)
-        if 43 <= pin_index <= 56:          # top edge, right->left
-            return (3.25 - (pin_index - 43) * 0.5, -3.9375, 0.25, 0.875)
-        raise ValueError(f"QFN-56 pin {pin_index} out of range")
+        if 1 <= pin_index <= 28:
+            # Left edge, pin 1 at top (-6.75) -> pin 28 at bottom (+6.75)
+            return (-3.75, -6.75 + (pin_index - 1) * 0.5, 1.55, 0.3)
+        if 29 <= pin_index <= 56:
+            # Right edge, pin 29 at bottom (+6.75) -> pin 56 at top (-6.75)
+            return (3.75, 6.75 - (pin_index - 29) * 0.5, 1.55, 0.3)
+        raise ValueError(f"HTSSOP-56 pin {pin_index} out of range")
 
-    def generate_qfn56(ref: str, pos: tuple, value: str) -> str:
-        """Generate the complete QFN-56 footprint for the DRV8301 gate driver.
+    def generate_htssop56(ref: str, pos: tuple, value: str) -> str:
+        """Generate the complete HTSSOP-56 footprint for the DRV8301 gate
+        driver.
 
-        Emits all 56 perimeter pads plus the exposed thermal pad (pin 57).
+        Emits all 56 perimeter pads plus the exposed PowerPAD (pin 57).
         Net assignments come from ``DRV8301_PINS`` above; pin 57 is GND.
+        Footprint matches TI's DCA package per SLOS719F.
         """
         x, y = pos
         pad_lines = []
         for pin_str, net_name in DRV8301_PINS:
             pin_idx = int(pin_str)
-            px, py, sx, sy = _qfn56_pad_xy(pin_idx)
+            px, py, sx, sy = _htssop56_pad_xy(pin_idx)
             net_num = NETS.get(net_name, 0)
             pad_lines.append(
                 f'    (pad "{pin_str}" smd roundrect '
@@ -1192,21 +1218,22 @@ def create_bldc_pcb(output_dir: Path) -> Path:
                 f'(layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) '
                 f'(net {net_num} "{net_name}"))'
             )
-        # Thermal/exposed pad (pin 57 == GND)
+        # PowerPAD / exposed pad (pin 57 == GND).  EP geometry per KiCad
+        # library footprint: 3.61 mm x 6.35 mm centred on the package.
         pad_lines.append(
-            f'    (pad "57" smd rect (at 0 0) (size 4.3 4.3) '
+            f'    (pad "57" smd rect (at 0 0) (size 3.61 6.35) '
             f'(layers "F.Cu" "F.Paste" "F.Mask") '
             f'(net {NETS["GND"]} "GND"))'
         )
         pads = "\n".join(pad_lines)
-        return f"""  (footprint "Package_DFN_QFN:QFN-56-1EP_8x8mm_P0.5mm_EP4.3x4.3mm"
+        return f"""  (footprint "Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -5.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -8) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "{value}" (at 0 5.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{value}" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
 {pads}
@@ -1547,8 +1574,8 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print(f"   Y1 at {Y1_POS}, C10-C11 at {C10_POS}, {C11_POS}")
 
     print("\n7. Adding gate driver...")
-    parts.append(generate_qfn56("U3", U3_POS, "DRV8301"))
-    print(f"   U3 (DRV8301) at {U3_POS}")
+    parts.append(generate_htssop56("U3", U3_POS, "DRV8301"))
+    print(f"   U3 (DRV8301, HTSSOP-56) at {U3_POS}")
     # Bootstrap caps (VMOTOR to phase)
     parts.append(generate_cap_0805("C12", C12_POS, "100nF", "VMOTOR", "PHASE_A"))
     parts.append(generate_cap_0805("C13", C13_POS, "100nF", "VMOTOR", "PHASE_B"))
@@ -1650,7 +1677,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # signal routing on a motor controller board.  Power nets get wider
     # traces (0.5mm+) via the net-class system automatically.
     # Issue #2532: Reduced trace_clearance to 0.15mm to allow fanout from
-    # the now-complete DRV8301 QFN-56 (0.5mm-pitch) and STM32G431 LQFP-32
+    # the DRV8301 HTSSOP-56 (0.5mm-pitch) and STM32G431 LQFP-32
     # (0.8mm-pitch) packages.  These match the JLCPCB 1-2 layer minimums.
     rules = DesignRules(
         grid_resolution=0.05,
