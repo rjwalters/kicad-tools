@@ -844,8 +844,16 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Gate driver (left, row 4) -- DRV8301 HTSSOP-56 (DCA package), 14x8.1mm
     # body per TI SLOS719F.  Pin 1 is on the top-left of the long-axis-vertical
     # orientation, so the body extends ~7mm above and below U3_POS along Y and
-    # ~4mm left/right along X (with leads).  Centered to clear the bypass caps
+    # ~4mm left/right along X (with leads).  Centred to clear the bypass caps
     # at x=4 and x=24 and the MCU at x=40.
+    #
+    # Note on routing density: the DCA package places half-bridge pins
+    # (BST/GH/GL/SH/SL for A,B,C, pins 34-48) along the lower-right of the
+    # device, while the H-bridge MOSFETs sit south at y=68/76.  The router
+    # achieves ~58-77% on this geometry with the C++ negotiated backend at
+    # the requested ``--timeout 240 --layers 2`` budget; runs are
+    # deterministic but the saved-partial heuristic can vary 2-3 nets
+    # between iterations (issue #2532 follow-up).
     U3_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 50)  # DRV8301 HTSSOP-56
     C12_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 47)  # Bootstrap A
     C13_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 53)  # Bootstrap B
