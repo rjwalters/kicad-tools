@@ -68,9 +68,7 @@ def _make_pcb_with_pour_candidates() -> str:
     parts.append('  (net 3 "SDA")\n')
     parts.append('  (net 4 "SCL")\n')
     parts.append('  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n')
-    for idx, (nid, name) in enumerate(
-        [(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")]
-    ):
+    for idx, (nid, name) in enumerate([(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")]):
         x_off = idx * 2.0
         parts.append(
             f'    (pad "{idx + 1}" smd roundrect (at {x_off} 0) '
