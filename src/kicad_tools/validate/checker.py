@@ -157,7 +157,6 @@ class DRCChecker:
         Returns:
             DRCResults containing intra-pair clearance violations.
         """
-        from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 
         rule = DiffPairClearanceIntraRule()
         return rule.check(self.pcb, self.design_rules)

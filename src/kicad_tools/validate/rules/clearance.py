@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
@@ -154,7 +156,6 @@ def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, fl
     new_height = width * sin_a + height * cos_a
 
     return new_width, new_height
-
 
 
 # _point_to_segment_distance and _segment_to_segment_distance are imported
