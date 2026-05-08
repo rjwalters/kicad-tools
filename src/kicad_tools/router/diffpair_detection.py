@@ -32,6 +32,8 @@ from .diffpair import (
     DifferentialPairRules,
     DifferentialSignal,
     _detect_pair_type,
+)
+from .diffpair import (
     detect_differential_pairs as _suffix_detect_pairs,
 )
 
@@ -129,24 +131,24 @@ def detect_diff_pairs(
     # 2. KiCad group declarations.
     if kicad_groups:
         for p_name, n_name in kicad_groups:
-            pair = _make_pair_from_names(
+            kicad_pair = _make_pair_from_names(
                 p_name=p_name,
                 n_name=n_name,
                 name_to_id=name_to_id,
             )
-            if pair is None:
+            if kicad_pair is None:
                 continue
-            if pair.positive.net_id in paired_net_ids:
+            if kicad_pair.positive.net_id in paired_net_ids:
                 continue
-            if pair.negative.net_id in paired_net_ids:
+            if kicad_pair.negative.net_id in paired_net_ids:
                 continue
-            out.append(DetectedPair(pair=pair, source=DetectionSource.KICAD_GROUP))
-            paired_net_ids.add(pair.positive.net_id)
-            paired_net_ids.add(pair.negative.net_id)
+            out.append(DetectedPair(pair=kicad_pair, source=DetectionSource.KICAD_GROUP))
+            paired_net_ids.add(kicad_pair.positive.net_id)
+            paired_net_ids.add(kicad_pair.negative.net_id)
             logger.info(
                 "[diffpair] %s <-> %s (source: kicad_group)",
-                pair.positive.net_name,
-                pair.negative.net_name,
+                kicad_pair.positive.net_name,
+                kicad_pair.negative.net_name,
             )
 
     # 3. Suffix-based fall-back.  Only consider nets that aren't

@@ -57,7 +57,10 @@ class DesignRules:
     via_clearance: float = 0.2  # mm
     min_drill_clearance: float = 0.102  # mm (minimum drill-to-drill spacing, including same-net)
     grid_resolution: float = 0.1  # mm (routing grid)
-    grid_origin_offset: tuple[float, float] = (0.0, 0.0)  # mm (grid origin shift for mixed-pitch alignment)
+    grid_origin_offset: tuple[float, float] = (
+        0.0,
+        0.0,
+    )  # mm (grid origin shift for mixed-pitch alignment)
 
     # Per-component clearance overrides (Issue #1016)
     # Maps component reference (e.g., "U1") to clearance in mm
@@ -124,8 +127,8 @@ class DesignRules:
     # global corridors over time.
     #   effective_penalty = corridor_penalty * max(floor, 1.0 - rate * iteration)
     # With defaults (rate=0.05, floor=0.3) the floor is reached at iteration 14.
-    corridor_decay_rate: float = 0.05   # per-iteration linear decay
-    corridor_decay_floor: float = 0.3   # minimum multiplier (never decays below this)
+    corridor_decay_rate: float = 0.05  # per-iteration linear decay
+    corridor_decay_floor: float = 0.3  # minimum multiplier (never decays below this)
 
     # Crossing-aware routing (Issue #1250)
     # Penalizes candidate edges that cross already-routed segments on the same layer.
@@ -164,7 +167,9 @@ class DesignRules:
     # ICs (0.5-0.65mm pitch) to be routed without requiring a global fine grid.
     subgrid_routing: bool = False  # Enable sub-grid escape routing
     subgrid_escape_radius: int = 3  # Grid cells to search for escape endpoint
-    subgrid_clearance_factor: float = 0.5  # Relaxed clearance multiplier for sub-grid escape Phase 3
+    subgrid_clearance_factor: float = (
+        0.5  # Relaxed clearance multiplier for sub-grid escape Phase 3
+    )
 
     # Constraint-aware net ordering (Issue #1020)
     # Routes highly-constrained nets first to give them access to routing resources

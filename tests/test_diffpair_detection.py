@@ -36,7 +36,6 @@ from kicad_tools.router.diffpair_detection import (
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.sexp.parser import parse_string
 
-
 # =============================================================================
 # 1. Suffix-only (regression)
 # =============================================================================
@@ -394,8 +393,7 @@ class TestTieBreaker:
         plus_pair = next(
             d
             for d in out
-            if d.pair.positive.net_name == "USB_D+"
-            or d.pair.negative.net_name == "USB_D+"
+            if d.pair.positive.net_name == "USB_D+" or d.pair.negative.net_name == "USB_D+"
         )
         partner = (
             plus_pair.pair.negative.net_name
@@ -425,8 +423,7 @@ class TestTieBreaker:
         plus_pair = next(
             d
             for d in out
-            if d.pair.positive.net_name == "USB_D+"
-            or d.pair.negative.net_name == "USB_D+"
+            if d.pair.positive.net_name == "USB_D+" or d.pair.negative.net_name == "USB_D+"
         )
         assert plus_pair.source == DetectionSource.EXPLICIT
         partner = (
@@ -447,8 +444,7 @@ class TestTieBreaker:
         plus_pair = next(
             d
             for d in out
-            if d.pair.positive.net_name == "USB_D+"
-            or d.pair.negative.net_name == "USB_D+"
+            if d.pair.positive.net_name == "USB_D+" or d.pair.negative.net_name == "USB_D+"
         )
         assert plus_pair.source == DetectionSource.KICAD_GROUP
         # USB_D- should be left unpaired.
@@ -567,9 +563,7 @@ class TestBackwardCompatAcceptance:
         layered = detect_diff_pairs(net_names)
         legacy_pairs = legacy(net_names)
         assert len(layered) == len(legacy_pairs)
-        layered_keys = {
-            (d.pair.positive.net_name, d.pair.negative.net_name) for d in layered
-        }
+        layered_keys = {(d.pair.positive.net_name, d.pair.negative.net_name) for d in layered}
         legacy_keys = {(p.positive.net_name, p.negative.net_name) for p in legacy_pairs}
         assert layered_keys == legacy_keys
 

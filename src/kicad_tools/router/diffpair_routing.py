@@ -28,18 +28,15 @@ from .diffpair import (
     DifferentialPairConfig,
     LengthMismatchWarning,
     analyze_differential_pairs,
-    detect_differential_pairs,
 )
 from .diffpair_detection import (
-    DetectionSource,
     detect_diff_pairs as _layered_detect_diff_pairs,
 )
-
-
-logger = logging.getLogger(__name__)
 from .layers import Layer
 from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
+
+logger = logging.getLogger(__name__)
 
 
 class PairOrientation(Enum):
