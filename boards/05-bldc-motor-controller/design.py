@@ -984,13 +984,18 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     R4_POS = (BOARD_ORIGIN_X + 62, BOARD_ORIGIN_Y + 13)  # STATUS LED resistor
 
     # Hall sensor filter network (next to J3, between MCU and connector).
-    # Pull-ups (R30-R32) above filter caps (C30-C32), 5mm column pitch.
-    R30_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 54)  # HALL_A pull-up
-    C30_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 58)  # HALL_A filter
-    R31_POS = (BOARD_ORIGIN_X + 52, BOARD_ORIGIN_Y + 54)  # HALL_B pull-up
-    C31_POS = (BOARD_ORIGIN_X + 52, BOARD_ORIGIN_Y + 58)  # HALL_B filter
-    R32_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 54)  # HALL_C pull-up
-    C32_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 58)  # HALL_C filter
+    # Pull-ups (R30-R32) above filter caps (C30-C32).
+    # Iteration 2: widen column pitch from 5mm to 6mm and shift the cluster
+    # rightward by ~2mm so HALL_A/B/C traces from MCU bottom-edge pins
+    # 11/12/13 (x=138.8/139.6/140.4, y=154.175) have room to fan out without
+    # stacking three parallel traces against the MCU pad row.  J3 pads at
+    # x=164.15..165.85 leave the rightmost cap (x=161) ~3mm clearance.
+    R30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 54)  # HALL_A pull-up
+    C30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 58)  # HALL_A filter
+    R31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 54)  # HALL_B pull-up
+    C31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 58)  # HALL_B filter
+    R32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 54)  # HALL_C pull-up
+    C32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 58)  # HALL_C filter
 
     # =========================================================================
     # Footprint generators
