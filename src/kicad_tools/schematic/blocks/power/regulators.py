@@ -1242,9 +1242,7 @@ def create_dual_supply_cascade(
     if ldo_key not in _LDO_PART_TABLE:
         # This should not be reachable because the buck table already
         # implies a valid LDO key — guard anyway for future extensions.
-        raise ValueError(
-            f"No LDO mapping for (v_mid, vout) = ({v_mid}, {vout})"
-        )
+        raise ValueError(f"No LDO mapping for (v_mid, vout) = ({v_mid}, {vout})")
     ldo_value, ldo_symbol, ldo_input_cap, ldo_output_caps = _LDO_PART_TABLE[ldo_key]
 
     buck_components = _BUCK_COMPONENTS_TABLE.get(
