@@ -79,10 +79,12 @@ from .mcu import (
 from .motor import (
     CurrentSenseShunt,
     GateDriverBlock,
+    GateDriveResistorArray,
     HalfBridge,
     ThreePhaseInverter,
     create_3phase_inverter,
     create_current_sense,
+    create_gate_drive_resistor_array,
     create_half_bridge,
 )
 
@@ -195,9 +197,11 @@ __all__ = [
     "ThreePhaseInverter",
     "CurrentSenseShunt",
     "GateDriverBlock",
+    "GateDriveResistorArray",
     "create_half_bridge",
     "create_3phase_inverter",
     "create_current_sense",
+    "create_gate_drive_resistor_array",
     # Analog
     "ADCInputFilterBlock",
     "OpAmpBlock",

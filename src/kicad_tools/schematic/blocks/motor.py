@@ -730,9 +730,7 @@ class GateDriverBlock(CircuitBlock):
                 driver_symbol = "Driver_FET:IR2110"
 
         # Add the driver IC symbol
-        self.driver = sch.add_symbol(
-            driver_symbol, x, y, ref, value
-        )
+        self.driver = sch.add_symbol(driver_symbol, x, y, ref, value)
 
         self.components = {"DRIVER": self.driver}
 
@@ -897,4 +895,229 @@ def create_current_sense(
         ref_start=ref_start,
         amplifier=with_amplifier,
         gain=gain,
+    )
+
+
+class GateDriveResistorArray(CircuitBlock):
+    """
+    Series gate-drive (slew-rate) resistor array.
+
+    A bank of N series resistors placed in the path between a gate-driver
+    output and the gate of a power MOSFET. Each resistor controls the
+    switching slew rate for one channel:
+
+        - Too little series R causes ringing/EMI and shoot-through risk.
+        - Too much series R increases switching loss and dead-time
+          requirements.
+
+    Schematic (3-channel):
+
+        IN_1 ──[R_GATE_1]── OUT_1
+        IN_2 ──[R_GATE_2]── OUT_2
+        IN_3 ──[R_GATE_3]── OUT_3
+
+    Ports:
+        - IN_1..IN_N: Driver-side inputs.
+        - OUT_1..OUT_N: MOSFET-gate-side outputs.
+        - When ``input_nets`` / ``output_nets`` are provided, alias ports
+          named after the suffix of each net are also exposed (e.g. for
+          ``input_nets=["GATE_DRV_AH"]`` an alias ``IN_AH`` is added).
+
+    Example:
+        from kicad_tools.schematic.blocks import create_gate_drive_resistor_array
+
+        gate_r = create_gate_drive_resistor_array(
+            sch, x=300, y=120,
+            channels=3,
+            value="22",
+            ref_start=20,
+            input_nets=["GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH"],
+            output_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+        )
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        channels: int = 3,
+        value: str = "10",
+        *,
+        ref_start: int = 1,
+        ref_prefix: str = "R",
+        resistor_symbol: str = "Device:R",
+        resistor_package: str = "0805",
+        spacing: float = 10.0,
+        input_nets: list[str] | None = None,
+        output_nets: list[str] | None = None,
+    ):
+        """
+        Create a gate-drive resistor array.
+
+        Args:
+            sch: Schematic to add components to.
+            x: X coordinate of first resistor.
+            y: Y coordinate (center of the array).
+            channels: Number of resistor channels (one per gate signal).
+            value: Resistor value in ohms (e.g. ``"10"``, ``"22"``, ``"47"``).
+                Typical range is 10-47 Ω for IRLZ44N-class gates.
+            ref_start: Starting reference number for resistors.
+            ref_prefix: Reference designator prefix (default ``"R"``).
+            resistor_symbol: KiCad symbol for resistor.
+            resistor_package: Footprint package (e.g. ``"0805"``, ``"0603"``).
+            spacing: Horizontal spacing between resistors (schematic units).
+            input_nets: Optional list of input net names (length must equal
+                ``channels``). When provided, ``add_label`` is called at each
+                resistor input pin and an alias port is added.
+            output_nets: Optional list of output net names (length must equal
+                ``channels``). When provided, ``add_label`` is called at each
+                resistor output pin and an alias port is added.
+
+        Raises:
+            ValueError: If ``input_nets`` or ``output_nets`` is provided and
+                its length does not equal ``channels``.
+        """
+        super().__init__(sch, x, y)
+
+        if channels < 1:
+            raise ValueError(f"channels must be >= 1, got {channels}")
+
+        if input_nets is not None and len(input_nets) != channels:
+            raise ValueError(
+                f"input_nets length ({len(input_nets)}) must equal channels ({channels})"
+            )
+        if output_nets is not None and len(output_nets) != channels:
+            raise ValueError(
+                f"output_nets length ({len(output_nets)}) must equal channels ({channels})"
+            )
+
+        self.channels = channels
+        self.value = value
+        self.resistor_package = resistor_package
+        self.resistors = []
+        self.components = {}
+        self.ports = {}
+
+        for i in range(channels):
+            res_x = x + i * spacing
+            ref = f"{ref_prefix}{ref_start + i}"
+            resistor = sch.add_symbol(
+                resistor_symbol,
+                res_x,
+                y,
+                ref,
+                value,
+                properties={"Package": resistor_package},
+            )
+            self.resistors.append(resistor)
+            self.components[f"R_GATE_{i + 1}"] = resistor
+
+            # Pin 1 = input (driver side), Pin 2 = output (MOSFET-gate side).
+            in_pos = resistor.pin_position("1")
+            out_pos = resistor.pin_position("2")
+
+            in_port_name = f"IN_{i + 1}"
+            out_port_name = f"OUT_{i + 1}"
+            self.ports[in_port_name] = in_pos
+            self.ports[out_port_name] = out_pos
+
+            # Optional net labels — emit a label at each pin and add an
+            # alias port keyed by the net suffix (the trailing token after
+            # the last '_').
+            if input_nets is not None:
+                in_net = input_nets[i]
+                sch.add_label(in_net, in_pos[0], in_pos[1], rotation=0)
+                alias = f"IN_{_net_suffix(in_net)}"
+                self.ports[alias] = in_pos
+
+            if output_nets is not None:
+                out_net = output_nets[i]
+                sch.add_label(out_net, out_pos[0], out_pos[1], rotation=0)
+                alias = f"OUT_{_net_suffix(out_net)}"
+                self.ports[alias] = out_pos
+
+
+def _net_suffix(net_name: str) -> str:
+    """Extract the suffix used for alias port naming.
+
+    The suffix is the trailing token after the last underscore. For
+    ``"GATE_DRV_AH"`` it returns ``"AH"``; for ``"GATE_AH"`` it returns
+    ``"AH"``; for a single-token name it returns the whole name.
+    """
+    return net_name.rsplit("_", 1)[-1] if "_" in net_name else net_name
+
+
+def create_gate_drive_resistor_array(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    channels: int = 3,
+    value: str = "10",
+    *,
+    ref_start: int = 1,
+    ref_prefix: str = "R",
+    resistor_symbol: str = "Device:R",
+    resistor_package: str = "0805",
+    spacing: float = 10.0,
+    input_nets: list[str] | None = None,
+    output_nets: list[str] | None = None,
+) -> GateDriveResistorArray:
+    """
+    Create an N-channel series gate-drive (slew-rate) resistor array.
+
+    A series resistor (commonly 10-47 Ω) belongs in the path from each
+    gate-driver IC output to its MOSFET gate. This factory produces an
+    array sized to ``channels``, intended to be spliced in between the
+    driver and the MOSFETs.
+
+    Args:
+        sch: Schematic to add components to.
+        x: X coordinate of first resistor.
+        y: Y coordinate (center of the array).
+        channels: Number of resistor channels (one per gate signal).
+            Common values: 1 (low-side switch), 2 (half-bridge HS+LS),
+            3 (3-phase HS only), 6 (3-phase HS+LS).
+        value: Resistor value in ohms (e.g. ``"10"``, ``"22"``, ``"47"``).
+        ref_start: Starting reference number.
+        ref_prefix: Reference designator prefix (default ``"R"``).
+        resistor_symbol: KiCad symbol for resistor.
+        resistor_package: Footprint package (e.g. ``"0805"``, ``"0603"``).
+        spacing: Horizontal spacing between resistors.
+        input_nets: Optional list of input net names (length == ``channels``).
+            Each emits an ``add_label`` call at the corresponding input pin
+            and adds an alias port (e.g. ``IN_AH``).
+        output_nets: Optional list of output net names (length == ``channels``).
+
+    Returns:
+        ``GateDriveResistorArray`` instance.
+
+    Example:
+        # 3-phase driver -> resistor array -> MOSFET gates (HS only).
+        from kicad_tools.schematic.blocks import create_gate_drive_resistor_array
+
+        gate_r = create_gate_drive_resistor_array(
+            sch, x=300, y=120,
+            channels=3, value="22", ref_start=20,
+            input_nets=["GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH"],
+            output_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+        )
+
+    Raises:
+        ValueError: If ``input_nets`` or ``output_nets`` length does not
+            equal ``channels``.
+    """
+    return GateDriveResistorArray(
+        sch,
+        x,
+        y,
+        channels=channels,
+        value=value,
+        ref_start=ref_start,
+        ref_prefix=ref_prefix,
+        resistor_symbol=resistor_symbol,
+        resistor_package=resistor_package,
+        spacing=spacing,
+        input_nets=input_nets,
+        output_nets=output_nets,
     )
