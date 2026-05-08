@@ -633,6 +633,11 @@ class SExp:
             "uvia_drill",
             "diff_pair_width",
             "diff_pair_gap",
+            # Differential pair declarations (Issue #2558, Epic #2556 Phase 1B)
+            "diff_pair_template",
+            "diff_pair",
+            "positive",
+            "negative",
             # Scope keywords (power symbol scope)
             "global",
             "local",

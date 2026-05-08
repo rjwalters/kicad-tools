@@ -285,6 +285,22 @@ def classify_from_name(net_name: str) -> NetClass | None:
         patterns = NET_CLASS_PATTERNS.get(net_class, [])
         for pattern in patterns:
             if re.search(pattern, name_upper, re.IGNORECASE):
+                # Issue #2558 / Epic #2556 Phase 1B: when DIFFERENTIAL
+                # patterns match, also confirm the name is not on the
+                # single-ended refusal list (CC1/CC2, SBU1/SBU2, prefix
+                # variants).  We deliberately keep the broader
+                # NET_CLASS_PATTERNS[DIFFERENTIAL] entries (e.g.
+                # ``(TX|RX)[PN]$``) accepted here since classify_from_name
+                # is a *classification* hint -- it just biases routing
+                # parameters and doesn't pair up nets.  The pair-formation
+                # path (parse_differential_signal in diffpair.py) is
+                # stricter.
+                if net_class == NetClass.DIFFERENTIAL:
+                    # Local import to avoid a forward ref cycle.
+                    from .diffpair import is_single_ended_refused
+
+                    if is_single_ended_refused(net_name):
+                        continue
                 return net_class
 
     return None
@@ -293,12 +309,30 @@ def classify_from_name(net_name: str) -> NetClass | None:
 def is_differential_pair_name(net_name: str) -> bool:
     """Check if net name suggests it's part of a differential pair.
 
+    Issue #2558, Epic #2556 Phase 1B: this function is the BROAD hint
+    used by ``classify_from_name``; it accepts patterns like ``TXP``
+    or ``CLKP`` that don't have an underscore separator.  The strict
+    pair-formation path lives in ``diffpair.py::parse_differential_signal``
+    and is more conservative.  However, BOTH paths now agree on the
+    refusal list (CC1/CC2, SBU1/SBU2, prefix variants) and the
+    power-rail filter -- the single source of truth lives in
+    ``diffpair.py`` and is consulted here.
+
     Args:
         net_name: Name of the net
 
     Returns:
         True if name pattern suggests differential pair
     """
+    # Local import to avoid a circular import (diffpair.py is in the
+    # same package and is loaded after net_class.py at module init).
+    from .diffpair import is_single_ended_refused
+
+    # Strict refusal: never classify single-ended pin pairs (CC1/CC2,
+    # SBU1/SBU2) as differential.
+    if is_single_ended_refused(net_name):
+        return False
+
     name_upper = net_name.upper()
     diff_patterns = [
         r"[_-]?P$",
