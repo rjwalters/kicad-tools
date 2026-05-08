@@ -253,91 +253,97 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ### 2026-04-23
 
 - **PR #2155–#2166** (high volume): silkscreen repair improvements, schematic validation expansion, MCP enhancements
-- **PR #2160**: feat(sch): add `connect-net` and `disconnect-pin` commands for net editing
-- **PR #2159**: feat(report): integrate review-schematic narratives into design report
-- **PR #2158**: feat(validate): add channel symmetry check for differential / multi-channel designs
-- **PR #2157**: feat(sch): add `add-symbol`/`add-wire` for programmatic schematic edits
-- **PR #2156**: feat(report): add review-schematic command with LLM narrative generation
-- **PR #2155**: feat(audit): integrate review-schematic into design report
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - schematic editing: `connect-net` / `disconnect-pin` / `add-symbol` / `add-wire` commands for net editing and programmatic schematic edits
+  - report integration: review-schematic narrative generation and integration into design report
+  - validation: channel symmetry check for differential / multi-channel designs
 
 ### 2026-04-22
 
 - **PR #2140–#2154** (high volume): board generation improvements (boards 02, 03), router stability fixes, BOM enrichment
-- **PR #2154**: feat(boards/03): generate USB joystick PCB with footprint placement
-- **PR #2153**: feat(boards/02): regenerate charlieplex PCB with placement optimizer
-- **PR #2150**: feat(audit): add per-section ACTION ITEMS aggregator across audit pipeline
-- **PR #2149**: feat(report): wire silkscreen repair into pipeline
-- **PR #2147**: feat(silkscreen): add full silkscreen repair pass (line widths, text heights, overlap)
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - boards/03 (USB joystick) and boards/02 (charlieplex) PCB generation with placement optimizer
+  - audit pipeline: per-section ACTION ITEMS aggregator
+  - silkscreen repair: full repair pass (line widths, text heights, overlap) wired into pipeline
 
 ### 2026-04-21
 
 - **PR #2120–#2139** (high volume): export pipeline (BOM, CPL, gerber), preflight expansion, manufacturer presets
-- **PR #2139**: feat(export): add gerber export step to manufacturing pipeline
-- **PR #2135**: feat(export): rotation correction tables for JLCPCB and PCBWay CPL
-- **PR #2129**: feat(preflight): expand check coverage to silkscreen, courtyard, hole sizes
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - export pipeline: gerber export step in manufacturing pipeline
+  - rotation correction tables for JLCPCB and PCBWay CPL
+  - preflight: expanded check coverage to silkscreen, courtyard, hole sizes
 
 ### 2026-04-20
 
 - **PR #2090–#2119** (high volume): router cache versioning, escape routing, pipeline integration
-- **PR #2119**: feat(audit): add ROUTING section with completion / DRC / time-to-route metrics
-- **PR #2113**: feat(pipeline): add `--auto-fix` cascade for ERC, DRC, vias, silkscreen
-- **PR #2107**: feat(router): cache routing solutions keyed by board geometry hash
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - audit: ROUTING section with completion / DRC / time-to-route metrics
+  - pipeline: `--auto-fix` cascade for ERC, DRC, vias, silkscreen
+  - router: cache routing solutions keyed by board geometry hash
 
 ### 2026-04-19
 
 - **PR #2030–#2089** (very high volume, 58 commits): cache versioning, MCP expansion, board generation, audit reorg
 - **PR #1649**: fix(cache): wire `CACHE_VERSION` into cache key computation for partial and full routes
-- **PR #2087**: feat(audit): split audit into preflight / drc / erc / report sub-steps
-- **PR #2080**: feat(mcp): add `analyze_routing` and `analyze_placement` tools
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - audit: split into preflight / drc / erc / report sub-steps
+  - mcp: `analyze_routing` and `analyze_placement` tools
 
 ### 2026-04-18
 
 - **PR #2005–#2029**: routing strategy retry loop, fix-drc enhancements, schematic editing API
-- **PR #2029**: feat(router): add automatic strategy retry loop on routing failure
-- **PR #2017**: feat(drc): add multi-segment cluster rerouting for grouped via violations
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - router: automatic strategy retry loop on routing failure
+  - drc: multi-segment cluster rerouting for grouped via violations
 
 ### 2026-04-17
 
 - **PR #1990–#2004**: pipeline scheduler, ERC violation handlers, fix-erc command
-- **PR #2002**: feat(erc): add `fix-erc` command to auto-fix common ERC violations
-- **PR #1995**: feat(pipeline): add FIX_ERC step for automatic ERC remediation
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - erc: `fix-erc` command to auto-fix common ERC violations
+  - pipeline: FIX_ERC step for automatic ERC remediation
 
 ### 2026-04-16
 
 - **PR #1976–#1989**: report generator (PDF/HTML/Markdown), screenshot rendering, action items
-- **PR #1985**: feat(report): add professional PDF layout with cover block, PCB grid, and page controls
-- **PR #1981**: feat(report): wire `ReportFigureGenerator` into `report generate` CLI
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - report: professional PDF layout with cover block, PCB grid, page controls
+  - report: `ReportFigureGenerator` wired into `report generate` CLI
 
 ### 2026-04-15
 
 - **PR #1940–#1975** (high volume, 33 commits): manufacturing export pipeline, JLCPCB integration, design report v1
 - **Release**: v0.12.0 (commit e19e38aa)
-- **PR #1975**: feat(report): add Jinja2 Markdown report generator with CLI
-- **PR #1973**: feat(report): add HTML/PDF renderers with styled CSS template
-- **PR #1971**: feat(cli): add pipeline subcommand for end-to-end PCB repair workflow
-- **PR #1965**: feat(export): auto-match LCSC part numbers during JLCPCB BOM export
-- **PR #1958**: feat(export): add `kct export` command for manufacturing package generation
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - report: Jinja2 Markdown report generator with CLI
+  - report: HTML/PDF renderers with styled CSS template
+  - cli: pipeline subcommand for end-to-end PCB repair workflow (actual merge: #1307)
+  - export: auto-match LCSC part numbers during JLCPCB BOM export
+  - export: `kct export` command for manufacturing package generation
 - **PR 5e9bbb2d**: feat: add `/release` skill for guided semver release process
 
 ### 2026-04-14
 
 - **PR #1900–#1939** (high volume, 34 commits): fix-drc command, audit gating, ERC integration
-- **PR #1933**: feat(drc): add `fix-drc` command for automated DRC violation repair
-- **PR #1927**: feat(audit): READY-verdict gating across DRC/ERC/connectivity
-- **PR #1920**: feat(zones): add zone fill CLI command delegating to `kicad-cli`
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - drc: `fix-drc` command for automated DRC violation repair (actual merge: #1262)
+  - audit: READY-verdict gating across DRC/ERC/connectivity
+  - zones: zone fill CLI command delegating to `kicad-cli` (actual merge: #1260)
 
 ### 2026-04-13
 
 - **PR #1860–#1899** (high volume, 31 commits): C++ router backend, multi-resolution routing, MCP analysis tools
-- **PR #1875**: feat(router): add multi-resolution routing with fine-grid fallback
-- **PR #1872**: feat(router): add R-tree spatial indexing for segment clearance queries
-- **PR #1865**: feat(mcp): add `screenshot_board` and `screenshot_schematic` tools
+- Themes (specific PR-to-title bindings dropped — see `git log` for verified attributions):
+  - router: multi-resolution routing with fine-grid fallback (actual merge: #1254)
+  - router: R-tree spatial indexing for segment clearance queries (actual merge: #1253)
+  - mcp: `screenshot_board` and `screenshot_schematic` tools (actual merge: #1247)
 
 ### 2026-04-12
 
 - **PR #1850–#1859**: orchestrator wiring, type checking, force-mode follow-ups
 - **Release**: v0.11.0 (commit aa9dc545)
-- **PR #1857**: ci: add PyPI publish workflow and speed up CI tests
+- **Commit 117f58e3**: ci: add PyPI publish workflow and speed up CI tests (direct push, no PR)
 
 ### 2026-04-11
 
