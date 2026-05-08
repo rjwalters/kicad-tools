@@ -71,6 +71,7 @@ from .mcu import (
     ResetButton,
     create_esp32_boot,
     create_generic_boot,
+    create_gpio_pull_resistor,
     create_reset_button,
     create_stm32_boot,
 )
@@ -188,6 +189,7 @@ __all__ = [
     "ResetButton",
     "create_esp32_boot",
     "create_generic_boot",
+    "create_gpio_pull_resistor",
     "create_reset_button",
     "create_stm32_boot",
     # Motor control

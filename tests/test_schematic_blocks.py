@@ -41,6 +41,7 @@ from kicad_tools.schematic.blocks import (
     create_current_sense,
     create_esp32_boot,
     create_generic_boot,
+    create_gpio_pull_resistor,
     create_half_bridge,
     create_i2c_pullups,
     create_jtag_header,
@@ -3143,6 +3144,140 @@ class TestBootModeSelectorFactoryFunctions:
         """Create generic boot selector with custom resistor."""
         boot = create_generic_boot(mock_schematic, x=100, y=100, ref="R1", resistor_value="100k")
         assert boot.resistor_value == "100k"
+
+
+class TestCreateGpioPullResistor:
+    """Tests for ``create_gpio_pull_resistor`` thin wrapper factory.
+
+    These tests cover the four gaps the curator analysis identified over
+    the existing ``BootModeSelector``: caller-supplied port name, custom
+    rail names (e.g. "+3.3V"), footprint pass-through, and validation of
+    pull_type. See issue #2573.
+    """
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic mirroring TestBootModeSelectorFactoryFunctions."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_default_pull_down_to_gnd(self, mock_schematic):
+        """Defaults give one resistor, port 'PIN', pull-down, no button."""
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100)
+        assert isinstance(block, BootModeSelector)
+        assert block.mode == "generic"
+        assert block.default_high is False  # pull-down
+        assert block.include_button is False
+        assert "PIN" in block.ports
+        assert "GND" in block.ports
+        # No button placed
+        assert len(block.buttons) == 0
+        assert "SW" not in block.components
+        # Exactly one resistor placed
+        assert len(block.resistors) == 1
+
+    def test_pull_up_to_vcc(self, mock_schematic):
+        """pull_type='up' produces a pull-up to VCC."""
+        block = create_gpio_pull_resistor(
+            mock_schematic, x=100, y=100, pull_type="up", rail="VCC"
+        )
+        assert block.default_high is True
+        assert "PIN" in block.ports
+        assert "VCC" in block.ports
+
+    def test_custom_value(self, mock_schematic):
+        """Custom resistor value propagates."""
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100, value="4.7k")
+        assert block.resistor_value == "4.7k"
+
+    def test_custom_rail_name_pulldown(self, mock_schematic):
+        """rail='+3.3V' is exposed as a port (not silently coerced to GND)."""
+        block = create_gpio_pull_resistor(
+            mock_schematic, x=100, y=100, pull_type="down", rail="+3.3V"
+        )
+        # Custom rail name is exposed as its own port
+        assert "+3.3V" in block.ports
+        # Standard alias remains available so connect_to_rails still works
+        assert "GND" in block.ports
+        # The custom rail port aliases the standard rail position
+        assert block.ports["+3.3V"] == block.ports["GND"]
+
+    def test_custom_rail_name_pullup(self, mock_schematic):
+        """rail='+5V' on a pull-up is exposed (not coerced to VCC)."""
+        block = create_gpio_pull_resistor(
+            mock_schematic, x=100, y=100, pull_type="up", rail="+5V"
+        )
+        assert "+5V" in block.ports
+        assert "VCC" in block.ports
+        assert block.ports["+5V"] == block.ports["VCC"]
+
+    def test_custom_pin_name(self, mock_schematic):
+        """pin_name='ADDR' exposes port 'ADDR' (not 'BOOT'/'PIN')."""
+        block = create_gpio_pull_resistor(
+            mock_schematic, x=100, y=100, pin_name="ADDR"
+        )
+        assert "ADDR" in block.ports
+
+    def test_footprint_passthrough(self, mock_schematic):
+        """footprint='...' is forwarded to sch.add_symbol."""
+        create_gpio_pull_resistor(
+            mock_schematic,
+            x=100,
+            y=100,
+            footprint="Resistor_SMD:R_0805_2012Metric",
+        )
+        # add_symbol called once for the resistor; check footprint kwarg
+        assert mock_schematic.add_symbol.called
+        call_kwargs = mock_schematic.add_symbol.call_args.kwargs
+        assert call_kwargs.get("footprint") == "Resistor_SMD:R_0805_2012Metric"
+
+    def test_no_footprint_when_omitted(self, mock_schematic):
+        """When footprint is omitted, no footprint kwarg is sent (preserves
+        existing BootModeSelector behavior for callers not using it)."""
+        create_gpio_pull_resistor(mock_schematic, x=100, y=100)
+        assert mock_schematic.add_symbol.called
+        call_kwargs = mock_schematic.add_symbol.call_args.kwargs
+        assert "footprint" not in call_kwargs
+
+    def test_invalid_pull_type_raises(self, mock_schematic):
+        """Invalid pull_type raises ValueError."""
+        with pytest.raises(ValueError, match="pull_type"):
+            create_gpio_pull_resistor(mock_schematic, x=100, y=100, pull_type="sideways")
+
+    def test_invalid_rail_raises(self, mock_schematic):
+        """Empty rail raises ValueError."""
+        with pytest.raises(ValueError, match="rail"):
+            create_gpio_pull_resistor(mock_schematic, x=100, y=100, rail="")
+
+    def test_returns_circuit_block(self, mock_schematic):
+        """Result is a CircuitBlock subclass."""
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100)
+        assert isinstance(block, CircuitBlock)
+
+    def test_no_button_components(self, mock_schematic):
+        """No button components are added."""
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100)
+        assert len(block.buttons) == 0
+        assert "SW" not in block.components
+
+    def test_custom_ref_designator(self, mock_schematic):
+        """Custom ref propagates to add_symbol call."""
+        create_gpio_pull_resistor(mock_schematic, x=100, y=100, ref="R42")
+        # add_symbol(symbol, x, y, ref, value, ...) — ref is positional arg 3
+        call_args = mock_schematic.add_symbol.call_args.args
+        assert call_args[3] == "R42"
 
 
 class TestCANTransceiverMocked:

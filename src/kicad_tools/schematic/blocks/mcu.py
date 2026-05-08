@@ -1065,6 +1065,138 @@ def create_esp32_boot(
     )
 
 
+def create_gpio_pull_resistor(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    *,
+    pin_name: str = "PIN",
+    rail: str = "GND",
+    value: str = "10k",
+    pull_type: str = "down",
+    ref: str = "R1",
+    footprint: str | None = None,
+    resistor_symbol: str = "Device:R",
+) -> BootModeSelector:
+    """
+    Create a single pull-up or pull-down resistor on a GPIO/strap pin.
+
+    Thin convenience wrapper over :class:`BootModeSelector` for the very
+    common pattern of a single pull resistor on a configuration or strap
+    pin (boot mode, I2C address select, regulator EN, mode select, etc.)
+    where the existing class' "BootModeSelector" name reads wrong.
+
+    Internally constructs a button-less ``BootModeSelector`` in
+    ``mode="generic"`` with the pull direction selected by ``pull_type``.
+    The boot port is exposed under the user-supplied ``pin_name`` (default
+    "PIN") rather than "BOOT". The opposite-end port is exposed under the
+    user-supplied ``rail`` name (default "GND") so callers can pull to
+    arbitrary rails such as "+3.3V" without coercion to VCC/GND.
+
+    Schematic (pull-down to GND, default):
+        PIN ──┬────
+              │
+             [R]   (e.g., 10k)
+              │
+        GND ──┴────
+
+    Schematic (pull-up to VCC or custom rail):
+        VCC ──┬────
+              │
+             [R]
+              │
+        PIN ──┴────
+
+    Args:
+        sch: Schematic to add to.
+        x: X coordinate of circuit center.
+        y: Y coordinate of circuit center.
+        pin_name: Port name for the GPIO/strap pin side of the resistor
+            (e.g., ``"PIN"``, ``"ADDR"``, ``"EN"``, ``"BOOT0"``).
+        rail: Port name for the rail side of the resistor (e.g., ``"GND"``,
+            ``"VCC"``, ``"+3.3V"``, ``"+5V"``). When the rail is not
+            literally ``"VCC"`` or ``"GND"``, the caller is responsible for
+            wiring the exposed port to the actual net (e.g., via
+            :func:`add_label` or :func:`add_wire`); :meth:`connect_to_rails`
+            still uses the underlying VCC/GND geometry.
+        value: Resistor value as a string (e.g., ``"10k"``, ``"4.7k"``).
+        pull_type: ``"down"`` for pull-down (resistor between pin and rail
+            assumed to be ground) or ``"up"`` for pull-up (resistor between
+            pin and rail assumed to be supply). Determines the underlying
+            ``default_state``.
+        ref: Reference designator (e.g., ``"R2"``).
+        footprint: Optional footprint string (e.g.,
+            ``"Resistor_SMD:R_0805_2012Metric"``) forwarded to ``add_symbol``.
+        resistor_symbol: KiCad symbol library id for the resistor.
+
+    Returns:
+        The underlying :class:`BootModeSelector` instance with no button.
+        ``ports[pin_name]`` is the GPIO side, ``ports[rail]`` is the rail
+        side. Standard ``ports["VCC"]`` / ``ports["GND"]`` aliases also
+        remain available for compatibility.
+
+    Raises:
+        ValueError: If ``pull_type`` is not one of ``{"up", "down"}`` or
+            ``rail`` is not a non-empty string.
+
+    Example:
+        >>> # 10k pull-down on STM32 BOOT0 to GND with explicit footprint
+        >>> r = create_gpio_pull_resistor(
+        ...     sch, x=100, y=80,
+        ...     pin_name="BOOT0", rail="GND",
+        ...     value="10k", pull_type="down", ref="R2",
+        ...     footprint="Resistor_SMD:R_0805_2012Metric",
+        ... )
+        >>> sch.add_wire(mcu.port("BOOT0"), r.port("BOOT0"))
+        >>>
+        >>> # 4.7k pull-up on I2C ADDR pin to +3.3V
+        >>> r = create_gpio_pull_resistor(
+        ...     sch, x=120, y=80,
+        ...     pin_name="ADDR", rail="+3.3V",
+        ...     value="4.7k", pull_type="up", ref="R5",
+        ... )
+    """
+    if pull_type not in ("up", "down"):
+        raise ValueError(
+            f"Invalid pull_type {pull_type!r}. Must be 'up' or 'down'."
+        )
+    if not isinstance(rail, str) or not rail:
+        raise ValueError("rail must be a non-empty string")
+
+    block = BootModeSelector(
+        sch,
+        x,
+        y,
+        mode="generic",
+        default_state="high" if pull_type == "up" else "low",
+        include_button=False,
+        resistor_value=value,
+        ref_prefix=ref,
+        resistor_symbol=resistor_symbol,
+        footprint=footprint,
+    )
+
+    # Rename the boot port ("BOOT") to caller-supplied pin_name. Keep the
+    # original alias as a fallback so existing call sites (and tests on the
+    # generic mode) continue to work.
+    if pin_name != "BOOT":
+        block.ports[pin_name] = block.ports["BOOT"]
+
+    # Expose the rail side under the caller's rail name. We don't coerce
+    # custom rail names to "VCC"/"GND" — both aliases stay populated so
+    # connect_to_rails still works for the standard cases. For non-standard
+    # rails (e.g., "+3.3V") the caller wires the port manually.
+    if pull_type == "down":
+        # Resistor's far end is at the GND rail port.
+        if rail not in ("GND",):
+            block.ports[rail] = block.ports["GND"]
+    else:  # pull_type == "up"
+        if rail not in ("VCC",):
+            block.ports[rail] = block.ports["VCC"]
+
+    return block
+
+
 def create_generic_boot(
     sch: "Schematic",
     x: float,
