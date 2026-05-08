@@ -350,6 +350,8 @@ def create_analog_joystick(
     btn_pullup: str | None = "10k",
     connector_symbol: str | None = None,
     connector_footprint: str = "Module:Joystick_Analog",
+    filter_ref_start: int = 1,
+    pullup_ref: str | None = None,
 ) -> AnalogJoystickBlock:
     """Create a 2-axis analog joystick connector with optional filter and pull-up.
 
@@ -375,6 +377,11 @@ def create_analog_joystick(
         connector_symbol: KiCad symbol for the connector. When ``None``,
             ``Conn_01x05`` is used for 5-pin and ``Conn_01x04`` for 4-pin.
         connector_footprint: KiCad footprint for the connector.
+        filter_ref_start: Starting numeric ref for the X/Y filter components.
+            X uses ``R<n>``/``C<n>``; Y uses ``R<n+1>``/``C<n+1>``. Bump this
+            on boards that already use ``R1``/``C1`` etc. for other components.
+        pullup_ref: Reference designator for the BTN pull-up resistor.
+            Defaults to ``R<filter_ref_start + 2>``.
 
     Returns:
         Configured :class:`AnalogJoystickBlock`.
@@ -409,4 +416,6 @@ def create_analog_joystick(
         btn_pullup=btn_pullup,
         connector_symbol=connector_symbol,
         connector_footprint=connector_footprint,
+        filter_ref_start=filter_ref_start,
+        pullup_ref=pullup_ref,
     )
