@@ -90,16 +90,23 @@ class TestParseDifferentialSignal:
         assert result[1] == "N"
 
     def test_dp_dn_suffix_notation(self):
-        """Test parsing DP/DN suffix like CLK_DP."""
+        """Test parsing DP/DN suffix like CLK_DP.
+
+        Issue #2558 / A6: the ``_D`` is part of the base name so
+        ``CLK_DP`` parses to base=``CLK_D`` (not ``CLK``).  This
+        prevents collision with ``CLK_D+/CLK_D-`` plus-minus pairs on
+        the same board.
+        """
         result = parse_differential_signal("CLK_DP")
         assert result is not None
         base_name, polarity, notation = result
-        assert base_name == "CLK"
+        assert base_name == "CLK_D"
         assert polarity == "P"
         assert notation == "pn_suffix"
 
         result = parse_differential_signal("CLK_DN")
         assert result is not None
+        assert result[0] == "CLK_D"
         assert result[1] == "N"
 
     def test_pos_neg_notation(self):

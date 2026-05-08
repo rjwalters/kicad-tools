@@ -156,17 +156,88 @@ class DifferentialPair:
 # =============================================================================
 # REGEX PATTERNS FOR DIFFERENTIAL PAIR DETECTION
 # =============================================================================
+#
+# CANONICAL SOURCE OF TRUTH (Issue #2558, Epic #2556 Phase 1B).
+#
+# Two pattern sets historically existed in this codebase:
+#   - ``diffpair.py`` (this module) -- structured tuple-returning matcher
+#   - ``router/net_class.py`` NET_CLASS_PATTERNS[NetClass.DIFFERENTIAL] --
+#     broad regex used by classify_net()
+# The two drifted: net_class.py had ``[_-]?[PN]$`` which mis-classified
+# names like ``USB_CC1`` (the trailing digit forces the classifier into
+# DIFFERENTIAL) while diffpair.py correctly returned ``None``.
+#
+# To prevent further drift, ``net_class.is_differential_pair_name`` now
+# delegates to ``parse_differential_signal`` (defined here) so there is
+# a single source of truth for what counts as a diff-pair name.
 
 # Pattern 1: Plus/minus notation - USB_D+, ETH_TX-, etc.
 # Matches the base name and the +/- suffix
 _PLUS_MINUS_PATTERN = re.compile(r"^(.+)([+-])$")
 
 # Pattern 2: P/N suffix notation - HDMI_D0_P, USB3_TX_N, etc.
-# Also handles _DP/_DN (differential positive/negative)
-_PN_SUFFIX_PATTERN = re.compile(r"^(.+)_([PN]|D[PN])$", re.IGNORECASE)
+# Note: _DP/_DN is handled SEPARATELY below so the "_D" stays part of the
+# base name (USB_DP -> base="USB_D", not "USB"). See issue #2558 / A6.
+_PN_SUFFIX_PATTERN = re.compile(r"^(.+)_([PN])$", re.IGNORECASE)
+
+# Pattern 2b: _DP/_DN suffix notation - USB_DP, CLK_DP, etc.
+# The "_D" is part of the base name so a board can carry BOTH
+# ``USB_D+/USB_D-`` AND ``USB_DP/USB_DN`` (different pairs) without
+# colliding on a shared base of ``USB``.
+_DP_DN_SUFFIX_PATTERN = re.compile(r"^(.+)_(D[PN])$", re.IGNORECASE)
 
 # Pattern 3: POS/NEG suffix notation - CLK_POS, CLK_NEG
 _POS_NEG_PATTERN = re.compile(r"^(.+)_(POS|NEG)$", re.IGNORECASE)
+
+
+# =============================================================================
+# REFUSAL PATTERNS -- known single-ended pairs that must NOT be inferred as
+# differential pairs from suffixes (Issue #2558, Epic #2556 Phase 1B).
+# =============================================================================
+#
+# These pin pairs look diff-pair-ish (matching numbers, similar prefixes)
+# but are SINGLE-ENDED by spec.  Examples:
+#   - USB-C ``CC1``/``CC2``: orientation/role detection (analog).
+#   - USB-C ``SBU1``/``SBU2``: sideband use (alt-mode mux).
+# A designer can still force pairing via the explicit
+# ``NetClassRouting.diffpair_partner`` field -- the refusal list applies
+# only to suffix INFERENCE.
+_SINGLE_ENDED_REFUSAL_PATTERN = re.compile(r"^(.+_)?(CC|SBU)\d+$", re.IGNORECASE)
+
+
+# =============================================================================
+# POWER-RAIL FILTER -- prevent ``VCC_NEG`` / ``VBUS_POS`` etc. from being
+# matched as ``pos_neg`` diff-pair signals (Issue #2558 / A5).
+# =============================================================================
+#
+# The base-name prefixes here are taken from
+# ``router/net_class.py::NET_CLASS_PATTERNS[NetClass.POWER]`` (the same
+# set used by classify_net).  Names whose base matches a power-rail
+# prefix are excluded from POS/NEG suffix inference.
+_POWER_RAIL_PREFIX_PATTERN = re.compile(
+    r"^(VCC|VDD|VBUS|VIN|VOUT|PWR|POWER|AVDD|DVDD|"
+    r"PVDD|PVCC|VBAT|VCORE|VCAP|VIO|"
+    r"VMOTOR|VMOT|VMAIN|VPWR|VDRIVE|VACT|VSRV)(_.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_power_rail_base(base_name: str) -> bool:
+    """Return True if ``base_name`` looks like a power-rail name.
+
+    Used to refuse ``VCC_NEG``/``VBUS_POS``-style false positives.
+    """
+    return bool(_POWER_RAIL_PREFIX_PATTERN.match(base_name))
+
+
+def is_single_ended_refused(net_name: str) -> bool:
+    """Return True if ``net_name`` matches the single-ended refusal list.
+
+    Refusal applies to suffix INFERENCE only -- explicit declarations
+    (via ``NetClassRouting.diffpair_partner``) and KiCad group
+    declarations bypass this check (designer override wins).
+    """
+    return bool(_SINGLE_ENDED_REFUSAL_PATTERN.match(net_name))
 
 
 def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
@@ -179,7 +250,19 @@ def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
         Tuple of (base_name, polarity, notation) if this is a differential signal,
         None otherwise. polarity is "P" for positive, "N" for negative.
         notation is one of: "plus_minus", "pn_suffix", "pos_neg"
+
+    Refuses (returns None) for:
+      - Names matching the single-ended refusal pattern (CC1/CC2, SBU1/SBU2,
+        prefix variants like ``USB_CC1``).  See Issue #2558.
+      - ``pos_neg`` matches whose base name is a known power rail prefix
+        (e.g. ``VCC_NEG``, ``VBUS_POS``).  See Issue #2558.
     """
+    # Reject known single-ended pairs up front -- suffix inference only.
+    # Explicit declarations and KiCad group declarations bypass this in
+    # ``detect_diff_pairs``.
+    if is_single_ended_refused(net_name):
+        return None
+
     # Try plus/minus notation first (most common for USB, etc.)
     match = _PLUS_MINUS_PATTERN.match(net_name)
     if match:
@@ -187,19 +270,31 @@ def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
         polarity = "P" if match.group(2) == "+" else "N"
         return (base_name, polarity, "plus_minus")
 
-    # Try P/N suffix notation (HDMI, USB3, etc.)
+    # Try _DP/_DN suffix notation BEFORE the plain _P/_N pattern so the
+    # "D" stays part of the base name (USB_DP -> base="USB_D"), avoiding
+    # the collision-with-USB_D+/USB_D- bug noted in #2558 / A6.
+    match = _DP_DN_SUFFIX_PATTERN.match(net_name)
+    if match:
+        base_name = match.group(1) + "_D"
+        suffix = match.group(2).upper()
+        polarity = "P" if suffix == "DP" else "N"
+        return (base_name, polarity, "pn_suffix")
+
+    # Try plain P/N suffix notation (HDMI, USB3, etc.)
     match = _PN_SUFFIX_PATTERN.match(net_name)
     if match:
         base_name = match.group(1)
         suffix = match.group(2).upper()
-        # Handle _DP/_DN as well as _P/_N
-        polarity = "P" if suffix in ("P", "DP") else "N"
+        polarity = "P" if suffix == "P" else "N"
         return (base_name, polarity, "pn_suffix")
 
-    # Try POS/NEG suffix notation
+    # Try POS/NEG suffix notation -- but reject power rails like
+    # ``VCC_NEG`` / ``VBUS_POS`` (Issue #2558 / A5).
     match = _POS_NEG_PATTERN.match(net_name)
     if match:
         base_name = match.group(1)
+        if _is_power_rail_base(base_name):
+            return None
         polarity = "P" if match.group(2).upper() == "POS" else "N"
         return (base_name, polarity, "pos_neg")
 
