@@ -319,11 +319,20 @@ ValidationResult Grid3D::validate_route(
     const std::vector<uint32_t>& exclude_ref_hashes,
     float trace_clearance,
     float via_clearance,
-    float min_drill_clearance) const
+    float min_drill_clearance,
+    int partner_net,
+    float intra_pair_clearance) const
 {
     ValidationResult result;
     result.valid = true;
     result.min_clearance = std::numeric_limits<float>::infinity();
+
+    // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+    // The partner branch is active when partner_net is a real net id (>= 0)
+    // and intra_pair_clearance is a tighter (non-negative) override.  When
+    // the branch is dormant (default), validation behaves exactly as before.
+    bool partner_active =
+        (partner_net >= 0) && (partner_net != exclude_net) && (intra_pair_clearance >= 0.0f);
 
     // Helper: check if a ref_hash is in the exclusion set
     auto is_excluded_ref = [&](uint32_t ref_hash) -> bool {
@@ -395,7 +404,14 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < trace_clearance - CLEARANCE_EPSILON_MM) {
+            // Issue #2559 / Phase 1C: tighter clearance for the diff-pair
+            // partner only.  All other foreign nets keep the wider rule.
+            float effective_clearance =
+                (partner_active && other.net == partner_net)
+                ? intra_pair_clearance
+                : trace_clearance;
+
+            if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = (seg.x1 + seg.x2 + other.x1 + other.x2) / 4.0f;
                 result.violation_y = (seg.y1 + seg.y2 + other.y1 + other.y2) / 4.0f;
@@ -418,7 +434,13 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < trace_clearance - CLEARANCE_EPSILON_MM) {
+            // Issue #2559 / Phase 1C: tighter clearance for the partner.
+            float effective_clearance =
+                (partner_active && sv.net == partner_net)
+                ? intra_pair_clearance
+                : trace_clearance;
+
+            if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = sv.x;
                 result.violation_y = sv.y;

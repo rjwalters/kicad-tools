@@ -47,7 +47,13 @@ public:
         int trace_radius_cells = 0,  // Per-net trace clearance radius (0 = use default)
         int via_radius_cells = 0,    // Per-net via clearance radius (0 = use default)
         const PadBounds& start_pad_bounds = {},  // Start pad metal/approach bounds
-        const PadBounds& end_pad_bounds = {}     // End pad metal/approach bounds
+        const PadBounds& end_pad_bounds = {},    // End pad metal/approach bounds
+        // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+        // partner_net = -1 disables the partner branch (default; pre-#2559 behavior).
+        // intra_pair_radius_cells = 0 means "no tighter radius" -- the partner
+        // (when set) is treated with the wider trace_radius_cells.
+        int partner_net = -1,
+        int intra_pair_radius_cells = 0
     );
 
     // Resumable A* routing: initializes search state and runs to first goal.
@@ -65,7 +71,11 @@ public:
         int trace_radius_cells = 0,
         int via_radius_cells = 0,
         const PadBounds& start_pad_bounds = {},
-        const PadBounds& end_pad_bounds = {}
+        const PadBounds& end_pad_bounds = {},
+        // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+        // See comment on route() above; defaults preserve pre-#2559 behavior.
+        int partner_net = -1,
+        int intra_pair_radius_cells = 0
     );
 
     // Resume A* search after rejecting a goal cell.
@@ -116,8 +126,16 @@ public:
 private:
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_
+    //
+    // Issue #2559 / Epic #2556 Phase 1C: when partner_net >= 0 and
+    // partner_radius > 0 and partner_radius < radius, cells whose net
+    // matches partner_net are checked against the smaller partner_radius
+    // instead of the wider radius.  This implements within-pair clearance
+    // for differential pairs.  Defaults preserve pre-#2559 behavior.
     bool is_trace_blocked(int x, int y, int layer, int net, bool allow_sharing,
-                          int radius_override = 0) const;
+                          int radius_override = 0,
+                          int partner_net = -1,
+                          int partner_radius = 0) const;
 
     // Check if diagonal move cuts through obstacles
     bool is_diagonal_blocked(int x, int y, int dx, int dy, int layer, int net,
@@ -187,6 +205,12 @@ private:
     PadBounds search_start_pad_bounds_{};
     PadBounds search_end_pad_bounds_{};
     bool search_state_active_ = false;  // True when resumable state is valid
+
+    // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+    // Cached per-route-call so resume() and run_astar_loop() can apply
+    // the partner-aware radius branch on every neighbor expansion.
+    int search_partner_net_ = -1;
+    int search_intra_pair_radius_cells_ = 0;
 
     // Issue #2476: Via-vs-via failure tracking for run_astar_loop().  Reset
     // by route_resumable() and accumulated across the search and any

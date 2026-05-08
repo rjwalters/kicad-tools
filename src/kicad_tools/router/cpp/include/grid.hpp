@@ -141,6 +141,12 @@ public:
     // trace_clearance: default clearance for segments
     // via_clearance: default clearance for vias
     // min_drill_clearance: minimum drill-to-drill spacing (same-net)
+    // partner_net: Issue #2559 / Phase 1C -- diff-pair partner net id, or
+    //              -1 to disable the partner branch (default).  When set,
+    //              segment-vs-segment / segment-vs-via comparisons against
+    //              partner_net use intra_pair_clearance instead of
+    //              trace_clearance.  Defaults preserve pre-#2559 behavior.
+    // intra_pair_clearance: tighter clearance applied only to the partner.
     ValidationResult validate_route(
         const std::vector<Segment>& segments,
         const std::vector<Via>& vias,
@@ -148,7 +154,9 @@ public:
         const std::vector<uint32_t>& exclude_ref_hashes,
         float trace_clearance,
         float via_clearance,
-        float min_drill_clearance) const;
+        float min_drill_clearance,
+        int partner_net = -1,
+        float intra_pair_clearance = 0.0f) const;
 
     // Accessors for validation data sizes (for testing/debugging)
     size_t pad_count() const { return pads_.size(); }

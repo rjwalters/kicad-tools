@@ -57,8 +57,18 @@ void Pathfinder::set_routable_layers(const std::vector<int>& layers) {
 }
 
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
-                                  bool allow_sharing, int radius_override) const {
+                                  bool allow_sharing, int radius_override,
+                                  int partner_net, int partner_radius) const {
     int radius = (radius_override > 0) ? radius_override : trace_half_width_cells_;
+
+    // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
+    // (partner_net >= 0 && partner_radius > 0 && partner_radius < radius),
+    // partner-owned blocked cells in the slack ring (Chebyshev distance
+    // > partner_radius) are treated as passable.  All other cells use the
+    // wider radius as before.
+    bool partner_active =
+        (partner_net >= 0) && (partner_radius > 0) && (partner_radius < radius);
+
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
             int cx = x + dx, cy = y + dy;
@@ -68,6 +78,17 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 
             const auto& cell = grid_.at(cx, cy, layer);
             if (cell.blocked) {
+                // Issue #2559: relax partner cells outside the tighter
+                // intra-pair radius (Chebyshev metric matches the kernel
+                // shape used by Python compute_expanded_blocked()).
+                if (partner_active && cell.net == partner_net) {
+                    int cheb = std::max(std::abs(dx), std::abs(dy));
+                    if (cheb > partner_radius) {
+                        // Partner cell in the slack ring -- skip.
+                        continue;
+                    }
+                }
+
                 if (allow_sharing && !cell.is_obstacle) {
                     // Negotiated mode: allow sharing non-obstacle cells
                     if (cell.net == 0 && cell.usage_count == 0) {
@@ -272,7 +293,9 @@ RouteResult Pathfinder::route(
     int trace_radius_cells,
     int via_radius_cells,
     const PadBounds& start_pad_bounds,
-    const PadBounds& end_pad_bounds
+    const PadBounds& end_pad_bounds,
+    int partner_net,
+    int intra_pair_radius_cells
 ) {
     // Non-resumable route: use local A* state, no member state touched.
     // This preserves backward compatibility for callers that don't need retry.
@@ -424,7 +447,8 @@ RouteResult Pathfinder::route(
                     // Same-net blocked cell - allow
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
-                                         trace_radius_cells)) {
+                                         trace_radius_cells,
+                                         partner_net, intra_pair_radius_cells)) {
                         continue;
                     }
                 } else {
@@ -443,7 +467,8 @@ RouteResult Pathfinder::route(
                 );
                 if (!is_pad_exit_or_approach) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
-                                         trace_radius_cells)) {
+                                         trace_radius_cells,
+                                         partner_net, intra_pair_radius_cells)) {
                         continue;
                     }
                 }
@@ -563,7 +588,9 @@ RouteResult Pathfinder::route_resumable(
     int trace_radius_cells,
     int via_radius_cells,
     const PadBounds& start_pad_bounds,
-    const PadBounds& end_pad_bounds
+    const PadBounds& end_pad_bounds,
+    int partner_net,
+    int intra_pair_radius_cells
 ) {
     // Clear any previous search state
     clear_search_state();
@@ -579,6 +606,12 @@ RouteResult Pathfinder::route_resumable(
     search_weight_ = weight;
     search_trace_radius_cells_ = trace_radius_cells;
     search_via_radius_cells_ = via_radius_cells;
+
+    // Issue #2559 / Epic #2556 Phase 1C: cache diff-pair partner state so
+    // resume() and run_astar_loop() can apply the partner-aware radius
+    // branch on every neighbor expansion.
+    search_partner_net_ = partner_net;
+    search_intra_pair_radius_cells_ = intra_pair_radius_cells;
 
     auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
     auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
@@ -757,7 +790,9 @@ RouteResult Pathfinder::run_astar_loop() {
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, search_net_,
                                          search_negotiated_mode_,
-                                         search_trace_radius_cells_)) {
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_)) {
                         continue;
                     }
                 } else {
@@ -777,7 +812,9 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (!is_pad_exit_or_approach) {
                     if (is_trace_blocked(nx, ny, nlayer, search_net_,
                                          search_negotiated_mode_,
-                                         search_trace_radius_cells_)) {
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_)) {
                         continue;
                     }
                 }
@@ -901,6 +938,10 @@ void Pathfinder::clear_search_state() {
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+    // Issue #2559 / Phase 1C: reset partner-net state so a stale partner
+    // from a previous net does not leak into the next route().
+    search_partner_net_ = -1;
+    search_intra_pair_radius_cells_ = 0;
 }
 
 RouteResult Pathfinder::reconstruct_path(

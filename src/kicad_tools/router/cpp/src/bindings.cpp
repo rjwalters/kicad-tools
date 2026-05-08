@@ -184,7 +184,13 @@ NB_MODULE(router_cpp, m) {
         .def("validate_route", &Grid3D::validate_route,
              "segments"_a, "vias"_a, "exclude_net"_a,
              "exclude_ref_hashes"_a, "trace_clearance"_a,
-             "via_clearance"_a, "min_drill_clearance"_a)
+             "via_clearance"_a, "min_drill_clearance"_a,
+             "partner_net"_a = -1,
+             "intra_pair_clearance"_a = 0.0f,
+             "Validate a candidate route against stored geometry.  Issue #2559 "
+             "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
+             "comparisons against partner_net use intra_pair_clearance instead "
+             "of trace_clearance (defaults preserve pre-#2559 behavior).")
         .def_prop_ro("pad_count", &Grid3D::pad_count)
         .def_prop_ro("stored_segment_count", &Grid3D::stored_segment_count)
         .def_prop_ro("stored_via_count", &Grid3D::stored_via_count);
@@ -205,7 +211,10 @@ NB_MODULE(router_cpp, m) {
              "trace_radius_cells"_a = 0,
              "via_radius_cells"_a = 0,
              "start_pad_bounds"_a = PadBounds{},
-             "end_pad_bounds"_a = PadBounds{})
+             "end_pad_bounds"_a = PadBounds{},
+             // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+             "partner_net"_a = -1,
+             "intra_pair_radius_cells"_a = 0)
         .def("route_resumable", &Pathfinder::route_resumable,
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
@@ -218,7 +227,10 @@ NB_MODULE(router_cpp, m) {
              "trace_radius_cells"_a = 0,
              "via_radius_cells"_a = 0,
              "start_pad_bounds"_a = PadBounds{},
-             "end_pad_bounds"_a = PadBounds{})
+             "end_pad_bounds"_a = PadBounds{},
+             // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+             "partner_net"_a = -1,
+             "intra_pair_radius_cells"_a = 0)
         .def("resume", &Pathfinder::resume,
              "reject_x"_a, "reject_y"_a, "reject_layer"_a)
         .def("clear_search_state", &Pathfinder::clear_search_state)
