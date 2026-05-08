@@ -27,6 +27,16 @@ if TYPE_CHECKING:
 # Wire stub length used when emitting net labels on connector pins.
 _LABEL_STUB = 5.08  # 200 mils, matches board 03 convention
 
+# Vertical spacing between filter / pull-up rows (mm).
+#
+# The connector pin pitch is 2.54 mm (100 mils), but a `Device:R` symbol body
+# is ~7.62 mm pin-to-pin and a `Device:C` adds another ~5 mm of plate
+# extent. Stacking filter Rs at the connector pin pitch produces overlap
+# warnings (R_X / R_Y / R_BTN within ~2.54 mm of each other). 12.7 mm
+# (5 × pitch) leaves clear headroom for the resistor body, the capacitor
+# body 10 mm below the resistor, and the wire stubs to the OUT/GND labels.
+_ROW_SPACING = 12.7
+
 
 def _add_pin_label(
     sch: Schematic,
@@ -218,18 +228,32 @@ class AnalogJoystickBlock(CircuitBlock):
         # ------------------------------------------------------------------
         # X / Y RC filters (composed via create_adc_filter)
         # ------------------------------------------------------------------
-        # Filter sub-blocks are placed off to the right of the connector so
-        # they don't overlap. Vertical positions track the wiper pin Y so
-        # callers see a stable layout.
+        # Filter sub-blocks are placed off to the right of the connector on
+        # their own rows so the resistor / capacitor symbols don't overlap.
+        # The connector pin pitch (2.54 mm) is too tight for a vertical
+        # ``Device:R`` body, so we use ``_ROW_SPACING`` (12.7 mm) per row
+        # and anchor the rows to the connector center ``y`` instead of the
+        # individual wiper pin Y. The connector wiper pins still feed the
+        # filter inputs via ``add_wire``, which is point-to-point and
+        # handles the offset cleanly.
         self.x_filter = None
         self.y_filter = None
+
+        # Compute distinct row centers for X filter, Y filter, and BTN pull-up
+        # relative to the connector center. The X filter sits one row above
+        # the connector center, Y filter one row below, BTN pull-up two rows
+        # below — leaving room for the filter capacitors (which sit ~10 mm
+        # below their resistor) without crowding the next row.
+        x_filter_row_y = y - _ROW_SPACING
+        y_filter_row_y = y + _ROW_SPACING
+        btn_pullup_row_y = y + 2 * _ROW_SPACING
 
         if filter_cutoff_hz is not None and x_pin is not None and y_pin is not None:
             filter_x = x + 20  # 20 mm right of connector
             self.x_filter = create_adc_filter(
                 sch,
                 filter_x,
-                x_pin[1],
+                x_filter_row_y,
                 cutoff_hz=filter_cutoff_hz,
                 order=1,
             )
@@ -242,7 +266,7 @@ class AnalogJoystickBlock(CircuitBlock):
             self.y_filter = create_adc_filter(
                 sch,
                 filter_x,
-                y_pin[1],
+                y_filter_row_y,
                 cutoff_hz=filter_cutoff_hz,
                 order=1,
             )
@@ -280,11 +304,13 @@ class AnalogJoystickBlock(CircuitBlock):
             btn_pin = self.connector.pin_position(self.PIN_BTN)
 
             if btn_pin is not None and btn_pullup is not None:
-                # Place a pull-up resistor near the BTN pin
+                # Place a pull-up resistor on its own row, below the X/Y
+                # filter rows, so the (rotated) resistor body doesn't crash
+                # into the Y-filter resistor or capacitor.
                 if pullup_ref is None:
                     pullup_ref = f"R{filter_ref_start + 2}"
                 pu_x = x + 20  # match filter column
-                pu_y = btn_pin[1]
+                pu_y = btn_pullup_row_y
                 self.r_pullup = sch.add_symbol(
                     resistor_symbol,
                     pu_x,
