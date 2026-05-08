@@ -42,7 +42,14 @@ from .analog import (
 from .base import CircuitBlock, ComposedCircuitBlock, Port
 
 # Indicator blocks
-from .indicators import LEDIndicator, create_power_led, create_status_led
+from .indicators import (
+    CharlieplexMatrix,
+    LEDIndicator,
+    charlieplex_pairs_for_grid,
+    create_charlieplex_matrix,
+    create_power_led,
+    create_status_led,
+)
 
 # Interface blocks (organized by protocol type)
 from .interface import (
@@ -146,8 +153,11 @@ __all__ = [
     "match_ports",
     # Indicators
     "LEDIndicator",
+    "CharlieplexMatrix",
     "create_power_led",
     "create_status_led",
+    "create_charlieplex_matrix",
+    "charlieplex_pairs_for_grid",
     # Power
     "DecouplingCaps",
     "LDOBlock",
