@@ -27,9 +27,12 @@
 #   * board 03 (1 error) -- tracked separately; pre-existing pre-CI-gate state.
 
 tolerances:
-  # 15x clearance_segment_segment + 2x clearance_segment_via at JLCPCB rules.
-  # Partial progress landed in #2551 (closes #2532); full fix tracked in #2542.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 17
+  # Tightened from 17 → 15 to lock in the floor reached by PR #2583 (Hall
+  # sensor placement re-tune dropped 22 → 15 via R30-R32/C30-C32 spread).
+  # Per-rule: 13x clearance_segment_segment + 2x clearance_segment_via at
+  # JLCPCB rules. Partial progress landed in #2551 (closes #2532); full
+  # fix tracked in #2542.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 15
 
   # 1x clearance_segment_segment at JLCPCB rules. Pre-existing at the time the
   # CI gate landed (issue #2546). Should be driven to 0 in a follow-up.
