@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.schematic.blocks import USBConnector
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
@@ -114,30 +115,46 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
 
     # =========================================================================
-    # Section 2: Place USB connector (using autolayout)
+    # Section 2: Place USB connector (using autolayout + USBConnector block)
     # =========================================================================
-    print("\n2. Placing USB connector with suggest_position...")
+    print("\n2. Placing USB connector via USBConnector block...")
 
-    # Request position near top-left, let autolayout find clear spot
+    # Request position near top-left, let autolayout find clear spot.
     preferred_x, preferred_y = 50.8, 50.8
 
-    # Use suggest_position to find a non-overlapping location
+    # The Type-C symbol used by USBConnector by default ("USB_C_Receptacle_USB2.0")
+    # is not present in every KiCad install — fall back to the 16-pin variant
+    # which exposes the same VBUS / GND / D+ / D- / CC1 / CC2 / SHIELD pin
+    # names that USBConnector looks up.
+    usb_symbol = "Connector:USB_C_Receptacle_USB2.0_16P"
+
+    # Use suggest_position to find a non-overlapping location for the
+    # underlying Type-C receptacle symbol used by USBConnector.
     suggested_pos = sch.suggest_position(
-        "Connector_Generic:Conn_01x04",
+        usb_symbol,
         near=(preferred_x, preferred_y),
         padding=5.08,  # 200mil padding
     )
     print(f"   Preferred: ({preferred_x}, {preferred_y})")
     print(f"   Suggested: {suggested_pos}")
 
-    usb_conn = sch.add_symbol(
-        "Connector_Generic:Conn_01x04",
+    # USBConnector places a real Type-C receptacle symbol with typed VBUS /
+    # D+ / D- / GND / CC1 / CC2 ports. We disable ESD here to preserve the
+    # pre-refactor topology (no extra TVS diodes); callers wanting USB ESD
+    # can flip esd_protection=True.
+    usb_block = USBConnector(
+        sch,
         x=suggested_pos[0],
         y=suggested_pos[1],
-        ref="J1",
-        value="USB-C",
-        footprint="Connector_USB:USB_C_Receptacle_GCT_USB4105",
+        connector_type="type-c",
+        esd_protection=False,
+        vbus_protection=False,
+        ref_prefix="J1",
+        connector_symbol=usb_symbol,
     )
+    usb_conn = usb_block.connector
+    # Preserve existing footprint assignment (matches pre-refactor PCB layout)
+    usb_conn.footprint = "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     print(f"   J1 (USB-C): placed at ({usb_conn.x}, {usb_conn.y})")
 
     # =========================================================================
@@ -234,7 +251,10 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         ("C1", 88.9, 63.5),  # Near MCU VCC
         ("C2", 114.3, 63.5),  # Near MCU VCC
         ("C3", 88.9, 114.3),  # Near MCU GND
-        ("C4", 55.88, 38.1),  # Near USB VBUS
+        # C4: VBUS bypass for the USB connector. Wired to VCC/GND via the
+        # generic decoupling loop below (functionally identical to a
+        # DecouplingCaps(values=["100nF"]) placed on usb_block.port("VBUS")).
+        ("C4", 55.88, 38.1),
     ]
 
     caps = []
@@ -326,14 +346,6 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         "31": "GND",
     }
 
-    # USB connector pin assignments (4-pin USB):
-    USB_PIN_MAP = {
-        "1": "VCC",  # VBUS
-        "2": "USB_D-",  # D-
-        "3": "USB_D+",  # D+
-        "4": "GND",  # GND
-    }
-
     # Joystick connector pin assignments (5-pin):
     JOY_PIN_MAP = {
         "1": "VCC",  # VCC
@@ -365,13 +377,39 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
                 sch.add_no_connect(pin_pos[0], pin_pos[1], snap=False)
                 print(f"      Pin {pin_num} -> NC")
 
-    # Wire USB connector pins
+    # Wire USB connector pins via the underlying symbol. The 16P Type-C
+    # receptacle exposes multiple physical pins per logical signal (e.g.
+    # two D+ pins for cable-orientation mux). Iterate the symbol's pins
+    # and emit a global label per pin so all instances share the same net.
     print("   Wiring USB connector (J1) pins...")
-    for pin_num, net_name in USB_PIN_MAP.items():
-        pin_pos = usb_conn.pin_position(pin_num)
-        if pin_pos:
+    # Pin-name -> net mapping. Pins without an entry here are tied to GND
+    # if they're SBU side-band lines (unused), or marked NC.
+    USB_PIN_NET_MAP = {
+        "VBUS": "VCC",
+        "GND": "GND",
+        "D+": "USB_D+",
+        "D-": "USB_D-",
+        "SHIELD": "GND",
+        # CC1/CC2 grounded — passive device-mode default. (Real Type-C
+        # device-mode designs use 5.1k pulldowns; ground keeps ERC clean
+        # while preserving the pre-refactor net set.)
+        "CC1": "GND",
+        "CC2": "GND",
+        # SBU side-band pins are unused for USB 2.0; tie to GND.
+        "SBU1": "GND",
+        "SBU2": "GND",
+    }
+    for pin in usb_conn.symbol_def.pins:
+        pin_pos = usb_conn.pin_position(pin.number)
+        if not pin_pos:
+            continue
+        net_name = USB_PIN_NET_MAP.get(pin.name)
+        if net_name is None:
+            sch.add_no_connect(pin_pos[0], pin_pos[1], snap=False)
+            print(f"      Pin {pin.number} ({pin.name}) -> NC")
+        else:
             add_pin_label(sch, pin_pos, net_name, direction="right")
-            print(f"      Pin {pin_num} -> {net_name}")
+            print(f"      Pin {pin.number} ({pin.name}) -> {net_name}")
 
     # Wire Joystick connector pins
     print("   Wiring Joystick connector (J2) pins...")

@@ -170,6 +170,17 @@ class USBPowerInput(CircuitBlock):
     """
     USB power input with optional fuse protection.
 
+    This block models a **power-only** USB inlet (VBUS in -> fuse -> filter cap -> V5).
+    No connector symbol is placed and there are no D+/D- (data) ports — the input is
+    a single ``VBUS_IN`` coordinate intended to be wired to an external VBUS source
+    or a USB-as-wall-wart receptacle.
+
+    For a USB connector with both **data and power** lines (D+/D-, CC1/CC2, GND,
+    optional ESD on data, optional VBUS TVS), use ``USBConnector`` (and the
+    ``create_usb_type_c`` / ``create_usb_micro_b`` factories) from
+    ``kicad_tools.schematic.blocks.interface.usb`` instead. Pair it with
+    ``DecouplingCaps`` for VBUS bypass.
+
     Schematic (with fuse):
         VBUS_IN ──── [F] ──┬── [C_filt] ──┬── V5
                            │              │
@@ -461,7 +472,16 @@ def create_usb_power(
     y: float,
     ref: str = "J1",
 ) -> USBPowerInput:
-    """Create a USB power input with polyfuse protection."""
+    """Create a USB power input with polyfuse protection.
+
+    This is a **power-only** USB inlet: VBUS in -> polyfuse -> 10uF filter cap -> V5.
+    It does **not** place a USB connector symbol and exposes no D+/D- ports.
+
+    For a USB connector that carries both data and power, use
+    :func:`kicad_tools.schematic.blocks.interface.usb.create_usb_type_c` (or
+    ``create_usb_micro_b``) instead, optionally paired with ``DecouplingCaps`` for
+    VBUS bypass.
+    """
     return USBPowerInput(
         sch,
         x,
