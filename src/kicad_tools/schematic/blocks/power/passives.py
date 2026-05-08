@@ -35,6 +35,7 @@ class DecouplingCaps(CircuitBlock):
         spacing: float = 15,
         cap_symbol: str = "Device:C",
         auto_footprint: bool = False,
+        cap_footprint: str | None = None,
     ):
         """
         Create a bank of decoupling capacitors.
@@ -49,6 +50,9 @@ class DecouplingCaps(CircuitBlock):
             spacing: Horizontal spacing between caps
             cap_symbol: KiCad symbol for capacitors
             auto_footprint: If True, automatically select footprint based on value
+            cap_footprint: Explicit footprint string (e.g.,
+                "Capacitor_SMD:C_0805_2012Metric"). Takes precedence over
+                auto_footprint when both are provided.
         """
         super().__init__(sch, x, y)
         self.caps = []
@@ -57,7 +61,10 @@ class DecouplingCaps(CircuitBlock):
         for i, value in enumerate(values):
             cap_x = x + i * spacing
             ref = f"{ref_prefix}{ref_start + i}"
-            cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value, auto_footprint=auto_footprint)
+            add_kwargs: dict = {"auto_footprint": auto_footprint}
+            if cap_footprint is not None:
+                add_kwargs["footprint"] = cap_footprint
+            cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value, **add_kwargs)
             self.caps.append(cap)
 
         self.components = {f"C{i + 1}": cap for i, cap in enumerate(self.caps)}
@@ -459,4 +466,97 @@ def create_voltage_divider(
         r_bottom=r_bottom_str,
         filter_cap="100nF" if with_filter else None,
         ref_start=ref_start,
+    )
+
+
+def create_mcu_decoupling_array(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    *,
+    supply_pins: int,
+    bypass_value: str = "100nF",
+    bulk_value: str = "4.7uF",
+    ref_start: int = 1,
+    ref_prefix: str = "C",
+    spacing: float = 10,
+    cap_symbol: str = "Device:C",
+    cap_footprint: str | None = None,
+    auto_footprint: bool = False,
+) -> DecouplingCaps:
+    """
+    Create an MCU-style decoupling capacitor array (N bypass + 1 bulk).
+
+    Convenience factory that wraps :class:`DecouplingCaps` with the common
+    "one bypass cap per VDD/VBAT/VDDA pin plus a single bulk reservoir" pattern
+    used near MCUs. The first ``supply_pins`` caps share ``bypass_value`` and
+    the final cap uses ``bulk_value``.
+
+    The returned object is a regular :class:`DecouplingCaps` instance, so the
+    caller can chain ``.connect_to_rails(vcc_y, gnd_y)`` to wire each cap to
+    the power rails in the usual way.
+
+    Args:
+        sch: Schematic to add to.
+        x: X coordinate of the first capacitor.
+        y: Y coordinate (center of caps).
+        supply_pins: Number of bypass capacitors to place. Must be >= 1; the
+            total cap count is ``supply_pins + 1`` (one extra for the bulk).
+            Note that callers may legitimately use a value smaller than the
+            actual VDD pin count (e.g. board 05 uses ``supply_pins=2`` for a
+            3-VDD-pin MCU); the factory does not enforce a 1:1 ratio.
+        bypass_value: Value applied to the first ``supply_pins`` caps
+            (default ``"100nF"``).
+        bulk_value: Value applied to the final cap (default ``"4.7uF"``).
+        ref_start: Starting reference number (default 1).
+        ref_prefix: Reference designator prefix (default ``"C"``).
+        spacing: Horizontal spacing between caps in mm (default 10).
+        cap_symbol: KiCad symbol library id for capacitors (default
+            ``"Device:C"``). Boards using compact footprints typically pass
+            ``"Device:C_Small"``.
+        cap_footprint: Explicit footprint (e.g.
+            ``"Capacitor_SMD:C_0805_2012Metric"``). When ``None`` the symbol
+            footprint default is used.
+        auto_footprint: If ``True``, ``add_symbol`` will pick a footprint based
+            on the cap value and configured profile (ignored when
+            ``cap_footprint`` is provided).
+
+    Returns:
+        :class:`DecouplingCaps` instance with ``len(caps) == supply_pins + 1``.
+
+    Raises:
+        ValueError: If ``supply_pins < 1``. A zero-bypass array degenerates to
+            a single bulk cap, which almost always indicates a caller bug; use
+            :class:`DecouplingCaps` directly if you really want one cap.
+
+    Example:
+        >>> # Board 04 STM32F303 - 4 VDD/VBAT/VDDA pins + 1 bulk
+        >>> caps = create_mcu_decoupling_array(
+        ...     sch, x=160, y=85,
+        ...     supply_pins=4,
+        ...     ref_start=12,
+        ...     cap_symbol="Device:C_Small",
+        ...     cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+        ... )
+        >>> caps.connect_to_rails(RAIL_3V3, RAIL_GND)
+    """
+    if supply_pins < 1:
+        raise ValueError(
+            f"supply_pins must be >= 1 (got {supply_pins}); "
+            "use DecouplingCaps directly for a bulk-only configuration"
+        )
+
+    values = [bypass_value] * supply_pins + [bulk_value]
+
+    return DecouplingCaps(
+        sch,
+        x,
+        y,
+        values=values,
+        ref_start=ref_start,
+        ref_prefix=ref_prefix,
+        spacing=spacing,
+        cap_symbol=cap_symbol,
+        auto_footprint=auto_footprint,
+        cap_footprint=cap_footprint,
     )

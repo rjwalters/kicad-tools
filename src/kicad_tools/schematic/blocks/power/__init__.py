@@ -29,6 +29,7 @@ from .inputs import (
 from .passives import (
     DecouplingCaps,
     VoltageDivider,
+    create_mcu_decoupling_array,
     create_voltage_divider,
 )
 from .regulators import (
@@ -58,5 +59,6 @@ __all__ = [
     # Passives
     "DecouplingCaps",
     "VoltageDivider",
+    "create_mcu_decoupling_array",
     "create_voltage_divider",
 ]
