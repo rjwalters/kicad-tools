@@ -640,6 +640,145 @@ class CurrentSenseShunt(CircuitBlock):
             return float(value)
 
 
+class BootstrapCapacitorArray(CircuitBlock):
+    """
+    N-phase array of bootstrap capacitors for driver-IC topologies.
+
+    Each phase has a single bootstrap capacitor between its high-side
+    bootstrap node (e.g. ``BST_A``) and the corresponding switch-node
+    return (e.g. ``PHASE_A``).  Unlike :class:`HalfBridge`'s built-in
+    bootstrap (which adds a diode for discrete-MOSFET designs), this
+    block targets driver ICs that already have an internal bootstrap
+    pin and only need the external cap.
+
+    Schematic (3-phase example):
+        BST_A ─┬─    BST_B ─┬─    BST_C ─┬─
+               │            │            │
+              [C1]         [C2]         [C3]
+               │            │            │
+        PHASE_A┴     PHASE_B┴     PHASE_C┴
+
+    Ports per phase ``i`` in ``[0, phases)``:
+        - ``HIGH_<label>``: Bootstrap node (cap pin 1).
+        - ``PHASE_<label>``: Switch-node return (cap pin 2).
+
+    Components are stored as ``self.caps`` (list[Symbol]) and keyed in
+    ``self.components`` as ``C_BOOT_<label>``.
+
+    The block does NOT call any rail-connect helper -- wiring is left
+    to the caller, consistent with :class:`DecouplingCaps`.
+
+    Example:
+        from kicad_tools.schematic.blocks import (
+            create_bootstrap_capacitor_array,
+        )
+
+        boot = create_bootstrap_capacitor_array(
+            sch, x=80, y=60,
+            phases=3,
+            value="100nF",
+            cap_ref_start=12,        # C12, C13, C14
+            high_nets=["BST_A", "BST_B", "BST_C"],
+            phase_nets=["PHASE_A", "PHASE_B", "PHASE_C"],
+        )
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        phases: int = 3,
+        value: str = "100nF",
+        phase_labels: list[str] | None = None,
+        high_nets: list[str] | None = None,
+        phase_nets: list[str] | None = None,
+        cap_ref_start: int = 1,
+        cap_ref_prefix: str = "C",
+        cap_symbol: str = "Device:C",
+        cap_spacing: float = 10,
+    ):
+        """
+        Create an N-phase bootstrap capacitor array.
+
+        Args:
+            sch: Schematic to add to.
+            x: X coordinate of the first capacitor.
+            y: Y coordinate of all capacitors.
+            phases: Number of bootstrap capacitors (default 3).
+            value: Capacitor value, applied to every cap (default "100nF").
+            phase_labels: Per-phase labels.  Defaults to
+                ``["A", "B", "C"][:phases]`` when ``phases <= 3``,
+                otherwise ``[str(i) for i in range(phases)]``.
+            high_nets: Optional per-phase net names for the high
+                (bootstrap) side.  If provided, ``add_label`` is called
+                at each cap's pin 1.  Length must equal ``phases``.
+            phase_nets: Optional per-phase net names for the
+                switch-node return.  If provided, ``add_label`` is
+                called at each cap's pin 2.  Length must equal
+                ``phases``.
+            cap_ref_start: Reference number for the first capacitor
+                (default 1).
+            cap_ref_prefix: Reference prefix (default "C").
+            cap_symbol: KiCad symbol for capacitors (default "Device:C").
+            cap_spacing: Horizontal spacing between caps (default 10).
+
+        Raises:
+            ValueError: If ``phases`` < 1, or if ``phase_labels``,
+                ``high_nets``, or ``phase_nets`` have mismatched length.
+        """
+        super().__init__(sch, x, y)
+
+        if phases < 1:
+            raise ValueError(f"phases must be >= 1, got {phases}")
+
+        # Default labels: A/B/C for small phase counts, integers otherwise
+        if phase_labels is None:
+            if phases <= 3:
+                phase_labels = ["A", "B", "C"][:phases]
+            else:
+                phase_labels = [str(i) for i in range(phases)]
+        elif len(phase_labels) != phases:
+            raise ValueError(
+                f"phase_labels length {len(phase_labels)} != phases {phases}"
+            )
+
+        if high_nets is not None and len(high_nets) != phases:
+            raise ValueError(
+                f"high_nets length {len(high_nets)} != phases {phases}"
+            )
+        if phase_nets is not None and len(phase_nets) != phases:
+            raise ValueError(
+                f"phase_nets length {len(phase_nets)} != phases {phases}"
+            )
+
+        self.phases = phases
+        self.phase_labels = phase_labels
+        self.value = value
+        self.caps: list = []
+        self.components = {}
+        self.ports = {}
+
+        for i, label in enumerate(phase_labels):
+            cap_x = x + i * cap_spacing
+            cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
+            cap = sch.add_symbol(cap_symbol, cap_x, y, cap_ref, value)
+            self.caps.append(cap)
+            self.components[f"C_BOOT_{label}"] = cap
+
+            high_pos = cap.pin_position("1")
+            phase_pos = cap.pin_position("2")
+
+            self.ports[f"HIGH_{label}"] = high_pos
+            self.ports[f"PHASE_{label}"] = phase_pos
+
+            # Optionally drive labels for net naming
+            if high_nets is not None:
+                sch.add_label(high_nets[i], high_pos[0], high_pos[1], rotation=0)
+            if phase_nets is not None:
+                sch.add_label(phase_nets[i], phase_pos[0], phase_pos[1], rotation=0)
+
+
 class GateDriverBlock(CircuitBlock):
     """
     Gate driver IC block with bootstrap capacitors.
@@ -697,7 +836,7 @@ class GateDriverBlock(CircuitBlock):
         ref: str = "U1",
         value: str = "DRV8301",
         driver_symbol: str | None = None,
-        bootstrap_caps: str = "100nF",
+        bootstrap_caps: str | None = "100nF",
         bypass_caps: list[str] | None = None,
         cap_ref_start: int = 1,
     ):
@@ -712,7 +851,9 @@ class GateDriverBlock(CircuitBlock):
             ref: Reference designator for driver IC
             value: Driver IC part number
             driver_symbol: KiCad symbol (auto-selected based on driver_type if None)
-            bootstrap_caps: Bootstrap capacitor value per phase
+            bootstrap_caps: Bootstrap capacitor value per phase (None to omit).
+                When non-None, an internal :class:`BootstrapCapacitorArray`
+                is composed and exposed via ``self._bootstrap_block``.
             bypass_caps: Bypass capacitor values (default: ["10uF", "100nF"])
             cap_ref_start: Starting reference number for capacitors
         """
@@ -738,15 +879,26 @@ class GateDriverBlock(CircuitBlock):
         num_phases = 3 if driver_type == "3-phase" else 1
         phase_labels = ["A", "B", "C"][:num_phases]
 
-        # Add bootstrap capacitors
-        self.bootstrap_caps = []
-        for i in range(num_phases):
-            cap_ref = f"C{cap_ref_start + i}"
-            cap_x = x - 20 + i * 10
-            cap_y = y - 15
-            cap = sch.add_symbol("Device:C", cap_x, cap_y, cap_ref, bootstrap_caps)
-            self.bootstrap_caps.append(cap)
-            self.components[f"C_BOOT_{phase_labels[i]}"] = cap
+        # Add bootstrap capacitors via BootstrapCapacitorArray composition.
+        # We expose self.bootstrap_caps as the underlying caps list for
+        # back-compat with tests that assert len(driver.bootstrap_caps) == N.
+        self._bootstrap_block: BootstrapCapacitorArray | None = None
+        if bootstrap_caps is not None:
+            self._bootstrap_block = BootstrapCapacitorArray(
+                sch,
+                x=x - 20,
+                y=y - 15,
+                phases=num_phases,
+                value=bootstrap_caps,
+                phase_labels=phase_labels,
+                cap_ref_start=cap_ref_start,
+            )
+            self.bootstrap_caps = self._bootstrap_block.caps
+            # Merge bootstrap components into our components dict
+            for name, comp in self._bootstrap_block.components.items():
+                self.components[name] = comp
+        else:
+            self.bootstrap_caps = []
 
         # Add bypass capacitors
         self.bypass_caps = []
@@ -774,6 +926,14 @@ class GateDriverBlock(CircuitBlock):
             self.ports[f"PWM_H_{label}"] = (x + offset - 30, y + 5)
             self.ports[f"PWM_L_{label}"] = (x + offset - 30, y + 10)
 
+        # Re-expose bootstrap-array ports so callers can wire HIGH_<label>
+        # / PHASE_<label> to BST_<label> / PHASE_<label> nets.
+        if self._bootstrap_block is not None:
+            for name, pos in self._bootstrap_block.ports.items():
+                # Avoid clobbering driver ports if names ever collide
+                if name not in self.ports:
+                    self.ports[name] = pos
+
     def connect_to_rails(
         self,
         vcc_rail_y: float,
@@ -796,6 +956,65 @@ class GateDriverBlock(CircuitBlock):
 
 
 # Factory functions
+
+
+def create_bootstrap_capacitor_array(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    phases: int = 3,
+    value: str = "100nF",
+    phase_labels: list[str] | None = None,
+    high_nets: list[str] | None = None,
+    phase_nets: list[str] | None = None,
+    cap_ref_start: int = 1,
+    cap_ref_prefix: str = "C",
+    cap_symbol: str = "Device:C",
+    cap_spacing: float = 10,
+) -> BootstrapCapacitorArray:
+    """
+    Create an N-phase bootstrap capacitor array (driver-IC topology).
+
+    This is a thin wrapper around :class:`BootstrapCapacitorArray`
+    that provides a discoverable factory entry point alongside the
+    other ``create_*`` helpers in this module.
+
+    Args:
+        sch: Schematic to add to.
+        x: X coordinate of the first capacitor.
+        y: Y coordinate of all capacitors.
+        phases: Number of bootstrap capacitors (default 3).
+        value: Capacitor value, applied to every cap (default "100nF").
+        phase_labels: Per-phase labels.  Defaults to A/B/C for
+            ``phases <= 3``, integer strings otherwise.
+        high_nets: Optional per-phase net names for the high
+            (bootstrap) side (e.g. ``["BST_A", "BST_B", "BST_C"]``).
+            Length must equal ``phases``.
+        phase_nets: Optional per-phase net names for the switch-node
+            return.  Length must equal ``phases``.
+        cap_ref_start: Reference number for the first capacitor
+            (default 1).
+        cap_ref_prefix: Reference prefix (default "C").
+        cap_symbol: KiCad symbol for capacitors (default "Device:C").
+        cap_spacing: Horizontal spacing between caps (default 10).
+
+    Returns:
+        :class:`BootstrapCapacitorArray` instance.
+    """
+    return BootstrapCapacitorArray(
+        sch,
+        x,
+        y,
+        phases=phases,
+        value=value,
+        phase_labels=phase_labels,
+        high_nets=high_nets,
+        phase_nets=phase_nets,
+        cap_ref_start=cap_ref_start,
+        cap_ref_prefix=cap_ref_prefix,
+        cap_symbol=cap_symbol,
+        cap_spacing=cap_spacing,
+    )
 
 
 def create_half_bridge(
