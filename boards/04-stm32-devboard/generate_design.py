@@ -35,6 +35,7 @@ from kicad_tools.schematic.blocks import (
     DebugHeader,
     LEDIndicator,
     create_gpio_pull_resistor,
+    create_mcu_decoupling_array,
 )
 from kicad_tools.schematic.models.schematic import Schematic
 
@@ -239,50 +240,20 @@ def create_stm32_schematic(output_dir: Path) -> Path:
 
     print("   Wired MCU VDD/VBAT/VDDA to +3.3V and VSS/VSSA to GND")
 
-    # MCU decoupling caps (one per VDD/VBAT/VDDA pin, plus a bulk cap)
+    # MCU decoupling caps (one per VDD/VBAT/VDDA pin, plus a bulk cap).
     # Place between MCU and 3.3V rail, on the left side of the symbol.
-    c_dec1 = sch.add_symbol(
-        "Device:C_Small",
+    # Produces C12-C15 (100nF) at x=160,170,180,190 and C16 (4.7uF) at x=200.
+    mcu_decoupling = create_mcu_decoupling_array(
+        sch,
         x=160,
         y=85,
-        ref="C12",
-        value="100nF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
+        supply_pins=4,
+        ref_start=12,
+        spacing=10,
+        cap_symbol="Device:C_Small",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
-    c_dec2 = sch.add_symbol(
-        "Device:C_Small",
-        x=170,
-        y=85,
-        ref="C13",
-        value="100nF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
-    )
-    c_dec3 = sch.add_symbol(
-        "Device:C_Small",
-        x=180,
-        y=85,
-        ref="C14",
-        value="100nF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
-    )
-    c_dec4 = sch.add_symbol(
-        "Device:C_Small",
-        x=190,
-        y=85,
-        ref="C15",
-        value="100nF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
-    )
-    c_bulk = sch.add_symbol(
-        "Device:C_Small",
-        x=200,
-        y=85,
-        ref="C16",
-        value="4.7uF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
-    )
-    for cap in (c_dec1, c_dec2, c_dec3, c_dec4, c_bulk):
-        sch.wire_decoupling_cap(cap, RAIL_3V3, RAIL_GND)
+    mcu_decoupling.connect_to_rails(RAIL_3V3, RAIL_GND)
     print("   C12-C15 (100nF) + C16 (4.7uF) bypass caps")
 
     # =========================================================================
