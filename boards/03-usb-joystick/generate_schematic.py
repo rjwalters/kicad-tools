@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.schematic.blocks import USBConnector
+from kicad_tools.schematic.blocks import USBConnector, create_analog_joystick
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
@@ -158,26 +158,39 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     print(f"   J1 (USB-C): placed at ({usb_conn.x}, {usb_conn.y})")
 
     # =========================================================================
-    # Section 3: Place Joystick connector (demonstrate autolayout)
+    # Section 3: Place Joystick connector (uses create_analog_joystick factory)
     # =========================================================================
-    print("\n3. Placing Joystick connector...")
+    print("\n3. Placing Joystick connector via create_analog_joystick factory...")
 
-    # Place joystick connector on left side
+    # The factory drops the 5-pin connector + per-axis RC anti-aliasing filters
+    # + a BTN pull-up resistor and emits the VCC/GND/X/Y/BTN labels itself, so
+    # the inline connector + JOY_PIN_MAP + wiring loop that lived here before
+    # all collapse into a single call.
     joy_pos = sch.suggest_position(
         "Connector_Generic:Conn_01x05",
         near=(50.8, 101.6),
         padding=5.08,
     )
-
-    joy_conn = sch.add_symbol(
-        "Connector_Generic:Conn_01x05",
+    joy_block = create_analog_joystick(
+        sch,
         x=joy_pos[0],
         y=joy_pos[1],
         ref="J2",
-        value="Joystick",
-        footprint="Module:Joystick_Analog",
+        vcc_net="VCC",
+        gnd_net="GND",
+        x_net="JOY_X",
+        y_net="JOY_Y",
+        btn_net="JOY_BTN",
+        filter_cutoff_hz=1000.0,
+        btn_pullup="10k",
+        # Board uses C1-C4 for decoupling; bump filter refs out of the way.
+        filter_ref_start=10,
+        resistor_footprint="Resistor_SMD:R_0402_1005Metric",
+        capacitor_footprint="Capacitor_SMD:C_0402_1005Metric",
     )
+    joy_conn = joy_block.connector
     print(f"   J2 (Joystick): placed at ({joy_conn.x}, {joy_conn.y})")
+    print(f"   Filter Rs/Cs + BTN pull-up: {len(joy_block.components)} components total")
 
     # =========================================================================
     # Section 4: Place Crystal
@@ -346,14 +359,8 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         "31": "GND",
     }
 
-    # Joystick connector pin assignments (5-pin):
-    JOY_PIN_MAP = {
-        "1": "VCC",  # VCC
-        "2": "GND",  # GND
-        "3": "JOY_X",  # X axis output
-        "4": "JOY_Y",  # Y axis output
-        "5": "JOY_BTN",  # Joystick button (optional)
-    }
+    # Joystick pin labels (VCC/GND/JOY_X/JOY_Y/JOY_BTN) are emitted by
+    # ``create_analog_joystick`` in Section 3 — no inline wiring needed here.
 
     # Wire MCU pins with global labels
     print("   Wiring MCU (U1) pins...")
@@ -411,13 +418,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             add_pin_label(sch, pin_pos, net_name, direction="right")
             print(f"      Pin {pin.number} ({pin.name}) -> {net_name}")
 
-    # Wire Joystick connector pins
-    print("   Wiring Joystick connector (J2) pins...")
-    for pin_num, net_name in JOY_PIN_MAP.items():
-        pin_pos = joy_conn.pin_position(pin_num)
-        if pin_pos:
-            add_pin_label(sch, pin_pos, net_name, direction="right")
-            print(f"      Pin {pin_num} -> {net_name}")
+    # Joystick (J2) wiring is handled by create_analog_joystick (Section 3).
 
     # Wire crystal pins
     print("   Wiring Crystal (Y1) pins...")

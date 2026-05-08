@@ -53,10 +53,12 @@ from .indicators import (
 
 # Interface blocks (organized by protocol type)
 from .interface import (
+    AnalogJoystickBlock,
     CANTransceiver,
     DebugHeader,
     I2CPullups,
     USBConnector,
+    create_analog_joystick,
     create_can_transceiver_mcp2551,
     create_can_transceiver_sn65hvd230,
     create_can_transceiver_tja1050,
@@ -186,6 +188,7 @@ __all__ = [
     "DebugHeader",
     "USBConnector",
     "I2CPullups",
+    "AnalogJoystickBlock",
     "create_can_transceiver_mcp2551",
     "create_can_transceiver_sn65hvd230",
     "create_can_transceiver_tja1050",
@@ -195,6 +198,7 @@ __all__ = [
     "create_usb_type_c",
     "create_usb_micro_b",
     "create_i2c_pullups",
+    "create_analog_joystick",
     # MCU
     "BootModeSelector",
     "MCUBlock",

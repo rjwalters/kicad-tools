@@ -6,6 +6,7 @@ This package provides circuit blocks for common hardware interfaces:
 - USB connectors (Type-C, Micro-B, Mini-B, Type-A)
 - I2C bus components (pull-ups, filtering)
 - CAN bus transceivers (with termination and ESD protection)
+- Analog input connectors (2-axis joysticks with optional filtering)
 
 Example:
     from kicad_tools.schematic.blocks import DebugHeader, USBConnector
@@ -16,6 +17,12 @@ Example:
     # Create a USB Type-C connector with ESD protection
     usb = USBConnector(sch, x=50, y=100, connector_type="type-c")
 """
+
+# Analog input interfaces
+from .analog_input import (
+    AnalogJoystickBlock,
+    create_analog_joystick,
+)
 
 # Debug interfaces
 # CAN interfaces
@@ -63,4 +70,7 @@ __all__ = [
     "create_can_transceiver_mcp2551",
     "create_can_transceiver_sn65hvd230",
     "create_can_transceiver_tja1050",
+    # Analog input
+    "AnalogJoystickBlock",
+    "create_analog_joystick",
 ]
