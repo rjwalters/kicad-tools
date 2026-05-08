@@ -38,6 +38,7 @@ from kicad_tools.schematic.blocks import (
     create_can_transceiver_mcp2551,
     create_can_transceiver_sn65hvd230,
     create_can_transceiver_tja1050,
+    create_crystal_with_loads,
     create_current_sense,
     create_esp32_boot,
     create_generic_boot,
@@ -1150,6 +1151,125 @@ class TestCrystalOscillatorMocked:
         assert isinstance(xtal.ports["GND"], tuple)
 
         # IN should be on left (lower x), OUT on right (higher x)
+        assert xtal.ports["IN"][0] < xtal.ports["OUT"][0]
+
+
+class TestCreateCrystalWithLoadsMocked:
+    """Tests for create_crystal_with_loads factory with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic (mirrors TestCrystalOscillatorMocked fixture)."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.reference = ref
+            # First positional after ref is value (per add_symbol signature)
+            comp.value = args[0] if args else kwargs.get("value")
+            comp.footprint = kwargs.get("footprint", "")
+            comp.symbol = symbol
+            if "Crystal" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_factory_returns_crystal_oscillator_instance(self, mock_schematic):
+        """Factory returns a CrystalOscillator with XTAL/C1/C2 components."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100)
+
+        assert isinstance(xtal, CrystalOscillator)
+        assert "XTAL" in xtal.components
+        assert "C1" in xtal.components
+        assert "C2" in xtal.components
+
+    def test_factory_default_8MHz_20pF(self, mock_schematic):
+        """Default frequency 8MHz and 20pF load caps propagate to symbols."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100)
+
+        assert xtal.crystal.value == "8MHz"
+        assert xtal.cap1.value == "20pF"
+        assert xtal.cap2.value == "20pF"
+
+    def test_factory_16MHz_15pF(self, mock_schematic):
+        """Explicit 16 MHz / 15 pF override propagates."""
+        xtal = create_crystal_with_loads(
+            mock_schematic, x=100, y=100, frequency="16MHz", load_pF=15
+        )
+
+        assert xtal.crystal.value == "16MHz"
+        assert xtal.cap1.value == "15pF"
+        assert xtal.cap2.value == "15pF"
+
+    def test_factory_watch_crystal_32_768kHz(self, mock_schematic):
+        """32.768 kHz watch-crystal frequency string is accepted verbatim."""
+        xtal = create_crystal_with_loads(
+            mock_schematic,
+            x=100,
+            y=100,
+            frequency="32.768kHz",
+            load_pF=12,
+        )
+
+        assert xtal.crystal.value == "32.768kHz"
+        assert xtal.cap1.value == "12pF"
+        assert xtal.cap2.value == "12pF"
+
+    def test_factory_int_load_pF_formatted_as_pF_string(self, mock_schematic):
+        """Integer load_pF is formatted as '<n>pF'."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100, load_pF=18)
+
+        assert xtal.cap1.value == "18pF"
+        assert xtal.cap2.value == "18pF"
+
+    def test_factory_str_load_pF_passed_through(self, mock_schematic):
+        """String load_pF is passed through verbatim."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100, load_pF="22pF")
+
+        assert xtal.cap1.value == "22pF"
+        assert xtal.cap2.value == "22pF"
+
+    def test_factory_forwards_cap_ref_start(self, mock_schematic):
+        """cap_ref_start=10 produces C10/C11 (not C1/C2)."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100, cap_ref_start=10)
+
+        assert xtal.cap1.reference == "C10"
+        assert xtal.cap2.reference == "C11"
+
+    def test_factory_forwards_footprints(self, mock_schematic):
+        """Crystal and cap footprints reach the underlying symbols."""
+        xtal = create_crystal_with_loads(
+            mock_schematic,
+            x=100,
+            y=100,
+            crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
+            cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+        )
+
+        assert xtal.crystal.footprint == "Crystal:Crystal_HC49-4H_Vertical"
+        assert xtal.cap1.footprint == "Capacitor_SMD:C_0805_2012Metric"
+        assert xtal.cap2.footprint == "Capacitor_SMD:C_0805_2012Metric"
+
+    def test_factory_ports_iface_unchanged(self, mock_schematic):
+        """Returned block exposes IN/OUT/GND ports identically to CrystalOscillator."""
+        xtal = create_crystal_with_loads(mock_schematic, x=100, y=100)
+
+        assert xtal.port("IN") is not None
+        assert xtal.port("OUT") is not None
+        assert xtal.port("GND") is not None
+        # IN on left of OUT
         assert xtal.ports["IN"][0] < xtal.ports["OUT"][0]
 
 

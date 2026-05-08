@@ -143,6 +143,7 @@ from .protection import (
 from .timing import (
     CrystalOscillator,
     OscillatorBlock,
+    create_crystal_with_loads,
     create_mclk_oscillator,
 )
 
@@ -190,6 +191,7 @@ __all__ = [
     # Timing
     "OscillatorBlock",
     "CrystalOscillator",
+    "create_crystal_with_loads",
     "create_mclk_oscillator",
     # Interface
     "CANTransceiver",
