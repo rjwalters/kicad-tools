@@ -1058,31 +1058,19 @@ def route_with_layer_escalation(
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
-        is_cpp_available,
+        ensure_cpp_backend_available,
         load_pcb_for_routing,
         show_routing_summary,
     )
 
-    # Handle backend selection
-    force_python = False
-    if args.backend == "cpp":
-        if not is_cpp_available():
-            print(
-                "Error: C++ backend requested but not available.\n"
-                "Build the C++ extension or use --backend auto/python.\n"
-                "See README for build instructions.",
-                file=sys.stderr,
-            )
-            return 1
-    elif args.backend == "python":
-        force_python = True
-
-    # Warn prominently when auto-backend falls back to Python
-    if args.backend == "auto" and not is_cpp_available() and not quiet:
-        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
-        flush_print("  Build it now:  kct build-native")
-        flush_print("  Check status:  kct build-native --check")
-        flush_print()
+    # Handle backend selection (auto-build C++ extension on first use; #2549)
+    ok, force_python, exit_code = ensure_cpp_backend_available(
+        backend=args.backend,
+        quiet=quiet,
+        allow_auto_build=not getattr(args, "no_auto_build_native", False),
+    )
+    if not ok:
+        return exit_code if exit_code is not None else 1
 
     # Configure design rules
     fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
@@ -1603,33 +1591,21 @@ def route_with_rule_relaxation(
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
+        ensure_cpp_backend_available,
         get_relaxation_tiers,
-        is_cpp_available,
         load_pcb_for_routing,
         show_routing_summary,
     )
     from kicad_tools.router.io import detect_layer_stack
 
-    # Handle backend selection
-    force_python = False
-    if args.backend == "cpp":
-        if not is_cpp_available():
-            print(
-                "Error: C++ backend requested but not available.\n"
-                "Build the C++ extension or use --backend auto/python.\n"
-                "See README for build instructions.",
-                file=sys.stderr,
-            )
-            return 1
-    elif args.backend == "python":
-        force_python = True
-
-    # Warn prominently when auto-backend falls back to Python
-    if args.backend == "auto" and not is_cpp_available() and not quiet:
-        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
-        flush_print("  Build it now:  kct build-native")
-        flush_print("  Check status:  kct build-native --check")
-        flush_print()
+    # Handle backend selection (auto-build C++ extension on first use; #2549)
+    ok, force_python, exit_code = ensure_cpp_backend_available(
+        backend=args.backend,
+        quiet=quiet,
+        allow_auto_build=not getattr(args, "no_auto_build_native", False),
+    )
+    if not ok:
+        return exit_code if exit_code is not None else 1
 
     # Parse skip nets
     skip_nets = []
@@ -2098,32 +2074,20 @@ def route_with_combined_escalation(
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
+        ensure_cpp_backend_available,
         get_relaxation_tiers,
-        is_cpp_available,
         load_pcb_for_routing,
         show_routing_summary,
     )
 
-    # Handle backend selection
-    force_python = False
-    if args.backend == "cpp":
-        if not is_cpp_available():
-            print(
-                "Error: C++ backend requested but not available.\n"
-                "Build the C++ extension or use --backend auto/python.\n"
-                "See README for build instructions.",
-                file=sys.stderr,
-            )
-            return 1
-    elif args.backend == "python":
-        force_python = True
-
-    # Warn prominently when auto-backend falls back to Python
-    if args.backend == "auto" and not is_cpp_available() and not quiet:
-        flush_print("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
-        flush_print("  Build it now:  kct build-native")
-        flush_print("  Check status:  kct build-native --check")
-        flush_print()
+    # Handle backend selection (auto-build C++ extension on first use; #2549)
+    ok, force_python, exit_code = ensure_cpp_backend_available(
+        backend=args.backend,
+        quiet=quiet,
+        allow_auto_build=not getattr(args, "no_auto_build_native", False),
+    )
+    if not ok:
+        return exit_code if exit_code is not None else 1
 
     # Parse skip nets
     skip_nets = []
@@ -2921,6 +2885,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--no-auto-build-native",
+        action="store_true",
+        help=(
+            "Disable silent auto-build of the C++ router extension on first use "
+            "(Issue #2549). When --backend is 'auto' (the default) and the "
+            "compiled router_cpp.*.so is missing, kct route normally invokes "
+            "'kct build-native' once and uses C++ for the rest of the session. "
+            "Pass this flag (or set KICAD_TOOLS_NO_AUTO_BUILD=1) to skip the "
+            "build attempt and fall straight through to pure Python."
+        ),
+    )
+    parser.add_argument(
         "--skip-drc",
         action="store_true",
         help=(
@@ -3527,7 +3503,7 @@ def main(argv: list[str] | None = None) -> int:
         DifferentialPairConfig,
         LayerStack,
         RoutabilityAnalyzer,
-        is_cpp_available,
+        ensure_cpp_backend_available,
         load_pcb_for_routing,
         print_routing_diagnostics_json,
         show_routing_summary,
@@ -3535,19 +3511,14 @@ def main(argv: list[str] | None = None) -> int:
     from kicad_tools.router.io import detect_layer_stack
     from kicad_tools.schema.pcb import PCB
 
-    # Handle backend selection
-    force_python = False
-    if args.backend == "cpp":
-        if not is_cpp_available():
-            print(
-                "Error: C++ backend requested but not available.\n"
-                "Build the C++ extension or use --backend auto/python.\n"
-                "See README for build instructions.",
-                file=sys.stderr,
-            )
-            return 1
-    elif args.backend == "python":
-        force_python = True
+    # Handle backend selection (auto-build C++ extension on first use; #2549)
+    ok, force_python, exit_code = ensure_cpp_backend_available(
+        backend=args.backend,
+        quiet=getattr(args, "quiet", False),
+        allow_auto_build=not getattr(args, "no_auto_build_native", False),
+    )
+    if not ok:
+        return exit_code if exit_code is not None else 1
 
     # Grid resolution already resolved early in main()
     # (args.grid is now a float, grid_auto_result set if "auto" was used)

@@ -66,9 +66,7 @@ except ImportError as e:
 
     _so_files = glob.glob(
         str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-darwin.so")
-    ) + glob.glob(
-        str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so")
-    )
+    ) + glob.glob(str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so"))
     # Issue #2514: Distinguish "no compiled extension" from a genuine
     # circular import.  When ``from . import router_cpp`` runs while
     # ``kicad_tools.router.__init__`` is still mid-import, Python's
@@ -124,6 +122,232 @@ def get_cpp_unavailable_reason() -> str | None:
     if _CPP_AVAILABLE:
         return None
     return _CPP_IMPORT_ERROR
+
+
+def _reload_cpp_backend() -> bool:
+    """Reload the cpp_backend module after a successful build.
+
+    After ``build_native()`` writes a new ``router_cpp.*.so`` into the
+    package directory, the in-process module-level globals
+    ``_CPP_AVAILABLE`` and ``router_cpp`` are still ``False`` / ``None``
+    from the original failed import.  Reloading the module re-runs the
+    top-level import block, populating those globals so subsequent calls
+    to :func:`is_cpp_available` return ``True`` and the C++ backend is
+    actually used by the routing code.
+
+    Returns:
+        ``True`` if the backend is available after reload, ``False`` otherwise.
+    """
+    global _CPP_AVAILABLE, _CPP_IMPORT_ERROR, router_cpp
+
+    import importlib
+    import sys as _sys
+
+    module_name = __name__  # "kicad_tools.router.cpp_backend"
+    module = _sys.modules.get(module_name)
+    if module is None:
+        return _CPP_AVAILABLE
+
+    try:
+        importlib.reload(module)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to reload cpp_backend after build: %s", exc)
+        return _CPP_AVAILABLE
+
+    # Mirror the freshly-imported globals into this module's namespace so
+    # callers that already have references to functions in this module
+    # (e.g. ``is_cpp_available``) see the new state.
+    _CPP_AVAILABLE = getattr(module, "_CPP_AVAILABLE", False)
+    _CPP_IMPORT_ERROR = getattr(module, "_CPP_IMPORT_ERROR", None)
+    router_cpp = getattr(module, "router_cpp", None)
+    return _CPP_AVAILABLE
+
+
+def ensure_cpp_backend_available(
+    *,
+    backend: str = "auto",
+    quiet: bool = False,
+    allow_auto_build: bool = True,
+) -> tuple[bool, bool, int | None]:
+    """Resolve C++ backend availability, auto-building if needed (Issue #2549).
+
+    Consolidates the four near-identical "Handle backend selection" blocks
+    that previously lived in ``route_cmd.py``.  Honors the user's explicit
+    ``--backend`` choice and silently auto-builds the C++ extension on first
+    use when ``--backend`` is ``auto`` (the default) and the ``router_cpp.*.so``
+    is missing or stale.
+
+    Auto-build is skipped under any of:
+      - ``backend == "python"`` (user explicitly chose Python)
+      - ``backend == "cpp"`` (handled separately: hard error if unavailable)
+      - ``allow_auto_build=False`` (caller opt-out, e.g. ``--no-auto-build-native``)
+      - ``KICAD_TOOLS_NO_AUTO_BUILD=1`` env var (sandbox / CI escape hatch)
+      - cmake or a C++ compiler not present on PATH (cheap pre-check)
+
+    On build failure (any reason: missing toolchain, timeout, verification
+    error, sandbox without write permission), this function falls through
+    to the existing Python-fallback warning path.  It never raises -- the
+    intent is to keep ``kct route`` working even when the build fails.
+
+    Args:
+        backend: One of ``"auto"``, ``"cpp"``, or ``"python"``.  Mirrors the
+            ``--backend`` CLI flag.
+        quiet: Suppress informational and warning output.
+        allow_auto_build: If ``False``, never attempt auto-build.  Used by
+            tests and ``--no-auto-build-native``.
+
+    Returns:
+        A tuple ``(ok, force_python, exit_code)`` where:
+          - ``ok``: ``True`` if the caller should proceed with routing.
+            ``False`` only when ``backend=="cpp"`` and the backend is
+            unavailable (caller should ``return exit_code``).
+          - ``force_python``: ``True`` when the Python backend should be
+            used (``--backend python`` or auto-fallback after build failure).
+          - ``exit_code``: ``1`` when ``backend=="cpp"`` and unavailable,
+            ``None`` otherwise.
+    """
+    import sys
+
+    def _emit(msg: str, *, file=None) -> None:
+        if quiet:
+            return
+        if file is None:
+            print(msg, flush=True)
+        else:
+            print(msg, file=file, flush=True)
+
+    # --backend python: honor user intent, never attempt auto-build.
+    if backend == "python":
+        return True, True, None
+
+    # --backend cpp: hard error if unavailable (existing behavior).  We
+    # still attempt an auto-build when the user explicitly selected cpp,
+    # because that matches the user's intent ("I want C++"), but we
+    # surface a hard error if the build fails so the user knows the
+    # request was honored as best as possible.
+    if backend == "cpp":
+        if is_cpp_available():
+            return True, False, None
+        if allow_auto_build and _auto_build_allowed_by_env():
+            built = _attempt_auto_build(quiet=quiet)
+            if built:
+                return True, False, None
+        # Build either disallowed or failed -- preserve the original
+        # hard-error behavior so ``--backend cpp`` never silently falls
+        # back to Python.
+        _emit(
+            "Error: C++ backend requested but not available.\n"
+            "Build the C++ extension or use --backend auto/python.\n"
+            "See README for build instructions.",
+            file=sys.stderr,
+        )
+        return False, False, 1
+
+    # --backend auto (default): try to auto-build if not available.
+    if is_cpp_available():
+        return True, False, None
+
+    if allow_auto_build and _auto_build_allowed_by_env():
+        built = _attempt_auto_build(quiet=quiet)
+        if built:
+            return True, False, None
+
+    # Backend still unavailable: emit the existing warning and continue
+    # with Python.  Build failures (toolchain missing, timeout, etc.)
+    # share this path so ``kct route`` never crashes due to a failed
+    # auto-build attempt.
+    if not quiet:
+        _emit("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
+        _emit("  Build it now:  kct build-native")
+        _emit("  Check status:  kct build-native --check")
+        _emit("")
+    return True, False, None
+
+
+def _auto_build_allowed_by_env() -> bool:
+    """Check the ``KICAD_TOOLS_NO_AUTO_BUILD`` environment opt-out.
+
+    Returns ``False`` when the variable is set to a truthy value
+    (``1``, ``true``, ``yes``, ``on`` -- case-insensitive).
+    """
+    import os
+
+    val = os.environ.get("KICAD_TOOLS_NO_AUTO_BUILD", "").strip().lower()
+    return val not in ("1", "true", "yes", "on")
+
+
+def _toolchain_available() -> bool:
+    """Cheap pre-check for cmake + C++ compiler on PATH.
+
+    Avoids spending ~5-10s invoking cmake in environments where the build
+    is guaranteed to fail (sandboxes, CI runners without dev tools).
+    """
+    import shutil
+
+    if shutil.which("cmake") is None:
+        return False
+    return any(shutil.which(compiler) is not None for compiler in ("clang++", "g++"))
+
+
+def _attempt_auto_build(*, quiet: bool) -> bool:
+    """Run ``build_native(force=False)`` and reload this module on success.
+
+    Returns ``True`` if the C++ backend is available after the attempt
+    (either it was already built and the call short-circuited, or it
+    built successfully).  Returns ``False`` on any failure -- never
+    raises.
+
+    The ``build_native`` call short-circuits in milliseconds when the
+    backend is already loaded (see ``build_native_cmd.py:193-208``), so
+    repeat invocations are effectively free once the ``.so`` exists.
+    """
+    if not _toolchain_available():
+        if not quiet:
+            print(
+                "Note: C++ router toolchain (cmake + clang++/g++) not found; skipping auto-build.",
+                flush=True,
+            )
+        return False
+
+    if not quiet:
+        print(
+            "C++ router extension missing -- building (~30s, one-time)...",
+            flush=True,
+        )
+
+    try:
+        from kicad_tools.cli.build_native_cmd import build_native
+
+        result = build_native(verbose=False, force=False)
+    except Exception as exc:
+        if not quiet:
+            print(
+                f"Note: auto-build raised {type(exc).__name__}: {exc}; falling back to Python.",
+                flush=True,
+            )
+        return False
+
+    if not getattr(result, "success", False):
+        if not quiet:
+            err = getattr(result, "error_message", None) or "unknown error"
+            print(
+                f"Note: C++ auto-build failed: {err}; falling back to Python.",
+                flush=True,
+            )
+        return False
+
+    # Build succeeded -- reload this module so module-level globals
+    # (``_CPP_AVAILABLE``, ``router_cpp``) reflect the freshly written
+    # ``.so``.  Without this, ``is_cpp_available()`` continues to return
+    # ``False`` for the rest of the process.
+    available = _reload_cpp_backend()
+    if not available and not quiet:
+        print(
+            "Note: C++ build succeeded but module reload did not pick it up; "
+            "falling back to Python (re-run kct to use C++).",
+            flush=True,
+        )
+    return available
 
 
 def get_backend_info() -> dict:
@@ -327,16 +551,20 @@ class CppGrid:
 
             # Pre-compute clearance for this pad's component (Issue #1016)
             pin_pitch = component_pitches.get(pad.ref) if pad.ref else None
-            clearance_override = grid.rules.get_clearance_for_component(
-                pad.ref, pin_pitch
-            )
+            clearance_override = grid.rules.get_clearance_for_component(pad.ref, pin_pitch)
 
             # Deterministic FNV-1a hash of component reference
             ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
 
             cpp_grid._impl.add_pad(
-                pad.x, pad.y, pad.width, pad.height,
-                pad.net, layer_idx, ref_hash, clearance_override,
+                pad.x,
+                pad.y,
+                pad.width,
+                pad.height,
+                pad.net,
+                layer_idx,
+                ref_hash,
+                clearance_override,
             )
 
         return cpp_grid
@@ -631,17 +859,13 @@ class CppPathfinder:
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
         trace_radius_cells = max(
             1,
-            math.ceil(
-                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
-            ),
+            math.ceil((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution),
         )
 
         net_via_size = net_class.via_size if net_class else self._rules.via_diameter
         via_radius_cells = max(
             1,
-            math.ceil(
-                (net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution
-            ),
+            math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -705,9 +929,7 @@ class CppPathfinder:
                 )
 
             for attempt in range(max_resume_attempts + 1):
-                route = self._convert_result_to_route(
-                    result, start, net_class
-                )
+                route = self._convert_result_to_route(result, start, net_class)
 
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
                 # clearance validation via C++ validate_route().
@@ -745,15 +967,11 @@ class CppPathfinder:
                 # goal cell that A* reached.
                 last_seg = result.segments[-1] if result.segments else None
                 if last_seg is not None:
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
-                        last_seg.x2, last_seg.y2
-                    )
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
                     reject_layer = last_seg.layer
                 else:
                     # Fallback: use end pad grid coords
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(
-                        end.x, end.y
-                    )
+                    reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
                     reject_layer = end_layer
 
                 # Resume A* from the preserved open set, skipping the
@@ -949,7 +1167,8 @@ class CppPathfinder:
             cpp_vias.append(cv)
 
         vresult = self._grid._impl.validate_route(
-            cpp_segs, cpp_vias,
+            cpp_segs,
+            cpp_vias,
             start.net,
             exclude_ref_hashes,
             self._rules.trace_clearance,
@@ -1120,12 +1339,21 @@ class CppPathfinder:
             for seg in route.segments:
                 layer_idx = py_grid.layer_to_index(seg.layer.value)
                 self._grid._impl.add_stored_segment(
-                    seg.x1, seg.y1, seg.x2, seg.y2,
-                    seg.width, layer_idx, seg.net,
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    seg.width,
+                    layer_idx,
+                    seg.net,
                 )
             for via in route.vias:
                 self._grid._impl.add_stored_via(
-                    via.x, via.y, via.drill, via.diameter, via.net,
+                    via.x,
+                    via.y,
+                    via.drill,
+                    via.diameter,
+                    via.net,
                 )
 
         self._grid._synced_route_count = current_count
@@ -1180,10 +1408,7 @@ class CppPathfinder:
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
         trace_half_width_cells = max(
             1,
-            int(
-                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
-                + 0.5
-            ),
+            int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
         )
 
         while True:
@@ -1379,8 +1604,7 @@ def create_hybrid_router(
     if not force_python:
         reason = _CPP_IMPORT_ERROR or "unknown reason"
         logger.warning(
-            "C++ router backend not available -- using pure Python (10-100x slower). "
-            "Reason: %s",
+            "C++ router backend not available -- using pure Python (10-100x slower). Reason: %s",
             reason,
         )
 
