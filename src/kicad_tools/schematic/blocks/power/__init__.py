@@ -34,21 +34,25 @@ from .passives import (
 )
 from .regulators import (
     BuckConverter,
+    DualSupplyCascade,
     LDOBlock,
     create_3v3_buck,
     create_3v3_ldo,
     create_5v_buck,
     create_12v_buck,
+    create_dual_supply_cascade,
 )
 
 __all__ = [
     # Regulators
     "LDOBlock",
     "BuckConverter",
+    "DualSupplyCascade",
     "create_3v3_ldo",
     "create_5v_buck",
     "create_3v3_buck",
     "create_12v_buck",
+    "create_dual_supply_cascade",
     # Inputs
     "BarrelJackInput",
     "USBPowerInput",
