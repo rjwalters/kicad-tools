@@ -41,6 +41,7 @@ from kicad_tools.schematic.blocks import (
     create_5v_buck,
     create_bootstrap_capacitor_array,
     create_gate_drive_resistor_array,
+    create_mcu_decoupling_array,
 )
 from kicad_tools.schematic.models.schematic import Schematic
 
@@ -304,14 +305,23 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # =========================================================================
     print("\n5. Adding MCU section...")
 
-    # Bypass capacitors for MCU (placed first so we can wire later)
-    c_mcu1 = sch.add_symbol("Device:C", x=X_MCU, y=100, ref="C7", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
-    c_mcu2 = sch.add_symbol("Device:C", x=X_MCU + 10, y=100, ref="C8", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
-    c_mcu3 = sch.add_symbol("Device:C", x=X_MCU + 20, y=100, ref="C9", value="4.7uF", footprint="Capacitor_SMD:C_0805_2012Metric")
+    # Bypass capacitors for MCU (placed first so we can wire later).
+    # STM32G431K8Tx has 2 VDD + 1 VDDA = 3 supply pins, but historically this
+    # board uses only 2 bypass caps + 1 bulk cap (C7/C8/C9); preserve that.
+    mcu_decoupling = create_mcu_decoupling_array(
+        sch,
+        x=X_MCU,
+        y=100,
+        supply_pins=2,
+        ref_start=7,
+        spacing=10,
+        cap_symbol="Device:C",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_mcu1, c_mcu2, c_mcu3 = mcu_decoupling.caps
     print(f"   Bypass caps: {c_mcu1.reference}, {c_mcu2.reference}, {c_mcu3.reference}")
 
-    for cap in [c_mcu1, c_mcu2, c_mcu3]:
-        sch.wire_decoupling_cap(cap, RAIL_3V3, RAIL_GND)
+    mcu_decoupling.connect_to_rails(RAIL_3V3, RAIL_GND)
 
     # Place STM32G431K8Tx MCU (LQFP-32) below the bypass caps
     # The STM32G431K_6-8-B_Tx symbol body spans ~25mm wide x ~55mm tall.

@@ -115,6 +115,7 @@ from .power import (
     create_12v_barrel_jack,
     create_12v_buck,
     create_lipo_battery,
+    create_mcu_decoupling_array,
     create_usb_power,
     create_voltage_divider,
 )
@@ -180,6 +181,7 @@ __all__ = [
     "create_12v_barrel_jack",
     "create_usb_power",
     "create_lipo_battery",
+    "create_mcu_decoupling_array",
     "create_voltage_divider",
     # Timing
     "OscillatorBlock",
