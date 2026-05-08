@@ -390,6 +390,33 @@ class NetClassRouting:
     # Length constraint parameters (Issue #630)
     length_constraint: LengthConstraint | None = None  # Length constraint for this net class
 
+    # Differential pair within-pair clearance (Issue #2557, Epic #2556 Phase 1A)
+    intra_pair_clearance: float | None = None
+    """Clearance applied to within-pair edges of a differential pair.
+
+    When ``None`` (the default), the accessor :meth:`effective_intra_pair_clearance`
+    falls back to :attr:`clearance`, preserving pre-#2557 single-clearance behavior.
+
+    Callers (in Issue #2559 / Phase 1B) should read this via
+    :meth:`effective_intra_pair_clearance` rather than touching the field
+    directly, since the public ``None`` sentinel encodes "fall back to
+    ``clearance``" rather than a literal zero clearance.
+
+    Phase 1A scope (#2557) is the type-system foundation only; pathfinder /
+    cpp_backend threading is explicitly out of scope and lands in #2559.
+    """
+
+    def effective_intra_pair_clearance(self) -> float:
+        """Return the clearance to apply to within-pair diff-pair edges.
+
+        Backward-compatible accessor: returns :attr:`clearance` when
+        :attr:`intra_pair_clearance` is unset (``None``), matching pre-#2557
+        single-clearance behavior. Returns the explicit override otherwise.
+        """
+        if self.intra_pair_clearance is not None:
+            return self.intra_pair_clearance
+        return self.clearance
+
 
 # =============================================================================
 # PREDEFINED NET CLASSES
