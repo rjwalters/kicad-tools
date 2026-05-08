@@ -406,6 +406,16 @@ class NetClassRouting:
     cpp_backend threading is explicitly out of scope and lands in #2559.
     """
 
+    # Differential pair partner (Issue #2558, Epic #2556 Phase 1B)
+    # When set, declares this net is the positive (or negative) half of a
+    # differential pair whose partner is the named net.  This is the
+    # AUTHORITATIVE source for diff-pair detection -- it overrides KiCad
+    # group declarations and suffix inference.  A one-sided declaration
+    # (only one of the two nets has ``diffpair_partner`` set) is sufficient
+    # to form a pair.  Parallel addition to ``intra_pair_clearance`` from
+    # Phase 1A (#2557).
+    diffpair_partner: str | None = None
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
