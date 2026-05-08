@@ -87,12 +87,14 @@ from .mcu import (
 
 # Motor control blocks
 from .motor import (
+    BootstrapCapacitorArray,
     CurrentSenseShunt,
     GateDriverBlock,
     GateDriveResistorArray,
     HalfBridge,
     ThreePhaseInverter,
     create_3phase_inverter,
+    create_bootstrap_capacitor_array,
     create_current_sense,
     create_gate_drive_resistor_array,
     create_half_bridge,
@@ -214,10 +216,12 @@ __all__ = [
     "CurrentSenseShunt",
     "GateDriverBlock",
     "GateDriveResistorArray",
+    "BootstrapCapacitorArray",
     "create_half_bridge",
     "create_3phase_inverter",
     "create_current_sense",
     "create_gate_drive_resistor_array",
+    "create_bootstrap_capacitor_array",
     # Analog
     "ADCInputFilterBlock",
     "OpAmpBlock",
