@@ -56,6 +56,7 @@ Layer Stack Configuration:
 import argparse
 import logging
 import math
+import shutil
 import signal
 import sys
 import textwrap
@@ -954,6 +955,37 @@ def _print_power_stall_suggestions(
     print()
 
 
+def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
+    """Stage the input PCB so ``auto_pour_if_missing`` does not mutate the user's input.
+
+    ``auto_pour_if_missing`` writes zone definitions in-place to its target
+    file.  When ``kct route INPUT -o OUTPUT`` is invoked with distinct paths
+    the user expects ``INPUT`` to be left untouched; this helper copies
+    ``pcb_path`` to ``output_path`` and returns ``output_path`` so the rest
+    of the route flow can operate on the copy.
+
+    When ``pcb_path`` and ``output_path`` resolve to the same file (the
+    pipeline ``kct build`` case where input == output), no copy is needed
+    and ``pcb_path`` is returned unchanged — preserving the existing
+    in-place behavior the pipeline depends on.
+
+    Args:
+        pcb_path: User-supplied input PCB path.
+        output_path: User-supplied output PCB path.
+
+    Returns:
+        Path that subsequent route steps should use as their working PCB.
+        Either ``pcb_path`` (input == output) or ``output_path`` (after copy).
+
+    See: issue #2548 — ``kct route`` should not modify INPUT when output
+    differs.  Mirrors the ``shutil.copy2`` pattern in ``runner.py``.
+    """
+    if pcb_path.resolve() == output_path.resolve():
+        return pcb_path
+    shutil.copy2(pcb_path, output_path)
+    return output_path
+
+
 def _auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
@@ -1088,10 +1120,13 @@ def route_with_layer_escalation(
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
-    # Auto-create copper pours for power nets (before skip detection)
+    # Auto-create copper pours for power nets (before skip detection).
+    # auto_pour_if_missing writes in-place; stage a copy at output_path
+    # first so the user's INPUT is left untouched (issue #2548).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
+        pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
         auto_pour_if_missing(
             pcb_path,
             quiet=quiet,
@@ -1612,10 +1647,13 @@ def route_with_rule_relaxation(
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
-    # Auto-create copper pours for power nets (before skip detection)
+    # Auto-create copper pours for power nets (before skip detection).
+    # auto_pour_if_missing writes in-place; stage a copy at output_path
+    # first so the user's INPUT is left untouched (issue #2548).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
+        pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
         auto_pour_if_missing(
             pcb_path,
             quiet=quiet,
@@ -2094,10 +2132,13 @@ def route_with_combined_escalation(
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
-    # Auto-create copper pours for power nets (before skip detection)
+    # Auto-create copper pours for power nets (before skip detection).
+    # auto_pour_if_missing writes in-place; stage a copy at output_path
+    # first so the user's INPUT is left untouched (issue #2548).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
+        pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
         auto_pour_if_missing(
             pcb_path,
             quiet=quiet,
@@ -3481,10 +3522,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
-    # Auto-create copper pours for power nets (before skip detection)
+    # Auto-create copper pours for power nets (before skip detection).
+    # auto_pour_if_missing writes in-place; stage a copy at output_path
+    # first so the user's INPUT is left untouched (issue #2548).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
+        pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
         auto_pour_if_missing(
             pcb_path,
             quiet=args.quiet,
