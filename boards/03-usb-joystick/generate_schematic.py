@@ -223,7 +223,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     )
     xtal = xtal_block.crystal
     print(f"   Y1 (Crystal): placed at ({xtal.x}, {xtal.y})")
-    print(f"   C5/C6 (load caps, 22pF): placed below crystal")
+    print("   C5/C6 (load caps, 22pF): placed below crystal")
 
     # =========================================================================
     # Section 5: Place Buttons (test multiple placements with autolayout)
