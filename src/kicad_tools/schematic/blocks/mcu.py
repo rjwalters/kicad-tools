@@ -783,6 +783,7 @@ class BootModeSelector(CircuitBlock):
         button_ref_prefix: str = "SW",
         resistor_symbol: str = "Device:R",
         button_symbol: str = "Switch:SW_Push",
+        footprint: str | None = None,
     ):
         """
         Create a boot mode selector circuit.
@@ -803,6 +804,9 @@ class BootModeSelector(CircuitBlock):
             button_ref_prefix: Reference designator prefix for button
             resistor_symbol: KiCad symbol for resistor
             button_symbol: KiCad symbol for push button
+            footprint: Optional footprint string for the resistor (e.g.,
+                "Resistor_SMD:R_0805_2012Metric"). Forwarded to ``add_symbol``.
+                When ``None`` (default), no explicit footprint is set.
         """
         super().__init__(sch, x, y)
         self.mode = mode.lower()
@@ -848,7 +852,21 @@ class BootModeSelector(CircuitBlock):
             resistor_y = y + component_spacing
 
         # Place resistor (always present)
-        self.resistor = sch.add_symbol(resistor_symbol, x, resistor_y, r_ref, resistor_value)
+        # Forward footprint only when caller supplied one — pass-through
+        # preserves existing behavior (no explicit footprint) when omitted.
+        if footprint is not None:
+            self.resistor = sch.add_symbol(
+                resistor_symbol,
+                x,
+                resistor_y,
+                r_ref,
+                resistor_value,
+                footprint=footprint,
+            )
+        else:
+            self.resistor = sch.add_symbol(
+                resistor_symbol, x, resistor_y, r_ref, resistor_value
+            )
         self.components["R"] = self.resistor
         self.resistors["R1"] = self.resistor
 
