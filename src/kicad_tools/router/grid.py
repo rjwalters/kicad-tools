@@ -1073,6 +1073,8 @@ class RoutingGrid:
         min_clearance: float | None = None,
         component_pitches: dict[str, float] | None = None,
         exclude_refs: set[str] | None = None,
+        partner_net: int | None = None,
+        partner_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
         """Validate geometric clearance of a segment against all obstacles.
 
@@ -1085,6 +1087,12 @@ class RoutingGrid:
         clearance against a pad, uses the clearance for that pad's component
         (from DesignRules.component_clearances or fine_pitch_clearance).
 
+        Issue #2559 / Epic #2556 Phase 1C: Adds optional ``partner_net`` /
+        ``partner_clearance`` parameters.  When set, a segment-vs-segment
+        comparison against the partner net uses ``partner_clearance`` in
+        place of the wider ``min_clearance``.  This implements within-pair
+        clearance for differential pairs.
+
         Args:
             seg: The segment to validate
             exclude_net: Net ID to exclude (same-net elements don't violate clearance)
@@ -1092,6 +1100,12 @@ class RoutingGrid:
                           This is used when no component-specific clearance applies.
             component_pitches: Optional dict mapping component ref to pin pitch in mm.
                              Used for automatic fine-pitch clearance detection.
+            partner_net: Issue #2559 / Phase 1C -- when set, the named net id
+                         is the diff-pair partner of ``exclude_net`` and the
+                         seg-vs-seg / seg-vs-via comparisons use
+                         ``partner_clearance`` instead of ``min_clearance``.
+            partner_clearance: Tighter clearance applied only to elements
+                               whose net matches ``partner_net``.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -1103,6 +1117,15 @@ class RoutingGrid:
 
         if min_clearance is None:
             min_clearance = self.rules.trace_clearance
+
+        # Issue #2559: Tighter clearance is only applied when both arguments
+        # are present and the partner clearance is tighter than the default.
+        partner_active = (
+            partner_net is not None
+            and partner_net >= 0
+            and partner_net != exclude_net
+            and partner_clearance is not None
+        )
 
         # Segment half-width for edge-to-edge distance calculation
         seg_half_width = seg.width / 2
@@ -1213,9 +1236,17 @@ class RoutingGrid:
                 # Edge-to-edge clearance (both segment half-widths)
                 clearance = dist - seg_half_width - other_seg.width / 2
 
+                # Issue #2559 / Phase 1C: tighter clearance for the diff-pair
+                # partner only.
+                effective_clearance = (
+                    partner_clearance
+                    if partner_active and other_seg.net == partner_net
+                    else min_clearance
+                )
+
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < effective_clearance:
                     has_violation = True
                     violation_loc = (
                         (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
@@ -1248,9 +1279,16 @@ class RoutingGrid:
                     # Edge-to-edge clearance (both segment half-widths)
                     clearance = dist - seg_half_width - other_seg.width / 2
 
+                    # Issue #2559 / Phase 1C: tighter clearance for partner.
+                    effective_clearance = (
+                        partner_clearance
+                        if partner_active and route.net == partner_net
+                        else min_clearance
+                    )
+
                     if clearance < min_actual_clearance:
                         min_actual_clearance = clearance
-                    if clearance < min_clearance:
+                    if clearance < effective_clearance:
                         # Violation location at midpoint
                         has_violation = True
                         violation_loc = (
@@ -2167,6 +2205,8 @@ class RoutingGrid:
         radius: int,
         net: int,
         allow_sharing: bool = False,
+        partner_net: int | None = None,
+        partner_radius: int | None = None,
     ) -> np.ndarray:
         """Pre-compute an expanded blocked bitmap for trace-width clearance.
 
@@ -2178,12 +2218,27 @@ class RoutingGrid:
         The dilation uses ``scipy.ndimage.maximum_filter`` when available,
         falling back to a pure-NumPy sliding-window maximum.
 
+        Issue #2559 / Epic #2556 Phase 1C: When ``partner_net`` is provided
+        with a tighter ``partner_radius`` (< ``radius``), partner-owned
+        blocked cells are dilated by the tighter radius and OR-combined
+        with the wider dilation of all other foreign-net blocked cells.
+        This implements within-pair clearance for differential pairs while
+        leaving the per-cell logic in ``_is_trace_blocked`` consistent.
+
         Args:
             radius: Half-width of the trace in grid cells (``_trace_half_width_cells``).
             net: Net ID of the route being planned.  Same-net cells are
                  *not* treated as blocked (consistent with ``_is_trace_blocked``).
             allow_sharing: If True (negotiated mode), only static obstacles
                            block; shared-usage cells are passable.
+            partner_net: Issue #2559 / Phase 1C -- when set (non-None and
+                         >= 0), cells whose net matches this id are dilated
+                         using ``partner_radius`` instead of ``radius``.
+                         When ``None``, the partner branch is dormant and
+                         behavior matches pre-#2559 (single-radius dilation).
+            partner_radius: Tighter half-width (in grid cells) for partner
+                            cells.  Ignored when ``partner_net`` is ``None``
+                            or ``partner_radius >= radius``.
 
         Returns:
             Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
@@ -2202,6 +2257,36 @@ class RoutingGrid:
             # Standard mode: block cells that are blocked AND different net
             base_blocked = self._blocked & (self._net != net)
 
+        partner_active = (
+            partner_net is not None
+            and partner_net >= 0
+            and partner_radius is not None
+            and partner_radius < radius
+        )
+
+        if partner_active:
+            # Split base_blocked into "partner cells" and "non-partner cells".
+            # Partner cells get dilated by the tighter partner_radius; the
+            # rest of the foreign-net cells get the wider radius.  The
+            # final mask is the OR of the two dilations.
+            partner_mask = base_blocked & (self._net == partner_net)
+            other_mask = base_blocked & ~partner_mask
+
+            other_expanded = self._dilate_blocked(other_mask, radius)
+            partner_expanded = self._dilate_blocked(partner_mask, partner_radius)
+            return other_expanded | partner_expanded
+
+        return self._dilate_blocked(base_blocked, radius)
+
+    def _dilate_blocked(self, base_blocked: np.ndarray, radius: int) -> np.ndarray:
+        """Dilate a boolean blocked mask by ``radius`` cells (Chebyshev).
+
+        Helper extracted from :meth:`compute_expanded_blocked` so the same
+        kernel logic can be applied independently to the partner-cells
+        mask and the non-partner-cells mask (Issue #2559 / Phase 1C).
+        """
+        if radius <= 0:
+            return base_blocked.copy() if isinstance(base_blocked, np.ndarray) else base_blocked
         if radius <= 1:
             # No expansion needed; single-cell check is equivalent.
             return base_blocked
