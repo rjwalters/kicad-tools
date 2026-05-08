@@ -7,7 +7,35 @@ from ...exceptions import PinNotFoundError
 from ..interfaces import PowerPort
 
 if TYPE_CHECKING:
-    from kicad_sch_helper import Schematic
+    from kicad_sch_helper import Schematic, SymbolInstance
+
+
+def _resolve_pin(symbol: "SymbolInstance", names: list[str]) -> tuple[str, tuple[float, float]]:
+    """Try a list of pin names in order, return the first one that exists.
+
+    Used to support LDO families that use different pin name conventions
+    (e.g., XC6206 / AP2204 use ``VIN`` / ``VOUT``, while AMS1117 / AP1117
+    use ``VI`` / ``VO``).
+
+    Args:
+        symbol: Symbol instance to query.
+        names: Candidate pin names to try, in priority order.
+
+    Returns:
+        Tuple of ``(resolved_pin_name, (x, y))``.
+
+    Raises:
+        PinNotFoundError: If none of the candidate names match a pin.
+    """
+    last_error: PinNotFoundError | None = None
+    for name in names:
+        try:
+            return name, symbol.pin_position(name)
+        except PinNotFoundError as exc:  # noqa: PERF203 - small list of fallbacks
+            last_error = exc
+    # Re-raise the last error so the caller sees a useful message
+    assert last_error is not None
+    raise last_error
 
 
 class LDOBlock(CircuitBlock):
@@ -108,12 +136,18 @@ class LDOBlock(CircuitBlock):
         for i, cap in enumerate(self.output_caps):
             self.components[f"C_OUT{i + 1}"] = cap
 
-        # Get LDO pin positions
-        vin_pos = self.ldo.pin_position("VIN")
-        vout_pos = self.ldo.pin_position("VOUT")
+        # Get LDO pin positions.
+        # Different LDO families use different pin names:
+        #   XC6206PxxxMR, AP2204K, MCP1700: VIN / VOUT
+        #   AMS1117 / AP1117 (Regulator_Linear): VI / VO
+        # Try the canonical name first, then fall back to short aliases so
+        # the same block works with AMS1117 footprints used on motor boards.
+        self._vin_pin, vin_pos = _resolve_pin(self.ldo, ["VIN", "VI", "IN"])
+        self._vout_pin, vout_pos = _resolve_pin(self.ldo, ["VOUT", "VO", "OUT"])
+        self._gnd_pin = "GND"
         gnd_pos = self.ldo.pin_position("GND")
 
-        # EN pin is optional -- 3-pin LDOs (e.g., XC6206PxxxMR) lack it
+        # EN pin is optional -- 3-pin LDOs (e.g., XC6206PxxxMR, AMS1117) lack it
         try:
             en_pos = self.ldo.pin_position("EN")
         except PinNotFoundError:
@@ -175,14 +209,14 @@ class LDOBlock(CircuitBlock):
         """
         sch = self.schematic
 
-        # Connect LDO VIN to input rail
-        sch.wire_to_rail(self.ldo, "VIN", vin_rail_y)
+        # Connect LDO VIN to input rail (use resolved pin name for AMS1117 compat)
+        sch.wire_to_rail(self.ldo, self._vin_pin, vin_rail_y)
 
         # Connect LDO VOUT to output rail
-        sch.wire_to_rail(self.ldo, "VOUT", vout_rail_y)
+        sch.wire_to_rail(self.ldo, self._vout_pin, vout_rail_y)
 
         # Connect LDO GND to ground rail
-        sch.wire_to_rail(self.ldo, "GND", gnd_rail_y)
+        sch.wire_to_rail(self.ldo, self._gnd_pin, gnd_rail_y)
 
         # Wire input cap
         sch.wire_decoupling_cap(self.input_cap, vin_rail_y, gnd_rail_y)
@@ -193,7 +227,7 @@ class LDOBlock(CircuitBlock):
 
         # Extend VOUT rail if requested
         if extend_vout_rail_to is not None:
-            vout_pos = self.ldo.pin_position("VOUT")
+            vout_pos = self.ldo.pin_position(self._vout_pin)
             sch.add_rail(vout_rail_y, vout_pos[0], extend_vout_rail_to)
 
     def get_vout_net_name(self) -> str:
@@ -803,4 +837,443 @@ def create_12v_buck(
         diode="SS54",
         feedback_divider=False,
         cap_ref_start=cap_ref_start,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cascaded buck → LDO power tree
+# ---------------------------------------------------------------------------
+
+# Configuration table mapping (vin, v_mid, vout) to (buck_part, ldo_part)
+# tuples. Each tuple is (value, symbol, ldo_input_cap, ldo_output_caps).
+#
+# The buck side keeps the existing per-rail factory defaults
+# (e.g. LM2596-5.0 with 100uF/220uF/33uH/SS34) — see ``create_5v_buck``,
+# ``create_12v_buck``. The LDO side is what differs from ``create_3v3_ldo``:
+# board 05 uses AMS1117-3.3 with a single 10uF in *and* out, not the
+# XC6206 10uF/100nF pair.
+_BUCK_PART_TABLE: dict[tuple[float, float, float], tuple[str, str]] = {
+    # (vin, v_mid, vout) -> (buck_value, buck_symbol)
+    (24.0, 5.0, 3.3): ("LM2596-5.0", "Regulator_Switching:LM2596S-5"),
+    (12.0, 5.0, 3.3): ("LM2596-5.0", "Regulator_Switching:LM2596S-5"),
+    (48.0, 12.0, 5.0): ("LM2596-12", "Regulator_Switching:LM2596S-12"),
+}
+
+_LDO_PART_TABLE: dict[tuple[float, float], tuple[str, str, str, list[str]]] = {
+    # (v_mid, vout) -> (ldo_value, ldo_symbol, ldo_input_cap, ldo_output_caps)
+    (5.0, 3.3): ("AMS1117-3.3", "Regulator_Linear:AMS1117-3.3", "10uF", ["10uF"]),
+    (12.0, 5.0): ("AMS1117-5.0", "Regulator_Linear:AMS1117-5.0", "10uF", ["10uF"]),
+}
+
+# Buck-stage component defaults keyed on (v_mid). Allows the (48, 12, 5)
+# combination to pick a heavier inductor / diode than the 5V case.
+_BUCK_COMPONENTS_TABLE: dict[float, dict[str, str]] = {
+    # v_mid -> dict of buck component values
+    5.0: {"input_cap": "100uF", "output_cap": "220uF", "inductor": "33uH", "diode": "SS34"},
+    12.0: {"input_cap": "100uF", "output_cap": "330uF", "inductor": "68uH", "diode": "SS54"},
+}
+
+
+class DualSupplyCascade(CircuitBlock):
+    """Cascaded buck → LDO power tree (high-V in, mid-V intermediate, low-V clean out).
+
+    Composes a :class:`BuckConverter` and an :class:`LDOBlock` with a shared
+    mid-voltage rail. The buck stage is chosen for *efficiency* (24V→5V step
+    down with ~85% efficiency) and the LDO stage is chosen for a *clean*
+    low-noise final rail (5V→3.3V at ~66% linear-regulator efficiency).
+
+    Use this block when you have a high-voltage input (12V/24V/48V) that
+    needs to feed both a power-hungry mid-voltage rail (e.g., 5V gate
+    drivers, motor logic) and a quiet low-voltage rail (e.g., 3.3V MCU,
+    ADC reference). A pure buck would be more efficient but noisier; a
+    pure LDO from 24V would dissipate ~21V × I_load as heat.
+
+    Schematic topology::
+
+        VIN ──[BuckConverter]── V_MID ──[LDOBlock]── VOUT
+              │   |   |    |          │  |  |   │
+              C3  L1  D2   C4         C5 U2 C6  │
+              U1                                │
+        GND ──┴───┴───┴────┴──────────┴──┴──┴───┴── GND
+
+    The subclass owns both child blocks and exposes them as ``.buck`` and
+    ``.ldo`` so callers can drill into stage-specific details (e.g., tying
+    the LM2596 ON/OFF pin to GND for always-on operation).
+
+    Ports:
+        - ``VIN``: high-voltage input (matches buck VIN)
+        - ``V_MID``: intermediate rail (buck VOUT == LDO VIN)
+        - ``VOUT``: clean low-voltage output (matches LDO VOUT)
+        - ``GND``: ground (shared with both stages)
+
+    See Also:
+        :class:`BuckConverter` for stage-level buck configuration.
+        :class:`LDOBlock` for stage-level LDO configuration.
+        :func:`create_dual_supply_cascade` for a higher-level factory with
+        sensible defaults driven by ``(vin, v_mid, vout)``.
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x_buck: float,
+        x_ldo: float,
+        y: float,
+        *,
+        vin: float,
+        v_mid: float,
+        vout: float,
+        # Buck stage configuration
+        buck_ref: str = "U1",
+        buck_value: str = "LM2596-5.0",
+        buck_symbol: str = "Regulator_Switching:LM2596S-5",
+        buck_topology: str = "async",
+        buck_input_cap: str = "100uF",
+        buck_output_cap: str = "220uF",
+        buck_inductor: str = "33uH",
+        buck_diode: str = "SS34",
+        buck_diode_ref: str = "D2",
+        buck_inductor_ref: str = "L1",
+        # LDO stage configuration
+        ldo_ref: str = "U2",
+        ldo_value: str = "AMS1117-3.3",
+        ldo_symbol: str = "Regulator_Linear:AMS1117-3.3",
+        ldo_input_cap: str = "10uF",
+        ldo_output_caps: list[str] | None = None,
+        ldo_en_tied_to_vin: bool = True,
+        # Numbering
+        cap_ref_start: int = 3,
+        auto_footprint: bool = False,
+    ):
+        """Create a dual-supply cascade with explicit per-stage configuration.
+
+        Args:
+            sch: Schematic to add components to.
+            x_buck: X coordinate of the buck regulator centre.
+            x_ldo: X coordinate of the LDO centre.
+            y: Y coordinate shared by both stages.
+            vin: Buck input voltage in volts (informational, used for
+                efficiency estimate).
+            v_mid: Intermediate voltage (buck output == LDO input) in volts.
+            vout: Final clean output voltage in volts.
+            buck_ref: Buck regulator reference designator (e.g. ``"U1"``).
+            buck_value: Buck regulator value label (e.g. ``"LM2596-5.0"``).
+            buck_symbol: KiCad symbol for the buck regulator IC.
+            buck_topology: ``"async"`` or ``"sync"``.
+            buck_input_cap: Buck input capacitor value.
+            buck_output_cap: Buck output capacitor value.
+            buck_inductor: Buck inductor value.
+            buck_diode: Buck Schottky diode part number (async only).
+            buck_diode_ref: Buck diode reference designator.
+            buck_inductor_ref: Buck inductor reference designator.
+            ldo_ref: LDO reference designator (e.g. ``"U2"``).
+            ldo_value: LDO value label (e.g. ``"AMS1117-3.3"``).
+            ldo_symbol: KiCad symbol for the LDO IC.
+            ldo_input_cap: LDO input capacitor value.
+            ldo_output_caps: List of LDO output capacitor values (default
+                ``["10uF"]`` matching AMS1117 board-05 topology).
+            ldo_en_tied_to_vin: If True and the LDO has an EN pin, tie it
+                to VIN.
+            cap_ref_start: Starting reference number for capacitors. The
+                buck stage uses ``C{n}`` and ``C{n+1}``; the LDO stage uses
+                ``C{n+2}``...``C{n+1+len(output_caps)+1}``. Defaults to 3
+                so the cascade fits the board-05 numbering (C3-C6).
+            auto_footprint: If True, automatically select footprints for
+                capacitors based on value.
+        """
+        super().__init__(sch, x_buck, y)
+        self.vin = vin
+        self.v_mid = v_mid
+        self.vout = vout
+
+        if ldo_output_caps is None:
+            ldo_output_caps = ["10uF"]
+
+        # ----- Buck stage -----
+        # Buck owns C{cap_ref_start} (input cap) and C{cap_ref_start+1}
+        # (output cap), plus L1 (inductor) and D2 (Schottky for async).
+        self.buck = BuckConverter(
+            sch,
+            x=x_buck,
+            y=y,
+            ref=buck_ref,
+            value=buck_value,
+            regulator_symbol=buck_symbol,
+            input_voltage=vin,
+            output_voltage=v_mid,
+            topology=buck_topology,
+            input_cap=buck_input_cap,
+            output_cap=buck_output_cap,
+            inductor=buck_inductor,
+            diode=buck_diode,
+            feedback_divider=False,
+            cap_ref_start=cap_ref_start,
+            inductor_ref=buck_inductor_ref,
+            diode_ref=buck_diode_ref,
+            auto_footprint=auto_footprint,
+        )
+
+        # ----- LDO stage -----
+        # LDO uses C{cap_ref_start+2} (input cap) and C{cap_ref_start+3..}
+        # (output caps). cap_ref_start in LDOBlock is the *input* cap index.
+        ldo_cap_ref_start = cap_ref_start + 2
+        self.ldo = LDOBlock(
+            sch,
+            x=x_ldo,
+            y=y,
+            ref=ldo_ref,
+            value=ldo_value,
+            ldo_symbol=ldo_symbol,
+            input_cap=ldo_input_cap,
+            output_caps=ldo_output_caps,
+            cap_ref_start=ldo_cap_ref_start,
+            en_tied_to_vin=ldo_en_tied_to_vin,
+            output_voltage=_voltage_string(vout),
+            auto_footprint=auto_footprint,
+        )
+
+        # ----- Composed component dictionary -----
+        # Re-export the underlying components with prefixed keys so callers
+        # can iterate (e.g., for BOM generation).
+        self.components = {}
+        for k, v in self.buck.components.items():
+            self.components[f"BUCK_{k}"] = v
+        for k, v in self.ldo.components.items():
+            self.components[f"LDO_{k}"] = v
+
+        # ----- Composed ports -----
+        # VIN comes from buck; VOUT comes from LDO; V_MID is the buck VOUT
+        # / LDO VIN shared rail; GND is shared.
+        self.ports = {
+            "VIN": self.buck.ports["VIN"],
+            "V_MID": self.buck.ports["VOUT"],  # == buck output node
+            "VOUT": self.ldo.ports["VOUT"],
+            "GND": self.buck.ports["GND"],
+        }
+
+        # Typed ports: only the LDO populates typed_ports today, so the
+        # cascade synthesizes its own typed view from each side. This keeps
+        # the cascade composable with future ``buck & ldo`` operator paths.
+        self.typed_ports = {
+            "VIN": PowerPort(
+                name="VIN",
+                x=self.buck.ports["VIN"][0],
+                y=self.buck.ports["VIN"][1],
+                direction="input",
+            ),
+            "V_MID": PowerPort(
+                name="V_MID",
+                x=self.buck.ports["VOUT"][0],
+                y=self.buck.ports["VOUT"][1],
+                direction="bidirectional",
+            ),
+            "VOUT": PowerPort(
+                name="VOUT",
+                x=self.ldo.ports["VOUT"][0],
+                y=self.ldo.ports["VOUT"][1],
+                direction="output",
+            ),
+            "GND": PowerPort(
+                name="GND",
+                x=self.buck.ports["GND"][0],
+                y=self.buck.ports["GND"][1],
+                direction="passive",
+                voltage_min=0.0,
+                voltage_max=0.0,
+            ),
+        }
+
+    def connect_to_rails(
+        self,
+        vin_rail_y: float,
+        v_mid_rail_y: float,
+        vout_rail_y: float,
+        gnd_rail_y: float,
+    ) -> None:
+        """Wire each child stage to its rails.
+
+        The buck stage connects ``VIN`` -> ``vin_rail_y``,
+        ``VOUT`` -> ``v_mid_rail_y``, and ``GND`` -> ``gnd_rail_y``.
+        The LDO stage connects ``VIN`` -> ``v_mid_rail_y`` (the shared
+        intermediate rail), ``VOUT`` -> ``vout_rail_y``, and
+        ``GND`` -> ``gnd_rail_y``.
+
+        Args:
+            vin_rail_y: Y coordinate of the buck-input rail.
+            v_mid_rail_y: Y coordinate of the buck-out / LDO-in shared rail.
+            vout_rail_y: Y coordinate of the final clean output rail.
+            gnd_rail_y: Y coordinate of the ground rail.
+        """
+        # Buck: input -> intermediate, share GND
+        self.buck.connect_to_rails(
+            vin_rail_y=vin_rail_y,
+            vout_rail_y=v_mid_rail_y,
+            gnd_rail_y=gnd_rail_y,
+        )
+        # LDO: intermediate -> output, share GND
+        self.ldo.connect_to_rails(
+            vin_rail_y=v_mid_rail_y,
+            vout_rail_y=vout_rail_y,
+            gnd_rail_y=gnd_rail_y,
+        )
+
+    def get_efficiency_estimate(self) -> float:
+        """Total cascade efficiency as a decimal.
+
+        Computed as ``buck_efficiency * ldo_efficiency`` where the LDO
+        efficiency is the linear-regulator approximation
+        ``vout / v_mid`` (no quiescent current modelled).
+
+        For the canonical 24V → 5V → 3.3V case this is approximately
+        ``0.85 * (3.3 / 5.0) ≈ 0.561`` — i.e. ~56% wall-to-load. Useful
+        as a quick sanity check during design.
+
+        Returns:
+            Estimated total efficiency, in [0.0, 1.0].
+        """
+        buck_eff = self.buck.get_efficiency_estimate()
+        ldo_eff = self.vout / self.v_mid if self.v_mid > 0 else 0.0
+        return buck_eff * ldo_eff
+
+
+def _voltage_string(v: float) -> str:
+    """Format a voltage as a net-name-friendly string (e.g. 3.3 -> '3V3')."""
+    # Map common rails to their conventional net-name forms
+    if abs(v - round(v)) < 1e-9:
+        return f"{int(round(v))}V"
+    integer_part = int(v)
+    fractional = round((v - integer_part) * 10)
+    return f"{integer_part}V{fractional}"
+
+
+def create_dual_supply_cascade(
+    sch: "Schematic",
+    x_buck: float,
+    x_ldo: float,
+    y: float,
+    *,
+    vin: float = 24.0,
+    v_mid: float = 5.0,
+    vout: float = 3.3,
+    cap_ref_start: int = 3,
+    buck_ref: str = "U1",
+    ldo_ref: str = "U2",
+    buck_diode_ref: str = "D2",
+    buck_inductor_ref: str = "L1",
+    auto_footprint: bool = False,
+) -> DualSupplyCascade:
+    """Create a buck → LDO cascade with sensible defaults from a config table.
+
+    Defaults to the board-05 case (24V → 5V buck → 3.3V LDO) with the
+    LM2596-5.0 + AMS1117-3.3 part pair. Other supported voltage triples
+    are listed below; callers needing a non-listed combination should
+    instantiate :class:`DualSupplyCascade` directly with explicit
+    ``buck_symbol`` / ``ldo_symbol`` overrides.
+
+    Supported ``(vin, v_mid, vout)`` combinations:
+
+    +-------------------+---------------+-------------------+
+    | (vin, v_mid, vout)| Buck part     | LDO part          |
+    +===================+===============+===================+
+    | (24, 5, 3.3)      | LM2596-5.0    | AMS1117-3.3       |
+    +-------------------+---------------+-------------------+
+    | (12, 5, 3.3)      | LM2596-5.0    | AMS1117-3.3       |
+    +-------------------+---------------+-------------------+
+    | (48, 12, 5)       | LM2596-12     | AMS1117-5.0       |
+    +-------------------+---------------+-------------------+
+
+    Args:
+        sch: Schematic to add components to.
+        x_buck: X coordinate of the buck regulator.
+        x_ldo: X coordinate of the LDO.
+        y: Y coordinate shared by both stages.
+        vin: Buck input voltage in volts.
+        v_mid: Intermediate voltage in volts.
+        vout: Final output voltage in volts.
+        cap_ref_start: Starting capacitor reference number. Defaults to 3
+            (board-05 case where C1/C2 are reserved for the input
+            connector). Buck owns ``C{n}``/``C{n+1}``; LDO owns
+            ``C{n+2}``...
+        buck_ref: Buck regulator reference designator.
+        ldo_ref: LDO reference designator.
+        buck_diode_ref: Buck Schottky diode reference designator.
+        buck_inductor_ref: Buck inductor reference designator.
+        auto_footprint: If True, auto-select footprints for capacitors.
+
+    Returns:
+        Configured :class:`DualSupplyCascade` instance.
+
+    Raises:
+        ValueError: If ``(vin, v_mid, vout)`` is not in the supported
+            table.
+
+    Example:
+        Board 05 setup::
+
+            cascade = create_dual_supply_cascade(
+                sch, x_buck=80, x_ldo=140, y=100,
+                vin=24.0, v_mid=5.0, vout=3.3,
+                cap_ref_start=3,
+            )
+            cascade.connect_to_rails(
+                vin_rail_y=RAIL_VMOTOR,
+                v_mid_rail_y=RAIL_5V,
+                vout_rail_y=RAIL_3V3,
+                gnd_rail_y=RAIL_GND,
+            )
+
+            # Drill in for board-specific tweaks
+            on_off = cascade.buck.regulator.pin_position("~{ON}/OFF")
+    """
+    key = (float(vin), float(v_mid), float(vout))
+    if key not in _BUCK_PART_TABLE:
+        supported = ", ".join(
+            f"({int(v_in_)}, {v_mid_:g}, {vout_:g})" for (v_in_, v_mid_, vout_) in _BUCK_PART_TABLE
+        )
+        raise ValueError(
+            f"Unsupported (vin, v_mid, vout) = ({vin}, {v_mid}, {vout}). "
+            f"Supported combinations: {supported}. "
+            f"For other voltages, instantiate DualSupplyCascade directly "
+            f"with explicit buck_symbol and ldo_symbol arguments."
+        )
+
+    buck_value, buck_symbol = _BUCK_PART_TABLE[key]
+    ldo_key = (float(v_mid), float(vout))
+    if ldo_key not in _LDO_PART_TABLE:
+        # This should not be reachable because the buck table already
+        # implies a valid LDO key — guard anyway for future extensions.
+        raise ValueError(f"No LDO mapping for (v_mid, vout) = ({v_mid}, {vout})")
+    ldo_value, ldo_symbol, ldo_input_cap, ldo_output_caps = _LDO_PART_TABLE[ldo_key]
+
+    buck_components = _BUCK_COMPONENTS_TABLE.get(
+        float(v_mid),
+        {"input_cap": "100uF", "output_cap": "220uF", "inductor": "33uH", "diode": "SS34"},
+    )
+
+    return DualSupplyCascade(
+        sch,
+        x_buck=x_buck,
+        x_ldo=x_ldo,
+        y=y,
+        vin=vin,
+        v_mid=v_mid,
+        vout=vout,
+        buck_ref=buck_ref,
+        buck_value=buck_value,
+        buck_symbol=buck_symbol,
+        buck_topology="async",
+        buck_input_cap=buck_components["input_cap"],
+        buck_output_cap=buck_components["output_cap"],
+        buck_inductor=buck_components["inductor"],
+        buck_diode=buck_components["diode"],
+        buck_diode_ref=buck_diode_ref,
+        buck_inductor_ref=buck_inductor_ref,
+        ldo_ref=ldo_ref,
+        ldo_value=ldo_value,
+        ldo_symbol=ldo_symbol,
+        ldo_input_cap=ldo_input_cap,
+        ldo_output_caps=list(ldo_output_caps),
+        ldo_en_tied_to_vin=True,
+        cap_ref_start=cap_ref_start,
+        auto_footprint=auto_footprint,
     )

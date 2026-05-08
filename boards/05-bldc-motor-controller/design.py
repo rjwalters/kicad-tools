@@ -38,8 +38,8 @@ from kicad_tools.schematic.blocks import (
     GateDriverBlock,
     LEDIndicator,
     ThreePhaseInverter,
-    create_5v_buck,
     create_bootstrap_capacitor_array,
+    create_dual_supply_cascade,
     create_gate_drive_resistor_array,
     create_mcu_decoupling_array,
 )
@@ -207,33 +207,53 @@ def create_bldc_controller(output_dir: Path) -> Path:
     sch.add_junction(pin2_pos[0], RAIL_GND)
 
     # =========================================================================
-    # Section 3: Buck Converter (24V → 5V)
+    # Sections 3 + 4: Cascaded Power Tree (24V → 5V buck → 3.3V LDO)
     # =========================================================================
-    print("\n3. Adding buck converter (24V → 5V)...")
+    # The DualSupplyCascade block encapsulates the buck + LDO topology
+    # decision (high-V in for efficiency, then linear regulator for clean
+    # low-noise final rail). It owns:
+    #   - U1 (LM2596-5.0 buck regulator) + C3 (input) + C4 (output)
+    #     + L1 (33uH) + D2 (SS34 Schottky)
+    #   - U2 (AMS1117-3.3 LDO) + C5 (input) + C6 (output)
+    print("\n3. Adding cascaded power tree (24V → 5V → 3.3V)...")
 
-    # Create 5V buck converter using BuckConverter block
-    # This creates the full LM2596 module with all supporting components:
-    # - Regulator IC (U1)
-    # - Input/output capacitors (C3, C4)
-    # - Inductor (L1)
-    # - Schottky diode (D2) for async topology
-    buck = create_5v_buck(
+    cascade = create_dual_supply_cascade(
         sch,
-        x=X_BUCK,
+        x_buck=X_BUCK,
+        x_ldo=X_LDO,
         y=100,
-        ref="U1",
-        input_voltage=24.0,
-        cap_ref_start=3,  # C3, C4
-        diode_ref="D2",  # D1 is used for TVS diode
+        vin=24.0,
+        v_mid=5.0,
+        vout=3.3,
+        cap_ref_start=3,  # C3, C4 (buck), C5, C6 (LDO)
+        buck_ref="U1",
+        ldo_ref="U2",
+        buck_diode_ref="D2",  # D1 is used for TVS diode
+        buck_inductor_ref="L1",
     )
-    buck.connect_to_rails(
+
+    # Patch footprints on the LDO stage so the BOM matches the
+    # pre-refactor design exactly (the cascade leaves footprints unset by
+    # default; the buck stage already runs without footprints under
+    # ``create_5v_buck``).
+    cascade.ldo.ldo.footprint = "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+    cascade.ldo.input_cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
+    for cap in cascade.ldo.output_caps:
+        cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
+
+    # Wire each stage to its rails in one call (buck VIN -> VMOTOR,
+    # buck VOUT == LDO VIN -> 5V rail, LDO VOUT -> 3V3 rail).
+    cascade.connect_to_rails(
         vin_rail_y=RAIL_VMOTOR,
-        vout_rail_y=RAIL_5V,
+        v_mid_rail_y=RAIL_5V,
+        vout_rail_y=RAIL_3V3,
         gnd_rail_y=RAIL_GND,
     )
 
-    # Tie the ~ON/OFF pin to GND for always-on operation
-    # The LM2596 ON/OFF pin is active-low: GND = ON, >1.3V = OFF
+    # Tie the LM2596 ~ON/OFF pin to GND for always-on operation
+    # (active-low: GND = ON, >1.3V = OFF). Drilling into ``cascade.buck``
+    # keeps this board-specific tweak possible after the refactor.
+    buck = cascade.buck
     try:
         on_off_pos = buck.regulator.pin_position("~{ON}/OFF")
         sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND), warn_on_collision=False)
@@ -250,55 +270,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print(f"   Buck regulator: {buck.regulator.reference} (LM2596-5.0)")
     print(f"   Inductor: {buck.inductor.reference} = 33uH")
     print(f"   Diode: {buck.diode.reference} = SS34 (Schottky)")
-    print(f"   Estimated efficiency: {buck.get_efficiency_estimate() * 100:.0f}%")
-
-    # =========================================================================
-    # Section 4: LDO (5V → 3.3V)
-    # =========================================================================
-    print("\n4. Adding LDO (5V → 3.3V)...")
-
-    ldo = sch.add_symbol(
-        "Regulator_Linear:AMS1117-3.3",
-        x=X_LDO,
-        y=100,
-        ref="U2",
-        value="AMS1117-3.3",
-        footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
-    )
-    print(f"   LDO: {ldo.reference}")
-
-    # LDO capacitors
-    c_ldo_in = sch.add_symbol(
-        "Device:C",
-        x=X_LDO - 15,
-        y=120,
-        ref="C5",
-        value="10uF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
-    )
-    c_ldo_out = sch.add_symbol(
-        "Device:C",
-        x=X_LDO + 25,
-        y=120,
-        ref="C6",
-        value="10uF",
-        footprint="Capacitor_SMD:C_0805_2012Metric",
+    print(
+        f"   Buck stage efficiency: {buck.get_efficiency_estimate() * 100:.0f}%"
     )
 
-    # Wire LDO
-    ldo_vin = ldo.pin_position("VI")
-    ldo_vout = ldo.pin_position("VO")
-    ldo_gnd = ldo.pin_position("GND")
-
-    sch.add_wire(ldo_vin, (ldo_vin[0], RAIL_5V), warn_on_collision=False)
-    sch.add_junction(ldo_vin[0], RAIL_5V)
-    sch.add_wire(ldo_vout, (ldo_vout[0], RAIL_3V3), warn_on_collision=False)
-    sch.add_junction(ldo_vout[0], RAIL_3V3)
-    sch.add_wire(ldo_gnd, (ldo_gnd[0], RAIL_GND), warn_on_collision=False)
-    sch.add_junction(ldo_gnd[0], RAIL_GND)
-
-    sch.wire_decoupling_cap(c_ldo_in, RAIL_5V, RAIL_GND)
-    sch.wire_decoupling_cap(c_ldo_out, RAIL_3V3, RAIL_GND)
+    print(f"\n4. LDO stage (5V → 3.3V): {cascade.ldo.ldo.reference} (AMS1117-3.3)")
+    print(
+        f"   Cascade total efficiency: "
+        f"{cascade.get_efficiency_estimate() * 100:.0f}% "
+        f"(buck × LDO; multiplicative)"
+    )
 
     # =========================================================================
     # Section 5: MCU (STM32G431K8Tx in LQFP-32)
