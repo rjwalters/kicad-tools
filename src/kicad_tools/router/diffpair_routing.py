@@ -12,6 +12,7 @@ Key features:
 from __future__ import annotations
 
 import heapq
+import logging
 import math
 from dataclasses import dataclass, field
 from enum import Enum
@@ -29,6 +30,13 @@ from .diffpair import (
     analyze_differential_pairs,
     detect_differential_pairs,
 )
+from .diffpair_detection import (
+    DetectionSource,
+    detect_diff_pairs as _layered_detect_diff_pairs,
+)
+
+
+logger = logging.getLogger(__name__)
 from .layers import Layer
 from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
@@ -972,8 +980,47 @@ class DiffPairRouter:
         self.autorouter = autorouter
 
     def detect_differential_pairs(self) -> list[DifferentialPair]:
-        """Detect differential pairs from net names."""
-        return detect_differential_pairs(self.autorouter.net_names)
+        """Detect differential pairs from net names.
+
+        Issue #2558, Epic #2556 Phase 1B: this delegates to the layered
+        detector (``diffpair_detection.detect_diff_pairs``) which
+        consults explicit ``NetClassRouting.diffpair_partner`` and
+        KiCad-group declarations in priority order before falling back
+        to suffix inference.  When the autorouter does not provide
+        ``net_class_routing`` / ``net_to_class`` / ``kicad_diff_pair_groups``
+        attributes, behaviour collapses to the legacy suffix-only
+        result.
+        """
+        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
+        net_to_class = getattr(self.autorouter, "net_to_class", None)
+        kicad_groups = getattr(self.autorouter, "kicad_diff_pair_groups", None)
+
+        detected = _layered_detect_diff_pairs(
+            self.autorouter.net_names,
+            net_class_routing=net_class_routing,
+            net_to_class=net_to_class,
+            kicad_groups=kicad_groups,
+        )
+        return [d.pair for d in detected]
+
+    def detect_differential_pairs_with_source(self) -> list[tuple[DifferentialPair, str]]:
+        """Like :meth:`detect_differential_pairs`, but also report the
+        detection source for each pair.
+
+        Returns a list of ``(pair, source)`` tuples where ``source`` is
+        one of ``"explicit"``, ``"kicad_group"``, ``"suffix"``.
+        """
+        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
+        net_to_class = getattr(self.autorouter, "net_to_class", None)
+        kicad_groups = getattr(self.autorouter, "kicad_diff_pair_groups", None)
+
+        detected = _layered_detect_diff_pairs(
+            self.autorouter.net_names,
+            net_class_routing=net_class_routing,
+            net_to_class=net_to_class,
+            kicad_groups=kicad_groups,
+        )
+        return [(d.pair, d.source.value) for d in detected]
 
     def analyze_differential_pairs(self) -> dict[str, any]:
         """Analyze net names for differential pairs."""
@@ -1568,15 +1615,18 @@ class DiffPairRouter:
         if diffpair_config is None or not diffpair_config.enabled:
             return [], [], set()
 
-        diff_pairs = self.detect_differential_pairs()
+        diff_pairs_with_source = self.detect_differential_pairs_with_source()
+        diff_pairs = [p for p, _ in diff_pairs_with_source]
         if not diff_pairs:
             print("  No differential pairs detected")
             return [], [], set()
 
         print("\n=== Differential Pair Pre-Pass (Issue #2464) ===")
         print(f"  Detected {len(diff_pairs)} differential pairs:")
-        for pair in diff_pairs:
-            print(f"    - {pair}: {pair.pair_type.value}")
+        for pair, source in diff_pairs_with_source:
+            msg = f"    - {pair}: {pair.pair_type.value} (source: {source})"
+            print(msg)
+            logger.info("[diffpair-pre-pass] %s", msg.strip())
 
         for pair in diff_pairs:
             if pair.rules is not None:
@@ -1657,13 +1707,16 @@ class DiffPairRouter:
 
         print("\n=== Differential Pair Routing ===")
 
-        diff_pairs = self.detect_differential_pairs()
+        diff_pairs_with_source = self.detect_differential_pairs_with_source()
+        diff_pairs = [p for p, _ in diff_pairs_with_source]
         diff_net_ids: set[int] = set()
 
         if diff_pairs:
             print(f"  Detected {len(diff_pairs)} differential pairs:")
-            for pair in diff_pairs:
-                print(f"    - {pair}: {pair.pair_type.value}")
+            for pair, source in diff_pairs_with_source:
+                msg = f"    - {pair}: {pair.pair_type.value} (source: {source})"
+                print(msg)
+                logger.info("[diffpair-routing] %s", msg.strip())
                 p_id, n_id = pair.get_net_ids()
                 diff_net_ids.add(p_id)
                 diff_net_ids.add(n_id)

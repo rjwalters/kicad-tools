@@ -265,6 +265,35 @@ def get_netclass_patterns(data: dict[str, Any]) -> list[dict[str, str]]:
     return net_settings["netclass_patterns"]
 
 
+def get_diff_pairs(data: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Get list of explicit differential-pair declarations from project data.
+
+    Issue #2558, Epic #2556 Phase 1B.  KiCad project files don't
+    natively store per-pair memberships, so kicad-tools introduces a
+    custom additive field ``net_settings.diff_pairs`` that holds a
+    list of ``{"p": "<positive net>", "n": "<negative net>"}`` entries.
+    The field is optional -- absence yields an empty list.
+
+    Args:
+        data: Project data dictionary
+
+    Returns:
+        List of pair dictionaries with 'p' and 'n' keys.  Each entry
+        names the positive and negative net of an explicit declaration.
+    """
+    net_settings = get_net_settings(data)
+    pairs = net_settings.get("diff_pairs")
+    if not isinstance(pairs, list):
+        return []
+    # Filter out malformed entries (missing keys / wrong types)
+    return [
+        {"p": str(entry["p"]), "n": str(entry["n"])}
+        for entry in pairs
+        if isinstance(entry, dict) and "p" in entry and "n" in entry
+    ]
+
+
 def create_netclass_definition(
     name: str,
     track_width: float = 0.25,
