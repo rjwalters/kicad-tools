@@ -30,10 +30,12 @@ Usage:
 # Analog blocks
 from .analog import (
     ADCInputFilterBlock,
+    HallSensorInput,
     OpAmpBlock,
     ThermistorSense,
     VoltageDividerSense,
     create_adc_filter,
+    create_hall_sensor_input,
     create_opamp_buffer,
     create_opamp_gain,
     create_temperature_sense,
@@ -232,10 +234,12 @@ __all__ = [
     "create_bootstrap_capacitor_array",
     # Analog
     "ADCInputFilterBlock",
+    "HallSensorInput",
     "OpAmpBlock",
     "ThermistorSense",
     "VoltageDividerSense",
     "create_adc_filter",
+    "create_hall_sensor_input",
     "create_opamp_buffer",
     "create_opamp_gain",
     "create_temperature_sense",

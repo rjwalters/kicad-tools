@@ -41,6 +41,7 @@ from kicad_tools.schematic.blocks import (
     create_crystal_with_loads,
     create_dual_supply_cascade,
     create_gate_drive_resistor_array,
+    create_hall_sensor_input,
     create_mcu_decoupling_array,
 )
 from kicad_tools.schematic.models.schematic import Schematic
@@ -588,15 +589,49 @@ def create_bldc_controller(output_dir: Path) -> Path:
     )
     print(f"   Hall connector: {j_hall.reference}")
 
-    # Wire hall signal pins and add labels
-    # Pins 1-3 are hall signals, pin 4 is VCC, pin 5 is GND
+    # Wire hall signal pins through filtered input blocks and add labels.
+    # Pins 1-3 are hall signals, pin 4 is VCC, pin 5 is GND.
+    #
+    # Each Hall channel is fed through a HallSensorInput block providing
+    # a 10kOhm pull-up to +3.3V and a 10nF cap to GND for noise immunity.
+    # Existing R/C designators on this board peak at R12/C16, so the new
+    # parts are assigned starting at R30/C30 with one ref consumed per
+    # channel (R30/C30, R31/C31, R32/C32).
     hall_labels = ["HALL_A", "HALL_B", "HALL_C"]
+    label_x = X_CONNECTORS - 20
+    HALL_REF_BASE = 30
+    # Stagger filter blocks horizontally so adjacent R/C symbols do not
+    # overlap (each block spans ~30mm vertically; pin pitch is only
+    # 2.54mm, so vertical stacking at the pin Y is not viable).
+    hall_block_x = [label_x - 8, label_x - 16, label_x - 24]
+
     for i, label in enumerate(hall_labels):
         pin_pos = j_hall.pin_position(str(i + 1))
-        label_x = X_CONNECTORS - 20
-        # Add wire from pin to label position
-        sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
+        block_x = hall_block_x[i]
+        # Place the filter block with its junction at the pin's Y so
+        # SIGNAL_IN is collinear with the connector pin and SIGNAL_OUT
+        # can wire straight back to the label without a jog.
+        hall_block = create_hall_sensor_input(
+            sch,
+            x=block_x,
+            y=pin_pos[1],
+            ref_start=HALL_REF_BASE + i,
+        )
+        # Connector pin -> block SIGNAL_IN (same Y, horizontal wire)
+        sch.add_wire(pin_pos, hall_block.ports["SIGNAL_IN"], warn_on_collision=False)
+        # Block SIGNAL_OUT -> label position (same Y, horizontal wire)
+        sch.add_wire(
+            hall_block.ports["SIGNAL_OUT"], (label_x, pin_pos[1]), warn_on_collision=False
+        )
         sch.add_label(label, label_x, pin_pos[1], rotation=0)
+        # Block VCC -> +3.3V rail (vertical wire upward)
+        vcc_port = hall_block.ports["VCC"]
+        sch.add_wire(vcc_port, (vcc_port[0], RAIL_3V3), warn_on_collision=False)
+        sch.add_junction(vcc_port[0], RAIL_3V3)
+        # Block GND -> GND rail (vertical wire downward)
+        gnd_port = hall_block.ports["GND"]
+        sch.add_wire(gnd_port, (gnd_port[0], RAIL_GND), warn_on_collision=False)
+        sch.add_junction(gnd_port[0], RAIL_GND)
 
     # Wire hall connector VCC (pin 4) to 3.3V rail
     hall_vcc_pos = j_hall.pin_position("4")
@@ -947,6 +982,20 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     R3_POS = (BOARD_ORIGIN_X + 56, BOARD_ORIGIN_Y + 13)  # PWR LED resistor
     D4_POS = (BOARD_ORIGIN_X + 62, BOARD_ORIGIN_Y + 8)  # STATUS LED
     R4_POS = (BOARD_ORIGIN_X + 62, BOARD_ORIGIN_Y + 13)  # STATUS LED resistor
+
+    # Hall sensor filter network (next to J3, between MCU and connector).
+    # Pull-ups (R30-R32) above filter caps (C30-C32).
+    # Iteration 2: widen column pitch from 5mm to 6mm and shift the cluster
+    # rightward by ~2mm so HALL_A/B/C traces from MCU bottom-edge pins
+    # 11/12/13 (x=138.8/139.6/140.4, y=154.175) have room to fan out without
+    # stacking three parallel traces against the MCU pad row.  J3 pads at
+    # x=164.15..165.85 leave the rightmost cap (x=161) ~3mm clearance.
+    R30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 54)  # HALL_A pull-up
+    C30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 58)  # HALL_A filter
+    R31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 54)  # HALL_B pull-up
+    C31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 58)  # HALL_B filter
+    R32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 54)  # HALL_C pull-up
+    C32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 58)  # HALL_C filter
 
     # =========================================================================
     # Footprint generators
@@ -1691,6 +1740,17 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_led_0805("D4", D4_POS, "STATUS_LED", "GND"))
     print(f"   D3 (PWR), D4 (STATUS) with resistors R3, R4")
 
+    print("\n11b. Adding Hall sensor filter network...")
+    # Pull-up resistors: +3.3V to each HALL_x signal
+    parts.append(generate_resistor_0805("R30", R30_POS, "10k", "+3.3V", "HALL_A"))
+    parts.append(generate_resistor_0805("R31", R31_POS, "10k", "+3.3V", "HALL_B"))
+    parts.append(generate_resistor_0805("R32", R32_POS, "10k", "+3.3V", "HALL_C"))
+    # Filter caps: each HALL_x signal to GND
+    parts.append(generate_cap_0805("C30", C30_POS, "10nF", "HALL_A", "GND"))
+    parts.append(generate_cap_0805("C31", C31_POS, "10nF", "HALL_B", "GND"))
+    parts.append(generate_cap_0805("C32", C32_POS, "10nF", "HALL_C", "GND"))
+    print("   R30-R32 (10k pull-ups), C30-C32 (10nF filters)")
+
     parts.append(")")  # Close kicad_pcb
 
     pcb_content = "\n".join(parts)
@@ -1922,6 +1982,7 @@ def main() -> int:
         print("  Power stage: Q1-Q6, R10-R12 (current sense), R20-R22 (gate-drive)")
         print("  Connectors: J1-J4")
         print("  LEDs: D3-D4, R3-R4")
+        print("  Hall filter: R30-R32 (pull-ups), C30-C32 (filters)")
 
         # For this board, partial routing is acceptable
         # Success if ERC passes and DRC has no errors (warnings OK)
