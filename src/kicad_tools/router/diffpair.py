@@ -368,24 +368,32 @@ def group_differential_pairs(
 ) -> list[DifferentialPair]:
     """Group differential signals into pairs.
 
+    Issue #2558 / Epic #2556 Phase 1B: signals are grouped by both
+    base name AND notation so a board carrying both ``USB_D+/USB_D-``
+    (plus_minus) and ``USB_DP/USB_DN`` (pn_suffix) -- which share the
+    base ``USB_D`` after the _DP/_DN base-name fix -- still yields
+    two distinct pairs instead of collapsing into one.
+
     Args:
         signals: List of DifferentialSignal objects
 
     Returns:
         List of DifferentialPair objects (only complete pairs)
     """
-    # Group signals by base name
-    by_base_name: dict[str, dict[str, DifferentialSignal]] = {}
+    # Group by (base_name, notation) so different notations produce
+    # different pairs even when they share a base name.
+    by_key: dict[tuple[str, str], dict[str, DifferentialSignal]] = {}
 
     for signal in signals:
-        if signal.base_name not in by_base_name:
-            by_base_name[signal.base_name] = {}
-        by_base_name[signal.base_name][signal.polarity] = signal
+        key = (signal.base_name, signal.notation)
+        if key not in by_key:
+            by_key[key] = {}
+        by_key[key][signal.polarity] = signal
 
     # Create pairs where both P and N exist
     pairs: list[DifferentialPair] = []
 
-    for base_name, polarity_map in sorted(by_base_name.items()):
+    for (base_name, _notation), polarity_map in sorted(by_key.items()):
         if "P" in polarity_map and "N" in polarity_map:
             pair_type = _detect_pair_type(base_name)
             pairs.append(
