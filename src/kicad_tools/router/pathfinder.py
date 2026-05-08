@@ -216,6 +216,15 @@ class Router:
         # Counter for assigning unique negative waypoint indices.
         self._waypoint_id_counter: int = 0
 
+        # Issue #2559 / Epic #2556 Phase 1C: Differential-pair within-pair
+        # clearance threading.  Net-name -> net-id reverse map populated by
+        # the autorouter (or test harness) so the pathfinder can resolve
+        # ``NetClassRouting.diffpair_partner`` (a name) to an integer net id
+        # for the per-cell partner branch in ``_is_trace_blocked``.  Empty
+        # by default -- when unset, the partner branch is dormant and
+        # behavior matches pre-#2559 (single-clearance) routing.
+        self._net_name_to_id: dict[str, int] = {}
+
     # ------------------------------------------------------------------
     # Waypoint helpers (Issue #2330)
     # ------------------------------------------------------------------
@@ -753,6 +762,46 @@ class Router:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
 
+    # ------------------------------------------------------------------
+    # Diff-pair partner resolution (Issue #2559 / Epic #2556 Phase 1C)
+    # ------------------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Inject a net-name -> net-id reverse map for partner resolution.
+
+        Phase 1C threads ``NetClassRouting.intra_pair_clearance`` through the
+        A* search.  The clearance is configured by net-class on the source
+        net, but applies only when the *other* net is the named partner.
+        Resolving partner-name to partner-id requires a reverse map that the
+        ``Autorouter`` builds from its ``net_names`` dict.
+
+        The setter is idempotent and may be called multiple times (e.g. to
+        refresh the map when new pads are loaded).  Passing an empty dict
+        disables partner detection (everything falls back to ``clearance``).
+        """
+        self._net_name_to_id = dict(mapping)
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        """Look up the integer net id of the diff-pair partner of *net_name*.
+
+        Reads ``NetClassRouting.diffpair_partner`` (the authoritative
+        Phase 1B signal) and resolves the partner-name to a partner-id via
+        :attr:`_net_name_to_id`.  Returns ``None`` when:
+
+        * the source net has no net class (or the class has no
+          ``diffpair_partner`` set), or
+        * the partner-name is missing from ``_net_name_to_id`` (e.g. the
+          autorouter has not populated the reverse map yet).
+
+        ``None`` is the dormant signal for the four read sites: when partner
+        is unknown, the search uses the wider ``clearance`` for every other
+        net, matching pre-#2559 behavior.
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        return self._net_name_to_id.get(net_class.diffpair_partner)
+
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.
 
@@ -819,6 +868,8 @@ class Router:
     def _is_trace_blocked(
         self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False,
         radius: int | None = None,
+        partner_net: int | None = None,
+        partner_radius: int | None = None,
     ) -> bool:
         """Check if placing a trace at this position would conflict.
 
@@ -834,6 +885,17 @@ class Router:
                           non-obstacle blocked cells (they'll get high cost instead)
             radius: Override the trace half-width in grid cells. When None,
                     uses the global ``_trace_half_width_cells`` (Issue #1674).
+            partner_net: Issue #2559 / Phase 1C -- if set (non-None and >= 0)
+                         and ``partner_radius`` is provided, cells belonging
+                         to this net are checked against the *tighter*
+                         ``partner_radius`` instead of the wider ``radius``.
+                         This implements within-pair clearance for diff pairs.
+                         When ``None``, the partner branch is dormant and
+                         behavior matches pre-#2559 routing.
+            partner_radius: Tighter half-width (in grid cells) to apply only
+                            to ``cell.net == partner_net``.  When ``None``
+                            but ``partner_net`` is set, the partner branch
+                            falls back to ``radius`` (no tightening).
         """
         if radius is None:
             radius = self._trace_half_width_cells
@@ -859,6 +921,31 @@ class Router:
         blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
         net_region = self.grid._net[layer, y1:y2, x1:x2]
 
+        # Issue #2559 / Phase 1C: Build partner-relaxation mask.
+        # When the partner branch is active, cells whose net matches
+        # partner_net are checked against partner_radius instead of radius.
+        # We OR the blocking mask with a "is partner cell outside the tight
+        # radius" suppressor so partner-blocked cells in the slack ring
+        # (>partner_radius && <=radius from gx,gy) are treated as passable.
+        partner_active = (
+            partner_net is not None
+            and partner_net >= 0
+            and partner_radius is not None
+            and partner_radius < radius
+        )
+        partner_relax_mask = None
+        if partner_active:
+            # Compute Chebyshev distance from (gx, gy) to each cell in the
+            # extracted region, then mark cells whose net == partner_net
+            # AND distance > partner_radius as "ignore for blocking".
+            ys = np.arange(y1, y2)
+            xs = np.arange(x1, x2)
+            cheb = np.maximum(
+                np.abs(ys - gy)[:, None],
+                np.abs(xs - gx)[None, :],
+            )
+            partner_relax_mask = (net_region == partner_net) & (cheb > partner_radius)
+
         if allow_sharing:
             # Negotiated mode: more complex logic
             # Block if any cell is:
@@ -876,12 +963,17 @@ class Router:
             # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
             static_blocks = blocked_region & ~obstacle_region & different_net & (usage_region == 0)
 
-            return bool(np.any(obstacle_blocks | static_blocks))
+            combined = obstacle_blocks | static_blocks
+            if partner_relax_mask is not None:
+                combined = combined & ~partner_relax_mask
+            return bool(np.any(combined))
         else:
             # Standard mode: block if any cell is blocked AND has different net
             # Issue #864: Same-net cells are passable (even overlapping clearance)
             # but different-net cells and obstacles (net=0 blocked cells) must block.
             blocked_different_net = blocked_region & (net_region != net)
+            if partner_relax_mask is not None:
+                blocked_different_net = blocked_different_net & ~partner_relax_mask
             return bool(np.any(blocked_different_net))
 
     def _is_diagonal_corner_blocked(
@@ -1493,6 +1585,28 @@ class Router:
             ),
         )
 
+        # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner and
+        # compute the tighter within-pair half-width radius.  When the
+        # source net's NetClassRouting declares a ``diffpair_partner`` and
+        # the partner net id is known via ``_net_name_to_id``, the search
+        # uses ``effective_intra_pair_clearance`` as the tighter radius
+        # for cells belonging to the partner net only.  All other foreign
+        # nets continue to see the wider ``net_trace_clearance`` radius.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is not None and net_class is not None:
+            net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
+            net_partner_half_width_cells = max(
+                1,
+                math.ceil(
+                    round(
+                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
+                        6,
+                    )
+                ),
+            )
+        else:
+            net_partner_half_width_cells = net_trace_half_width_cells
+
         # Issue #1692: Compute per-net via clearance radius.  Net classes
         # may specify larger via_size which requires a wider blocking check.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
@@ -1573,8 +1687,14 @@ class Router:
 
         # Issue #2430: Pre-compute expanded blocked bitmap so that
         # _is_trace_blocked becomes a single array lookup per neighbor.
+        # Issue #2559 / Phase 1C: Pass partner net id and tighter radius so
+        # within-pair edges of a diff pair get the relaxed clearance.
         expanded_blocked = self.grid.compute_expanded_blocked(
-            net_trace_half_width_cells, start.net, allow_sharing
+            net_trace_half_width_cells,
+            start.net,
+            allow_sharing,
+            partner_net=partner_net_id,
+            partner_radius=net_partner_half_width_cells,
         )
 
         # Issue #2430: Build crossing grid index if routed segments exist.
@@ -2687,6 +2807,27 @@ class Router:
             ),
         )
 
+        # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner for
+        # within-pair clearance threading -- mirrors the logic in route().
+        # The bidirectional search expands neighbors via
+        # ``_expand_bidirectional_neighbors``, which now accepts a
+        # ``partner_net``/``partner_radius`` pair to forward into the
+        # ``_is_trace_blocked`` check.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is not None and net_class is not None:
+            net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
+            net_partner_half_width_cells = max(
+                1,
+                math.ceil(
+                    round(
+                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
+                        6,
+                    )
+                ),
+            )
+        else:
+            net_partner_half_width_cells = net_trace_half_width_cells
+
         # Issue #1692: Compute per-net via clearance radius.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
         net_via_half_cells = max(
@@ -2854,6 +2995,8 @@ class Router:
                         weight,
                         trace_radius=net_trace_half_width_cells,
                         via_radius=net_via_half_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
                     )
 
             # Process backward step
@@ -2890,6 +3033,8 @@ class Router:
                         weight,
                         trace_radius=net_trace_half_width_cells,
                         via_radius=net_via_half_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
                     )
 
             # Early termination: if we have a meeting point and both queues
@@ -2930,6 +3075,8 @@ class Router:
         weight: float,
         trace_radius: int | None = None,
         via_radius: int | None = None,
+        partner_net: int | None = None,
+        partner_radius: int | None = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -2943,6 +3090,11 @@ class Router:
             via_radius: Per-net-class via half-width in grid cells.
                 When None, falls back to the global ``_via_half_cells``
                 (Issue #1692).
+            partner_net: Issue #2559 / Phase 1C -- diff-pair partner net id.
+                When set, ``_is_trace_blocked`` calls below pass this id and
+                ``partner_radius`` so the partner cells are treated as
+                blockers only within the tighter intra-pair radius.
+            partner_radius: Tighter half-width for partner cells.
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
@@ -3010,7 +3162,9 @@ class Router:
                     pass  # Same net - passable
                 elif cell.net == 0:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
-                                              radius=trace_radius):
+                                              radius=trace_radius,
+                                              partner_net=partner_net,
+                                              partner_radius=partner_radius):
                         continue
                 else:
                     # Different net's blocked cell
@@ -3035,7 +3189,9 @@ class Router:
                 )
                 if not is_pad_exit_or_approach:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
-                                              radius=trace_radius):
+                                              radius=trace_radius,
+                                              partner_net=partner_net,
+                                              partner_radius=partner_radius):
                         continue
 
             # Check zone blocking

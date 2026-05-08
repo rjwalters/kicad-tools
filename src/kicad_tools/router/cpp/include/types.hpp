@@ -21,7 +21,7 @@ namespace router {
 // ``cpp_backend.py``; on import the two are compared and a mismatch
 // disables the C++ backend with a clear "kct build-native" error,
 // preventing silent ``AttributeError`` failures from a stale .so.
-constexpr int ROUTER_CPP_BUILD_VERSION = 2;
+constexpr int ROUTER_CPP_BUILD_VERSION = 3;
 
 // Grid cell state
 struct GridCell {

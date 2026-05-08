@@ -93,7 +93,9 @@ class TestDataclassesReplaceRoundTrip:
     """
 
     def test_replace_sets_only_intra_pair_clearance(self):
-        original = NET_CLASS_HIGH_SPEED
+        # Use a fresh instance — the predefined NET_CLASS_HIGH_SPEED now sets
+        # intra_pair_clearance=0.075 (Phase 1C config change).
+        original = NetClassRouting(name="TestPair", clearance=0.15)
         replaced = dataclasses.replace(original, intra_pair_clearance=0.075)
         assert replaced.intra_pair_clearance == 0.075
         assert replaced.clearance == original.clearance
@@ -135,7 +137,9 @@ class TestPredefinedInstanceDefaults:
             NET_CLASS_POWER,
             NET_CLASS_HIGH_CURRENT_SIGNAL,
             NET_CLASS_CLOCK,
-            NET_CLASS_HIGH_SPEED,
+            # NET_CLASS_HIGH_SPEED intentionally omitted — Phase 1C
+            # (issue #2559) sets intra_pair_clearance=0.075 on this class
+            # to enable tighter within-pair clearance for diff pairs.
             NET_CLASS_AUDIO,
             NET_CLASS_DIGITAL,
             NET_CLASS_DEBUG,
@@ -145,13 +149,20 @@ class TestPredefinedInstanceDefaults:
     def test_predefined_instance_intra_pair_is_none(self, net_class):
         assert net_class.intra_pair_clearance is None
 
+    def test_high_speed_has_phase1c_intra_pair_clearance(self):
+        # Phase 1C (Epic #2556) configures NET_CLASS_HIGH_SPEED with
+        # intra_pair_clearance=0.075 so USB_D+/USB_D- on board 03 fits
+        # the J1 row A 0.5mm pitch without -0.200mm overlap.
+        assert NET_CLASS_HIGH_SPEED.intra_pair_clearance == 0.075
+        assert NET_CLASS_HIGH_SPEED.effective_intra_pair_clearance() == 0.075
+
     @pytest.mark.parametrize(
         "net_class",
         [
             NET_CLASS_POWER,
             NET_CLASS_HIGH_CURRENT_SIGNAL,
             NET_CLASS_CLOCK,
-            NET_CLASS_HIGH_SPEED,
+            # NET_CLASS_HIGH_SPEED omitted (Phase 1C — see above).
             NET_CLASS_AUDIO,
             NET_CLASS_DIGITAL,
             NET_CLASS_DEBUG,
