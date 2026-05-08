@@ -126,6 +126,8 @@ class AnalogJoystickBlock(CircuitBlock):
         connector_footprint: str = "Module:Joystick_Analog",
         resistor_symbol: str = "Device:R",
         capacitor_symbol: str = "Device:C",
+        resistor_footprint: str = "",
+        capacitor_footprint: str = "",
         filter_ref_start: int = 1,
         pullup_ref: str | None = None,
     ) -> None:
@@ -157,6 +159,11 @@ class AnalogJoystickBlock(CircuitBlock):
             resistor_symbol: KiCad symbol for the BTN pull-up resistor.
             capacitor_symbol: KiCad symbol for filter capacitors (passed
                 through to :func:`create_adc_filter`).
+            resistor_footprint: Optional KiCad footprint for filter and
+                pull-up resistors (e.g. ``"Resistor_SMD:R_0402_1005Metric"``).
+                Empty string skips footprint assignment (default).
+            capacitor_footprint: Optional KiCad footprint for filter
+                capacitors (e.g. ``"Capacitor_SMD:C_0402_1005Metric"``).
             filter_ref_start: Starting numeric ref for the X/Y filter
                 resistors and capacitors. ``X`` filter uses
                 ``R<n>``/``C<n>``; ``Y`` filter uses ``R<n+1>``/``C<n+1>``.
@@ -228,6 +235,7 @@ class AnalogJoystickBlock(CircuitBlock):
             )
             # Re-ref the filter components using filter_ref_start
             self._reref_filter(self.x_filter, filter_ref_start)
+            self._set_filter_footprints(self.x_filter, resistor_footprint, capacitor_footprint)
             self.components["R_FILT_X"] = self.x_filter.components["R1"]
             self.components["C_FILT_X"] = self.x_filter.components["C1"]
 
@@ -239,6 +247,7 @@ class AnalogJoystickBlock(CircuitBlock):
                 order=1,
             )
             self._reref_filter(self.y_filter, filter_ref_start + 1)
+            self._set_filter_footprints(self.y_filter, resistor_footprint, capacitor_footprint)
             self.components["R_FILT_Y"] = self.y_filter.components["R1"]
             self.components["C_FILT_Y"] = self.y_filter.components["C1"]
 
@@ -283,6 +292,7 @@ class AnalogJoystickBlock(CircuitBlock):
                     pullup_ref,
                     btn_pullup,
                     rotation=90,
+                    footprint=resistor_footprint,
                 )
                 self.components["R_PULLUP"] = self.r_pullup
                 # Wire pin1 of pull-up to VCC label, pin2 of pull-up to BTN line
@@ -331,6 +341,31 @@ class AnalogJoystickBlock(CircuitBlock):
                     with contextlib.suppress(Exception):
                         comp.reference = new_ref
 
+    @staticmethod
+    def _set_filter_footprints(
+        filter_block: object,
+        resistor_footprint: str,
+        capacitor_footprint: str,
+    ) -> None:
+        """Set footprints on filter sub-block components when caller supplied them.
+
+        ``create_adc_filter`` does not accept footprint args; we patch the
+        ``.footprint`` attribute on the ``SymbolInstance`` objects after the
+        fact. Empty strings are skipped so callers that don't supply
+        footprints get the same behavior as before.
+        """
+        components = getattr(filter_block, "components", {})
+        if resistor_footprint and "R1" in components:
+            comp = components["R1"]
+            if hasattr(comp, "footprint"):
+                with contextlib.suppress(Exception):
+                    comp.footprint = resistor_footprint
+        if capacitor_footprint and "C1" in components:
+            comp = components["C1"]
+            if hasattr(comp, "footprint"):
+                with contextlib.suppress(Exception):
+                    comp.footprint = capacitor_footprint
+
 
 # Factory functions
 
@@ -350,6 +385,8 @@ def create_analog_joystick(
     btn_pullup: str | None = "10k",
     connector_symbol: str | None = None,
     connector_footprint: str = "Module:Joystick_Analog",
+    resistor_footprint: str = "",
+    capacitor_footprint: str = "",
     filter_ref_start: int = 1,
     pullup_ref: str | None = None,
 ) -> AnalogJoystickBlock:
@@ -377,6 +414,11 @@ def create_analog_joystick(
         connector_symbol: KiCad symbol for the connector. When ``None``,
             ``Conn_01x05`` is used for 5-pin and ``Conn_01x04`` for 4-pin.
         connector_footprint: KiCad footprint for the connector.
+        resistor_footprint: Optional KiCad footprint for filter and pull-up
+            resistors (e.g. ``"Resistor_SMD:R_0402_1005Metric"``). Empty
+            string skips footprint assignment.
+        capacitor_footprint: Optional KiCad footprint for filter capacitors
+            (e.g. ``"Capacitor_SMD:C_0402_1005Metric"``).
         filter_ref_start: Starting numeric ref for the X/Y filter components.
             X uses ``R<n>``/``C<n>``; Y uses ``R<n+1>``/``C<n+1>``. Bump this
             on boards that already use ``R1``/``C1`` etc. for other components.
@@ -416,6 +458,8 @@ def create_analog_joystick(
         btn_pullup=btn_pullup,
         connector_symbol=connector_symbol,
         connector_footprint=connector_footprint,
+        resistor_footprint=resistor_footprint,
+        capacitor_footprint=capacitor_footprint,
         filter_ref_start=filter_ref_start,
         pullup_ref=pullup_ref,
     )

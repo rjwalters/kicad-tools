@@ -185,6 +185,8 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         btn_pullup="10k",
         # Board uses C1-C4 for decoupling; bump filter refs out of the way.
         filter_ref_start=10,
+        resistor_footprint="Resistor_SMD:R_0402_1005Metric",
+        capacitor_footprint="Capacitor_SMD:C_0402_1005Metric",
     )
     joy_conn = joy_block.connector
     print(f"   J2 (Joystick): placed at ({joy_conn.x}, {joy_conn.y})")
