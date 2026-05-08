@@ -221,3 +221,93 @@ jobs:
 
       - name: Run kicad-cli round-trip smoke tests
         run: uv run pytest tests/test_kicad_cli_roundtrip.py -v --no-cov
+
+  routed-pcb-drc-check:
+    # Issue #2546: validate every committed `*_routed.kicad_pcb` touched by a
+    # PR via `kct check --mfr jlcpcb --errors-only`. Closes the safety-net gap
+    # that allowed PR #2538 to ship with 5 DRC errors despite a "0 errors"
+    # claim at merge time.
+    #
+    # The check uses pure-Python DRC (no kicad-cli, no Docker container) so it
+    # piggybacks on the same cheap ubuntu-latest + uv pattern as lint/typecheck.
+    # File detection is in-job (no `paths:` filter) so the check is safe to
+    # mark as a required status check on branch protection -- it always runs
+    # and short-circuits to green on PRs that don't touch routed PCBs.
+    #
+    # A per-board allowlist (`.github/routed-drc-tolerance.yml`) grandfathers
+    # in known-broken boards (currently boards 03 and 05) at their CURRENT
+    # error counts. The gate is "allowed minus epsilon" -- regressions still
+    # fail, but the gate can land before every board reaches 0 errors.
+    name: Routed PCB DRC Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the merge-base for `git diff origin/main...HEAD` (default
+          # fetch-depth: 1 makes the diff fail with "unknown revision").
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Identify modified routed PCBs
+        id: changed
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Push to main: diff against the previous commit.
+            base="${{ github.event.before }}"
+          else
+            # Pull request: diff against the merge-base with the target branch.
+            base="${{ github.event.pull_request.base.sha }}"
+          fi
+          # Empty `base` (e.g., very first push to a fresh branch) falls back
+          # to origin/main so the gate still has a sensible diff target.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="origin/main"
+          fi
+          echo "Diffing against base: $base"
+
+          # Newline-separated list of modified routed PCBs. `|| true` keeps
+          # the pipeline green when grep finds no matches (empty result is
+          # the common case and explicitly handled below).
+          mapfile -t files < <(
+            git diff --name-only --diff-filter=AM "$base"...HEAD \
+              | grep -E '^boards/[^/]+/output/[^/]+_routed\.kicad_pcb$' || true
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No routed PCBs modified -- skipping DRC check."
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Modified routed PCBs:"
+          printf '  %s\n' "${files[@]}"
+          {
+            echo 'files<<EOF'
+            printf '%s\n' "${files[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.changed.outputs.files != ''
+        run: uv sync --extra dev
+
+      - name: Run kct check on each modified routed PCB
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -euo pipefail
+          # Pass each file as a separate arg; the helper handles the
+          # allowlist comparison and emits ::error:: annotations.
+          mapfile -t files <<< "${{ steps.changed.outputs.files }}"
+          # Filter out empty lines (mapfile preserves trailing newline).
+          args=()
+          for f in "${files[@]}"; do
+            [ -n "$f" ] && args+=("$f")
+          done
+          uv run python scripts/ci/check_routed_drc.py "${args[@]}"

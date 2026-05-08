@@ -1,0 +1,36 @@
+# Per-board DRC tolerance allowlist for the `routed-pcb-drc-check` CI job.
+#
+# This file grandfathers in known-broken routed PCB files so the CI gate can
+# land before every board reaches a 0-error state. The gate is "allowed minus
+# epsilon": if a board's committed _routed.kicad_pcb produces MORE errors than
+# the value listed here (under JLCPCB rules, --errors-only), the job fails.
+# This still catches regressions like "board 05 went from 17 -> 22 errors".
+#
+# Boards NOT listed here MUST report 0 errors. Adding a new entry should be
+# considered a regression and require explicit reviewer sign-off in the PR.
+#
+# How to update:
+#   * When a board reaches 0 errors, REMOVE its entry (do not set to 0). The
+#     absence of the entry is the strict 0-error gate.
+#   * When a board's count IMPROVES (e.g., 17 -> 12), reduce the value here
+#     in the same PR that reduces the count, so further regressions are
+#     caught against the new floor.
+#   * Adding a new entry (loosening) requires reviewer justification and a
+#     tracking issue link in the PR description.
+#
+# Schema:
+#   tolerances:
+#     <path-relative-to-repo-root>: <max_errors>
+#
+# Tracking:
+#   * board 05 (17 errors) -- tracked in #2542 (full clean state)
+#   * board 03 (1 error) -- tracked separately; pre-existing pre-CI-gate state.
+
+tolerances:
+  # 15x clearance_segment_segment + 2x clearance_segment_via at JLCPCB rules.
+  # Partial progress landed in #2551 (closes #2532); full fix tracked in #2542.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 17
+
+  # 1x clearance_segment_segment at JLCPCB rules. Pre-existing at the time the
+  # CI gate landed (issue #2546). Should be driven to 0 in a follow-up.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 1
