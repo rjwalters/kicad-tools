@@ -104,9 +104,7 @@ class TestBootstrapCapacitorArrayMocked:
 
     def test_custom_value(self, mock_schematic):
         """value='220nF' applied to all caps via add_symbol."""
-        block = create_bootstrap_capacitor_array(
-            mock_schematic, x=0, y=0, phases=3, value="220nF"
-        )
+        block = create_bootstrap_capacitor_array(mock_schematic, x=0, y=0, phases=3, value="220nF")
 
         assert block.value == "220nF"
         # Verify all add_symbol calls received "220nF" as the value
@@ -117,9 +115,7 @@ class TestBootstrapCapacitorArrayMocked:
 
     def test_cap_ref_start(self, mock_schematic):
         """cap_ref_start=12 yields refs C12, C13, C14."""
-        create_bootstrap_capacitor_array(
-            mock_schematic, x=0, y=0, phases=3, cap_ref_start=12
-        )
+        create_bootstrap_capacitor_array(mock_schematic, x=0, y=0, phases=3, cap_ref_start=12)
 
         # Pull the ref (positional arg 3) from each add_symbol call
         refs = [call.args[3] for call in mock_schematic.add_symbol.call_args_list]
@@ -127,9 +123,7 @@ class TestBootstrapCapacitorArrayMocked:
 
     def test_cap_ref_prefix(self, mock_schematic):
         """cap_ref_prefix='CB' yields refs CB1, CB2, CB3."""
-        create_bootstrap_capacitor_array(
-            mock_schematic, x=0, y=0, phases=3, cap_ref_prefix="CB"
-        )
+        create_bootstrap_capacitor_array(mock_schematic, x=0, y=0, phases=3, cap_ref_prefix="CB")
 
         refs = [call.args[3] for call in mock_schematic.add_symbol.call_args_list]
         assert refs == ["CB1", "CB2", "CB3"]
@@ -145,9 +139,7 @@ class TestBootstrapCapacitorArrayMocked:
     def test_phase_nets_validation(self, mock_schematic):
         """phase_nets length mismatch raises ValueError."""
         with pytest.raises(ValueError, match="phase_nets"):
-            create_bootstrap_capacitor_array(
-                mock_schematic, x=0, y=0, phases=3, phase_nets=["X"]
-            )
+            create_bootstrap_capacitor_array(mock_schematic, x=0, y=0, phases=3, phase_nets=["X"])
 
     def test_high_nets_validation(self, mock_schematic):
         """high_nets length mismatch raises ValueError."""
@@ -170,9 +162,7 @@ class TestBootstrapCapacitorArrayMocked:
 
     def test_cap_spacing(self, mock_schematic):
         """Caps are placed at x, x+spacing, x+2*spacing."""
-        create_bootstrap_capacitor_array(
-            mock_schematic, x=100, y=50, phases=3, cap_spacing=15
-        )
+        create_bootstrap_capacitor_array(mock_schematic, x=100, y=50, phases=3, cap_spacing=15)
 
         # Pull positional x argument (index 1) from each add_symbol call
         xs = [call.args[1] for call in mock_schematic.add_symbol.call_args_list]
@@ -250,9 +240,7 @@ class TestGateDriverBlockComposition:
 
     def test_gate_driver_half_bridge_composition(self, mock_schematic):
         """Half-bridge gate driver composes a 1-phase BootstrapCapacitorArray."""
-        driver = GateDriverBlock(
-            mock_schematic, x=100, y=100, driver_type="half-bridge"
-        )
+        driver = GateDriverBlock(mock_schematic, x=100, y=100, driver_type="half-bridge")
 
         assert hasattr(driver, "_bootstrap_block")
         assert isinstance(driver._bootstrap_block, BootstrapCapacitorArray)

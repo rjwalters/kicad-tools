@@ -39,6 +39,7 @@ from kicad_tools.schematic.blocks import (
     LEDIndicator,
     ThreePhaseInverter,
     create_5v_buck,
+    create_bootstrap_capacitor_array,
     create_gate_drive_resistor_array,
 )
 from kicad_tools.schematic.models.schematic import Schematic
@@ -438,12 +439,14 @@ def create_bldc_controller(output_dir: Path) -> Path:
                       validate_connection=False)
 
     # =========================================================================
-    # Section 6: Gate Driver (using GateDriverBlock)
+    # Section 6: Gate Driver (using GateDriverBlock + BootstrapCapacitorArray)
     # =========================================================================
     print("\n6. Adding gate driver...")
 
-    # 3-phase gate driver with bootstrap capacitors
-    # Note: C10-C11 are used by CrystalOscillator, so start at C12
+    # 3-phase gate driver IC (no internal bootstrap cap composition --
+    # we instantiate BootstrapCapacitorArray explicitly below to demonstrate
+    # the new factory's composability).
+    # Note: C10-C11 are used by CrystalOscillator, so start at C15 for bypass
     gate_driver = GateDriverBlock(
         sch,
         x=X_GATE_DRV,
@@ -451,13 +454,27 @@ def create_bldc_controller(output_dir: Path) -> Path:
         driver_type="3-phase",
         ref="U3",
         value="DRV8301",
-        bootstrap_caps="100nF",
+        bootstrap_caps=None,  # bootstrap caps created externally below
         bypass_caps=["100nF", "10uF"],
-        cap_ref_start=12,  # C12-C14 for bootstrap, C15-C16 for bypass
+        cap_ref_start=15,  # C15-C16 for bypass (C12-C14 reserved for bootstrap)
     )
     gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
+
+    # External 3-phase bootstrap cap network (BST_x to PHASE_x).
+    # Uses C12-C14 to preserve existing PCB-side ref numbering and layout.
+    create_bootstrap_capacitor_array(
+        sch,
+        x=X_GATE_DRV - 20,
+        y=80,
+        phases=3,
+        value="100nF",
+        cap_ref_start=12,
+        high_nets=["BST_A", "BST_B", "BST_C"],
+        phase_nets=["PHASE_A", "PHASE_B", "PHASE_C"],
+    )
+
     print("   Gate driver: DRV8301 (GateDriverBlock)")
-    print("   Bootstrap caps: C12, C13, C14")
+    print("   Bootstrap caps: C12, C13, C14 (BootstrapCapacitorArray)")
     print("   Bypass caps: C15, C16")
 
     # Series gate-drive (slew-rate) resistors between DRV8301 outputs and the

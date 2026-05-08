@@ -739,18 +739,12 @@ class BootstrapCapacitorArray(CircuitBlock):
             else:
                 phase_labels = [str(i) for i in range(phases)]
         elif len(phase_labels) != phases:
-            raise ValueError(
-                f"phase_labels length {len(phase_labels)} != phases {phases}"
-            )
+            raise ValueError(f"phase_labels length {len(phase_labels)} != phases {phases}")
 
         if high_nets is not None and len(high_nets) != phases:
-            raise ValueError(
-                f"high_nets length {len(high_nets)} != phases {phases}"
-            )
+            raise ValueError(f"high_nets length {len(high_nets)} != phases {phases}")
         if phase_nets is not None and len(phase_nets) != phases:
-            raise ValueError(
-                f"phase_nets length {len(phase_nets)} != phases {phases}"
-            )
+            raise ValueError(f"phase_nets length {len(phase_nets)} != phases {phases}")
 
         self.phases = phases
         self.phase_labels = phase_labels
@@ -772,11 +766,19 @@ class BootstrapCapacitorArray(CircuitBlock):
             self.ports[f"HIGH_{label}"] = high_pos
             self.ports[f"PHASE_{label}"] = phase_pos
 
-            # Optionally drive labels for net naming
+            # Optionally drive labels for net naming.  ERC requires labels
+            # to attach to wires, so we draw a short stub from each pin
+            # to the label position (matches ThreePhaseInverter convention).
             if high_nets is not None:
-                sch.add_label(high_nets[i], high_pos[0], high_pos[1], rotation=0)
+                stub_x = high_pos[0]
+                stub_y = high_pos[1] - 2.54
+                sch.add_wire(high_pos, (stub_x, stub_y), warn_on_collision=False)
+                sch.add_label(high_nets[i], stub_x, stub_y, rotation=0)
             if phase_nets is not None:
-                sch.add_label(phase_nets[i], phase_pos[0], phase_pos[1], rotation=0)
+                stub_x = phase_pos[0]
+                stub_y = phase_pos[1] + 2.54
+                sch.add_wire(phase_pos, (stub_x, stub_y), warn_on_collision=False)
+                sch.add_label(phase_nets[i], stub_x, stub_y, rotation=0)
 
 
 class GateDriverBlock(CircuitBlock):
