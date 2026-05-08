@@ -46,9 +46,9 @@ The May 1–8 sprint cleared an enormous backlog of router-pipeline polish, boar
 | **v0.13.0 release** | Two-phase global routing with RSMT decomposition, RUDY congestion estimator, Specctra DSN export (2026-04-28) |
 | **C++ pathfinder hardening** | `cpp_backend` with stale-`.so` build-version guard (#2501), DRC violation cost feedback (#2442), pre-computed blocked bitmap (#2437), pad metal area expansion (#2434), resumable A* (#2449) |
 | **Auto-pour zones** | Power-net pour zones generated automatically with proper edge-clearance inset and per-net priority (#2407, #2417, #2422, #2461, #2519) |
-| **Boards 02–05 brought online** | Placement and full routing for charlieplex (#2153), USB joystick (#2154, #2536), STM32F103 board 04 (#2538, #2545), BLDC controller / DRV8301 (#2535, #2551) |
+| **Boards 02–05 brought online** | Placement and full routing for charlieplex (boards/02), USB joystick (boards/03, polished by #2536), STM32F103 board 04 (#2538, #2545), BLDC controller / DRV8301 (#2535, #2551) |
 | **CI hardening** | kicad-cli round-trip smoke test on every emitted PCB (#2507), build-time PCB validity smoke check (#2505), `_routed.kicad_pcb` validation gate (#2552) |
-| **Pipeline UX** | `kct pipeline` end-to-end workflow (#1971), `/release` skill for guided semver releases, `--commit` flag for pipeline runs |
+| **Pipeline UX** | `kct pipeline` end-to-end workflow (#1307), `/release` skill for guided semver releases, `--commit` flag for pipeline runs |
 | **Differential-pair groundwork** | CoupledPathfinder routing, N-pad coupling (#2478), `--differential-pairs` CLI flag (#2474), HIGH_CURRENT_SIGNAL net class (#2471) — all merged before Epic #2556 was scoped |
 | **Loom upgraded to 0.7.1** | Includes #2547 incremental-commit protocol (PR #2554) — builders and doctors must now commit incrementally |
 
