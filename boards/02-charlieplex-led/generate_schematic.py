@@ -2,17 +2,16 @@
 """
 Generate a KiCad Schematic for the 3x3 Charlieplex LED Grid.
 
-Uses global labels with short wire stubs for all net connections.
-This approach:
-1. Places symbols
-2. Draws short wire from each pin
-3. Places global label at wire end
+Uses the kicad_tools.schematic.blocks.create_charlieplex_matrix factory to
+emit the 9-LED, 4-resistor charlieplex topology. The factory uses global
+labels with short wire stubs for all internal connections, matching the
+style of the rest of this schematic.
 
 Usage:
     python generate_schematic.py [output_file] [-v|--verbose]
 
 Note:
-    Design data (LED connections, resistor connections, MCU pins) is defined
+    Design data (charlieplex topology, MCU pins, resistor values) is defined
     in design_spec.py to ensure schematic and PCB stay synchronized.
 """
 
@@ -21,13 +20,15 @@ import sys
 from pathlib import Path
 
 from design_spec import (
+    CHARLIEPLEX_LED_PAIRS,
+    CHARLIEPLEX_PIN_LABELS,
     LED_CONNECTIONS,
     MCU_PINS,
-    RESISTOR_CONNECTIONS,
     RESISTOR_VALUE,
 )
 
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.schematic.blocks import create_charlieplex_matrix
 from kicad_tools.schematic.grid import GridSize
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
@@ -119,64 +120,29 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
                 print(f"      Pin {pin_num} -> NC (no-connect)")
 
     # =========================================================================
-    # Section 2: Place Resistors with wire stubs
+    # Section 2 + 3: Place charlieplex matrix (resistors + LEDs)
     # =========================================================================
-    print("\n2. Placing resistors...")
-
-    resistor_base_x = 101.6
-    resistor_base_y = 63.5
-    resistor_spacing = 12.7
-
-    for i, resistor in enumerate(RESISTOR_CONNECTIONS):
-        x = resistor_base_x
-        y = resistor_base_y + i * resistor_spacing
-
-        r = sch.add_symbol(
-            "Device:R", x=x, y=y, ref=resistor.ref, value=RESISTOR_VALUE, auto_footprint=True
-        )
-        print(f"   {resistor.ref}: placed at ({r.x}, {r.y})")
-
-        # Add wire stubs with global labels at resistor pins
-        pin1_pos = r.pin_position("1")
-        pin2_pos = r.pin_position("2")
-
-        add_pin_label(sch, pin1_pos, resistor.input_net, direction="left")
-        add_pin_label(sch, pin2_pos, resistor.output_net, direction="right")
-        print(f"      {resistor.input_net} --[{resistor.ref}]-- {resistor.output_net}")
-
-    # =========================================================================
-    # Section 3: Place LEDs with wire stubs
-    # =========================================================================
-    print("\n3. Placing LEDs in 3x3 grid...")
-
-    led_start_x = 152.4
-    led_start_y = 50.8
-    led_spacing_x = 25.4
-    led_spacing_y = 25.4
-
-    for i, led_conn in enumerate(LED_CONNECTIONS):
-        row = i // 3
-        col = i % 3
-        x = led_start_x + col * led_spacing_x
-        y = led_start_y + row * led_spacing_y
-
-        led = sch.add_symbol(
-            "Device:LED",
-            x=x,
-            y=y,
-            ref=led_conn.ref,
-            value="LED",
-            footprint="LED_SMD:LED_0805_2012Metric",
-        )
-        print(f"   {led_conn.ref}: placed at ({led.x}, {led.y})")
-
-        # LED pins: pin 1 = cathode (K), pin 2 = anode (A)
-        pin1_pos = led.pin_position("1")  # Cathode
-        pin2_pos = led.pin_position("2")  # Anode
-
-        add_pin_label(sch, pin1_pos, led_conn.cathode_node, direction="left")
-        add_pin_label(sch, pin2_pos, led_conn.anode_node, direction="right")
-        print(f"      {led_conn.anode_node} -> LED -> {led_conn.cathode_node}")
+    # Use the create_charlieplex_matrix factory to emit the same topology
+    # previously assembled by hand (9 LEDs, 4 resistors, NODE_A..D / LINE_A..D
+    # global labels). Resistor and LED grid origins match the prior layout.
+    print("\n2. Placing charlieplex matrix (4 resistors + 9 LEDs)...")
+    matrix = create_charlieplex_matrix(
+        sch,
+        x=152.4,  # LED grid origin (top-left LED)
+        y=50.8,
+        pin_count=len(CHARLIEPLEX_PIN_LABELS),
+        led_pairs=CHARLIEPLEX_LED_PAIRS,
+        pin_labels=list(CHARLIEPLEX_PIN_LABELS),
+        resistor_value=RESISTOR_VALUE,
+        led_grid_cols=3,
+        led_spacing=(25.4, 25.4),
+        resistor_spacing=12.7,
+        # Place resistor column at the prior (101.6, 63.5) origin.
+        resistor_origin=(101.6, 63.5),
+        wire_stub=WIRE_STUB,
+    )
+    for ref, sym in matrix.components.items():
+        print(f"   {ref}: placed at ({sym.x}, {sym.y})")
 
     # =========================================================================
     # Section 4: Add Power Symbols with wire stubs and PWR_FLAG
