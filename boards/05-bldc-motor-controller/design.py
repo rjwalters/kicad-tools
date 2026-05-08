@@ -39,6 +39,7 @@ from kicad_tools.schematic.blocks import (
     LEDIndicator,
     ThreePhaseInverter,
     create_5v_buck,
+    create_gate_drive_resistor_array,
 )
 from kicad_tools.schematic.models.schematic import Schematic
 
@@ -363,26 +364,30 @@ def create_bldc_controller(output_dir: Path) -> Path:
     _connect_mcu_pin_to_label("12", "HALL_B", dx=5, dy=0)
     _connect_mcu_pin_to_label("13", "HALL_C", dx=5, dy=0)
 
-    # High-side gate PWM: PA8/PA9/PA10 (TIM1_CH1/CH2/CH3)
-    _connect_mcu_pin_to_label("18", "GATE_AH", dx=5, dy=0)
-    _connect_mcu_pin_to_label("19", "GATE_BH", dx=5, dy=0)
-    _connect_mcu_pin_to_label("20", "GATE_CH", dx=5, dy=0)
+    # High-side gate PWM: PA8/PA9/PA10 (TIM1_CH1/CH2/CH3).  These drive the
+    # DRV8301 INH_A/B/C logic inputs (pins 17/19/21), not the MOSFET gates
+    # directly — gate output of the driver is GATE_DRV_*H, then through the
+    # R20/R21/R22 slew-rate resistors to GATE_*H on the MOSFET gates.
+    _connect_mcu_pin_to_label("18", "PWM_AH", dx=5, dy=0)
+    _connect_mcu_pin_to_label("19", "PWM_BH", dx=5, dy=0)
+    _connect_mcu_pin_to_label("20", "PWM_CH", dx=5, dy=0)
 
     # SWD debug pins
     _connect_mcu_pin_to_label("23", "SWDIO", dx=5, dy=0)
     _connect_mcu_pin_to_label("24", "SWCLK", dx=5, dy=0)
     _connect_mcu_pin_to_label("26", "SWO", dx=5, dy=0)
 
-    # Low-side gate PWM: PB6/PB7/PB8 (TIM4_CH1/CH2/CH3, sync'd with TIM1)
-    _connect_mcu_pin_to_label("29", "GATE_AL", dx=5, dy=0)
-    _connect_mcu_pin_to_label("30", "GATE_BL", dx=5, dy=0)
-    _connect_mcu_pin_to_label("31", "GATE_CL", dx=5, dy=0)
+    # Low-side gate PWM: PB6/PB7/PB8 (TIM4_CH1/CH2/CH3, sync'd with TIM1).
+    # Drives DRV8301 INL_A/B/C logic inputs (pins 18/20/22).
+    _connect_mcu_pin_to_label("29", "PWM_AL", dx=5, dy=0)
+    _connect_mcu_pin_to_label("30", "PWM_BL", dx=5, dy=0)
+    _connect_mcu_pin_to_label("31", "PWM_CL", dx=5, dy=0)
 
     # Crystal pins: PF0/PF1 -> OSC_IN/OSC_OUT
     _connect_mcu_pin_to_label("2", "OSC_IN", dx=-5, dy=0)
     _connect_mcu_pin_to_label("3", "OSC_OUT", dx=-5, dy=0)
 
-    print("   Wired 16 floating nets (6 GATE, 3 HALL, 3 ISENSE-, 4 SWD) to MCU pins")
+    print("   Wired 16 floating nets (6 PWM, 3 HALL, 3 ISENSE-, 4 SWD) to MCU pins")
 
     # Crystal oscillator (8MHz)
     xtal = CrystalOscillator(
@@ -454,6 +459,22 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("   Gate driver: DRV8301 (GateDriverBlock)")
     print("   Bootstrap caps: C12, C13, C14")
     print("   Bypass caps: C15, C16")
+
+    # Series gate-drive (slew-rate) resistors between DRV8301 outputs and the
+    # high-side MOSFET gates.  ``GATE_DRV_AH/BH/CH`` are the driver-IC outputs;
+    # ``GATE_AH/BH/CH`` are the MOSFET-gate-side nets.  The array sits in the
+    # path between them.  Low-side gates remain direct-driven for now.
+    create_gate_drive_resistor_array(
+        sch,
+        x=X_GATE_DRV + 30,
+        y=120,
+        channels=3,
+        value="22",
+        ref_start=20,  # R20-R22 (R10-R12 are the current-sense shunts)
+        input_nets=["GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH"],
+        output_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+    )
+    print("   Gate-drive resistors: R20, R21, R22 (22 ohms, HS only)")
 
     # =========================================================================
     # Section 7: Power Stage (using ThreePhaseInverter and CurrentSenseShunt)
@@ -805,6 +826,20 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         "PWR_LED": 29,
         "STATUS_LED": 30,
         "SW_OUT": 31,
+        # Gate-driver-side (between DRV8301 outputs and the slew-rate resistors).
+        # The MOSFET-gate-side nets remain GATE_AH/BH/CH.  Low-side gates stay
+        # direct-driven so GATE_AL/BL/CL still tie the driver IC to the MOSFETs.
+        "GATE_DRV_AH": 32,
+        "GATE_DRV_BH": 33,
+        "GATE_DRV_CH": 34,
+        # MCU-side PWM logic inputs to the DRV8301 (pins 17-22).  These are
+        # distinct from the GATE_* nets above, which are the MOSFET gates.
+        "PWM_AH": 35,
+        "PWM_AL": 36,
+        "PWM_BH": 37,
+        "PWM_BL": 38,
+        "PWM_CH": 39,
+        "PWM_CL": 40,
     }
 
     # =========================================================================
@@ -882,6 +917,14 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     R10_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 84)
     R11_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 84)
     R12_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 84)
+
+    # Gate-drive (slew-rate) resistors -- between DRV8301 HS outputs and the
+    # high-side MOSFET gates.  Sit just above each phase's HS MOSFET so the
+    # GATE_DRV_*H -> GATE_*H net runs vertically.  R20-R22 use the same 0805
+    # footprint generator as R3/R4.
+    R20_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 64)  # Phase A HS
+    R21_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 64)  # Phase B HS
+    R22_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 64)  # Phase C HS
 
     # Motor connector (right edge, bottom -- near MOSFETs)
     J2_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 76)
@@ -1066,13 +1109,13 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #    15  CP2                                   -> +5V
     #    16  EN_GATE                               -> +3.3V (always-on)
     #
-    #   PWM logic inputs (17-22):
-    #    17  INH_A                                 <- GATE_AH
-    #    18  INL_A                                 <- GATE_AL
-    #    19  INH_B                                 <- GATE_BH
-    #    20  INL_B                                 <- GATE_BL
-    #    21  INH_C                                 <- GATE_CH
-    #    22  INL_C                                 <- GATE_CL
+    #   PWM logic inputs (17-22):  driven by the MCU on PWM_* nets.
+    #    17  INH_A                                 <- PWM_AH
+    #    18  INL_A                                 <- PWM_AL
+    #    19  INH_B                                 <- PWM_BH
+    #    20  INL_B                                 <- PWM_BL
+    #    21  INH_C                                 <- PWM_CH
+    #    22  INL_C                                 <- PWM_CL
     #
     #   Analog supplies / current-sense amps (23-33):
     #    23  DVDD     (internal 3.3-V supply, cap) -> +3.3V
@@ -1091,21 +1134,21 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #    34  SL_C     (low-side source / VDS-)     -> ISENSE_C-
     #    35  GL_C                                  -> GATE_CL
     #    36  SH_C                                  -> PHASE_C
-    #    37  GH_C                                  -> GATE_CH
+    #    37  GH_C                                  -> GATE_DRV_CH (via R22 to GATE_CH)
     #    38  BST_C    (high-side bootstrap)        -> VMOTOR (via cap, DC tie)
     #
     #   Half-bridge B (39-43):
     #    39  SL_B                                  -> ISENSE_B-
     #    40  GL_B                                  -> GATE_BL
     #    41  SH_B                                  -> PHASE_B
-    #    42  GH_B                                  -> GATE_BH
+    #    42  GH_B                                  -> GATE_DRV_BH (via R21 to GATE_BH)
     #    43  BST_B                                 -> VMOTOR
     #
     #   Half-bridge A (44-48):
     #    44  SL_A                                  -> ISENSE_A-
     #    45  GL_A                                  -> GATE_AL
     #    46  SH_A                                  -> PHASE_A
-    #    47  GH_A                                  -> GATE_AH
+    #    47  GH_A                                  -> GATE_DRV_AH (via R20 to GATE_AH)
     #    48  BST_A                                 -> VMOTOR
     #
     #   SPI / buck pins (49-57):
@@ -1145,12 +1188,12 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("14", "+5V"),           # CP1      (charge pump cap 1)
         ("15", "+5V"),           # CP2      (charge pump cap 2)
         ("16", "+3.3V"),         # EN_GATE  (always-on)
-        ("17", "GATE_AH"),       # INH_A
-        ("18", "GATE_AL"),       # INL_A
-        ("19", "GATE_BH"),       # INH_B
-        ("20", "GATE_BL"),       # INL_B
-        ("21", "GATE_CH"),       # INH_C
-        ("22", "GATE_CL"),       # INL_C
+        ("17", "PWM_AH"),        # INH_A    (PWM input from MCU)
+        ("18", "PWM_AL"),        # INL_A
+        ("19", "PWM_BH"),        # INH_B
+        ("20", "PWM_BL"),        # INL_B
+        ("21", "PWM_CH"),        # INH_C
+        ("22", "PWM_CL"),        # INL_C
         ("23", "+3.3V"),         # DVDD     (internal 3.3-V LDO output)
         ("24", "+3.3V"),         # REF      (current-sense reference)
         ("25", "ISENSE_A+"),     # SO1      (op-amp 1 output)
@@ -1165,17 +1208,17 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("34", "ISENSE_C-"),     # SL_C     (low-side source, half-bridge C)
         ("35", "GATE_CL"),       # GL_C
         ("36", "PHASE_C"),       # SH_C
-        ("37", "GATE_CH"),       # GH_C
+        ("37", "GATE_DRV_CH"),   # GH_C     (via R22 to GATE_CH)
         ("38", "VMOTOR"),        # BST_C    (bootstrap, via cap)
         ("39", "ISENSE_B-"),     # SL_B
         ("40", "GATE_BL"),       # GL_B
         ("41", "PHASE_B"),       # SH_B
-        ("42", "GATE_BH"),       # GH_B
+        ("42", "GATE_DRV_BH"),   # GH_B     (via R21 to GATE_BH)
         ("43", "VMOTOR"),        # BST_B
         ("44", "ISENSE_A-"),     # SL_A
         ("45", "GATE_AL"),       # GL_A
         ("46", "PHASE_A"),       # SH_A
-        ("47", "GATE_AH"),       # GH_A
+        ("47", "GATE_DRV_AH"),   # GH_A     (via R20 to GATE_AH)
         ("48", "VMOTOR"),        # BST_A
         ("49", "+3.3V"),         # VDD_SPI  (SPI logic supply)
         ("50", "SW_OUT"),        # PH       (buck switch node)
@@ -1249,8 +1292,8 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     # STM32G431K8Tx LQFP-32 pin -> net mapping.  Pin-to-port assignments come
     # from the steering decision in #2529 and the STM32G431 datasheet:
-    #   * TIM1_CH1/2/3 (PA8/PA9/PA10)  -> high-side gates AH/BH/CH
-    #   * TIM4_CH1/2/3 (PB6/PB7/PB8)   -> low-side gates AL/BL/CL
+    #   * TIM1_CH1/2/3 (PA8/PA9/PA10)  -> PWM_AH/BH/CH (DRV8301 INH_A/B/C)
+    #   * TIM4_CH1/2/3 (PB6/PB7/PB8)   -> PWM_AL/BL/CL (DRV8301 INL_A/B/C)
     #   * ADC1_IN1..IN3 (PA0/PA1/PA2)  -> ISENSE_A-/B-/C-
     #   * GPIO/TIM3 capture (PA6/PA7/PB0) -> HALL_A/B/C
     #   * SWD: PA13 SWDIO, PA14 SWCLK, PB3 SWO, PG10 NRST
@@ -1272,9 +1315,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("15", "+3.3V"),       # VDDA
         ("16", "GND"),         # VSS
         ("17", "+3.3V"),       # VDD
-        ("18", "GATE_AH"),     # PA8  TIM1_CH1
-        ("19", "GATE_BH"),     # PA9  TIM1_CH2
-        ("20", "GATE_CH"),     # PA10 TIM1_CH3
+        ("18", "PWM_AH"),      # PA8  TIM1_CH1   (HS PWM -> DRV8301 INH_A)
+        ("19", "PWM_BH"),      # PA9  TIM1_CH2   (HS PWM -> DRV8301 INH_B)
+        ("20", "PWM_CH"),      # PA10 TIM1_CH3   (HS PWM -> DRV8301 INH_C)
         ("21", "GND"),         # PA11 (unused)
         ("22", "GND"),         # PA12 (unused)
         ("23", "SWDIO"),       # PA13
@@ -1283,9 +1326,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("26", "SWO"),         # PB3 (SWO/TIM2_CH2)
         ("27", "GND"),         # PB4 (unused)
         ("28", "GND"),         # PB5 (unused)
-        ("29", "GATE_AL"),     # PB6  TIM4_CH1
-        ("30", "GATE_BL"),     # PB7  TIM4_CH2
-        ("31", "GATE_CL"),     # PB8  TIM4_CH3
+        ("29", "PWM_AL"),      # PB6  TIM4_CH1   (LS PWM -> DRV8301 INL_A)
+        ("30", "PWM_BL"),      # PB7  TIM4_CH2   (LS PWM -> DRV8301 INL_B)
+        ("31", "PWM_CL"),      # PB8  TIM4_CH3   (LS PWM -> DRV8301 INL_C)
         ("32", "GND"),         # VSS
     ]
 
@@ -1615,6 +1658,14 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_resistor_2512("R12", R12_POS, "5mR", "ISENSE_C+", "ISENSE_C-"))
     print(f"   R10, R11, R12 (5mOhm shunts)")
 
+    print("\n9b. Adding gate-drive (slew-rate) resistors...")
+    # Series 22-ohm resistors between DRV8301 HS outputs and the MOSFET gates.
+    # Each connects GATE_DRV_*H (driver IC output) to GATE_*H (MOSFET gate).
+    parts.append(generate_resistor_0805("R20", R20_POS, "22", "GATE_DRV_AH", "GATE_AH"))
+    parts.append(generate_resistor_0805("R21", R21_POS, "22", "GATE_DRV_BH", "GATE_BH"))
+    parts.append(generate_resistor_0805("R22", R22_POS, "22", "GATE_DRV_CH", "GATE_CH"))
+    print("   R20, R21, R22 (22 ohm gate-drive, HS only)")
+
     print("\n10. Adding connectors...")
     # J2: Motor output (3-pin)
     parts.append(generate_pin_header("J2", J2_POS, 3, "Motor Output", ["PHASE_A", "PHASE_B", "PHASE_C"]))
@@ -1651,7 +1702,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         + 6  # MOSFETs
         + 4  # ICs (U1 buck, U2 LDO, U3 DRV8301, U10 STM32G431K8Tx)
         + 16  # capacitors (C1-C16)
-        + 5  # resistors (R3, R4, R10-R12)
+        + 8  # resistors (R3, R4, R10-R12, R20-R22)
         + 4  # diodes (D1-D4)
         + 1  # inductor
         + 1  # fuse
@@ -1861,7 +1912,7 @@ def main() -> int:
         print("  LDO (5V->3.3V): U2, C5-C6")
         print("  MCU: C7-C9, Y1 (C10-C11)")
         print("  Gate driver: U3, C12-C16")
-        print("  Power stage: Q1-Q6, R10-R12")
+        print("  Power stage: Q1-Q6, R10-R12 (current sense), R20-R22 (gate-drive)")
         print("  Connectors: J1-J4")
         print("  LEDs: D3-D4, R3-R4")
 
