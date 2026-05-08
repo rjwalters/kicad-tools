@@ -416,12 +416,14 @@ fi
 
 **Phase contracts and recovery**:
 
-| Phase | Expected Outcome | Recovery |
-|-------|-----------------|----------|
+| Phase | Expected Outcome | Recovery (Fallback) |
+|-------|-----------------|---------------------|
 | `curator` | `loom:curated` label on issue | Apply label (curator may have enhanced but not labeled) |
-| `builder` | PR exists with `loom:review-requested` | Commit/push worktree changes, create PR |
+| `builder` | PR exists with `loom:review-requested` | Commit/push residual worktree changes since the last incremental commit, create PR |
 | `judge` | `loom:pr` or `loom:changes-requested` on PR | No recovery — mark `loom:blocked` |
-| `doctor` | `loom:review-requested` on PR | No recovery — mark `loom:blocked` |
+| `doctor` | `loom:review-requested` on PR | Commit/push residual worktree changes since the last incremental commit, then mark `loom:blocked` if PR still missing the label |
+
+**Recovery is a fallback, not a primary mechanism.** Builders and doctors are required by their role contracts (see `.claude/commands/loom/builder.md` Incremental Commit Protocol and `.claude/commands/loom/doctor.md` Incremental Commit Protocol) to commit AND push at well-defined boundaries during a single agent run. When followed, the worktree should already have committed progress at every point of failure, and the recovery step here only captures any uncommitted changes since the most recent incremental commit. This is a structural change from the previous model where recovery was the *only* path for preserving builder/doctor work on a crash — the previous model was the root cause of issue #2547 (#2542 builder lost 175 min of work, PR #2535 doctor lost diagnostic state, both because no per-boundary commit contract existed).
 
 Use `--json` for machine-readable output. Exit code 0 means contract satisfied (initially or after recovery), 1 means failed.
 

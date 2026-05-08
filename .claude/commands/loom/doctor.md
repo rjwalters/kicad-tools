@@ -510,6 +510,110 @@ $ sleep 60 && gh pr checks 1448
 # ... 1 CI run, complete in one pass
 ```
 
+## Incremental Commit Protocol
+
+**CRITICAL: You MUST commit and push at well-defined boundaries during a single agent run, not only at the end of the cycle.** A single end-of-cycle commit is insufficient for long iterative work — and "iterative" describes most doctor sessions, where each fix attempt may or may not move the failing CI check toward green.
+
+### Why This Exists (Concrete Failure)
+
+This protocol is not theoretical — it is a direct response to **PR #2535 (doctor, 2026-05)**: doctor crashed during a fix attempt without making any commits, losing all in-progress diagnostic work. The same week, the builder on issue #2542 ran for 175 minutes and crashed with API 529 having committed nothing. **Both failures left work recoverable only via manual worktree inspection.** Doctors are particularly exposed because:
+
+- Diagnostic work (reading logs, running tests, narrowing down failures) is high-value and often discarded if not committed
+- A doctor frequently runs *multiple* fix attempts in a single session — without incremental commits, only the final attempt is durable
+
+### Required Commit Boundaries (MUST)
+
+You MUST make a commit AND push (`git push`) at every one of these boundaries:
+
+| # | Boundary | Trigger | Why this is a natural seam |
+|---|----------|---------|----------------------------|
+| 1 | **After CI assessment is complete** | Finished step 1-3 of "CI Assessment (First Step)" above — you have the full list of failures and a fix plan | The plan itself is recoverable artifact; if you crash next, the next doctor doesn't have to re-run all the log fetches |
+| 2 | **After each fix attempt that changes a file** | You modified a test, a config, or production code as part of a fix — even if you haven't yet re-run the failing check | A failed-but-informative attempt (e.g. "this assertion update didn't help, but reveals the real bug is upstream") is worth preserving |
+| 3 | **Before any single command/operation expected to take >2 min** | Long test runs (`pnpm check:ci` on this repo takes ~15-20 min locally), CI status polls, slow simulations | Wall-clock risk window — if the tool call hangs or your session is killed during the wait, a commit-then-run pattern keeps the fix in `git log` |
+| 4 | **Before any push that triggers a long CI cycle** | Even a "single push" that triggers ~60 min of GitHub Actions is a checkpoint worth committing locally first, since CI failures may require another fix iteration | Decouples local commit from remote CI fate |
+
+**Push every committed batch.** Local commits inside a worktree are still a recovery hazard — the disk can fill, the worktree can be reused, another tool can clobber it. `git push` puts the work on the remote where it is durable.
+
+### How to Commit Incrementally as a Doctor
+
+```bash
+# After completing the CI assessment in step 1-3 of "CI Assessment (First Step)"
+# Even if no code has changed yet, commit a notes file so the plan is durable:
+cat > .loom/doctor-fix-plan.md <<'EOF'
+PR #1448 fix plan:
+1. state.test.ts — update mock for useConfig (renamed in #1444)
+2. button.test.ts — refresh snapshot
+3. SC2086 in scripts/worktree.sh:45 — quote $TARGET
+EOF
+git add .loom/doctor-fix-plan.md
+git commit -m "wip(doctor): triaged CI failures — fix plan recorded"
+git push
+
+# After fix attempt #1 — even if it didn't fully resolve the CI failures
+git add src/state.test.ts
+git commit -m "wip(doctor): update useConfig mock — fixes 8/21 frontend test failures"
+git push
+
+# Before launching a long pnpm check:ci run
+git add src/button.test.ts
+git commit -m "wip(doctor): refresh button snapshot"
+git push
+# Now safe to run pnpm check:ci, even if the run dies the snapshot fix is durable
+pnpm check:ci
+```
+
+### Verifying the Protocol Works (Simulated Crash)
+
+```bash
+# 1. Doctor commits + pushes after CI triage
+git commit -m "wip(doctor): triaged CI failures — fix plan recorded"
+git push
+
+# 2. Doctor begins fix #1 — modifies test, runs pnpm test (slow)
+# 3. API 529 / OOM / session timeout terminates the process
+# 4. Worktree is destroyed; the next doctor or human picks up.
+
+# 5. The next doctor can read the plan from PR branch:
+gh pr checkout 1448
+cat .loom/doctor-fix-plan.md  # plan is durable, no re-triage needed
+git log --oneline              # know which fix attempts have been tried
+
+# Without this protocol, the entire CI assessment + any partial fixes are gone.
+```
+
+### Intermediate Commit Message Style
+
+Use `wip(doctor):` for intermediate commits during a fix session — they will be squashed at merge time by the champion.
+
+**Good intermediate messages:**
+- `wip(doctor): triaged CI failures — fix plan recorded`
+- `wip(doctor): update useConfig mock — fixes 8/21 frontend test failures`
+- `wip(doctor): SC2086 fix in scripts/worktree.sh, shellcheck still failing on SC2164`
+
+**Bad (avoid):**
+- `progress` / `wip` / `checkpoint` (no information)
+- Final-style messages (`fix: resolve all CI failures`) until you actually have
+
+### Cleanup of `.loom/doctor-fix-plan.md`
+
+If you committed a fix plan as a recoverability aid, remove it before the final commit so it doesn't ship in the merged PR:
+
+```bash
+git rm .loom/doctor-fix-plan.md
+git commit -m "chore: remove doctor fix plan (work complete)"
+```
+
+The squash-merge will collapse all of these into the single PR title commit, but having the cleanup as its own intermediate commit keeps reviewer-visible history clean if the squash is ever bypassed.
+
+### When NOT to Commit Incrementally
+
+- **Mid-edit broken code** — finish the coherent unit first
+- **Diagnostic-only work that produced no file change** — if you ran `gh run view` and `pnpm test --filter foo` but did not edit any tracked file, there is nothing to commit. (The fix-plan-as-file pattern above is the workaround if you have non-trivial findings to preserve.)
+
+### Recovery Now Works Even on Hard Crashes
+
+With this protocol followed, a doctor that crashes mid-fix leaves the PR branch with progress and a fix plan visible in `git log`. The next doctor (or human) inherits the previous attempt's diagnostic work instead of starting from scratch. See `.claude/commands/loom/shepherd-lifecycle.md` Phase contracts table for the updated recovery framing.
+
 ## Types of Feedback to Address
 
 ### Quick Fixes (Always Handle)

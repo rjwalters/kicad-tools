@@ -382,6 +382,116 @@ You can read the current checkpoint:
 ./.loom/scripts/checkpoint.sh read --json  # For programmatic use
 ```
 
+## Incremental Commit Protocol
+
+**CRITICAL: You MUST commit and push at well-defined boundaries during a single agent run, not only at the end of the cycle.** A single end-of-cycle commit is insufficient for long iterative work.
+
+### Why This Exists (Concrete Failures)
+
+This protocol is not theoretical — it is a direct response to recoverable-only-by-luck failures observed in 2026-05:
+
+- **Issue #2542 (builder, 2026-05-07)**: Builder ran for **175 minutes** on board 05 placement, made real progress on `design.py` (~24 LoC of useful changes), then crashed with API 529. **Zero commits were made during the run.** The work was only recovered because the user manually inspected the worktree before it was reused. With incremental commits + push, the work would have been durable on the remote feature branch the moment the agent pushed, regardless of any session destruction.
+- **PR #2535 (doctor)**: Doctor crashed without any commits during a fix attempt; same recovery exposure.
+
+The existing recovery story (`validate-phase.sh` invoking commit/push from a still-on-disk worktree) is a **fallback**, not a guarantee. If the worktree is reused or wiped before the shepherd validates, uncommitted work is gone.
+
+### Required Commit Boundaries (MUST)
+
+You MUST make a commit AND push (`git push origin <branch>`) at every one of these boundaries. These boundaries are deliberately chosen to align with the existing checkpoint stages above — every checkpoint transition you write should also be a commit boundary.
+
+| # | Boundary | Trigger | Why this is a natural seam |
+|---|----------|---------|----------------------------|
+| 1 | **Scaffolding / infrastructure** | Adding a parameter, helper, type, stub, fixture, or import that is not yet exercised by any code path | Self-contained, well-described, low-blast-radius — easy to write a clear `wip:` message even if nothing calls it yet |
+| 2 | **Between tier attempts** | Iterative algorithm with named tiers (e.g. Tier 0 -> Tier 1 -> ... in a routing or placement search). Each tier is its own checkpoint of "approach X didn't work, trying Y" | Even a *failed* tier attempt is information worth preserving in `git log` for the next agent or human |
+| 3 | **Before any single command/operation expected to take >2 min** | Long route attempts, large test runs, slow simulations, KiCad invocations with thousands of nets | Wall-clock risk window — checkpoint the state of the world before the gamble |
+| 4 | **At every checkpoint stage transition** | Already a thing for state tracking (`planning` -> `implementing` -> `tested`); piggyback a commit on each meaningful transition | Forces git history to align with the recovery checkpoints |
+
+**Push every committed batch.** Local commits inside a worktree are still a recovery hazard — the disk can fill, the worktree can be reused, another tool can clobber it. `git push` puts the work on the remote where it is durable.
+
+### How to Commit Incrementally
+
+```bash
+# After completing scaffolding (e.g. added a no-op parameter)
+git add src/foo.py
+git commit -m "wip: add rotation parameter to generate_htssop56 (no-op)"
+git push origin "$(git branch --show-current)"
+./.loom/scripts/checkpoint.sh write --stage committed --issue <N> --commit-sha "$(git rev-parse HEAD)"
+
+# Before launching a long routing attempt for Tier 2 (the previous tier, Tier 1, just failed)
+git add boards/05-bldc-motor-controller/
+git commit -m "wip(board-05): tier 1 placement attempt — DRC still failing on U1<->U2"
+git push origin "$(git branch --show-current)"
+./.loom/scripts/checkpoint.sh write --stage committed --issue <N> --commit-sha "$(git rev-parse HEAD)"
+
+# Continue with Tier 2 — even if you crash now, Tier 1 result is durably on remote
+```
+
+### Verifying the Protocol Works (Simulated Crash)
+
+To convince yourself this actually preserves work on a hard crash, run this thought experiment:
+
+```bash
+# 1. Builder is at Tier 2 of placement search. It commits + pushes a wip:
+git commit -m "wip(board-05): tier 1 attempt"
+git push origin feature/issue-2394
+
+# 2. Builder begins Tier 2 — a long, expensive routing run
+# 3. API 529 (or OOM, or session timeout) terminates the process MID-ROUTE
+# 4. Worktree is destroyed; orchestrator picks up.
+
+# 5. The next agent or human checks:
+gh pr list --search "head:feature/issue-2394"        # branch is on remote
+git log --oneline origin/feature/issue-2394          # tier-1 commit is present
+# Tier 1 progress is preserved. Tier 2 is gone (it never committed),
+# but Tier 1 was *known to work* — that's the durable state to resume from.
+```
+
+Without incremental commits, both Tier 1 and Tier 2 progress would be on disk in the worktree only, and would be lost the moment the worktree was wiped. This is exactly what happened on issue #2542 (175 min builder, crashed, manual recovery only).
+
+### Intermediate Commit Message Style
+
+Intermediate commits will be **squashed at merge time** by the champion (this repo uses squash-merge), so the final commit on `main` is the PR title. But intermediate messages still matter for:
+- Worktree history when an agent crashes and another picks up
+- `git log --oneline` debugging during the run
+- The shepherd's recovery decision (a meaningful message tells it what was preserved)
+
+**Good intermediate messages:**
+- `wip: add rotation parameter to generate_htssop56 (no-op)`
+- `wip(board-05): tier 1 placement attempt — DRC still failing on U1<->U2`
+- `wip(router): scaffolding for CoupledPathfinder neck-down support`
+
+**Bad (avoid these for intermediates):**
+- `progress` / `wip` / `checkpoint` (no information content)
+- `working` (says nothing)
+- Final-style messages (`fix: resolve DRC violations on board 05`) — premature; save for the final commit
+
+### Relationship to the Checkpoint System
+
+The `committed` checkpoint stage and incremental commits are **complementary, not duplicative**:
+
+- An incremental `git commit` makes the work durable on remote (after push).
+- A `committed` checkpoint write tells the shepherd: "the work I just did at this stage is safely committed at SHA X."
+- **Write a `committed` checkpoint after every incremental commit**, passing the new `--commit-sha`. This keeps the recovery system aligned with git history.
+
+### When NOT to Commit Incrementally
+
+- **Untested broken code in the middle of a single coherent edit** — if you are 3 lines into a 30-line refactor and the file does not parse, finish the edit first. The boundary triggers (tier transition, >2min command, scaffolding done) all imply a coherent unit is complete.
+- **Generated artifacts that pollute the diff** — `boards/*/output/*.kicad_pcb` regenerated as a side effect should be committed deliberately, not folded into a `wip:` commit, unless they are the actual deliverable.
+
+### Recovery Now Works Even on Hard Crashes
+
+With this protocol followed, a builder that crashes mid-tier leaves a feature branch on the remote with progress visible in `git log`. The shepherd's `validate-phase.sh` recovery becomes a **fallback** for "changes since the last incremental commit," not the only mechanism keeping work alive. See `.claude/commands/loom/shepherd-lifecycle.md` Phase contracts table for the updated recovery framing.
+
+### Self-Check Before Long Operations
+
+Before any single tool call you expect to take more than ~2 minutes, ask:
+
+1. Is there work on disk since the last `git push`?
+2. If yes, is it in a coherent enough state to commit as `wip:`?
+3. If yes, **commit and push first**, then run the long operation.
+
+If the answer to (2) is "no, the file is mid-edit and broken," finish the edit before starting the long operation — do not start a >2min op while holding uncommitted broken state.
+
 ## Signaling "No Changes Needed"
 
 If after analyzing the issue you determine that **no code changes are required** (e.g. the bug is already fixed on main, the feature already exists, the issue is invalid), you **MUST** create a `.no-changes-needed` marker file in the worktree root before exiting:
