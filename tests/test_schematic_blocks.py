@@ -1995,6 +1995,114 @@ class TestUSBPowerInputMocked:
         assert mock_schematic.add_junction.called
 
 
+class TestUSBPowerVsUSBConnector:
+    """Document the USBPowerInput-vs-USBConnector distinction (issue #2571).
+
+    USBPowerInput models a power-only USB inlet (no connector symbol, no
+    data lines). USBConnector models a real USB connector that carries
+    both power and data. The two are not interchangeable.
+    """
+
+    @pytest.fixture
+    def mock_schematic_for_power(self):
+        """Mock schematic configured for USBPowerInput (fuse + cap pins)."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Polyfuse" in str(symbol) or "Fuse" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    @pytest.fixture
+    def mock_schematic_for_connector(self):
+        """Mock schematic configured for USBConnector (USB pin names)."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "USB" in str(symbol) or "Connector" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "VBUS": (x - 10, y - 10),
+                    "GND": (x - 10, y + 10),
+                    "D+": (x - 10, y - 5),
+                    "D-": (x - 10, y),
+                    "CC1": (x - 10, y + 5),
+                    "CC2": (x - 10, y + 7),
+                    "SHIELD": (x - 10, y + 15),
+                }.get(name, (x, y))
+            else:
+                comp.pin_position.return_value = (x, y)
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_usb_power_input_is_power_only(self, mock_schematic_for_power):
+        """USBPowerInput exposes only power ports — no D+/D- (data) ports.
+
+        Asserts the contract documented in the USBPowerInput docstring:
+        this is a power-only inlet with VBUS_IN / V5 / GND ports and no
+        connector symbol or data lines.
+        """
+        usb = USBPowerInput(mock_schematic_for_power, x=100, y=100, protection="polyfuse")
+
+        # Power-only ports
+        assert set(usb.ports) == {"VBUS_IN", "V5", "GND"}
+
+        # No data lines
+        assert "D+" not in usb.ports
+        assert "D-" not in usb.ports
+        # Also no Type-C / OTG metadata
+        assert "CC1" not in usb.ports
+        assert "CC2" not in usb.ports
+        assert "ID" not in usb.ports
+        assert "SHIELD" not in usb.ports
+
+    def test_usb_connector_has_data_lines(self, mock_schematic_for_connector):
+        """USBConnector(type-c) exposes data + power + Type-C CC pins.
+
+        Counterpart to test_usb_power_input_is_power_only: USBConnector is
+        the right block when both data and power are needed.
+        """
+        usb = USBConnector(
+            mock_schematic_for_connector,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+
+        # Data lines present
+        assert "D+" in usb.ports
+        assert "D-" in usb.ports
+        # Power lines present
+        assert "VBUS" in usb.ports
+        assert "GND" in usb.ports
+        # Type-C config-channel pins present
+        assert "CC1" in usb.ports
+        assert "CC2" in usb.ports
+
+    def test_usb_power_and_usb_connector_are_distinct_classes(self):
+        """Sanity check: the two blocks are different types and not interchangeable."""
+        assert USBPowerInput is not USBConnector
+
+
 class TestBatteryInputMocked:
     """Tests for BatteryInput with mocked schematic."""
 
