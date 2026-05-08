@@ -3190,9 +3190,7 @@ class TestCreateGpioPullResistor:
 
     def test_pull_up_to_vcc(self, mock_schematic):
         """pull_type='up' produces a pull-up to VCC."""
-        block = create_gpio_pull_resistor(
-            mock_schematic, x=100, y=100, pull_type="up", rail="VCC"
-        )
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100, pull_type="up", rail="VCC")
         assert block.default_high is True
         assert "PIN" in block.ports
         assert "VCC" in block.ports
@@ -3216,18 +3214,14 @@ class TestCreateGpioPullResistor:
 
     def test_custom_rail_name_pullup(self, mock_schematic):
         """rail='+5V' on a pull-up is exposed (not coerced to VCC)."""
-        block = create_gpio_pull_resistor(
-            mock_schematic, x=100, y=100, pull_type="up", rail="+5V"
-        )
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100, pull_type="up", rail="+5V")
         assert "+5V" in block.ports
         assert "VCC" in block.ports
         assert block.ports["+5V"] == block.ports["VCC"]
 
     def test_custom_pin_name(self, mock_schematic):
         """pin_name='ADDR' exposes port 'ADDR' (not 'BOOT'/'PIN')."""
-        block = create_gpio_pull_resistor(
-            mock_schematic, x=100, y=100, pin_name="ADDR"
-        )
+        block = create_gpio_pull_resistor(mock_schematic, x=100, y=100, pin_name="ADDR")
         assert "ADDR" in block.ports
 
     def test_footprint_passthrough(self, mock_schematic):

@@ -864,9 +864,7 @@ class BootModeSelector(CircuitBlock):
                 footprint=footprint,
             )
         else:
-            self.resistor = sch.add_symbol(
-                resistor_symbol, x, resistor_y, r_ref, resistor_value
-            )
+            self.resistor = sch.add_symbol(resistor_symbol, x, resistor_y, r_ref, resistor_value)
         self.components["R"] = self.resistor
         self.resistors["R1"] = self.resistor
 
@@ -1157,9 +1155,7 @@ def create_gpio_pull_resistor(
         ... )
     """
     if pull_type not in ("up", "down"):
-        raise ValueError(
-            f"Invalid pull_type {pull_type!r}. Must be 'up' or 'down'."
-        )
+        raise ValueError(f"Invalid pull_type {pull_type!r}. Must be 'up' or 'down'.")
     if not isinstance(rail, str) or not rail:
         raise ValueError("rail must be a non-empty string")
 
