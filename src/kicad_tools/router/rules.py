@@ -484,6 +484,7 @@ NET_CLASS_HIGH_SPEED = NetClassRouting(
     priority=2,
     trace_width=0.2,
     clearance=0.15,
+    intra_pair_clearance=0.075,  # Issue #2559 / Epic #2556 Phase 1C
     cost_multiplier=0.85,
     length_critical=True,
 )
