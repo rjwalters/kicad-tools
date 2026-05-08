@@ -18,6 +18,7 @@ from kicad_tools.schematic.blocks import (
     DecouplingCaps,
     GateDriverBlock,
     HalfBridge,
+    HallSensorInput,
     I2CPullups,
     LDOBlock,
     LEDIndicator,
@@ -44,6 +45,7 @@ from kicad_tools.schematic.blocks import (
     create_generic_boot,
     create_gpio_pull_resistor,
     create_half_bridge,
+    create_hall_sensor_input,
     create_i2c_pullups,
     create_jtag_header,
     create_lipo_battery,
@@ -4170,6 +4172,133 @@ class TestMotorControlFactoryFunctions:
         sense = create_current_sense(mock_schematic, x=100, y=100, with_amplifier=True, gain=50)
         assert sense.has_amplifier is True
         assert sense.gain == 50
+
+    def test_create_hall_sensor_input(self, mock_schematic):
+        """Create Hall sensor input via factory with defaults."""
+        block = create_hall_sensor_input(mock_schematic, x=100, y=100)
+        assert isinstance(block, HallSensorInput)
+        # Default ref_start=1 produces R1 + C1
+        refs = [call.args[3] for call in mock_schematic.add_symbol.call_args_list]
+        assert "R1" in refs
+        assert "C1" in refs
+
+    def test_create_hall_sensor_input_custom_values(self, mock_schematic):
+        """Custom pull-up / cap / ref_start propagate through the factory."""
+        block = create_hall_sensor_input(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup="4.7k",
+            filter_cap="22nF",
+            ref_start=30,
+        )
+        assert isinstance(block, HallSensorInput)
+        # Verify keyword args propagated to the underlying symbols
+        symbol_calls = mock_schematic.add_symbol.call_args_list
+        # Each call has (symbol, x, y, ref, value, ...)
+        refs_to_values = {call.args[3]: call.args[4] for call in symbol_calls}
+        assert refs_to_values["R30"] == "4.7k"
+        assert refs_to_values["C30"] == "22nF"
+
+
+# =============================================================================
+# Hall Sensor Input Block Tests
+# =============================================================================
+
+
+class TestHallSensorInputMocked:
+    """Tests for HallSensorInput with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic with deterministic R/C pin positions."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.reference = ref
+            # R / C symbols expose pins "1" (top) and "2" (bottom).
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_label = Mock()
+        return sch
+
+    def test_creation_defaults(self, mock_schematic):
+        """Block instantiates with required components and ports."""
+        block = HallSensorInput(mock_schematic, x=100, y=100)
+
+        assert block.schematic == mock_schematic
+        assert block.x == 100
+        assert block.y == 100
+        # Components present
+        assert "R_pull" in block.components
+        assert "C_filt" in block.components
+        # Ports present
+        assert "VCC" in block.ports
+        assert "SIGNAL_IN" in block.ports
+        assert "SIGNAL_OUT" in block.ports
+        assert "GND" in block.ports
+
+    def test_default_values(self, mock_schematic):
+        """Defaults: pull-up 10k, filter cap 10nF."""
+        HallSensorInput(mock_schematic, x=100, y=100)
+        symbol_calls = mock_schematic.add_symbol.call_args_list
+        # Two symbol creations: pull-up resistor, filter cap
+        assert len(symbol_calls) == 2
+        refs_to_values = {call.args[3]: call.args[4] for call in symbol_calls}
+        assert refs_to_values["R1"] == "10k"
+        assert refs_to_values["C1"] == "10nF"
+
+    def test_custom_rc_values(self, mock_schematic):
+        """Custom pull-up and filter cap values propagate to symbols."""
+        HallSensorInput(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup_value="4.7k",
+            filter_cap="22nF",
+        )
+        symbol_calls = mock_schematic.add_symbol.call_args_list
+        refs_to_values = {call.args[3]: call.args[4] for call in symbol_calls}
+        assert refs_to_values["R1"] == "4.7k"
+        assert refs_to_values["C1"] == "22nF"
+
+    def test_ref_start_offsets(self, mock_schematic):
+        """ref_start=30 produces R30 and C30."""
+        HallSensorInput(mock_schematic, x=100, y=100, ref_start=30)
+        refs = [call.args[3] for call in mock_schematic.add_symbol.call_args_list]
+        assert "R30" in refs
+        assert "C30" in refs
+
+    def test_wires_pullup_to_signal(self, mock_schematic):
+        """Block wires the pull-up resistor to the filter cap junction."""
+        HallSensorInput(mock_schematic, x=100, y=100)
+        assert mock_schematic.add_wire.called
+
+    def test_signal_in_and_out_share_node(self, mock_schematic):
+        """SIGNAL_IN and SIGNAL_OUT are the same electrical node."""
+        block = HallSensorInput(mock_schematic, x=100, y=100)
+        assert block.ports["SIGNAL_IN"] == block.ports["SIGNAL_OUT"]
+
+    def test_custom_symbols(self, mock_schematic):
+        """Custom resistor / capacitor symbol arguments propagate."""
+        HallSensorInput(
+            mock_schematic,
+            x=100,
+            y=100,
+            resistor_symbol="Device:R_Small",
+            capacitor_symbol="Device:C_Small",
+        )
+        symbols_used = [call.args[0] for call in mock_schematic.add_symbol.call_args_list]
+        assert "Device:R_Small" in symbols_used
+        assert "Device:C_Small" in symbols_used
 
 
 # ---------------------------------------------------------------------------
