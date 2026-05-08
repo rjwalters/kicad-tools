@@ -16,7 +16,11 @@ import sys
 from pathlib import Path
 
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.schematic.blocks import USBConnector, create_analog_joystick
+from kicad_tools.schematic.blocks import (
+    USBConnector,
+    create_analog_joystick,
+    create_crystal_with_loads,
+)
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
@@ -193,39 +197,33 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     print(f"   Filter Rs/Cs + BTN pull-up: {len(joy_block.components)} components total")
 
     # =========================================================================
-    # Section 4: Place Crystal
+    # Section 4: Place Crystal with load capacitors
     # =========================================================================
-    print("\n4. Placing Crystal...")
+    print("\n4. Placing Crystal with load capacitors...")
 
-    # Crystal should be near MCU
+    # Crystal should be near MCU. Use create_crystal_with_loads to instantiate
+    # the crystal AND its two 22pF load caps in one shot - previously this
+    # board placed only the bare crystal, leaving the load caps floating
+    # (an electrical bug for any real 16 MHz HSE oscillator).
     xtal_pos = sch.suggest_position(
         "Device:Crystal",
         near=(127.0, 76.2),  # Near MCU
         padding=5.08,
     )
 
-    try:
-        xtal = sch.add_symbol(
-            "Device:Crystal",
-            x=xtal_pos[0],
-            y=xtal_pos[1],
-            ref="Y1",
-            value="16MHz",
-            footprint="Crystal:Crystal_HC49-U_Vertical",
-        )
-        print(f"   Y1 (Crystal): placed at ({xtal.x}, {xtal.y})")
-    except Exception as e:
-        print(f"   Warning: Crystal symbol not available: {e}")
-        # Use resistor as placeholder
-        xtal = sch.add_symbol(
-            "Device:R",
-            x=xtal_pos[0],
-            y=xtal_pos[1],
-            ref="Y1",
-            value="16MHz",
-            footprint="Crystal:Crystal_HC49-U_Vertical",
-        )
-        print(f"   Y1 (Crystal placeholder): placed at ({xtal.x}, {xtal.y})")
+    xtal_block = create_crystal_with_loads(
+        sch,
+        x=xtal_pos[0],
+        y=xtal_pos[1],
+        frequency="16MHz",
+        load_pF=22,
+        cap_ref_start=5,  # C1-C4 are MCU decoupling caps; load caps become C5/C6
+        crystal_footprint="Crystal:Crystal_HC49-U_Vertical",
+        cap_footprint="Capacitor_SMD:C_0402_1005Metric",
+    )
+    xtal = xtal_block.crystal
+    print(f"   Y1 (Crystal): placed at ({xtal.x}, {xtal.y})")
+    print("   C5/C6 (load caps, 22pF): placed below crystal")
 
     # =========================================================================
     # Section 5: Place Buttons (test multiple placements with autolayout)
@@ -420,16 +418,15 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
 
     # Joystick (J2) wiring is handled by create_analog_joystick (Section 3).
 
-    # Wire crystal pins
+    # Wire crystal pins (load caps already wired internally by the block).
+    # Connect the load-cap ground bus to the GND rail and label IN/OUT for
+    # routing back to the MCU XTAL1/XTAL2 pins.
     print("   Wiring Crystal (Y1) pins...")
-    xtal_pin1 = xtal.pin_position("1")
-    xtal_pin2 = xtal.pin_position("2")
-    if xtal_pin1:
-        add_pin_label(sch, xtal_pin1, "XTAL1", direction="left")
-        print("      Pin 1 -> XTAL1")
-    if xtal_pin2:
-        add_pin_label(sch, xtal_pin2, "XTAL2", direction="right")
-        print("      Pin 2 -> XTAL2")
+    xtal_block.connect_to_rails(gnd_rail_y=RAIL_GND)
+    add_pin_label(sch, xtal_block.port("IN"), "XTAL1", direction="left")
+    print("      IN -> XTAL1")
+    add_pin_label(sch, xtal_block.port("OUT"), "XTAL2", direction="right")
+    print("      OUT -> XTAL2")
 
     # Wire buttons to MCU GPIO pins
     print("   Wiring Buttons (SW1-SW4)...")

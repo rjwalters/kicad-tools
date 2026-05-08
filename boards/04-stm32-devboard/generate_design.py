@@ -31,9 +31,9 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
-    CrystalOscillator,
     DebugHeader,
     LEDIndicator,
+    create_crystal_with_loads,
     create_gpio_pull_resistor,
     create_mcu_decoupling_array,
 )
@@ -265,13 +265,12 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # (pin 6, OSC_OUT) emerge.  PD0 is at (MCU_X - 17.78, MCU_Y - 22.86) =
     # (192.22, 97.14) and PD1 at (192.22, 99.68) in screen coords.  Place the
     # crystal block well to the left so its IN/OUT labels align cleanly.
-    xtal = CrystalOscillator(
+    xtal = create_crystal_with_loads(
         sch,
         x=140,
         y=100,
         frequency="8MHz",
-        load_caps="20pF",
-        ref_prefix="Y",
+        load_pF=20,
         cap_ref_start=10,
         crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
         cap_footprint="Capacitor_SMD:C_0805_2012Metric",

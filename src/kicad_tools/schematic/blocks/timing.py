@@ -313,3 +313,74 @@ def create_mclk_oscillator(
         decoupling_cap="100nF",
         cap_ref=cap_ref,
     )
+
+
+def create_crystal_with_loads(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    frequency: str = "8MHz",
+    load_pF: int | str = 20,
+    *,
+    ref_prefix: str = "Y",
+    cap_ref_start: int = 1,
+    crystal_footprint: str = "",
+    cap_footprint: str = "",
+) -> CrystalOscillator:
+    """Create a passive crystal oscillator with two load capacitors.
+
+    Thin factory over :class:`CrystalOscillator` that handles the common case
+    of a passive crystal driven by an MCU's internal oscillator (e.g. STM32
+    HSE, AVR XTAL1/XTAL2). The caller is responsible for wiring the returned
+    block's ``IN``/``OUT`` ports to the MCU oscillator pins (typically with
+    labels) and calling :meth:`CrystalOscillator.connect_to_rails` for ground.
+
+    Args:
+        sch: Schematic to add to.
+        x: X coordinate of crystal center.
+        y: Y coordinate of crystal center.
+        frequency: Frequency value as a string (e.g. ``"8MHz"``, ``"16MHz"``,
+            ``"32.768kHz"``). Used verbatim as the crystal value field.
+        load_pF: Load capacitor value. If an ``int``, formatted as
+            ``"{n}pF"`` (e.g. ``20`` -> ``"20pF"``). If a ``str``, used
+            verbatim (e.g. ``"18pF"``). Both load caps get the same value;
+            for asymmetric loads use :class:`CrystalOscillator` directly.
+        ref_prefix: Reference designator prefix for the crystal
+            (e.g. ``"Y"`` -> ``Y1``, or ``"Y2"`` to pin a specific number).
+        cap_ref_start: Starting reference number for the load capacitors.
+            Boards with existing decoupling caps should pass a value past
+            the highest existing ``Cn`` (e.g. ``cap_ref_start=10`` for boards
+            with C1-C9 already used).
+        crystal_footprint: Footprint for the crystal symbol
+            (e.g. ``"Crystal:Crystal_HC49-4H_Vertical"``).
+        cap_footprint: Footprint for the load capacitors
+            (e.g. ``"Capacitor_SMD:C_0805_2012Metric"``).
+
+    Returns:
+        The :class:`CrystalOscillator` instance. The caller still needs to
+        wire ``IN``/``OUT`` to the MCU and call ``connect_to_rails``.
+
+    Example:
+        >>> xtal = create_crystal_with_loads(
+        ...     sch, x=140, y=100, frequency="8MHz", load_pF=20,
+        ...     cap_ref_start=10,
+        ...     crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
+        ...     cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+        ... )
+        >>> xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
+        >>> sch.add_label("OSC_IN", *xtal.port("IN"))
+        >>> sch.add_label("OSC_OUT", *xtal.port("OUT"))
+    """
+    cap_value = f"{load_pF}pF" if isinstance(load_pF, int) else load_pF
+
+    return CrystalOscillator(
+        sch,
+        x,
+        y,
+        frequency=frequency,
+        load_caps=cap_value,
+        ref_prefix=ref_prefix,
+        cap_ref_start=cap_ref_start,
+        crystal_footprint=crystal_footprint,
+        cap_footprint=cap_footprint,
+    )

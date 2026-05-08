@@ -32,13 +32,13 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
-    CrystalOscillator,
     CurrentSenseShunt,
     DebugHeader,
     GateDriverBlock,
     LEDIndicator,
     ThreePhaseInverter,
     create_bootstrap_capacitor_array,
+    create_crystal_with_loads,
     create_dual_supply_cascade,
     create_gate_drive_resistor_array,
     create_mcu_decoupling_array,
@@ -382,13 +382,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("   Wired 16 floating nets (6 PWM, 3 HALL, 3 ISENSE-, 4 SWD) to MCU pins")
 
     # Crystal oscillator (8MHz)
-    xtal = CrystalOscillator(
+    xtal = create_crystal_with_loads(
         sch,
         x=X_MCU + 70,
         y=100,
         frequency="8MHz",
-        load_caps="20pF",
-        ref_prefix="Y",
+        load_pF=20,
         cap_ref_start=10,
     )
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
