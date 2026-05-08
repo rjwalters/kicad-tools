@@ -2718,8 +2718,7 @@ class TestResetButtonMocked:
         jog_wire_starts = [c[0][0] for c in rail_calls]  # p1 of each call
         # One wire should go horizontal from (115, ...) to (jog_x, ...)
         has_horizontal_jog = any(
-            c[0][0][0] != c[0][1][0] and abs(c[0][1][0] - jog_x) < 0.01
-            for c in rail_calls
+            c[0][0][0] != c[0][1][0] and abs(c[0][1][0] - jog_x) < 0.01 for c in rail_calls
         )
         assert has_horizontal_jog, "Expected a horizontal jog wire to avoid X range"
 
@@ -2733,9 +2732,7 @@ class TestResetButtonMocked:
         rail_calls = mock_schematic.add_wire.call_args_list[init_wire_count:]
         # TVS cathode at x=130 is in range, should produce jog wires
         jog_x = 128 - 2.54
-        has_tvs_jog = any(
-            abs(c[0][1][0] - jog_x) < 0.01 for c in rail_calls
-        )
+        has_tvs_jog = any(abs(c[0][1][0] - jog_x) < 0.01 for c in rail_calls)
         assert has_tvs_jog, "Expected TVS cathode wire to jog around avoid X range"
 
     def test_reset_button_connect_to_rails_warn_on_collision_enabled(self, mock_schematic):
@@ -4296,12 +4293,8 @@ class TestComposedBlockPortAccess:
 
     def test_port_not_found_on_composed(self):
         """KeyError for missing port on composed block."""
-        left = _make_block(
-            {"A": Port(name="A", x=0, y=0, direction="input")}
-        )
-        right = _make_block(
-            {"B": Port(name="B", x=10, y=0, direction="input")}
-        )
+        left = _make_block({"A": Port(name="A", x=0, y=0, direction="input")})
+        right = _make_block({"B": Port(name="B", x=10, y=0, direction="input")})
         composed = left & right
         with pytest.raises(KeyError):
             composed.port("MISSING")
@@ -4340,12 +4333,8 @@ class TestComposedBlockRealize:
 
     def test_realize_parallel(self):
         """realize() for parallel updates child positions."""
-        left = _make_block(
-            {"A": Port(name="A", x=0, y=0, direction="input")}
-        )
-        right = _make_block(
-            {"A": Port(name="A", x=0, y=0, direction="input")}
-        )
+        left = _make_block({"A": Port(name="A", x=0, y=0, direction="input")})
+        right = _make_block({"A": Port(name="A", x=0, y=0, direction="input")})
         composed = left | right
 
         sch = Mock()
@@ -4500,19 +4489,13 @@ class TestCreateMCUDecouplingArrayMocked:
 
     def test_factory_returns_decoupling_caps_instance(self, mock_schematic):
         """Factory returns a DecouplingCaps instance."""
-        result = create_mcu_decoupling_array(
-            mock_schematic, x=160, y=85, supply_pins=4
-        )
+        result = create_mcu_decoupling_array(mock_schematic, x=160, y=85, supply_pins=4)
         assert isinstance(result, DecouplingCaps)
 
     @pytest.mark.parametrize("supply_pins", [1, 2, 3, 4, 6, 8])
-    def test_factory_cap_count_matches_supply_plus_bulk(
-        self, mock_schematic, supply_pins
-    ):
+    def test_factory_cap_count_matches_supply_plus_bulk(self, mock_schematic, supply_pins):
         """Cap count is supply_pins + 1 (one bulk)."""
-        result = create_mcu_decoupling_array(
-            mock_schematic, x=0, y=0, supply_pins=supply_pins
-        )
+        result = create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=supply_pins)
         assert len(result.caps) == supply_pins + 1
 
     def test_factory_bypass_values(self, mock_schematic):
@@ -4536,9 +4519,7 @@ class TestCreateMCUDecouplingArrayMocked:
 
     def test_factory_default_values(self, mock_schematic):
         """Default values are 100nF bypass and 4.7uF bulk."""
-        create_mcu_decoupling_array(
-            mock_schematic, x=0, y=0, supply_pins=2
-        )
+        create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=2)
         caps = mock_schematic._created_caps
         assert caps[0]["value"] == "100nF"
         assert caps[1]["value"] == "100nF"
@@ -4603,25 +4584,19 @@ class TestCreateMCUDecouplingArrayMocked:
 
     def test_factory_connect_to_rails(self, mock_schematic):
         """connect_to_rails wires every cap (supply_pins + 1 wires)."""
-        result = create_mcu_decoupling_array(
-            mock_schematic, x=0, y=0, supply_pins=4
-        )
+        result = create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=4)
         result.connect_to_rails(50, 150)
         assert mock_schematic.wire_decoupling_cap.call_count == 5
 
     def test_supply_pins_zero_raises(self, mock_schematic):
         """supply_pins=0 raises ValueError."""
         with pytest.raises(ValueError, match="supply_pins must be >= 1"):
-            create_mcu_decoupling_array(
-                mock_schematic, x=0, y=0, supply_pins=0
-            )
+            create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=0)
 
     def test_supply_pins_negative_raises(self, mock_schematic):
         """Negative supply_pins raises ValueError."""
         with pytest.raises(ValueError, match="supply_pins must be >= 1"):
-            create_mcu_decoupling_array(
-                mock_schematic, x=0, y=0, supply_pins=-1
-            )
+            create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=-1)
 
     def test_factory_ref_stability_board04(self, mock_schematic):
         """Board 04 invocation produces refs C12..C16 (BOM stability)."""
@@ -4660,9 +4635,7 @@ class TestCreateMCUDecouplingArrayMocked:
 
     def test_factory_spacing_default(self, mock_schematic):
         """Default spacing of 10mm separates caps."""
-        create_mcu_decoupling_array(
-            mock_schematic, x=100, y=50, supply_pins=3
-        )
+        create_mcu_decoupling_array(mock_schematic, x=100, y=50, supply_pins=3)
         caps = mock_schematic._created_caps
         # x positions should be 100, 110, 120, 130
         xs = [c["x"] for c in caps]
@@ -4670,9 +4643,7 @@ class TestCreateMCUDecouplingArrayMocked:
 
     def test_factory_custom_spacing(self, mock_schematic):
         """Custom spacing is honored."""
-        create_mcu_decoupling_array(
-            mock_schematic, x=0, y=0, supply_pins=2, spacing=15
-        )
+        create_mcu_decoupling_array(mock_schematic, x=0, y=0, supply_pins=2, spacing=15)
         caps = mock_schematic._created_caps
         xs = [c["x"] for c in caps]
         assert xs == [0, 15, 30]
