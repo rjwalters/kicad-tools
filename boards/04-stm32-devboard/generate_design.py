@@ -34,6 +34,7 @@ from kicad_tools.schematic.blocks import (
     CrystalOscillator,
     DebugHeader,
     LEDIndicator,
+    create_gpio_pull_resistor,
 )
 from kicad_tools.schematic.models.schematic import Schematic
 
@@ -408,23 +409,31 @@ def create_stm32_schematic(output_dir: Path) -> Path:
 
     # BOOT0 pull-down (left side, top half).  Tying BOOT0 low forces normal
     # flash boot at reset; this is the typical configuration for development.
+    # Refactored to use create_gpio_pull_resistor (issue #2573); previously
+    # an inline 10k vertical pull-down with a manual GND stub.
     boot0_pos = mcu.pin_position("BOOT0")
-    r_boot = sch.add_symbol(
-        "Device:R",
-        x=boot0_pos[0] - 20,
-        y=boot0_pos[1],
-        ref="R2",
+    # Place the block left of BOOT0; the block's "BOOT0" port lands at
+    # (block_x, block_y + 5) for a pull-down (resistor below center).
+    block_x = boot0_pos[0] - 20
+    block_y = boot0_pos[1] - 5
+    boot_pull = create_gpio_pull_resistor(
+        sch,
+        x=block_x,
+        y=block_y,
+        pin_name="BOOT0",
+        rail="GND",
         value="10k",
+        pull_type="down",
+        ref="R2",
         footprint="Resistor_SMD:R_0805_2012Metric",
-        rotation=270,
     )
-    # R2 pin 1 connects to BOOT0 stub, pin 2 connects down to GND rail
-    r1 = r_boot.pin_position("1")
-    r2 = r_boot.pin_position("2")
-    sch.add_wire(boot0_pos, r1, warn_on_collision=False)
-    sch.add_wire(r2, (r2[0], RAIL_GND), warn_on_collision=False)
-    sch.add_junction(r2[0], RAIL_GND)
-    print("   R2 (10k) BOOT0 pull-down to GND")
+    # Wire BOOT0 stub from MCU to the block's BOOT0 port (horizontal).
+    sch.add_wire(boot0_pos, boot_pull.port("BOOT0"), warn_on_collision=False)
+    # Drop the resistor's GND end down to the GND rail.
+    gnd_end = boot_pull.port("GND")
+    sch.add_wire(gnd_end, (gnd_end[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(gnd_end[0], RAIL_GND)
+    print("   R2 (10k) BOOT0 pull-down to GND (via create_gpio_pull_resistor)")
 
     # =========================================================================
     # Section 7: User LED (driven by MCU PB12, active-low)
