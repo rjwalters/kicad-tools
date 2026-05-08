@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
+from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.edge import EdgeClearanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
@@ -99,6 +100,7 @@ class DRCChecker:
 
         # Run each category of checks
         results.merge(self.check_clearances())
+        results.merge(self.check_diffpair_clearance_intra())
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
         results.merge(self.check_silkscreen())
@@ -129,6 +131,34 @@ class DRCChecker:
             DRCResults containing clearance violations
         """
         rule = ClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_diffpair_clearance_intra(self) -> DRCResults:
+        """Check within-pair clearance for differential pairs.
+
+        Validates that segments belonging to a detected differential pair
+        maintain at least the per-class ``intra_pair_clearance`` edge-to-edge
+        spacing.  Within-pair edges are *allowed* to be tighter than the
+        inter-pair manufacturer minimum (that's the whole point of diff-pair
+        coupling), but they must still respect the intra threshold.
+
+        Diff-pair detection uses the suffix-inference matcher in
+        ``router/diffpair`` (USB_D+/USB_D-, HDMI_D0_P/HDMI_D0_N, etc.).
+        Single-ended refusal patterns (``USB_CC1``/``USB_CC2``,
+        ``SBU1``/``SBU2``) are correctly excluded per #2558.
+
+        See Issue #2560 / Epic #2556 Phase 1D.  When the upstream router
+        gains the per-pair clearance map (#2559), this method may be
+        extended to accept it via constructor injection on
+        :class:`DRCChecker`; today the rule falls back to the manufacturer's
+        ``min_clearance_mm``, which makes it a no-op duplicate of the
+        generic clearance rule for any pair without an explicit threshold.
+
+        Returns:
+            DRCResults containing intra-pair clearance violations.
+        """
+
+        rule = DiffPairClearanceIntraRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_dimensions(self) -> DRCResults:

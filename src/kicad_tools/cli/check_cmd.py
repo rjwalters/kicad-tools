@@ -59,6 +59,7 @@ def _find_pcb_file(directory: Path) -> Path | None:
 
 CHECK_CATEGORIES = [
     "clearance",
+    "diffpair_clearance_intra",
     "dimensions",
     "edge",
     "netlist",
@@ -269,6 +270,7 @@ def run_selected_checks(
     # Map of category to check method
     check_methods = {
         "clearance": checker.check_clearances,
+        "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "dimensions": checker.check_dimensions,
         "edge": checker.check_edge_clearances,
         "netlist": checker.check_netlist,

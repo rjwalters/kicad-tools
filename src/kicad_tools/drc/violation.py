@@ -45,6 +45,9 @@ def _init_type_category_map() -> None:
             ViolationType.CLEARANCE_PAD_VIA: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_SEGMENT_SEGMENT: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_VIA_VIA: ViolationCategory.ROUTING,
+            # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
+            # Same category as other clearance subtypes -- fixable by rerouting.
+            ViolationType.DIFFPAIR_CLEARANCE_INTRA: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -110,6 +113,11 @@ class ViolationType(Enum):
     CLEARANCE_PAD_PAD = "clearance_pad_pad"
     CLEARANCE_SEGMENT_SEGMENT = "clearance_segment_segment"
     CLEARANCE_VIA_VIA = "clearance_via_via"
+    # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
+    # Distinct from the generic CLEARANCE family because it validates the
+    # *intra-pair* gap (allowed to be tighter than the manufacturer's inter-pair
+    # ``min_clearance_mm``) against the per-class ``intra_pair_clearance``.
+    DIFFPAIR_CLEARANCE_INTRA = "diffpair_clearance_intra"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
@@ -212,6 +220,13 @@ class ViolationType(Enum):
             "clearance_pad_trace": cls.CLEARANCE_PAD_SEGMENT,
             "clearance_trace_trace": cls.CLEARANCE_SEGMENT_SEGMENT,
             "clearance_trace_via": cls.CLEARANCE_SEGMENT_VIA,
+            # Differential-pair within-pair clearance (Issue #2560).
+            # MUST be in the alias table -- without this entry the fuzzy
+            # fallback at the bottom of from_string() silently matches
+            # ``"clearance"`` and miscategorizes this rule_id as the
+            # generic CLEARANCE type, masking the new violation type from
+            # downstream consumers that filter by exact ``type`` value.
+            "diffpair_clearance_intra": cls.DIFFPAIR_CLEARANCE_INTRA,
             # edge clearance subtypes
             "edge_clearance_trace": cls.EDGE_CLEARANCE_TRACE,
             "edge_clearance_pad": cls.EDGE_CLEARANCE_PAD,

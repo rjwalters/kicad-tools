@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
@@ -156,9 +158,38 @@ def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, fl
     return new_width, new_height
 
 
-
 # _point_to_segment_distance and _segment_to_segment_distance are imported
 # from kicad_tools.core.geometry (consolidated in #2349).
+
+
+def _build_diff_pair_set(pcb: PCB) -> set[tuple[int, int]]:
+    """Return ``{(min_net_id, max_net_id)}`` for every detected diff pair.
+
+    Used by :class:`ClearanceRule` to skip same-pair segment-segment edges
+    that are instead validated by ``DiffPairClearanceIntraRule`` against
+    the per-class ``intra_pair_clearance`` threshold (see Issue #2560 /
+    Epic #2556 Phase 1D).
+
+    Detection currently uses the suffix-inference matcher in
+    ``router/diffpair`` -- this matches what the autorouter sees when no
+    explicit declarations or KiCad-group sources are present, and the
+    refusal patterns (``USB_CC1``/``USB_CC2``, ``SBU1``/``SBU2``) are
+    correctly excluded.  When the upstream rule consumer (the autorouter
+    in #2559) gains the explicit-declaration plumbing, this helper can be
+    extended to honor those sources too without a public API change.
+    """
+    from kicad_tools.router.diffpair import detect_differential_pairs
+
+    pairs: set[tuple[int, int]] = set()
+    net_names = {net.number: net.name for net in pcb.nets.values()}
+    for diff_pair in detect_differential_pairs(net_names):
+        p_id = diff_pair.positive.net_id
+        n_id = diff_pair.negative.net_id
+        if p_id == 0 or n_id == 0:
+            continue
+        key = (p_id, n_id) if p_id <= n_id else (n_id, p_id)
+        pairs.add(key)
+    return pairs
 
 
 def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
@@ -341,6 +372,20 @@ class ClearanceRule(DRCRule):
     Validates that spacing between traces, pads, and vias on the same
     layer but different nets meets the manufacturer's minimum clearance
     requirement.
+
+    Differential-pair within-pair edges (segment-to-segment edges where
+    both segments belong to the P/N halves of a detected diff pair) are
+    skipped here -- they are validated by
+    :class:`~kicad_tools.validate.rules.diffpair_clearance_intra.DiffPairClearanceIntraRule`
+    against the per-class ``intra_pair_clearance`` (which is allowed to
+    be tighter than the manufacturer's ``min_clearance_mm``).  Without
+    this skip users would see double violations on every diff-pair edge
+    that's tighter than inter-pair clearance, making the new rule
+    actively unhelpful.  See Issue #2560 / Epic #2556 Phase 1D.
+
+    The skip is segment-to-segment only -- pad and via clearances are
+    enforced inter-pair regardless of diff-pair membership, matching the
+    scope of the new rule (segments only).
     """
 
     rule_id = "clearance"
@@ -364,10 +409,17 @@ class ClearanceRule(DRCRule):
         results = DRCResults()
         min_clearance = design_rules.min_clearance_mm
 
+        # Build the diff-pair set once for the whole board (suffix
+        # inference is cheap; we scan the net table once).  Used to
+        # skip same-pair segment-segment edges that the new
+        # DiffPairClearanceIntraRule validates against a tighter
+        # per-class threshold.  See Issue #2560.
+        diff_pair_set = _build_diff_pair_set(pcb)
+
         # Process each copper layer
         for layer in pcb.copper_layers:
             layer_name = layer.name
-            violations = self._check_layer(pcb, layer_name, min_clearance)
+            violations = self._check_layer(pcb, layer_name, min_clearance, diff_pair_set)
             for v in violations:
                 results.add(v)
 
@@ -381,9 +433,23 @@ class ClearanceRule(DRCRule):
         pcb: PCB,
         layer_name: str,
         min_clearance: float,
+        diff_pair_set: set[tuple[int, int]] | None = None,
     ) -> list[DRCViolation]:
-        """Check clearance on a single copper layer."""
+        """Check clearance on a single copper layer.
+
+        Args:
+            pcb: The PCB being checked.
+            layer_name: Layer to scan.
+            min_clearance: Manufacturer's minimum inter-pair clearance.
+            diff_pair_set: Optional set of ``(min_net_id, max_net_id)``
+                tuples identifying detected differential pairs.  When
+                provided, segment-to-segment edges between the two
+                halves of a pair are skipped (delegated to
+                ``DiffPairClearanceIntraRule``).  See Issue #2560.
+        """
         violations: list[DRCViolation] = []
+        if diff_pair_set is None:
+            diff_pair_set = set()
 
         # Collect all copper elements on this layer
         elements = self._collect_elements(pcb, layer_name)
@@ -398,6 +464,24 @@ class ClearanceRule(DRCRule):
                 # Skip net 0 (unconnected) elements
                 if elem1.net_number == 0 or elem2.net_number == 0:
                     continue
+
+                # Skip same-pair segment-to-segment edges -- they are
+                # validated by DiffPairClearanceIntraRule against a
+                # tighter per-class threshold.  Pad/via combinations
+                # remain in scope here (issue #2560 scopes the new
+                # rule to segments only).
+                if (
+                    elem1.element_type == "segment"
+                    and elem2.element_type == "segment"
+                    and diff_pair_set
+                ):
+                    key = (
+                        (elem1.net_number, elem2.net_number)
+                        if elem1.net_number <= elem2.net_number
+                        else (elem2.net_number, elem1.net_number)
+                    )
+                    if key in diff_pair_set:
+                        continue
 
                 # Calculate clearance
                 clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
