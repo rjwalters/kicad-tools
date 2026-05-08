@@ -2,9 +2,10 @@
 Shared design specification for the 3x3 Charlieplex LED Grid.
 
 This module defines the single source of truth for:
-- LED connections (charlieplex topology)
+- Charlieplex topology (pin labels + ordered LED pairs)
+- LED connections (charlieplex topology, derived)
 - MCU pin assignments
-- Resistor connections
+- Resistor connections (derived)
 - Net definitions
 
 Both generate_schematic.py and generate_pcb.py import from this module,
@@ -17,6 +18,10 @@ With 4 pins (A, B, C, D), we can drive 12 LEDs:
   C->D, D->C (2 LEDs)
 
 For a 3x3 grid, we use 9 of these 12 combinations.
+
+Source of truth: CHARLIEPLEX_PIN_LABELS and CHARLIEPLEX_LED_PAIRS below
+fully describe the topology. LED_CONNECTIONS and RESISTOR_CONNECTIONS are
+derived from them so existing consumers (generate_pcb.py) stay unchanged.
 """
 
 from __future__ import annotations
@@ -54,36 +59,61 @@ class ResistorConnection(NamedTuple):
 
 
 # =============================================================================
-# LED Connections: Define the charlieplex topology
+# Charlieplex topology (source of truth)
+# =============================================================================
+# These two values fully describe the charlieplex matrix topology.  Everything
+# else (LED_CONNECTIONS, RESISTOR_CONNECTIONS) is derived from them and the
+# kicad_tools.schematic.blocks.create_charlieplex_matrix factory consumes the
+# same pair of values directly.
+
+# Per-pin label used in net names (LINE_<L>, NODE_<L>).
+CHARLIEPLEX_PIN_LABELS: tuple[str, ...] = ("A", "B", "C", "D")
+
+# Ordered (anode_pin_idx, cathode_pin_idx) pairs.  Index ranges 0..3.
+# To light D{i+1}: drive pair[0] HIGH, pair[1] LOW, others HIGH-Z.
+CHARLIEPLEX_LED_PAIRS: tuple[tuple[int, int], ...] = (
+    (0, 1),  # D1: A->B
+    (1, 0),  # D2: B->A
+    (0, 2),  # D3: A->C
+    (2, 0),  # D4: C->A
+    (0, 3),  # D5: A->D
+    (3, 0),  # D6: D->A
+    (1, 2),  # D7: B->C
+    (2, 1),  # D8: C->B
+    (1, 3),  # D9: B->D
+)
+
+
+# =============================================================================
+# LED Connections: derived from the charlieplex topology
 # =============================================================================
 # Each LED is connected between two nodes (A, B, C, D).
 # The direction determines which node is anode vs cathode.
 # To light an LED: set anode HIGH, cathode LOW, others HIGH-Z.
 
-LED_CONNECTIONS: tuple[LedConnection, ...] = (
-    LedConnection("D1", "NODE_A", "NODE_B"),  # A->B
-    LedConnection("D2", "NODE_B", "NODE_A"),  # B->A
-    LedConnection("D3", "NODE_A", "NODE_C"),  # A->C
-    LedConnection("D4", "NODE_C", "NODE_A"),  # C->A
-    LedConnection("D5", "NODE_A", "NODE_D"),  # A->D
-    LedConnection("D6", "NODE_D", "NODE_A"),  # D->A
-    LedConnection("D7", "NODE_B", "NODE_C"),  # B->C
-    LedConnection("D8", "NODE_C", "NODE_B"),  # C->B
-    LedConnection("D9", "NODE_B", "NODE_D"),  # B->D
+LED_CONNECTIONS: tuple[LedConnection, ...] = tuple(
+    LedConnection(
+        ref=f"D{i + 1}",
+        anode_node=f"NODE_{CHARLIEPLEX_PIN_LABELS[anode_idx]}",
+        cathode_node=f"NODE_{CHARLIEPLEX_PIN_LABELS[cathode_idx]}",
+    )
+    for i, (anode_idx, cathode_idx) in enumerate(CHARLIEPLEX_LED_PAIRS)
 )
 
 
 # =============================================================================
-# Resistor Connections: Current-limiting resistors between MCU and nodes
+# Resistor Connections: derived from the charlieplex topology
 # =============================================================================
 # Each LINE_x connects to the MCU pin, NODE_x connects to the LED network.
 # Resistor value should be calculated based on LED Vf and desired current.
 
-RESISTOR_CONNECTIONS: tuple[ResistorConnection, ...] = (
-    ResistorConnection("R1", "LINE_A", "NODE_A"),
-    ResistorConnection("R2", "LINE_B", "NODE_B"),
-    ResistorConnection("R3", "LINE_C", "NODE_C"),
-    ResistorConnection("R4", "LINE_D", "NODE_D"),
+RESISTOR_CONNECTIONS: tuple[ResistorConnection, ...] = tuple(
+    ResistorConnection(
+        ref=f"R{i + 1}",
+        input_net=f"LINE_{label}",
+        output_net=f"NODE_{label}",
+    )
+    for i, label in enumerate(CHARLIEPLEX_PIN_LABELS)
 )
 
 # Default resistor value (ohms) - calculated for ~10mA with typical LED
