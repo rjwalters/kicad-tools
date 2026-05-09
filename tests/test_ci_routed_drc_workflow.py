@@ -288,35 +288,39 @@ class TestHelperCheckFile:
 
     def test_zero_errors_zero_allowed_passes(self) -> None:
         with patch.object(self.helper, "count_errors", return_value=0):
-            passed, msg = self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
+            passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
         assert passed
         assert "0 errors" in msg
+        assert errors == 0
 
     def test_under_allowed_passes(self) -> None:
         """A board grandfathered at 17 errors that drops to 5 must pass --
         the gate is "allowed minus epsilon", not "exact match"."""
         with patch.object(self.helper, "count_errors", return_value=5):
-            passed, msg = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
+            passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
         assert "5 errors" in msg
         # The pass message should nudge the contributor to lower the
         # allowlist if the count drops -- this prevents stale tolerances.
         assert "reduce the allowlist value" in msg
+        assert errors == 5
 
     def test_at_allowed_passes(self) -> None:
         """Equal-to-allowed is the steady state for a grandfathered board."""
         with patch.object(self.helper, "count_errors", return_value=17):
-            passed, _ = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
+            passed, _, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
+        assert errors == 17
 
     def test_over_allowed_fails_grandfathered(self) -> None:
         """Regression on a grandfathered board: 17 -> 22. Must fail."""
         with patch.object(self.helper, "count_errors", return_value=22):
-            passed, msg = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
+            passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert not passed
         assert "regression" in msg.lower()
         assert "17" in msg
         assert "22" in msg
+        assert errors == 22
 
     def test_nonzero_with_zero_allowed_fails(self) -> None:
         """Default case: a board not in the allowlist (allowed=0) must
@@ -324,7 +328,7 @@ class TestHelperCheckFile:
         critical assertion that PR #2538's merge state would have
         triggered (board 04 with 5 errors)."""
         with patch.object(self.helper, "count_errors", return_value=5):
-            passed, msg = self.helper.check_file(
+            passed, msg, errors = self.helper.check_file(
                 Path("boards/04-x/output/x_routed.kicad_pcb"), allowed=0
             )
         assert not passed
@@ -332,6 +336,7 @@ class TestHelperCheckFile:
         # grandfathering escape hatch.
         assert "routed-drc-tolerance.yml" in msg
         assert "5 error" in msg
+        assert errors == 5
 
 
 class TestHelperMain:
