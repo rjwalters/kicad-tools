@@ -147,13 +147,48 @@ def annotate_error(file: str, message: str) -> None:
     print(f"::error file={file}::{message}", flush=True)
 
 
-def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str]:
+def annotate_drift_warning(file: str, errors: int, allowed: int) -> None:
+    """Emit a GitHub-Actions ``::warning file=...::`` for a stale allowlist entry.
+
+    Called when a routed PCB's actual error count is strictly less than the
+    allowlist value (slack > 0). The warning surfaces in the PR Files-changed
+    view alongside ``::error::`` annotations so reviewers don't miss it
+    (issue #2590).
+
+    Args:
+        file: Repo-relative path to the routed PCB (used as the annotation's
+            ``file=`` target so GitHub anchors the warning to the file).
+        errors: Actual error count returned by ``kct check``.
+        allowed: Current allowlist value from
+            ``.github/routed-drc-tolerance.yml``.
+
+    Note:
+        TODO(#2590): Cross-PR drift detection (i.e., warning on stale entries
+        for files NOT touched in the current PR) is deferred to a future
+        scheduled-audit job. v1 only inspects files in the diff so the
+        warning attaches to a file the reviewer is actively looking at, and
+        we don't pay the per-board ``kct check`` cost for every entry on
+        every PR. See the issue's "Scope question" section for the rationale.
+    """
+    slack = allowed - errors
+    print(
+        f"::warning file={file}::Allowlist for `{file}` is {allowed} but "
+        f"actual is {errors} (slack={slack}). Tighten to {errors} in this "
+        f"PR or a follow-up to lock in the new floor (see "
+        f".github/routed-drc-tolerance.yml).",
+        flush=True,
+    )
+
+
+def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str, int]:
     """Check a single PCB against its allowed error count.
 
     Returns:
-        (passed, message) tuple. ``passed`` is True if errors <= allowed.
-        ``message`` is a human-readable summary suitable for both stdout
-        and GitHub annotation.
+        ``(passed, message, errors)`` tuple. ``passed`` is True if
+        ``errors <= allowed``. ``message`` is a human-readable summary
+        suitable for both stdout and GitHub annotation. ``errors`` is the
+        actual count returned by ``kct check`` so callers can compute drift
+        slack without re-running the (expensive) DRC check.
     """
     errors = count_errors(pcb_path)
     if errors <= allowed:
@@ -165,7 +200,7 @@ def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str]:
                 f"reduce the allowlist value in .github/routed-drc-tolerance.yml "
                 f"if this count drops further)."
             )
-        return True, msg
+        return True, msg, errors
 
     if allowed == 0:
         msg = (
@@ -181,7 +216,7 @@ def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str]:
             f"new violations, or (if intentional) raise the allowlist value "
             f"with reviewer sign-off."
         )
-    return False, msg
+    return False, msg, errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -241,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         allowed = allowlist.get(lookup_key, 0)
 
         try:
-            passed, message = check_file(pcb_path, allowed)
+            passed, message, errors = check_file(pcb_path, allowed)
         except RuntimeError as e:
             annotate_error(str(pcb_path), f"kct check failed: {e}")
             overall_failed = 1
@@ -249,6 +284,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if passed:
             print(message, flush=True)
+            # Issue #2590: surface stale allowlist entries (slack > 0) as a
+            # GitHub-Actions warning annotation so reviewers see them in the
+            # PR Files-changed view, not buried in stdout. The ``allowed > 0``
+            # guard avoids noise on the common case of an unlisted board with
+            # 0 errors (allowed defaults to 0 -> slack=0 anyway, but be
+            # explicit). The gate's exit code is unchanged: warnings are
+            # advisory, matching the precedent at the deleted-file branch
+            # above.
+            if allowed > 0 and errors < allowed:
+                annotate_drift_warning(lookup_key, errors, allowed)
         else:
             annotate_error(str(pcb_path), message)
             overall_failed = 2

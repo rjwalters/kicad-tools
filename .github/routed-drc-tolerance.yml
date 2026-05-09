@@ -14,9 +14,17 @@
 #     absence of the entry is the strict 0-error gate.
 #   * When a board's count IMPROVES (e.g., 17 -> 12), reduce the value here
 #     in the same PR that reduces the count, so further regressions are
-#     caught against the new floor.
+#     caught against the new floor. Issue #2590 added a CI warning annotation
+#     that nags the PR Files-changed view when the actual count is below the
+#     allowlist value (slack > 0), so reviewers see the stale entry.
 #   * Adding a new entry (loosening) requires reviewer justification and a
 #     tracking issue link in the PR description.
+#
+# Cross-PR drift (an entry going stale because a different PR improved the
+# count without tightening) is NOT detected by the per-PR warning above --
+# only files in the diff are checked. A scheduled-audit job that walks every
+# entry in this file is deferred (see the TODO in
+# scripts/ci/check_routed_drc.py::annotate_drift_warning).
 #
 # Schema:
 #   tolerances:
