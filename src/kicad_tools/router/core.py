@@ -2665,6 +2665,114 @@ class Autorouter:
 
         return ordered_nets, mst_cache
 
+    def _prepare_routing(self) -> None:
+        """Pre-route hook: wire diff-pair partner resolution into the router.
+
+        Issue #2587 / Epic #2556 Phase 1C-cont.
+
+        Phase 1C threads ``NetClassRouting.intra_pair_clearance`` through
+        the per-cell A* search.  Two pieces of state on the pathfinder
+        must be populated BEFORE any net is routed for the partner branch
+        to fire:
+
+        1. ``set_net_name_to_id(...)`` -- the reverse map ``{net_name:
+           net_id}`` so ``_resolve_partner_net_id`` can translate the
+           authoritative partner-name to a partner-id.
+        2. ``set_net_partner_map(...)`` -- the per-net partner-name
+           overrides discovered by ``diffpair_detection.detect_diff_pairs``.
+           Using a per-instance map avoids mutating shared
+           ``NetClassRouting`` singletons (e.g. ``NET_CLASS_HIGH_SPEED``
+           is referenced by every net in ``high_speed_nets``; mutating
+           ``diffpair_partner`` on the singleton would set the partner
+           for ALL such nets at once).
+
+        This method is called from EVERY ``route_all_*`` entry point so
+        the wiring is uniform across routing strategies (route_all,
+        route_all_negotiated, route_all_two_phase, route_all_parallel,
+        route_all_interleaved, route_all_multi_resolution, ...).
+
+        Idempotent: safe to call multiple times.  Safe to call when the
+        router lacks one or both setters (older third-party Pathfinder
+        wrappers): the call is gated by ``hasattr``.
+
+        Behavior preservation:
+            - If diff-pair detection returns no pairs (e.g. board with no
+              high-speed nets), ``set_net_partner_map({})`` is a no-op.
+            - If the source net's NetClassRouting has no
+              ``intra_pair_clearance`` override, ``effective_intra_pair_clearance``
+              returns the regular ``clearance``, so the partner branch is
+              effectively no-op even when populated.
+
+        Tradeoff considered:
+            We do NOT mutate ``NetClassRouting.diffpair_partner`` on the
+            shared singletons (Option A from the curator's notes).  The
+            mutation footgun would set the partner for any other board
+            that reuses the singleton in the same Python process, which
+            is incorrect behavior for the second board.
+        """
+        # Build the reverse name->id map from the autorouter's net_names.
+        # net_names is fully populated by add_component (called for every
+        # component before any route_all_* method runs).  Skip empty
+        # names defensively.
+        reverse_map: dict[str, int] = {
+            name: nid for nid, name in self.net_names.items() if name
+        }
+
+        # Wire the reverse map into the active pathfinder.  Both Router
+        # and CppPathfinder define this method as of Phase 1C-cont; the
+        # hasattr guard tolerates older third-party wrappers.
+        if hasattr(self.router, "set_net_name_to_id"):
+            self.router.set_net_name_to_id(reverse_map)
+
+        # Build the per-net partner-name map from diff-pair detection.
+        # Detection consults explicit declarations (NetClassRouting.diffpair_partner)
+        # AND suffix inference, so this populates partners for both the
+        # "explicit" and "suffix-detected" cases without mutating the
+        # underlying NetClassRouting singletons.
+        partner_name_map: dict[str, str] = {}
+        try:
+            from .diffpair_detection import detect_diff_pairs
+
+            # Build net_to_class for explicit-declaration lookup: maps
+            # net_name -> class_name so detect_diff_pairs can find the
+            # NetClassRouting whose diffpair_partner is set.  When a net
+            # has no entry in net_class_map (uses DEFAULT_NET_CLASS_MAP
+            # fallback), it cannot have an explicit declaration anyway.
+            net_to_class: dict[str, str] = {
+                net_name: nc.name
+                for net_name, nc in self.net_class_map.items()
+                if nc is not None
+            }
+
+            # net_class_routing for detect_diff_pairs is keyed by class
+            # NAME (not net name), so re-key by .name.
+            net_class_routing: dict[str, "NetClassRouting"] = {}
+            for nc in self.net_class_map.values():
+                if nc is not None and nc.name not in net_class_routing:
+                    net_class_routing[nc.name] = nc
+
+            detected = detect_diff_pairs(
+                net_names=self.net_names,
+                net_class_routing=net_class_routing,
+                net_to_class=net_to_class,
+                kicad_groups=None,  # KiCad-group source not threaded yet
+            )
+            for dp in detected:
+                pair = dp.pair
+                # Bidirectional: each side's partner is the other side.
+                partner_name_map[pair.positive.net_name] = pair.negative.net_name
+                partner_name_map[pair.negative.net_name] = pair.positive.net_name
+        except Exception as exc:  # pragma: no cover - defensive
+            # Detection failures must never block routing.  Log and
+            # proceed with an empty partner map (dormant Phase 1C).
+            logger.debug(
+                "Phase 1C diff-pair detection failed in _prepare_routing: %s",
+                exc,
+            )
+
+        if hasattr(self.router, "set_net_partner_map"):
+            self.router.set_net_partner_map(partner_name_map)
+
     def route_all(
         self,
         net_order: list[int] | None = None,
@@ -2692,6 +2800,10 @@ class Autorouter:
         Returns:
             List of Route objects for all nets
         """
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.
+        self._prepare_routing()
+
         if interleaved:
             return self.route_all_interleaved(progress_callback=progress_callback)
 
@@ -3161,6 +3273,10 @@ class Autorouter:
         """
         print("\n=== Interleaved Net Routing ===")
 
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.
+        self._prepare_routing()
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
 
@@ -3386,6 +3502,10 @@ class Autorouter:
         """
         print("\n=== Parallel Net Routing ===")
         print(f"  Max workers: {max_workers}")
+
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.
+        self._prepare_routing()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
@@ -3643,6 +3763,12 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.  This is
+        # the gating piece that activates Phase 1C from `kct route`'s
+        # default negotiated strategy.
+        self._prepare_routing()
 
         # If hierarchical mode is requested, delegate to two-phase routing
         if hierarchical:
@@ -5602,6 +5728,10 @@ class Autorouter:
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
         """
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.
+        self._prepare_routing()
+
         tp_router = self._create_two_phase_router()
         return tp_router.route_all(
             use_negotiated=use_negotiated,
@@ -7634,6 +7764,12 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # Issue #2587 / Phase 1C-cont: wire diff-pair partner resolution
+        # into the active pathfinder before any routing begins.  The
+        # delegated route_all_negotiated / route_all calls also invoke
+        # _prepare_routing -- the redundant call is idempotent and safe.
+        self._prepare_routing()
 
         if pin_order_trials is None:
             pin_order_trials = ["default"]
