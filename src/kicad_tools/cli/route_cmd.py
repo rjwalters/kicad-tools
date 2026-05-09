@@ -56,6 +56,7 @@ Layer Stack Configuration:
 import argparse
 import logging
 import math
+import random
 import shutil
 import signal
 import sys
@@ -2926,6 +2927,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="INT",
+        help=(
+            "Seed for the global random module. When provided, seeds Python's "
+            "global random state before routing begins, making the Python "
+            "backend produce deterministic output across runs (modulo random "
+            "UUID lines emitted by router/primitives.py). Without --seed, "
+            "behavior is unchanged (non-deterministic). Issue #2589."
+        ),
+    )
+    parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(
@@ -3272,6 +3286,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #2589: Seed global random module for deterministic Python-backend
+    # routing.  Several escape strategies in algorithms/negotiated.py
+    # (random.shuffle/sample at lines ~1338/1463/1536) and the MST trial-pad
+    # shuffle in router/core.py (~line 7824) call the unseeded global random
+    # module.  Seeding here -- before any router construction -- pins their
+    # output, making 5 consecutive --seed N runs produce byte-identical .kicad_pcb
+    # files (modulo random UUID lines emitted by router/primitives.py:117,152).
+    # When --seed is omitted, behavior is unchanged for backward compatibility.
+    if args.seed is not None:
+        random.seed(args.seed)
 
     # Resolve two-phase iteration count.
     # Priority: --two-phase-iterations (explicit) > --iterations (explicit) > 20 (default)

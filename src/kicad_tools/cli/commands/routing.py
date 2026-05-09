@@ -240,6 +240,9 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--diffpair-spacing", str(args.diffpair_spacing)])
     if getattr(args, "diffpair_max_delta", None) is not None:
         sub_argv.extend(["--diffpair-max-delta", str(args.diffpair_max_delta)])
+    # Issue #2589: Forward --seed for deterministic Python-backend routing.
+    if getattr(args, "seed", None) is not None:
+        sub_argv.extend(["--seed", str(args.seed)])
     return route_main(sub_argv)
 
 

@@ -2344,6 +2344,19 @@ def _add_route_parser(subparsers) -> None:
             "Default: auto based on detected pair type."
         ),
     )
+    route_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="INT",
+        help=(
+            "Seed for the global random module. When provided, seeds Python's "
+            "global random state before routing begins, making the Python "
+            "backend produce deterministic output across runs (modulo random "
+            "UUID lines). Without --seed, behavior is unchanged "
+            "(non-deterministic). Issue #2589."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
