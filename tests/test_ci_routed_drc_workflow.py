@@ -432,9 +432,7 @@ class TestHelperDriftWarning:
         captured = capsys.readouterr()
         assert "Tighten to 15" in captured.out
 
-    def test_warning_points_at_allowlist_file(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_warning_points_at_allowlist_file(self, capsys: pytest.CaptureFixture[str]) -> None:
         """The warning must reference the allowlist file path so the
         reviewer can navigate to where the fix belongs."""
         path = "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
@@ -611,9 +609,7 @@ class TestMainDriftWarningEmission:
             text=True,
             check=False,
         )
-        assert proc.returncode == 0, (
-            f"subprocess exited {proc.returncode}; stderr:\n{proc.stderr}"
-        )
+        assert proc.returncode == 0, f"subprocess exited {proc.returncode}; stderr:\n{proc.stderr}"
         # The drift warning must appear in stdout exactly as GitHub
         # Actions would see it.
         assert "::warning file=" in proc.stdout
