@@ -388,6 +388,240 @@ class TestHelperMain:
 
 
 # ---------------------------------------------------------------------------
+# Drift warning tests (issue #2590)
+# ---------------------------------------------------------------------------
+
+
+class TestHelperDriftWarning:
+    """Unit tests for ``annotate_drift_warning`` -- the warning-annotation
+    helper that surfaces stale allowlist entries (slack > 0) to PR
+    reviewers via the GitHub Files-changed view (issue #2590)."""
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def test_warning_format(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The annotation must use the ``::warning file=...::`` form so
+        GitHub anchors it to the file in the Files-changed view (matches
+        the deleted-file precedent at check_routed_drc.py's main loop)."""
+        path = "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+        self.helper.annotate_drift_warning(path, errors=15, allowed=17)
+        captured = capsys.readouterr()
+        # GitHub annotation prefix with the right file= target.
+        assert f"::warning file={path}::" in captured.out
+
+    def test_warning_includes_actual_and_allowed_counts(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The warning text must include both numbers so reviewers can
+        read the slack at a glance without opening the allowlist."""
+        path = "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+        self.helper.annotate_drift_warning(path, errors=15, allowed=17)
+        captured = capsys.readouterr()
+        assert "is 17" in captured.out  # allowlist value
+        assert "actual is 15" in captured.out  # actual count
+
+    def test_warning_includes_recommended_new_value(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Per acceptance criteria #2: the warning must tell the contributor
+        what to set the allowlist to (= the actual count). This is the
+        load-bearing 'tighten to <N>' phrasing."""
+        path = "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+        self.helper.annotate_drift_warning(path, errors=15, allowed=17)
+        captured = capsys.readouterr()
+        assert "Tighten to 15" in captured.out
+
+    def test_warning_points_at_allowlist_file(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The warning must reference the allowlist file path so the
+        reviewer can navigate to where the fix belongs."""
+        path = "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+        self.helper.annotate_drift_warning(path, errors=0, allowed=1)
+        captured = capsys.readouterr()
+        assert ".github/routed-drc-tolerance.yml" in captured.out
+
+
+class TestMainDriftWarningEmission:
+    """Integration tests for ``main()``'s drift-warning emission flow
+    (issue #2590).
+
+    These stub ``count_errors`` so we exercise the gate without invoking
+    ``kct check``. The point is to pin the conditions under which a
+    warning IS or IS NOT emitted, since the silent stdout drift was the
+    original bug.
+    """
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def _make_pcb_and_allowlist(
+        self, tmp_path: Path, allowlist_value: int | None
+    ) -> tuple[Path, Path]:
+        """Create a placeholder .kicad_pcb file in a routed-pattern path
+        and an allowlist YAML pointing at it (or empty if value is None).
+
+        Returns ``(pcb_path, allowlist_path)``.
+        """
+        # Mirror the boards/<name>/output/<file>_routed.kicad_pcb pattern
+        # so the path looks like a real routed PCB.
+        pcb_dir = tmp_path / "boards" / "99-test" / "output"
+        pcb_dir.mkdir(parents=True)
+        pcb = pcb_dir / "test_routed.kicad_pcb"
+        pcb.touch()
+
+        allowlist = tmp_path / "tolerance.yml"
+        if allowlist_value is None:
+            allowlist.write_text("tolerances: {}\n")
+        else:
+            # Use the path as passed on argv (the helper resolves it
+            # relative to cwd before lookup, but raw form works for
+            # tmp_path-rooted absolute paths too -- we set it here so the
+            # lookup_key matches what main() computes).
+            allowlist.write_text(f"tolerances:\n  '{pcb}': {allowlist_value}\n")
+        return pcb, allowlist
+
+    def test_slack_positive_emits_drift_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The PR #2583 scenario: actual=15, allowlist=17. Gate passes,
+        but a ``::warning file=...::`` MUST be emitted so the reviewer
+        sees the stale entry. This is the regression test for #2590."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
+        with patch.object(self.helper, "count_errors", return_value=15):
+            rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
+        assert rc == 0  # gate still passes
+        captured = capsys.readouterr()
+        assert "::warning file=" in captured.out
+        assert "Tighten to 15" in captured.out
+        assert "actual is 15" in captured.out
+        assert "is 17" in captured.out
+
+    def test_slack_zero_no_drift_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Steady state: actual=17, allowlist=17. No warning -- the
+        floor matches reality. (The OK message still goes to stdout.)"""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
+        with patch.object(self.helper, "count_errors", return_value=17):
+            rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        # The "deleted in PR" warning is unrelated; we assert the drift
+        # warning specifically is absent.
+        assert "Tighten to" not in captured.out
+        assert "::warning file=" not in captured.out
+
+    def test_slack_negative_failure_no_drift_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression case: actual=22, allowlist=17. Gate FAILS with
+        ::error::, and we must NOT also emit a drift warning -- the
+        problem here is too many errors, not a stale floor."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
+        with patch.object(self.helper, "count_errors", return_value=22):
+            rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
+        assert rc == 2  # gate fails (regression)
+        captured = capsys.readouterr()
+        assert "::error file=" in captured.out
+        assert "Tighten to" not in captured.out
+
+    def test_unlisted_board_zero_errors_no_drift_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A board not in the allowlist (allowed=0) with 0 errors is the
+        common clean-state case (boards 01/02/04). Slack is 0, but more
+        importantly the ``allowed > 0`` guard suppresses the warning so
+        every clean PR doesn't get nagged."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
+        with patch.object(self.helper, "count_errors", return_value=0):
+            rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Tighten to" not in captured.out
+        assert "::warning file=" not in captured.out
+
+    def test_drift_warning_does_not_change_exit_code(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Per acceptance criteria #3 + #5: warnings are advisory. A PR
+        that triggers the drift warning must still exit 0 so the gate
+        doesn't become accidentally blocking."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=10)
+        with patch.object(self.helper, "count_errors", return_value=3):
+            rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
+        assert rc == 0  # warning emitted, but gate still passes
+        captured = capsys.readouterr()
+        assert "::warning file=" in captured.out
+        assert "Tighten to 3" in captured.out
+
+    def test_stale_allowlist_via_subprocess(self, tmp_path: Path) -> None:
+        """End-to-end via subprocess on a real allowlist file with a stale
+        entry. Exercises the full main() path including argv parsing,
+        allowlist load, and stdout flushing -- the path the CI workflow
+        actually takes.
+
+        We mock count_errors via a small shim script that imports the
+        helper, monkey-patches count_errors, and calls main(). This avoids
+        invoking the real `kct check` (which needs KiCad and is slow).
+        """
+        import subprocess
+        import textwrap
+
+        pcb_dir = tmp_path / "boards" / "05-x" / "output"
+        pcb_dir.mkdir(parents=True)
+        pcb = pcb_dir / "x_routed.kicad_pcb"
+        pcb.touch()
+
+        allowlist = tmp_path / "tolerance.yml"
+        # The shim runs from tmp_path; use the same pcb path that argv
+        # gets so lookup_key resolves correctly.
+        rel_pcb = "boards/05-x/output/x_routed.kicad_pcb"
+        allowlist.write_text(f"tolerances:\n  {rel_pcb}: 17\n")
+
+        shim = tmp_path / "shim.py"
+        shim.write_text(
+            textwrap.dedent(
+                f"""
+                import importlib.util
+                import sys
+                from unittest.mock import patch
+
+                spec = importlib.util.spec_from_file_location(
+                    "check_routed_drc",
+                    {str(HELPER_SCRIPT_PATH)!r},
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                with patch.object(module, "count_errors", return_value=15):
+                    sys.exit(module.main([
+                        "--allowlist", {str(allowlist)!r},
+                        {rel_pcb!r},
+                    ]))
+                """
+            )
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(shim)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"subprocess exited {proc.returncode}; stderr:\n{proc.stderr}"
+        )
+        # The drift warning must appear in stdout exactly as GitHub
+        # Actions would see it.
+        assert "::warning file=" in proc.stdout
+        assert rel_pcb in proc.stdout
+        assert "Tighten to 15" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
 # Allowlist self-consistency: helper must accept the real allowlist file.
 # ---------------------------------------------------------------------------
 
