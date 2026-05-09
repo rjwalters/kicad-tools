@@ -960,6 +960,22 @@ class CppPathfinder:
             math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Resolve diff-pair partner
+        # and compute the tighter within-pair half-width radius.  The
+        # bindings.cpp surface (build version 3) accepts partner_net=-1
+        # and intra_pair_radius_cells=0 with semantics "no partner
+        # override" -- defaults preserve pre-#2559 behavior so the
+        # branch is dormant for non-paired nets.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is not None:
+            intra_pair_radius_cells = self._compute_partner_radius_cells(
+                net_class, net_trace_width
+            )
+            partner_net_arg = partner_net_id
+        else:
+            intra_pair_radius_cells = 0
+            partner_net_arg = -1
+
         # Issue #2427: Compute pad metal bounds and approach zones.
         # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
         # so the C++ A* search can use expanded goal/start regions and
@@ -999,6 +1015,11 @@ class CppPathfinder:
                 via_radius_cells,
                 start_pad_bounds,
                 end_pad_bounds,
+                # Issue #2587 / Phase 1C-cont: per-net diff-pair partner
+                # threading.  Defaults (-1, 0) preserve pre-#2559 behavior
+                # for non-paired nets.
+                partner_net_arg,
+                intra_pair_radius_cells,
             )
 
             if not result.success:
@@ -1025,8 +1046,11 @@ class CppPathfinder:
 
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
                 # clearance validation via C++ validate_route().
+                # Issue #2587 / Phase 1C-cont: pass net_class so the
+                # validator can apply the tighter intra_pair_clearance
+                # to comparisons against partner segments.
                 violation_location = self._validate_route_clearance(
-                    route, start, end, trace_radius_cells
+                    route, start, end, trace_radius_cells, net_class=net_class
                 )
 
                 if violation_location is None:
@@ -1207,6 +1231,7 @@ class CppPathfinder:
         start: "Pad",
         end: "Pad",
         trace_radius_cells: int,
+        net_class: "NetClassRouting | None" = None,
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
@@ -1215,11 +1240,22 @@ class CppPathfinder:
         via-via, same-net drill spacing) in a single C++ call, eliminating
         Python callback overhead.
 
+        Issue #2587 / Phase 1C-cont: When ``net_class`` is provided and the
+        source net's diff-pair partner is resolvable via
+        :meth:`_resolve_partner_net_id`, comparisons against the partner
+        net use ``effective_intra_pair_clearance`` (the tighter
+        within-pair value) instead of the regular ``trace_clearance``.
+        For non-paired nets, partner_net=-1 / intra_pair_clearance=0.0
+        preserves pre-#2559 behavior.
+
         Args:
             route: Route to validate.
             start: Source pad (for component reference exclusion).
             end: Destination pad (for component reference exclusion).
             trace_radius_cells: Trace half-width in grid cells (for avoidance).
+            net_class: Optional source net class for diff-pair partner
+                clearance lookup (Issue #2587).  When ``None`` or no
+                partner is known, partner threading is dormant.
 
         Returns:
             (x, y) world coordinates of violation, or None if route is valid.
@@ -1258,6 +1294,20 @@ class CppPathfinder:
             cv.net = via.net
             cpp_vias.append(cv)
 
+        # Issue #2587 / Phase 1C-cont: Resolve diff-pair partner for the
+        # source net.  Defaults (-1, 0.0) preserve pre-#2559 behavior --
+        # the partner branch in C++ validate_route is dormant when
+        # partner_net is negative.
+        partner_net_arg = -1
+        intra_pair_clearance_arg = 0.0
+        if net_class is not None:
+            partner_net_id = self._resolve_partner_net_id(start.net_name)
+            if partner_net_id is not None:
+                partner_net_arg = partner_net_id
+                intra_pair_clearance_arg = float(
+                    net_class.effective_intra_pair_clearance()
+                )
+
         vresult = self._grid._impl.validate_route(
             cpp_segs,
             cpp_vias,
@@ -1266,6 +1316,8 @@ class CppPathfinder:
             self._rules.trace_clearance,
             self._rules.via_clearance,
             self._rules.min_drill_clearance,
+            partner_net_arg,
+            intra_pair_clearance_arg,
         )
 
         if not vresult.valid:
@@ -1463,6 +1515,13 @@ class CppPathfinder:
         then identifies which net IDs are blocking cells along that path.
         This is used for targeted rip-up in negotiated routing.
 
+        Issue #2587 / Phase 1C-cont: When the source net has a resolvable
+        diff-pair partner, the partner net is EXCLUDED from the returned
+        blocker set.  Within-pair clearance is permissive by design --
+        we don't want to rip up the partner just because it sits next to
+        the source net's ideal path.  This mirrors the partner-exclusion
+        semantics in :meth:`Router.find_blocking_nets`.
+
         Args:
             start: Source pad
             end: Destination pad
@@ -1470,7 +1529,8 @@ class CppPathfinder:
             net_class: Optional net class for per-net trace width (Issue #1692).
 
         Returns:
-            Set of net IDs that block the path (excluding net 0 and the source net)
+            Set of net IDs that block the path (excluding net 0, the source
+            net, and -- for paired nets -- the diff-pair partner net).
         """
         blocking_nets: set[int] = set()
         source_net = start.net
@@ -1503,6 +1563,14 @@ class CppPathfinder:
             int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
         )
 
+        # Issue #2587 / Phase 1C-cont: Resolve diff-pair partner net id.
+        # When set, the partner is EXCLUDED from the blocker set so the
+        # negotiated rip-up loop does not destroy the carefully-coupled
+        # partner trace.  None means "no partner" (regular behavior; the
+        # != check is a no-op since cell.net is always int and never
+        # equal to None).
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+
         while True:
             # Check this cell and nearby cells (accounting for trace width)
             for check_dy in range(-trace_half_width_cells, trace_half_width_cells + 1):
@@ -1511,7 +1579,12 @@ class CppPathfinder:
                     if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
                         if self._grid._impl.is_valid(cx, cy, layer):
                             cell = self._grid._impl.at(cx, cy, layer)
-                            if cell.blocked and cell.net != source_net and cell.net != 0:
+                            if (
+                                cell.blocked
+                                and cell.net != source_net
+                                and cell.net != 0
+                                and cell.net != partner_net_id
+                            ):
                                 # This cell is blocked by another net's route
                                 if cell.usage_count > 0:
                                     blocking_nets.add(cell.net)
