@@ -708,6 +708,98 @@ class CppPathfinder:
         # } or ``None`` if no diagnostic was captured.
         self._last_failure_info: dict | None = None
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Differential-pair within-pair
+        # clearance threading mirror of ``Router._net_name_to_id`` and
+        # ``_net_partner_map``.  These are populated by
+        # ``Autorouter._prepare_routing()`` before any ``route_all_*`` entry
+        # point begins routing.  Empty by default -- when both maps are
+        # empty the partner branches are dormant and behavior matches
+        # pre-#2559 single-clearance routing.
+        #
+        # ``_net_name_to_id``: {net_name: net_id}  -- reverse map for partner
+        #   resolution.
+        # ``_net_partner_map``: {net_name: partner_name}  -- per-instance
+        #   partner overrides populated from diff-pair detection results.
+        #   Consulted FIRST by ``_resolve_partner_net_id``; falls back to
+        #   ``NetClassRouting.diffpair_partner`` only when missing.  Using
+        #   a per-instance map avoids mutating shared net-class singletons
+        #   like ``NET_CLASS_HIGH_SPEED``.
+        self._net_name_to_id: dict[str, int] = {}
+        self._net_partner_map: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Diff-pair partner resolution (Issue #2587 / Epic #2556 Phase 1C-cont)
+    # ------------------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Inject a net-name -> net-id reverse map for partner resolution.
+
+        Mirror of :meth:`Router.set_net_name_to_id`.  Phase 1C threads
+        ``NetClassRouting.intra_pair_clearance`` through the C++ A* search
+        via the ``partner_net`` / ``intra_pair_radius_cells`` parameters
+        on ``route_resumable``, ``validate_route``, and the Python-side
+        ``find_blocking_nets`` filter.  Resolving partner-name to
+        partner-id requires the reverse map that ``Autorouter`` builds
+        from its ``net_names`` dict.
+
+        The setter is idempotent and may be called multiple times.
+        Passing an empty dict disables partner detection (everything
+        falls back to ``clearance``).
+        """
+        self._net_name_to_id = dict(mapping)
+
+    def set_net_partner_map(self, mapping: dict[str, str]) -> None:
+        """Inject the per-net diff-pair partner-name overrides.
+
+        Mirror of :meth:`Router.set_net_partner_map`.  Populated from
+        ``diffpair_detection.detect_diff_pairs`` results so the partner
+        branch can fire for every detected pair without mutating shared
+        ``NetClassRouting`` singletons.  Consulted FIRST by
+        :meth:`_resolve_partner_net_id`; falls back to
+        ``NetClassRouting.diffpair_partner`` only when missing.
+        """
+        self._net_partner_map = dict(mapping)
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        """Look up the integer net id of the diff-pair partner of *net_name*.
+
+        Mirrors :meth:`Router._resolve_partner_net_id`.  Consults
+        :attr:`_net_partner_map` (the per-instance override populated
+        from detection) FIRST, then falls back to
+        ``NetClassRouting.diffpair_partner`` for the explicit-declaration
+        case.  Returns ``None`` when no partner is known or when the
+        partner-name is missing from :attr:`_net_name_to_id`.
+        """
+        partner_name: str | None = self._net_partner_map.get(net_name)
+        if partner_name is None:
+            net_class = self._net_class_map.get(net_name)
+            if net_class is not None:
+                partner_name = net_class.diffpair_partner
+        if partner_name is None:
+            return None
+        return self._net_name_to_id.get(partner_name)
+
+    def _compute_partner_radius_cells(
+        self,
+        net_class: "NetClassRouting | None",
+        net_trace_width: float,
+    ) -> int:
+        """Compute the within-pair half-width radius in grid cells.
+
+        Returns ``0`` when no partner clearance is applicable (no class or
+        the class lacks an effective intra_pair_clearance distinct from
+        the regular clearance).  The C++ binding interprets ``0`` as "no
+        partner override" -- the partner_net argument is also typically
+        ``-1`` in that case.
+        """
+        if net_class is None:
+            return 0
+        intra = net_class.effective_intra_pair_clearance()
+        return max(
+            1,
+            math.ceil((net_trace_width / 2 + intra) / self._grid.resolution),
+        )
+
     def set_routable_layers(self, layers: list[int]) -> None:
         """Set which layers are routable (skip plane layers)."""
         self._impl.set_routable_layers(layers)

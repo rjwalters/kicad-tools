@@ -225,6 +225,16 @@ class Router:
         # behavior matches pre-#2559 (single-clearance) routing.
         self._net_name_to_id: dict[str, int] = {}
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Per-net diff-pair partner
+        # overrides populated from ``diffpair_detection.detect_diff_pairs``
+        # results.  Consulted FIRST by :meth:`_resolve_partner_net_id`;
+        # falls back to ``NetClassRouting.diffpair_partner`` for the
+        # explicit-declaration case.  Using a per-instance map avoids
+        # mutating shared ``NetClassRouting`` singletons (e.g.
+        # ``NET_CLASS_HIGH_SPEED``) which would set the partner for every
+        # net referencing the singleton.
+        self._net_partner_map: dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Waypoint helpers (Issue #2330)
     # ------------------------------------------------------------------
@@ -781,26 +791,52 @@ class Router:
         """
         self._net_name_to_id = dict(mapping)
 
+    def set_net_partner_map(self, mapping: dict[str, str]) -> None:
+        """Inject the per-net diff-pair partner-name overrides.
+
+        Issue #2587 / Phase 1C-cont: Populated from
+        ``diffpair_detection.detect_diff_pairs`` results so the partner
+        branch can fire for every detected pair without mutating shared
+        ``NetClassRouting`` singletons (e.g. ``NET_CLASS_HIGH_SPEED``,
+        which is referenced by every net in ``high_speed_nets``).
+
+        Consulted FIRST by :meth:`_resolve_partner_net_id`; falls back to
+        ``NetClassRouting.diffpair_partner`` only when the per-net map
+        has no entry.  Empty dict disables the override and the resolver
+        uses only the explicit-declaration source.
+        """
+        self._net_partner_map = dict(mapping)
+
     def _resolve_partner_net_id(self, net_name: str) -> int | None:
         """Look up the integer net id of the diff-pair partner of *net_name*.
 
-        Reads ``NetClassRouting.diffpair_partner`` (the authoritative
-        Phase 1B signal) and resolves the partner-name to a partner-id via
-        :attr:`_net_name_to_id`.  Returns ``None`` when:
+        Resolution order (first non-``None`` wins):
 
-        * the source net has no net class (or the class has no
-          ``diffpair_partner`` set), or
-        * the partner-name is missing from ``_net_name_to_id`` (e.g. the
-          autorouter has not populated the reverse map yet).
+        1. :attr:`_net_partner_map` (per-instance override populated from
+           ``diffpair_detection.detect_diff_pairs`` results -- preferred to
+           avoid mutating shared ``NetClassRouting`` singletons).
+        2. ``NetClassRouting.diffpair_partner`` (the explicit-declaration
+           Phase 1B signal).
 
-        ``None`` is the dormant signal for the four read sites: when partner
-        is unknown, the search uses the wider ``clearance`` for every other
-        net, matching pre-#2559 behavior.
+        Returns ``None`` when:
+
+        * neither source declares a partner, or
+        * the partner-name is missing from :attr:`_net_name_to_id` (e.g.
+          the autorouter has not populated the reverse map yet, or the
+          partner net does not exist on the board).
+
+        ``None`` is the dormant signal for the partner read sites: when
+        partner is unknown, the search uses the wider ``clearance`` for
+        every other net, matching pre-#2559 behavior.
         """
-        net_class = self._get_net_class(net_name)
-        if net_class is None or net_class.diffpair_partner is None:
+        partner_name: str | None = self._net_partner_map.get(net_name)
+        if partner_name is None:
+            net_class = self._get_net_class(net_name)
+            if net_class is not None:
+                partner_name = net_class.diffpair_partner
+        if partner_name is None:
             return None
-        return self._net_name_to_id.get(net_class.diffpair_partner)
+        return self._net_name_to_id.get(partner_name)
 
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.
