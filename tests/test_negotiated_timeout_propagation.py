@@ -145,6 +145,10 @@ class TestTwoPhaseTimeoutPropagation:
         rules.cost_corridor_deviation = 5.0
         rules.corridor_decay_rate = 0.1
         rules.corridor_decay_floor = 0.1
+        # Issue #2597: Set explicit numeric defaults for stagnation thresholds
+        # so the rip-up cohort detector can compare them against floats.
+        rules.stagnation_overflow_delta_threshold = 0.20
+        rules.stagnation_jaccard_threshold = 0.8
 
         # Track timestamps when each net is routed (after the burn).
         burn_log: list[float] = []
@@ -264,6 +268,16 @@ class TestTwoPhaseTimeoutPropagation:
         path."""
         two_phase, grid, burn_log = self._build(net_count=2, per_net_step=0.0)
         clock = two_phase._test_clock  # type: ignore[attr-defined]
+        # Issue #2597: Disable rip-up cohort stagnation detection for this
+        # test.  The fake grid pins overflow at 5 across every iteration
+        # which would naturally trip the new detector on iter 2 (same
+        # cohort, 0 % overflow improvement).  We want the test to exercise
+        # the no-timeout / max_iterations path, so set the overflow-delta
+        # threshold to ``0.0`` — only an outright regression will fire the
+        # detector, and the fake grid never regresses.  (Setting the
+        # Jaccard threshold to >1.0 would not help because the cohort is a
+        # subset of itself, which always satisfies cohort_stable.)
+        two_phase.rules.stagnation_overflow_delta_threshold = 0.0
 
         with (
             patch("kicad_tools.router.algorithms.two_phase.time.time", clock),

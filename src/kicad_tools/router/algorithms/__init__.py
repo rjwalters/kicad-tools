@@ -23,6 +23,7 @@ from .negotiated import (
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
+    detect_ripup_stagnation,
     should_terminate_early,
 )
 from .steiner import build_rsmt
@@ -42,5 +43,6 @@ __all__ = [
     "calculate_history_increment",
     "calculate_present_cost",
     "detect_oscillation",
+    "detect_ripup_stagnation",
     "should_terminate_early",
 ]

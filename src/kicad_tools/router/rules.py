@@ -130,6 +130,24 @@ class DesignRules:
     corridor_decay_rate: float = 0.05  # per-iteration linear decay
     corridor_decay_floor: float = 0.3  # minimum multiplier (never decays below this)
 
+    # Rip-up cohort stagnation detection (Issue #2597)
+    # Controls the heuristic that breaks out of the negotiated outer loop
+    # when consecutive iterations rip up the same set of nets without
+    # meaningful overflow progress (e.g. chorus-test-revA pattern
+    # ``ripup=[{A..F}, {A..F}], overflow=[30, 12, 10]`` — strictly decreasing
+    # but each iteration costs ~per-net-timeout × N seconds).
+    #   - ``stagnation_overflow_delta_threshold``: minimum fractional
+    #     overflow improvement required to *avoid* declaring stagnation.
+    #     Default 0.20 (20 %).  Lower values declare stagnation sooner.
+    #   - ``stagnation_jaccard_threshold``: minimum Jaccard similarity
+    #     between consecutive rip-up cohorts to declare stagnation.  Default
+    #     0.8.  A strict subset relationship between cohorts always
+    #     satisfies this criterion regardless of the value.
+    # See ``detect_ripup_stagnation()`` in
+    # ``router.algorithms.negotiated`` for the full heuristic.
+    stagnation_overflow_delta_threshold: float = 0.20
+    stagnation_jaccard_threshold: float = 0.8
+
     # Crossing-aware routing (Issue #1250)
     # Penalizes candidate edges that cross already-routed segments on the same layer.
     # This steers A* toward non-crossing paths while still permitting crossings when

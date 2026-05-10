@@ -12,6 +12,7 @@ from kicad_tools.router.algorithms.negotiated import (
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
+    detect_ripup_stagnation,
     should_terminate_early,
 )
 
@@ -2477,4 +2478,204 @@ class TestNegotiatedStallFallbackInvokesComponentRipup:
         assert "_attempt_blocked_component_ripup_negotiated" in source, (
             "route_all_negotiated must invoke the destination-component "
             "rip-up helper on stall (issue #2517)."
+        )
+
+
+class TestDetectRipupStagnation:
+    """Tests for detect_ripup_stagnation function (Issue #2597).
+
+    The detector flags the chorus-test-revA pattern where consecutive
+    negotiated outer iterations rip up the same set of nets but produce
+    only marginal overflow improvement.  ``should_terminate_early()`` is
+    blind to this case because the overflow trajectory ``[30, 12, 10]`` is
+    strictly decreasing and ``len(overflow_history) < 5`` short-circuits
+    its stagnation check.
+
+    Test matrix covers six cases per the acceptance criteria:
+      1. True  — chorus-test pattern: identical cohort, < 20 % delta
+      2. True  — strict subset cohort, < 20 % delta
+      3. False — cohort churn (Jaccard < 0.8)
+      4. False — same cohort, >= 20 % overflow improvement
+      5. False — overflow == 0 (converged)
+      6. False — insufficient history (iteration < 2)
+    """
+
+    # -- True cases ----------------------------------------------------
+
+    def test_chorus_test_pattern_identical_cohort_low_delta(self):
+        """True: identical 6-net cohort across two iterations, 16 % delta.
+
+        Reproduces the exact chorus-test-revA pattern from the bug report:
+        ``ripup_history=[{A..F}, {A..F}], overflow_history=[30, 12, 10]``.
+        Iteration 2 only improved overflow by 2/12 = 16.7 %, well below
+        the 20 % threshold, on the same six-net rip-up set.  The detector
+        must fire so the outer loop bails before iteration 3 burns ~100 s
+        of wall-clock budget producing the same routes.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},  # AUDIO_L, AUDIO_R, Net-(C21-1), ...
+            {1, 2, 3, 4, 5, 6},  # same six nets again
+        ]
+        overflow_history = [30, 12, 10]
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is True
+
+    def test_strict_subset_cohort_low_delta(self):
+        """True: rip-up set shrank to a subset, but overflow barely moved.
+
+        ``{1,2,3,4} ⊂ {1,2,3,4,5,6}`` qualifies as cohort_stable regardless
+        of the Jaccard threshold.  Combined with overflow drop 12 → 11
+        (8.3 % < 20 %) and current overflow > 0, the detector should fire.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {1, 2, 3, 4},  # subset of the previous iteration
+        ]
+        overflow_history = [30, 12, 11]
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is True
+
+    # -- False cases ---------------------------------------------------
+
+    def test_cohort_churn_low_jaccard(self):
+        """False: rip-up set churned substantially (Jaccard < 0.8).
+
+        Cohorts ``{1,2,3,4,5,6}`` and ``{4,5,6,7,8,9}`` share only
+        ``{4,5,6}`` out of a union of 9 nets — Jaccard = 3/9 ≈ 0.33.
+        Even with a small overflow improvement this is *not* stagnation;
+        the router is still exploring different topologies.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {4, 5, 6, 7, 8, 9},  # 50 % overlap, Jaccard = 3/9 ≈ 0.33
+        ]
+        overflow_history = [30, 12, 10]
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+
+    def test_same_cohort_significant_improvement(self):
+        """False: same six nets, but overflow dropped >= 20 % this iteration.
+
+        Even though the rip-up cohort is identical, a 50 % overflow
+        improvement (12 → 6) means the router is still making meaningful
+        progress on those nets.  Bailing here would discard real gains.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {1, 2, 3, 4, 5, 6},
+        ]
+        overflow_history = [30, 12, 6]  # 50 % improvement >= 20 %
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+
+    def test_converged_overflow_zero(self):
+        """False: overflow == 0 means converged regardless of cohort history.
+
+        At zero overflow the router has converged; declaring stagnation
+        would be nonsensical.  The detector must short-circuit on this
+        condition so a "stagnated" status never overrides "converged".
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {1, 2, 3, 4, 5, 6},
+        ]
+        overflow_history = [30, 12, 0]  # converged on iter 2
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+
+    def test_insufficient_history_first_iteration(self):
+        """False: only one iteration of rip-up history (iteration < 2).
+
+        After the very first rip-up iteration there is nothing to compare
+        against — the previous iteration has no rip-up cohort recorded.
+        The detector must require ``len(ripup_history) >= 2`` before
+        firing so that real stagnation is distinguishable from "we just
+        started".
+        """
+        ripup_history = [{1, 2, 3, 4, 5, 6}]  # only iter 1
+        overflow_history = [30, 12]  # initial pass + iter 1
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+
+    # -- Additional edge cases ----------------------------------------
+
+    def test_jaccard_exactly_at_threshold(self):
+        """True: cohorts with Jaccard exactly == 0.8 should trip detection.
+
+        Two five-element cohorts sharing four elements have
+        Jaccard = 4/6 ≈ 0.667 — below 0.8.  Use a 9/11 = 0.818 split so
+        the threshold edge is exercised.
+        """
+        # Jaccard = |A ∩ B| / |A ∪ B| = 9 / (10 + 1) = 9/11 ≈ 0.818
+        ripup_history = [
+            set(range(10)),
+            set(range(1, 11)),  # shifted by one: 9 shared, 1 new, 1 dropped
+        ]
+        overflow_history = [30, 12, 11]
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is True
+
+    def test_overflow_regression_with_stable_cohort(self):
+        """True: overflow regressed (got worse) on the same cohort.
+
+        A regression is "less than 20 % improvement" — strictly worse
+        progress than zero improvement.  The detector should fire so the
+        outer loop falls back to the best-state restore.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {1, 2, 3, 4, 5, 6},
+        ]
+        overflow_history = [30, 10, 12]  # got worse: 10 -> 12
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is True
+
+    def test_empty_ripup_set_does_not_trigger(self):
+        """False: an empty rip-up cohort means no nets need rerouting.
+
+        Defensive guard: if ``find_nets_through_overused_cells`` returns
+        nothing, the iteration is a no-op and stagnation is meaningless.
+        """
+        ripup_history: list[set[int]] = [set(), set()]
+        overflow_history = [30, 12, 10]
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+
+    def test_custom_thresholds_strict(self):
+        """A stricter delta threshold makes the detector fire sooner.
+
+        A 25 % overflow improvement (12 -> 9) does *not* trip detection
+        with the default 20 % threshold, but a custom ``0.30`` (30 %)
+        threshold should declare stagnation since 25 % < 30 %.
+        """
+        ripup_history = [
+            {1, 2, 3, 4, 5, 6},
+            {1, 2, 3, 4, 5, 6},
+        ]
+        overflow_history = [30, 12, 9]  # 25 % improvement
+        # Default 0.20 threshold: not stagnated (25 % > 20 %)
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+        # Stricter 0.30 threshold: stagnated (25 % < 30 %)
+        assert (
+            detect_ripup_stagnation(
+                ripup_history,
+                overflow_history,
+                overflow_delta_threshold=0.30,
+            )
+            is True
+        )
+
+    def test_custom_jaccard_threshold(self):
+        """A stricter Jaccard threshold rejects partial cohort overlap.
+
+        Cohorts with Jaccard ≈ 0.667 (4/6) should *not* trip the default
+        0.8 threshold but should trip a relaxed 0.5 threshold.
+        """
+        # |A ∩ B| = 4, |A ∪ B| = 6, Jaccard = 4/6 ≈ 0.667
+        ripup_history = [
+            {1, 2, 3, 4, 5},
+            {2, 3, 4, 5, 6},
+        ]
+        overflow_history = [30, 12, 11]
+        # Default 0.80 threshold: cohort not stable (0.667 < 0.80)
+        assert detect_ripup_stagnation(ripup_history, overflow_history) is False
+        # Relaxed 0.50 threshold: cohort stable (0.667 >= 0.50)
+        assert (
+            detect_ripup_stagnation(
+                ripup_history,
+                overflow_history,
+                jaccard_threshold=0.5,
+            )
+            is True
         )
