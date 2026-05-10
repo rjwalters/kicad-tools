@@ -858,6 +858,16 @@ def _run_placement_feedback(
     timeout = getattr(args, "timeout", None)
     per_net_timeout = getattr(args, "per_net_timeout", None)
 
+    # Issue #2606: stagnation + outer-timeout guards.  Defaults match
+    # the parser: patience=3, outer_timeout=None.
+    stagnation_patience = int(
+        getattr(args, "placement_feedback_stagnation_patience", 3) or 0
+    )
+    outer_timeout_raw = getattr(args, "placement_feedback_outer_timeout", None)
+    outer_timeout = (
+        float(outer_timeout_raw) if outer_timeout_raw is not None else None
+    )
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
@@ -868,6 +878,8 @@ def _run_placement_feedback(
             max_movement=max_movement,
             timeout=timeout,
             per_net_timeout=per_net_timeout,
+            stagnation_patience=stagnation_patience,
+            outer_timeout=outer_timeout,
         )
     except Exception as exc:
         if not quiet:
@@ -876,6 +888,10 @@ def _run_placement_feedback(
 
     if not quiet:
         print(f"  Feedback iterations: {result.iterations}")
+        # Issue #2606: surface the exit_reason so CI / humans can
+        # distinguish "we made it" (pf_converged) from "we plateaued"
+        # (pf_stagnated) or "we hit the wall clock" (pf_timeout).
+        print(f"  Exit reason:        {result.exit_reason}")
         print(f"  Components moved:   {result.total_components_moved}")
         print(f"  Final failed nets:  {len(result.failed_nets)}")
 

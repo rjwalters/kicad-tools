@@ -2330,6 +2330,34 @@ def _add_route_parser(subparsers) -> None:
             "Example: --placement-feedback-no-anchor J3"
         ),
     )
+    # Issue #2606: stagnation + outer-timeout guards on the
+    # PlacementFeedbackLoop.  Defaults preserve today's behavior (the
+    # detector is enabled but only triggers when the routed-net count
+    # has plateaued; the outer timeout is off unless explicitly set).
+    route_parser.add_argument(
+        "--placement-feedback-stagnation-patience",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of consecutive outer placement-feedback iterations with "
+            "no fully-routed-net-count improvement before the loop exits "
+            "early with exit_reason=pf_stagnated. Default 3. Set to 0 to "
+            "disable stagnation detection. Issue #2606."
+        ),
+    )
+    route_parser.add_argument(
+        "--placement-feedback-outer-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Hard wall-clock budget for the entire outer placement-feedback "
+            "loop, in seconds. When exceeded between iterations the loop "
+            "exits with exit_reason=pf_timeout. Default: no outer cap "
+            "(only the per-iteration --timeout applies). Issue #2606."
+        ),
+    )
     route_parser.add_argument(
         "--export-failed-nets",
         metavar="PATH",

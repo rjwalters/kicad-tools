@@ -250,6 +250,23 @@ def run_route_command(args) -> int:
                 args.placement_feedback_no_anchor,
             ]
         )
+    # Issue #2606: forward stagnation + outer-timeout flags only when
+    # set to a non-default value so the "boards 01-05 produce identical
+    # routes" invariant holds when --placement-feedback is off.
+    if getattr(args, "placement_feedback_stagnation_patience", 3) != 3:
+        sub_argv.extend(
+            [
+                "--placement-feedback-stagnation-patience",
+                str(args.placement_feedback_stagnation_patience),
+            ]
+        )
+    if getattr(args, "placement_feedback_outer_timeout", None) is not None:
+        sub_argv.extend(
+            [
+                "--placement-feedback-outer-timeout",
+                str(args.placement_feedback_outer_timeout),
+            ]
+        )
     if getattr(args, "export_failed_nets", None):
         sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     if getattr(args, "no_cache", False):
