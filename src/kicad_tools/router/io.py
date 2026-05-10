@@ -2259,6 +2259,7 @@ def load_pcb_for_routing(
     layer_stack: LayerStack | None = None,
     force_python: bool = False,
     load_existing_routes: bool = False,
+    max_search_iterations: int = 0,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -2605,6 +2606,9 @@ def load_pcb_for_routing(
         net_class_map=net_class_map,
         layer_stack=layer_stack,
         force_python=force_python,
+        # Issue #2610: thread --max-search-iterations through to the C++ A*
+        # iteration backstop override.
+        max_search_iterations=max_search_iterations,
     )
 
     # Add all components

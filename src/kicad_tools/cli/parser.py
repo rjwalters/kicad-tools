@@ -2155,6 +2155,22 @@ def _add_route_parser(subparsers) -> None:
         help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
         "Prevents individual nets from monopolizing the router. Use 0 to disable.",
     )
+    # Issue #2610: --max-search-iterations override for the C++ A* memory
+    # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
+    # Documented as an escape hatch for dense boards where the cap fires
+    # before the wall-clock deadline; not normally needed.
+    route_parser.add_argument(
+        "--max-search-iterations",
+        type=int,
+        default=0,
+        help=(
+            "Override the C++ A* iteration backstop (default: 0 = use "
+            "cols*rows*4, which is ~1M for a 500x500 grid). Positive values "
+            "let dense boards trade memory for completeness. Iteration-cap "
+            "aborts are logged distinctly from --per-net-timeout (wall-clock) "
+            "aborts so you can tell which limit fired."
+        ),
+    )
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
     route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")

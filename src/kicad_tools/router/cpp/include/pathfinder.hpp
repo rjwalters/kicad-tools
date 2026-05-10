@@ -17,6 +17,7 @@
 #include <queue>
 #include <unordered_set>
 #include <unordered_map>
+#include <chrono>
 
 namespace router {
 
@@ -35,6 +36,15 @@ public:
     Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_routing = true);
 
     // Main routing function (non-resumable, backward compatible)
+    //
+    // Issue #2610: ``per_net_timeout_seconds`` is the wall-clock budget for
+    // this A* invocation.  When <= 0 (default), no wall-clock deadline is
+    // enforced and the search runs until success, open-set exhaustion, or
+    // the memory-backstop iteration cap.  ``max_search_iterations`` is the
+    // hard iteration ceiling; when <= 0 (default) it falls back to the
+    // historical ``cols * rows * 4`` heuristic.  When the search aborts
+    // because the deadline fired, ``RouteResult::failure_reason`` is set to
+    // ``FAILURE_TIMEOUT``; iteration-cap aborts set ``FAILURE_ITERATION_LIMIT``.
     RouteResult route(
         float start_x, float start_y, int start_layer,
         float end_x, float end_y, int end_layer,
@@ -53,12 +63,22 @@ public:
         // intra_pair_radius_cells = 0 means "no tighter radius" -- the partner
         // (when set) is treated with the wider trace_radius_cells.
         int partner_net = -1,
-        int intra_pair_radius_cells = 0
+        int intra_pair_radius_cells = 0,
+        // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
+        // and override for the iteration backstop (<= 0 = use cols*rows*4).
+        double per_net_timeout_seconds = 0.0,
+        int max_search_iterations = 0
     );
 
     // Resumable A* routing: initializes search state and runs to first goal.
     // Returns a RouteResult; if success=true, state is preserved for resume().
     // Caller must call clear_search_state() when done (success or failure).
+    //
+    // Issue #2610: see ``route()`` for ``per_net_timeout_seconds`` and
+    // ``max_search_iterations`` semantics.  The deadline is computed once
+    // at ``route_resumable()`` entry and shared across the initial search
+    // and any subsequent ``resume()`` calls, so a single per-net budget
+    // covers all retry attempts.
     RouteResult route_resumable(
         float start_x, float start_y, int start_layer,
         float end_x, float end_y, int end_layer,
@@ -75,7 +95,10 @@ public:
         // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
         // See comment on route() above; defaults preserve pre-#2559 behavior.
         int partner_net = -1,
-        int intra_pair_radius_cells = 0
+        int intra_pair_radius_cells = 0,
+        // Issue #2610: deadline + iteration override; see ``route()`` above.
+        double per_net_timeout_seconds = 0.0,
+        int max_search_iterations = 0
     );
 
     // Resume A* search after rejecting a goal cell.
@@ -221,6 +244,20 @@ private:
     int search_last_blocking_net_ = 0;
     float search_last_block_world_x_ = 0.0f;
     float search_last_block_world_y_ = 0.0f;
+
+    // Issue #2610: Per-net wall-clock deadline for the resumable search.
+    // ``search_has_deadline_`` is true when the caller supplied a positive
+    // ``per_net_timeout_seconds``; in that case ``search_deadline_`` is the
+    // absolute ``steady_clock`` instant at which the A* loop must abort with
+    // ``FAILURE_TIMEOUT``.  ``search_timed_out_`` is set when the loop
+    // observes the deadline has fired so the run_astar_loop() epilogue can
+    // distinguish TIMEOUT from ITERATION_LIMIT / NO_PATH.  The deadline is
+    // computed once in route_resumable() and shared with resume() so a
+    // single per-net budget covers the whole sequence of (initial, resume*)
+    // attempts -- matching the Python pathfinder's behavior at line 1784.
+    std::chrono::steady_clock::time_point search_deadline_{};
+    bool search_has_deadline_ = false;
+    bool search_timed_out_ = false;
 };
 
 }  // namespace router

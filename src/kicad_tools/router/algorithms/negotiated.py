@@ -746,11 +746,50 @@ class NegotiatedRouter:
     # Via-blocked failure tracking (Issue #2476)
     # =========================================================================
 
-    # Failure-reason constant mirroring router_cpp.FAILURE_VIA_VIA_BLOCKED.
+    # Failure-reason constants mirroring router_cpp.FAILURE_*.
     # Hard-coded here so the Python module imports cleanly even when the C++
-    # extension is unavailable; matches the value of ``FAILURE_VIA_VIA_BLOCKED``
-    # in ``cpp/include/types.hpp``.
+    # extension is unavailable; values must match ``cpp/include/types.hpp``.
+    _FAILURE_NONE = 0
+    _FAILURE_NO_PATH = 1
+    _FAILURE_ITERATION_LIMIT = 2
+    # Issue #2610: per-net wall-clock deadline (--per-net-timeout) was hit.
+    _FAILURE_TIMEOUT = 3
     _FAILURE_VIA_VIA_BLOCKED = 5
+
+    # Issue #2610: Human-readable labels for log differentiation.  Used by
+    # describe_failure_reason() to emit "DAC_CLK aborted at iteration cap
+    # (N iterations)" vs "DAC_CLK timed out at wall-clock deadline" vs
+    # "DAC_CLK BLOCKED_PATH (open set drained)" rather than bucketing all
+    # three into a generic BLOCKED_PATH log line.
+    _FAILURE_REASON_LABELS = {
+        _FAILURE_NONE: "none",
+        _FAILURE_NO_PATH: "blocked_path",
+        _FAILURE_ITERATION_LIMIT: "iteration_cap",
+        _FAILURE_TIMEOUT: "wall_clock_timeout",
+        _FAILURE_VIA_VIA_BLOCKED: "via_via_blocked",
+    }
+
+    @classmethod
+    def describe_failure_reason(cls, info: dict | None) -> str:
+        """Return a short label for the failure-info dict's ``failure_reason``.
+
+        Issue #2610: Router logs use this to distinguish iteration-cap aborts
+        from wall-clock timeouts from genuine BLOCKED_PATH, so users can tell
+        whether to bump ``--per-net-timeout``, raise ``--max-search-iterations``,
+        or accept that the net is geometrically unroutable.
+
+        Args:
+            info: Dict returned by ``CppPathfinder.get_last_failure_info()``,
+                or ``None``.
+
+        Returns:
+            One of: ``"none"``, ``"blocked_path"``, ``"iteration_cap"``,
+            ``"wall_clock_timeout"``, ``"via_via_blocked"``, ``"unknown"``.
+        """
+        if not info:
+            return "none"
+        reason = int(info.get("failure_reason") or 0)
+        return cls._FAILURE_REASON_LABELS.get(reason, "unknown")
 
     def _record_via_blocked_failure(self, failed_net: int) -> None:
         """Capture a via-vs-via failure from the most recent route() call.

@@ -113,6 +113,8 @@ NB_MODULE(router_cpp, m) {
     m.attr("FAILURE_NONE") = static_cast<int>(FAILURE_NONE);
     m.attr("FAILURE_NO_PATH") = static_cast<int>(FAILURE_NO_PATH);
     m.attr("FAILURE_ITERATION_LIMIT") = static_cast<int>(FAILURE_ITERATION_LIMIT);
+    // Issue #2610: wall-clock deadline (--per-net-timeout) was hit.
+    m.attr("FAILURE_TIMEOUT") = static_cast<int>(FAILURE_TIMEOUT);
     m.attr("FAILURE_VIA_VIA_BLOCKED") = static_cast<int>(FAILURE_VIA_VIA_BLOCKED);
 
     // Grid3D class
@@ -214,7 +216,11 @@ NB_MODULE(router_cpp, m) {
              "end_pad_bounds"_a = PadBounds{},
              // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
              "partner_net"_a = -1,
-             "intra_pair_radius_cells"_a = 0)
+             "intra_pair_radius_cells"_a = 0,
+             // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
+             // and override for the iteration backstop (<= 0 = cols*rows*4).
+             "per_net_timeout_seconds"_a = 0.0,
+             "max_search_iterations"_a = 0)
         .def("route_resumable", &Pathfinder::route_resumable,
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
@@ -230,7 +236,11 @@ NB_MODULE(router_cpp, m) {
              "end_pad_bounds"_a = PadBounds{},
              // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
              "partner_net"_a = -1,
-             "intra_pair_radius_cells"_a = 0)
+             "intra_pair_radius_cells"_a = 0,
+             // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
+             // and override for the iteration backstop (<= 0 = cols*rows*4).
+             "per_net_timeout_seconds"_a = 0.0,
+             "max_search_iterations"_a = 0)
         .def("resume", &Pathfinder::resume,
              "reject_x"_a, "reject_y"_a, "reject_layer"_a)
         .def("clear_search_state", &Pathfinder::clear_search_state)

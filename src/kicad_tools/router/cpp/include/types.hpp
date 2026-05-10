@@ -21,7 +21,7 @@ namespace router {
 // ``cpp_backend.py``; on import the two are compared and a mismatch
 // disables the C++ backend with a clear "kct build-native" error,
 // preventing silent ``AttributeError`` failures from a stale .so.
-constexpr int ROUTER_CPP_BUILD_VERSION = 3;
+constexpr int ROUTER_CPP_BUILD_VERSION = 4;
 
 // Grid cell state
 struct GridCell {
@@ -91,7 +91,8 @@ struct Via {
 enum FailureReason : int {
     FAILURE_NONE = 0,
     FAILURE_NO_PATH = 1,            // Open set exhausted, no candidates remained.
-    FAILURE_ITERATION_LIMIT = 2,    // Reached max_iterations cap.
+    FAILURE_ITERATION_LIMIT = 2,    // Reached max_iterations cap (memory backstop).
+    FAILURE_TIMEOUT = 3,            // Per-net wall-clock deadline exceeded (Issue #2610).
     FAILURE_VIA_VIA_BLOCKED = 5,    // All via candidates refused by stored-via geometry.
 };
 

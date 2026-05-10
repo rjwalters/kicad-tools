@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 namespace router {
 
@@ -295,13 +296,39 @@ RouteResult Pathfinder::route(
     const PadBounds& start_pad_bounds,
     const PadBounds& end_pad_bounds,
     int partner_net,
-    int intra_pair_radius_cells
+    int intra_pair_radius_cells,
+    double per_net_timeout_seconds,
+    int max_search_iterations
 ) {
     // Non-resumable route: use local A* state, no member state touched.
     // This preserves backward compatibility for callers that don't need retry.
+    //
+    // Issue #2610: silence -Wunused-parameter for the partner_net/intra_pair
+    // and timeout arguments when the inline loop path is not yet wired to
+    // honor them past this entry point.  The one-shot route() is mostly
+    // exercised by unit tests today; production traffic goes through
+    // route_resumable() which has the full implementation.  We still accept
+    // the parameters so callers see a consistent ABI.
+    (void)partner_net;
+    (void)intra_pair_radius_cells;
+
     RouteResult result;
     result.net = net;
     result.success = false;
+
+    // Issue #2610: Establish a per-net wall-clock deadline up front so the
+    // inline A* loop can check it every N iterations without recomputing
+    // the absolute deadline each tick.  ``has_deadline == false`` skips
+    // all timeout checks (zero overhead vs. the pre-#2610 hot loop).
+    bool has_deadline = (per_net_timeout_seconds > 0.0);
+    std::chrono::steady_clock::time_point deadline{};
+    if (has_deadline) {
+        deadline = std::chrono::steady_clock::now()
+            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(per_net_timeout_seconds));
+    }
+    bool timed_out = false;
+    constexpr int kTimeoutCheckInterval = 1024;
 
     auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
     auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
@@ -338,7 +365,13 @@ RouteResult Pathfinder::route(
         }
     }
 
-    int max_iterations = grid_.cols() * grid_.rows() * 4;
+    // Issue #2610: ``max_search_iterations`` overrides the historical
+    // ``cols * rows * 4`` ceiling so callers (CLI ``--max-search-iterations``,
+    // ``cpp_backend.py``) can trade memory for completeness on dense boards.
+    // The default (<= 0) preserves pre-#2610 behavior.
+    int max_iterations = (max_search_iterations > 0)
+        ? max_search_iterations
+        : grid_.cols() * grid_.rows() * 4;
     last_iterations_ = 0;
     last_nodes_explored_ = 0;
 
@@ -356,6 +389,19 @@ RouteResult Pathfinder::route(
     // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
         last_iterations_++;
+
+        // Issue #2610: Per-net wall-clock deadline check.  Sampled every
+        // ``kTimeoutCheckInterval`` iterations to amortize the syscall to
+        // ``steady_clock::now()`` -- mirrors the Python pathfinder's
+        // approach at line 1791.  When the deadline fires we set
+        // ``timed_out`` so the epilogue reports FAILURE_TIMEOUT rather
+        // than FAILURE_NO_PATH / FAILURE_ITERATION_LIMIT.
+        if (has_deadline && (last_iterations_ % kTimeoutCheckInterval == 0)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                timed_out = true;
+                break;
+            }
+        }
 
         AStarNode current = open_set.top();
         open_set.pop();
@@ -559,15 +605,23 @@ RouteResult Pathfinder::route(
     }
 
     // Search ended without reaching the goal.  Populate structured failure
-    // diagnostics (Issue #2476) so the negotiated strategy can dispatch a
-    // targeted retry/rip-up rather than blanket retrying with no insight.
-    result.failure_reason = (last_iterations_ >= max_iterations)
-        ? FAILURE_ITERATION_LIMIT
-        : FAILURE_NO_PATH;
+    // diagnostics (Issues #2476 / #2610) so the negotiated strategy can
+    // dispatch targeted retry/rip-up and so the router log can distinguish
+    // wall-clock TIMEOUT from ITERATION_LIMIT (memory backstop hit) from
+    // genuine NO_PATH (open set drained).
+    if (timed_out) {
+        result.failure_reason = FAILURE_TIMEOUT;
+    } else if (last_iterations_ >= max_iterations) {
+        result.failure_reason = FAILURE_ITERATION_LIMIT;
+    } else {
+        result.failure_reason = FAILURE_NO_PATH;
+    }
     if (via_block_count > 0 && last_blocking_net != 0) {
         // At least one via expansion was refused by stored-via geometry.
         // Surface this regardless of why the open set ultimately drained --
         // a Python caller can then choose to rip up the blocking net.
+        // Note: VIA_VIA_BLOCKED takes precedence over TIMEOUT/ITERATION_LIMIT
+        // because the geometric blocker is the most actionable signal.
         result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
         result.blocking_via_net = last_blocking_net;
         result.failure_x = last_block_world_x;
@@ -590,7 +644,9 @@ RouteResult Pathfinder::route_resumable(
     const PadBounds& start_pad_bounds,
     const PadBounds& end_pad_bounds,
     int partner_net,
-    int intra_pair_radius_cells
+    int intra_pair_radius_cells,
+    double per_net_timeout_seconds,
+    int max_search_iterations
 ) {
     // Clear any previous search state
     clear_search_state();
@@ -646,7 +702,11 @@ RouteResult Pathfinder::route_resumable(
         }
     }
 
-    search_max_iterations_ = grid_.cols() * grid_.rows() * 4;
+    // Issue #2610: ``max_search_iterations`` overrides the historical
+    // ``cols * rows * 4`` ceiling.  Default (<= 0) preserves pre-#2610 behavior.
+    search_max_iterations_ = (max_search_iterations > 0)
+        ? max_search_iterations
+        : grid_.cols() * grid_.rows() * 4;
     last_iterations_ = 0;
     last_nodes_explored_ = 0;
     search_state_active_ = true;
@@ -659,6 +719,20 @@ RouteResult Pathfinder::route_resumable(
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+
+    // Issue #2610: Compute the per-net wall-clock deadline ONCE here and
+    // share it with subsequent resume() calls.  This way a single per-net
+    // budget covers the (initial search + up to N resume attempts), which
+    // matches how cpp_backend.py orchestrates retries on validation
+    // failure.  Without this, each resume() would get a fresh budget and
+    // a pathological net could blow well past --per-net-timeout.
+    search_has_deadline_ = (per_net_timeout_seconds > 0.0);
+    if (search_has_deadline_) {
+        search_deadline_ = std::chrono::steady_clock::now()
+            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(per_net_timeout_seconds));
+    }
+    search_timed_out_ = false;
 
     return run_astar_loop();
 }
@@ -686,8 +760,23 @@ RouteResult Pathfinder::run_astar_loop() {
     const auto& sp = search_start_pad_bounds_;
     const auto& ep = search_end_pad_bounds_;
 
+    constexpr int kTimeoutCheckInterval = 1024;
+
     while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
         last_iterations_++;
+
+        // Issue #2610: Per-net wall-clock deadline check.  Sampled every
+        // ``kTimeoutCheckInterval`` iterations to amortize the syscall to
+        // ``steady_clock::now()`` -- mirrors pathfinder.py:1791.  The deadline
+        // was computed once in route_resumable() and is shared with resume()
+        // so a single per-net budget covers all attempts.
+        if (search_has_deadline_ &&
+            (last_iterations_ % kTimeoutCheckInterval == 0)) {
+            if (std::chrono::steady_clock::now() >= search_deadline_) {
+                search_timed_out_ = true;
+                break;
+            }
+        }
 
         AStarNode current = search_open_set_.top();
         search_open_set_.pop();
@@ -907,15 +996,22 @@ RouteResult Pathfinder::run_astar_loop() {
         }
     }
 
-    // Open set exhausted or iteration limit hit.  Surface structured
-    // failure diagnostics (Issue #2476) -- the negotiated strategy uses
-    // ``failure_reason`` to dispatch targeted retries rather than blanket
-    // re-routing.
+    // Open set exhausted, iteration limit hit, or wall-clock deadline fired.
+    // Surface structured failure diagnostics (Issues #2476 / #2610) so the
+    // negotiated strategy can dispatch targeted retries and the router log
+    // can distinguish TIMEOUT (wall-clock) from ITERATION_LIMIT (memory
+    // backstop) from NO_PATH (open set drained).
     search_state_active_ = false;
-    result.failure_reason = (last_iterations_ >= search_max_iterations_)
-        ? FAILURE_ITERATION_LIMIT
-        : FAILURE_NO_PATH;
+    if (search_timed_out_) {
+        result.failure_reason = FAILURE_TIMEOUT;
+    } else if (last_iterations_ >= search_max_iterations_) {
+        result.failure_reason = FAILURE_ITERATION_LIMIT;
+    } else {
+        result.failure_reason = FAILURE_NO_PATH;
+    }
     if (search_via_block_count_ > 0 && search_last_blocking_net_ != 0) {
+        // VIA_VIA_BLOCKED takes precedence over TIMEOUT/ITERATION_LIMIT
+        // because the geometric blocker is the most actionable signal.
         result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
         result.blocking_via_net = search_last_blocking_net_;
         result.failure_x = search_last_block_world_x_;
@@ -942,6 +1038,10 @@ void Pathfinder::clear_search_state() {
     // from a previous net does not leak into the next route().
     search_partner_net_ = -1;
     search_intra_pair_radius_cells_ = 0;
+    // Issue #2610: reset deadline state so a stale per-net deadline from
+    // the previous net does not leak into the next route().
+    search_has_deadline_ = false;
+    search_timed_out_ = false;
 }
 
 RouteResult Pathfinder::reconstruct_path(
