@@ -135,6 +135,23 @@ def _reload_cpp_backend() -> bool:
     to :func:`is_cpp_available` return ``True`` and the C++ backend is
     actually used by the routing code.
 
+    Issue #2594: ``importlib.reload(cpp_backend)`` alone is *not* enough.
+    The original ``from . import router_cpp`` failed at startup, leaving:
+
+      1. A negative/partially-initialised entry for
+         ``kicad_tools.router.router_cpp`` in :data:`sys.modules` that
+         Python re-uses on subsequent imports instead of re-running the
+         module finder.
+      2. A cached directory listing on the parent package's
+         ``FileFinder`` that does not yet contain the freshly-written
+         ``router_cpp.*.so``.
+
+    To pick up the new ``.so`` in the same process we MUST drop the
+    stale ``sys.modules`` entry AND call
+    :func:`importlib.invalidate_caches` before the reload.  This is the
+    safe case: the previous attempt never succeeded, so there is no
+    initialised native module to clash with.
+
     Returns:
         ``True`` if the backend is available after reload, ``False`` otherwise.
     """
@@ -142,6 +159,18 @@ def _reload_cpp_backend() -> bool:
 
     import importlib
     import sys as _sys
+
+    # 1. Drop any stale negative/partial entry for the C++ extension itself.
+    #    A failed ``from . import router_cpp`` at startup leaves a None or
+    #    partially-initialised module in sys.modules that Python re-uses
+    #    on subsequent imports.
+    _sys.modules.pop("kicad_tools.router.router_cpp", None)
+
+    # 2. Tell the import machinery to re-scan filesystem-based finders
+    #    for the freshly-written .so. Without this, the parent package's
+    #    FileFinder may keep its cached directory listing from before the
+    #    build wrote the new file.
+    importlib.invalidate_caches()
 
     module_name = __name__  # "kicad_tools.router.cpp_backend"
     module = _sys.modules.get(module_name)
@@ -340,11 +369,19 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
     # (``_CPP_AVAILABLE``, ``router_cpp``) reflect the freshly written
     # ``.so``.  Without this, ``is_cpp_available()`` continues to return
     # ``False`` for the rest of the process.
+    #
+    # Issue #2594: ``_reload_cpp_backend`` now invalidates the import
+    # caches and pops the stale ``router_cpp`` entry from ``sys.modules``
+    # before reloading, so this is expected to succeed in the same
+    # process.  The ``not available`` branch is retained as a defensive
+    # diagnostic for genuinely pathological reload failures (e.g. a
+    # platform where dlopen of the new .so itself fails after the build
+    # wrote it to disk).
     available = _reload_cpp_backend()
     if not available and not quiet:
         print(
             "Note: C++ build succeeded but module reload did not pick it up; "
-            "falling back to Python (re-run kct to use C++).",
+            "falling back to Python.",
             flush=True,
         )
     return available
