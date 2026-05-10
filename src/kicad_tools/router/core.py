@@ -5292,11 +5292,26 @@ class Autorouter:
                 )
 
         if progress_callback is not None:
-            status = (
-                "converged"
-                if overflow == 0
-                else ("timeout" if timed_out else f"overflow={overflow}")
-            )
+            # Issue #2597: Distinguish ``stagnated`` from ``timeout`` and
+            # bare ``f"overflow={N}"`` so callers (and CI) can pick the
+            # right next action — re-place vs. add budget.  Plain
+            # ``timeout`` was ambiguous: did we run out of clock or hit a
+            # local minimum?  ``stagnation_detected`` is reserved here for
+            # the same rip-up cohort stagnation heuristic that the
+            # ``TwoPhaseRouter._detailed_negotiated()`` outer loop uses;
+            # the route-all path currently relies on ``cohort_history`` /
+            # stagnation-recovery (Issue #2515) so the flag is always
+            # ``False`` in this branch, but the branch is exposed so the
+            # status string is symmetric with the two-phase callback.
+            stagnation_detected = False
+            if overflow == 0:
+                status = "converged"
+            elif timed_out:
+                status = "timeout"
+            elif stagnation_detected:
+                status = "stagnated"
+            else:
+                status = f"overflow={overflow}"
             progress_callback(
                 1.0, f"Routing complete: {successful_nets}/{total_nets} nets ({status})", False
             )

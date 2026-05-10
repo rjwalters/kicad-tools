@@ -85,6 +85,18 @@ class TwoPhaseRouter:
         self._build_pads_by_net = build_pads_by_net
         self._get_partially_routed_nets = get_partially_routed_nets
 
+        # Issue #2597: Communicates the reason the negotiated outer loop in
+        # ``_detailed_negotiated()`` exited.  Read by the progress-callback
+        # status string in :class:`Autorouter` to distinguish ``"stagnated"``
+        # from ``"timeout"`` and bare ``f"overflow={N}"``.  Possible values:
+        #   - ``None`` — loop hasn't run yet, or two-phase path not taken.
+        #   - ``"stagnated"`` — rip-up cohort stagnation detector tripped.
+        #   - ``"timeout"`` — wall-clock budget exhausted.
+        #   - ``"early_stop"`` — overflow-history early termination.
+        #   - ``"converged"`` — overflow reached zero.
+        #   - ``"max_iterations"`` — outer loop ran to ``max_iterations``.
+        self.last_termination_reason: str | None = None
+
     def route_all(
         self,
         use_negotiated: bool = True,
@@ -336,9 +348,23 @@ class TwoPhaseRouter:
                 print(failure_summary)
 
         if progress_callback is not None:
+            # Issue #2597: Distinguish ``stagnated`` from ``timeout`` in the
+            # final progress message so callers (and CI) can pick the right
+            # next action — re-place vs. add budget.  Plain ``timeout`` was
+            # ambiguous: did we run out of clock or hit a local minimum?
+            status_suffix = ""
+            if self.last_termination_reason == "stagnated":
+                status_suffix = " (stagnated)"
+            elif self.last_termination_reason == "timeout":
+                status_suffix = " (timeout)"
+            elif self.last_termination_reason == "converged":
+                status_suffix = " (converged)"
             progress_callback(
                 1.0,
-                f"Complete: {connected_nets}/{total_nets} nets routed in {total_elapsed:.1f}s",
+                (
+                    f"Complete: {connected_nets}/{total_nets} nets routed "
+                    f"in {total_elapsed:.1f}s{status_suffix}"
+                ),
                 False,
             )
 
@@ -368,7 +394,10 @@ class TwoPhaseRouter:
                 ``min_iterations`` to ``should_terminate_early()``.
         """
         from ..algorithms import NegotiatedRouter
-        from ..algorithms.negotiated import should_terminate_early
+        from ..algorithms.negotiated import (
+            detect_ripup_stagnation,
+            should_terminate_early,
+        )
 
         if corridor_penalty is None:
             corridor_penalty = self.rules.cost_corridor_deviation
@@ -512,6 +541,23 @@ class TwoPhaseRouter:
         # Issue #2317: Track overflow history for early-stop detection.
         overflow_history: list[int] = [overflow]
 
+        # Issue #2597: Track per-iteration rip-up cohort for stagnation
+        # detection.  ``ripup_set_history[k]`` is the set of net IDs ripped
+        # up at the start of outer iteration ``k+1`` (the initial pass is
+        # not represented).  Combined with ``overflow_history`` this lets
+        # us detect the chorus-test pattern where consecutive iterations
+        # tear up the *same* nets and produce only marginal overflow
+        # improvement — the existing ``should_terminate_early()`` heuristic
+        # cannot see this because the overflow trajectory is strictly
+        # decreasing.
+        ripup_set_history: list[set[int]] = []
+
+        # Issue #2597: stagnation flag returned to the caller via the
+        # ``last_termination_reason`` attribute so the progress callback can
+        # distinguish ``"stagnated"`` from ``"timeout"`` and bare
+        # ``f"overflow={N}"``.
+        stagnation_detected = False
+
         # Issue #2305: Track best routing state across iterations.
         # Overflow can oscillate during rip-up-and-reroute; if timeout or
         # iteration limit is hit during a high-overflow iteration we want to
@@ -564,6 +610,11 @@ class TwoPhaseRouter:
                 flush_print(
                     f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
                 )
+
+                # Issue #2597: Snapshot the rip-up cohort *before* mutating
+                # ``net_routes`` so the stagnation detector can compare the
+                # current iteration's targets against the previous one.
+                ripup_set_history.append(set(nets_to_reroute))
 
                 neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
@@ -632,6 +683,38 @@ class TwoPhaseRouter:
                     )
                     break
 
+                # Issue #2597: Detect rip-up cohort stagnation that
+                # ``should_terminate_early()`` cannot see.  When the same
+                # nets get torn up across consecutive iterations and the
+                # overflow needle barely moves, the next iteration is very
+                # likely to repeat the same ~per-net-timeout × N seconds of
+                # work without escaping the local minimum.  The chorus-test
+                # pattern is ``ripup=[{A..F}, {A..F}], overflow=[30, 12, 10]``
+                # — strictly decreasing overflow keeps the standard
+                # heuristic silent, but iteration 3 is doomed to burn ~100 s
+                # of wall-clock budget before producing the same six routes.
+                if detect_ripup_stagnation(
+                    ripup_set_history,
+                    overflow_history,
+                    overflow_delta_threshold=self.rules.stagnation_overflow_delta_threshold,
+                    jaccard_threshold=self.rules.stagnation_jaccard_threshold,
+                ):
+                    prev_ov = overflow_history[-2]
+                    curr_ov = overflow_history[-1]
+                    if prev_ov > 0:
+                        improvement_pct = (
+                            100.0 * (prev_ov - curr_ov) / prev_ov
+                        )
+                    else:
+                        improvement_pct = 0.0
+                    flush_print(
+                        f"  Stagnation detected: rip-up set unchanged, "
+                        f"overflow plateau ({prev_ov} → {curr_ov}, "
+                        f"{improvement_pct:.1f}%)"
+                    )
+                    stagnation_detected = True
+                    break
+
         # Issue #2305: Restore best state if the final iteration is worse
         final_overflow = self.grid.get_total_overflow()
         if best_overflow < final_overflow:
@@ -652,6 +735,26 @@ class TwoPhaseRouter:
             # Update net_routes to best state
             net_routes.clear()
             net_routes.update(best_net_routes)
+
+        # Issue #2597: Surface the iteration-loop exit reason to the caller
+        # so the progress-callback status string can distinguish between
+        # ``"stagnated"`` (rip-up cohort stuck), ``"timeout"`` (wall clock
+        # exhausted), and bare ``f"overflow={N}"`` (other early stop or
+        # ``max_iterations`` reached).  ``stagnated`` takes precedence over
+        # ``timeout`` because the stagnation detector breaks out *before*
+        # iteration N+1 has a chance to trip the wall-clock check.
+        effective_overflow = min(best_overflow, final_overflow)
+        if stagnation_detected:
+            self.last_termination_reason = "stagnated"
+        elif effective_overflow == 0:
+            self.last_termination_reason = "converged"
+        elif timed_out:
+            self.last_termination_reason = "timeout"
+        else:
+            # Loop hit ``max_iterations`` or ``should_terminate_early()``;
+            # both fall under the catch-all ``f"overflow={N}"`` status in
+            # the caller's progress message, so signal ``early_stop`` here.
+            self.last_termination_reason = "early_stop"
 
         return list(self.routes)
 

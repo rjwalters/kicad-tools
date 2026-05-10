@@ -126,6 +126,10 @@ class TestBestStateTracking:
         router = MagicMock()
         rules = MagicMock()
         rules.cost_corridor_deviation = 5.0
+        # Issue #2597: Numeric defaults for stagnation thresholds so the
+        # rip-up cohort detector compares floats, not MagicMock objects.
+        rules.stagnation_overflow_delta_threshold = 0.20
+        rules.stagnation_jaccard_threshold = 0.8
 
         call_count = [0]
 
@@ -339,6 +343,10 @@ class TestEarlyStopOverflowRegression:
         rules.cost_corridor_deviation = 5.0
         rules.corridor_decay_rate = 0.1
         rules.corridor_decay_floor = 0.1
+        # Issue #2597: Numeric defaults for stagnation thresholds so the
+        # rip-up cohort detector compares floats, not MagicMock objects.
+        rules.stagnation_overflow_delta_threshold = 0.20
+        rules.stagnation_jaccard_threshold = 0.8
 
         call_count = [0]
 
@@ -385,6 +393,15 @@ class TestEarlyStopOverflowRegression:
         # iteration 10.  We provide enough overflow values for max_iterations=10.
         overflow_seq = [81, 18, 25, 30, 35, 40, 45, 50, 55, 60, 65, 65]
         two_phase, grid = self._build_two_phase(overflow_seq)
+        # Issue #2597: Disable rip-up cohort stagnation detection so this
+        # test exercises ``should_terminate_early()`` exclusively.  The
+        # FakeNegotiatedRouter always rips up the same single net, so the
+        # new detector would fire on iter 2's regression (18 → 25) before
+        # the should_terminate_early heuristic gets a chance to evaluate
+        # the longer history.  Setting an impossibly-strict delta
+        # threshold (-1.0) means only a >100 % regression would trip
+        # stagnation detection, which never happens in this fixture.
+        two_phase.rules.stagnation_overflow_delta_threshold = -1.0
 
         with patch(
             "kicad_tools.router.algorithms.NegotiatedRouter",
@@ -472,6 +489,10 @@ class TestEarlyStopOverflowRegression:
         #   [0] initial = 81, [1] = 18, [2] = 25, [3] = 30, [4] = 0
         overflow_seq = [81, 18, 25, 30, 0, 0]
         two_phase, grid = self._build_two_phase(overflow_seq)
+        # Issue #2597: Disable rip-up cohort stagnation detection so this
+        # test exercises ``patience`` exclusively.  See comment in
+        # ``test_early_stop_on_regression`` for details.
+        two_phase.rules.stagnation_overflow_delta_threshold = -1.0
 
         with patch(
             "kicad_tools.router.algorithms.NegotiatedRouter",

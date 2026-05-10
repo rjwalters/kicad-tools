@@ -270,6 +270,126 @@ def should_terminate_early(
     return False
 
 
+def detect_ripup_stagnation(
+    ripup_history: list[set[int]],
+    overflow_history: list[int],
+    *,
+    overflow_delta_threshold: float = 0.20,
+    jaccard_threshold: float = 0.8,
+) -> bool:
+    """Detect when negotiated rip-up keeps targeting the same nets without progress.
+
+    Issue #2597.  This complements :func:`should_terminate_early`, which only
+    inspects the overflow history.  On boards like chorus-test-revA the
+    overflow trajectory is *strictly decreasing* (e.g. ``[30, 12, 10]``) so
+    none of the standard stagnation checks fire — yet the rip-up cohort is
+    identical across consecutive iterations and each new iteration only
+    nibbles a few units off the overflow.  Rerouting the same six nets a
+    fourth time is overwhelmingly likely to repeat the same near-identical
+    paths and burn another ~per-net-timeout × N seconds before the wall-clock
+    timeout fires.
+
+    Stagnation is declared when **all** of the following hold:
+
+    1. There are at least two complete iterations of rip-up history
+       (``len(ripup_history) >= 2`` and ``len(overflow_history) >= 2``).
+    2. The latest two rip-up sets ``A = ripup_history[-2]`` and
+       ``B = ripup_history[-1]`` are highly similar:
+       ``B`` is a non-empty subset of ``A``, **or** the Jaccard similarity
+       ``|A ∩ B| / |A ∪ B|`` meets ``jaccard_threshold`` (default 0.8).
+    3. Overflow improved by less than ``overflow_delta_threshold`` (default
+       20 %): ``(overflow[-2] - overflow[-1]) / overflow[-2] <
+       overflow_delta_threshold``.  A regression (overflow[-1] > overflow[-2])
+       also counts as "less than threshold".
+    4. The current overflow is still positive — at ``overflow == 0`` the
+       router has converged and there is nothing to detect.
+
+    Args:
+        ripup_history: List of rip-up cohorts (one ``set[int]`` per
+            negotiated outer iteration).  ``ripup_history[k]`` is the set
+            of net IDs ripped up at the start of iteration ``k+1``.
+        overflow_history: List of total overflow values (one per iteration,
+            including the initial pass at index 0).  Must be at least the
+            same length as ``ripup_history`` minus one initial-pass entry.
+        overflow_delta_threshold: Minimum fractional improvement in overflow
+            required to *avoid* a stagnation declaration.  Default 0.20
+            (20 %).  Lower values are stricter (declare stagnation sooner).
+        jaccard_threshold: Minimum Jaccard similarity between consecutive
+            rip-up sets required to declare stagnation.  Default 0.8.  A
+            strict subset relationship also satisfies this criterion
+            regardless of the threshold.
+
+    Returns:
+        ``True`` if the negotiated outer loop should break out and let the
+        existing best-state restore in ``two_phase.py`` hand back the
+        previous (lower-overflow) iteration; ``False`` otherwise.
+
+    Examples:
+        >>> # chorus-test pattern: same 6 nets ripped up twice, overflow
+        >>> # 30 -> 12 -> 10 (16 % improvement on iter 2)
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3, 4, 5, 6}, {1, 2, 3, 4, 5, 6}],
+        ...     overflow_history=[30, 12, 10],
+        ... )
+        True
+
+        >>> # Cohort churned -- different nets, no stagnation
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3}, {7, 8, 9}],
+        ...     overflow_history=[30, 12, 10],
+        ... )
+        False
+
+        >>> # Same cohort but >= 20 % overflow improvement
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3}, {1, 2, 3}],
+        ...     overflow_history=[30, 12, 5],
+        ... )
+        False
+    """
+    # Criterion 1: need two complete rip-up + overflow iterations to compare.
+    if len(ripup_history) < 2 or len(overflow_history) < 2:
+        return False
+
+    prev_ripup = ripup_history[-2]
+    curr_ripup = ripup_history[-1]
+    prev_overflow = overflow_history[-2]
+    curr_overflow = overflow_history[-1]
+
+    # Criterion 4: skip when converged (no work left to detect).
+    if curr_overflow <= 0:
+        return False
+
+    # Empty cohorts indicate the iteration ripped up nothing -- not the
+    # stagnation pattern this detector targets.
+    if not prev_ripup or not curr_ripup:
+        return False
+
+    # Criterion 2: high overlap between consecutive rip-up cohorts.
+    # Subset relationship (curr ⊆ prev) is always sufficient; otherwise
+    # require Jaccard similarity >= threshold.
+    if curr_ripup <= prev_ripup:
+        cohort_stable = True
+    else:
+        intersection = len(curr_ripup & prev_ripup)
+        union = len(curr_ripup | prev_ripup)
+        jaccard = intersection / union if union else 0.0
+        cohort_stable = jaccard >= jaccard_threshold
+
+    if not cohort_stable:
+        return False
+
+    # Criterion 3: insufficient overflow improvement on this iteration.
+    # If overflow regressed or held steady, treat that as 0 % improvement.
+    if prev_overflow <= 0:
+        # Cannot compute a fractional delta from a non-positive baseline;
+        # fall back to "no improvement on a positive current overflow".
+        return True
+
+    improvement = (prev_overflow - curr_overflow) / prev_overflow
+    return improvement < overflow_delta_threshold
+
+
 def calculate_present_cost(
     iteration: int,
     total_iterations: int,
