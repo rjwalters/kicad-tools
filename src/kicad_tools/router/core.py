@@ -6970,6 +6970,10 @@ class Autorouter:
         use_negotiated: bool = True,
         min_confidence: float = 0.5,
         verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
+        max_movement: float | None = 5.0,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> PlacementFeedbackResult:
         """Route with automatic placement adjustment on failures.
 
@@ -6995,6 +6999,21 @@ class Autorouter:
             min_confidence: Minimum confidence required to apply a strategy.
                 Strategies below this threshold are skipped.
             verbose: Whether to print progress information.
+            fixed_refs: Optional set/list of component references that
+                must NOT move during the feedback loop.  Typically
+                connectors (J*), mechanical parts, and any component
+                the caller has hand-placed.  Default: empty.
+            max_movement: Hard cap on per-component movement distance,
+                in mm.  Strategies whose move actions exceed this cap
+                are filtered out.  Set to None to disable.  Default:
+                5.0mm.
+            timeout: Optional total routing budget per iteration of the
+                feedback loop, in seconds.  Forwarded to the negotiated
+                router so each re-route inside the loop respects the
+                same wall-time budget as the initial routing pass.
+                Default: no limit.
+            per_net_timeout: Optional per-net timeout, in seconds, also
+                forwarded to the negotiated router.  Default: no limit.
 
         Returns:
             PlacementFeedbackResult with:
@@ -7048,12 +7067,16 @@ class Autorouter:
             router=self,
             pcb=pcb,
             verbose=verbose,
+            fixed_refs=fixed_refs,
+            max_movement=max_movement,
         )
 
         return feedback_loop.run(
             max_adjustments=max_adjustments,
             use_negotiated=use_negotiated,
             min_confidence=min_confidence,
+            timeout=timeout,
+            per_net_timeout=per_net_timeout,
         )
 
     # =========================================================================

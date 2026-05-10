@@ -219,6 +219,7 @@ from .parallel import (
 from .pathfinder import AStarNode, Router
 from .placement_feedback import (
     PlacementAdjustment,
+    PlacementDiffEntry,
     PlacementFeedbackLoop,
     PlacementFeedbackResult,
 )
@@ -465,6 +466,7 @@ __all__ = [
     "PlacementFeedbackLoop",
     "PlacementFeedbackResult",
     "PlacementAdjustment",
+    "PlacementDiffEntry",
     # Escape Routing (dense packages)
     "EscapeRouter",
     "EscapeRoute",

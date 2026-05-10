@@ -2273,6 +2273,63 @@ def _add_route_parser(subparsers) -> None:
         metavar="N",
         help=("Number of repair passes for --auto-fix (default: 3). Implies --auto-fix."),
     )
+    # Issue #2595: placement-feedback opt-in flags.
+    route_parser.add_argument(
+        "--placement-feedback",
+        action="store_true",
+        default=False,
+        help=(
+            "After the initial routing pass, if any nets failed with "
+            "BLOCKED_BY_COMPONENT root cause, invoke the placement-routing "
+            "feedback loop to nudge non-anchored components and re-route. "
+            "Connectors (J*, P*) and locked footprints are auto-anchored. "
+            "Issue #2595."
+        ),
+    )
+    route_parser.add_argument(
+        "--no-placement-feedback",
+        dest="placement_feedback",
+        action="store_false",
+        help="Explicitly disable placement-routing feedback (default).",
+    )
+    route_parser.add_argument(
+        "--placement-feedback-budget",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Maximum number of placement adjustments to attempt when "
+            "--placement-feedback is set (default: 3)."
+        ),
+    )
+    route_parser.add_argument(
+        "--placement-feedback-max-movement",
+        type=float,
+        default=5.0,
+        metavar="MM",
+        help=(
+            "Hard cap on per-component movement distance for the placement "
+            "feedback loop, in mm (default: 5.0)."
+        ),
+    )
+    route_parser.add_argument(
+        "--placement-feedback-anchor",
+        default=None,
+        metavar="REFS",
+        help=(
+            "Additional component references to anchor (never move) during "
+            "placement feedback, comma-separated. Example: --placement-feedback-anchor U5,U7"
+        ),
+    )
+    route_parser.add_argument(
+        "--placement-feedback-no-anchor",
+        default=None,
+        metavar="REFS",
+        help=(
+            "Component references to remove from the anchor set, comma-separated. "
+            "Example: --placement-feedback-no-anchor J3"
+        ),
+    )
     route_parser.add_argument(
         "--export-failed-nets",
         metavar="PATH",
