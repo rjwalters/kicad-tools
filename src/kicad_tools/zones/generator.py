@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import uuid as uuid_module
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -718,8 +719,8 @@ def parse_power_nets(spec: str) -> list[tuple[str, str]]:
 
 
 def _order_ground_nets_canonically(
-    ground_nets: list[tuple[str, "NetClass"]],
-) -> list[tuple[str, "NetClass"]]:
+    ground_nets: Sequence[tuple[str, NetClass]],
+) -> list[tuple[str, NetClass]]:
     """Order ground nets so the canonical "system ground" is first.
 
     The canonical ground (assigned to the most-preferred layer/priority,
