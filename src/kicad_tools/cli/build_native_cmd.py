@@ -348,7 +348,23 @@ def build_native(
         # Verify the installation
         try:
             # Clear any cached imports
+            #
+            # Issue #2594: ``importlib.reload(cpp_module)`` alone is not
+            # enough when the original ``from . import router_cpp`` failed
+            # at startup (fresh checkout with no .so on disk).  Python
+            # caches the negative result on the parent package's
+            # ``FileFinder`` and may leave a partial / ``None`` entry in
+            # ``sys.modules`` for ``kicad_tools.router.router_cpp``.  We
+            # must drop that stale entry and invalidate the path-based
+            # caches so the reloaded ``cpp_backend`` actually picks up
+            # the freshly-written ``.so``.  ``sys`` is already imported
+            # at module scope -- do NOT shadow it with a local import
+            # here (would trigger ``UnboundLocalError`` on the earlier
+            # ``sys.executable`` reference at the cmake configure step).
             import importlib
+
+            sys.modules.pop("kicad_tools.router.router_cpp", None)
+            importlib.invalidate_caches()
 
             import kicad_tools.router.cpp_backend as cpp_module
 

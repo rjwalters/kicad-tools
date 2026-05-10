@@ -336,3 +336,124 @@ class TestRouteCmdCallsHelper:
         assert "WARNING: C++ router backend not installed" not in text, (
             "Old inline Python-fallback warning still present in route_cmd.py"
         )
+
+
+class TestReloadCppBackend:
+    """Issue #2594: ``_reload_cpp_backend()`` must flush import caches.
+
+    The auto-build path writes a fresh ``router_cpp.*.so`` to disk and
+    then calls ``_reload_cpp_backend()``.  Before this fix,
+    ``importlib.reload(cpp_backend)`` alone did not pick up the new
+    ``.so`` because:
+
+      1. The original failed ``from . import router_cpp`` left a stale
+         entry in ``sys.modules`` for ``kicad_tools.router.router_cpp``
+         that Python re-used on subsequent imports.
+      2. The parent package's ``FileFinder`` had a cached directory
+         listing that did not contain the freshly-written ``.so``.
+
+    These tests pin the cache-flushing behavior so future regressions
+    surface as test failures rather than as the silent
+    "C++ build succeeded but module reload did not pick it up" warning.
+    """
+
+    def test_reload_pops_stale_router_cpp_from_sys_modules(self, monkeypatch):
+        """``_reload_cpp_backend()`` removes the stale router_cpp entry.
+
+        Simulates the fresh-checkout scenario: a sentinel object is
+        planted in ``sys.modules`` under ``kicad_tools.router.router_cpp``
+        to mimic Python's negative-import cache from the original failed
+        ``from . import router_cpp`` at startup.  After
+        ``_reload_cpp_backend()`` runs, that sentinel must be gone --
+        otherwise the reloaded ``cpp_backend`` would re-use it instead
+        of running the module finder against the freshly-written .so.
+        """
+        import sys
+
+        sentinel = object()
+        monkeypatch.setitem(sys.modules, "kicad_tools.router.router_cpp", sentinel)
+
+        cpp_backend._reload_cpp_backend()
+
+        # After reload, the stale sentinel MUST be gone.  Either the
+        # entry has been re-populated by a successful import (real .so
+        # on disk) or it has been removed entirely (no .so).  In either
+        # case the sentinel object itself must not survive.
+        assert sys.modules.get("kicad_tools.router.router_cpp") is not sentinel
+
+    def test_reload_calls_invalidate_caches(self, monkeypatch):
+        """``_reload_cpp_backend()`` invokes ``importlib.invalidate_caches``.
+
+        Without this call, Python's ``FileFinder`` keeps its cached
+        directory listing for ``kicad_tools/router/`` from before the
+        build wrote ``router_cpp.*.so``, so the reloaded ``cpp_backend``
+        misses the freshly-installed file.
+        """
+        import importlib
+
+        called = {"count": 0}
+        original = importlib.invalidate_caches
+
+        def _spy() -> None:
+            called["count"] += 1
+            original()
+
+        monkeypatch.setattr(importlib, "invalidate_caches", _spy)
+
+        cpp_backend._reload_cpp_backend()
+
+        assert called["count"] >= 1, (
+            "_reload_cpp_backend() must call importlib.invalidate_caches() "
+            "before reload(cpp_backend) so the freshly-written router_cpp.*.so "
+            "is visible to the parent package's FileFinder"
+        )
+
+    def test_reload_recovers_when_router_cpp_was_set_to_none(self, monkeypatch):
+        """Fresh-checkout simulation: cpp_backend.router_cpp == None, .so on disk.
+
+        This mirrors the in-process state immediately after
+        ``_attempt_auto_build`` finishes writing the .so but before
+        ``_reload_cpp_backend()`` runs.  If the C++ extension *is* on
+        disk in this test run (i.e., ``is_cpp_available()`` was True
+        before we patched it), the reload must recover it.
+
+        This is the strongest available regression test: it actually
+        exercises the import system's cache-flushing on the live tree
+        without requiring a build invocation.  The test is skipped on
+        environments that genuinely have no .so on disk.
+        """
+        if not cpp_backend.is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available on this environment")
+
+        # Stash the live state so we can restore it.
+        live_router_cpp = cpp_backend.router_cpp
+        live_available = cpp_backend._CPP_AVAILABLE
+        live_error = cpp_backend._CPP_IMPORT_ERROR
+
+        try:
+            # Force the in-process flags into the "post-failed-import"
+            # state that the auto-build path would see.
+            monkeypatch.setattr(cpp_backend, "_CPP_AVAILABLE", False)
+            monkeypatch.setattr(cpp_backend, "router_cpp", None)
+            monkeypatch.setattr(
+                cpp_backend, "_CPP_IMPORT_ERROR", "stub: simulated startup failure"
+            )
+
+            recovered = cpp_backend._reload_cpp_backend()
+
+            assert recovered is True, (
+                "_reload_cpp_backend() must recover the C++ backend when the "
+                ".so is present on disk (Issue #2594). It did not -- this is "
+                "the regression that produces the 'C++ build succeeded but "
+                "module reload did not pick it up' warning."
+            )
+            assert cpp_backend.is_cpp_available() is True
+            assert cpp_backend.router_cpp is not None
+        finally:
+            # Restore live state regardless of pass/fail so subsequent
+            # tests in the session see the real backend.
+            cpp_backend._CPP_AVAILABLE = live_available
+            cpp_backend.router_cpp = live_router_cpp
+            cpp_backend._CPP_IMPORT_ERROR = live_error
