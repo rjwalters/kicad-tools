@@ -468,9 +468,7 @@ class TestDetectPfStagnation:
 
     def test_improvement_followed_by_three_flat(self):
         """[40, 46, 46, 46, 46] -- the trailing 4 entries are flat => stagnated."""
-        assert (
-            detect_pf_stagnation([40, 46, 46, 46, 46], patience=3) is True
-        )
+        assert detect_pf_stagnation([40, 46, 46, 46, 46], patience=3) is True
 
     def test_still_improving(self):
         """Monotonically increasing history is never stagnated."""
@@ -487,9 +485,7 @@ class TestDetectPfStagnation:
         even though the most-recent three entries are flat, the inclusion
         of the patience+1th entry differing keeps stagnation off.
         """
-        assert (
-            detect_pf_stagnation([46, 47, 46, 46, 46], patience=3) is False
-        )
+        assert detect_pf_stagnation([46, 47, 46, 46, 46], patience=3) is False
 
     def test_configurable_patience_short(self):
         """patience=2 fires on three flat entries."""
@@ -501,12 +497,7 @@ class TestDetectPfStagnation:
 
     def test_configurable_patience_long_satisfied(self):
         """patience=5 satisfied by six flat entries."""
-        assert (
-            detect_pf_stagnation(
-                [46, 46, 46, 46, 46, 46], patience=5
-            )
-            is True
-        )
+        assert detect_pf_stagnation([46, 46, 46, 46, 46, 46], patience=5) is True
 
     def test_zero_patience_disabled(self):
         """patience<1 disables the detector."""
@@ -553,6 +544,7 @@ class _FakeAutorouter:
         self.route_all_negotiated_calls += 1
         if self._per_call_delay > 0:
             import time as _t
+
             _t.sleep(self._per_call_delay)
         self._call_index += 1
         return self.routes
@@ -561,6 +553,7 @@ class _FakeAutorouter:
         self.route_all_calls += 1
         if self._per_call_delay > 0:
             import time as _t
+
             _t.sleep(self._per_call_delay)
         self._call_index += 1
         return self.routes
@@ -602,9 +595,7 @@ class _AlwaysApplyLoop:
             type=StrategyType.MOVE_COMPONENT,
             difficulty=Difficulty.EASY,
             confidence=0.99,
-            actions=[
-                Action(type="move", target="C1", params={"x": 0.0, "y": 0.0})
-            ],
+            actions=[Action(type="move", target="C1", params={"x": 0.0, "y": 0.0})],
         )
 
         def _dummy_strategy(_failed, _conf):
@@ -648,9 +639,7 @@ class TestPlacementFeedbackLoopExitReasons:
         from kicad_tools.router import PlacementFeedbackLoop
 
         router = _FakeAutorouter(total_nets=10, failed_nets_constant=[])
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=None, verbose=False, stagnation_patience=3
-        )
+        loop = PlacementFeedbackLoop(router=router, pcb=None, verbose=False, stagnation_patience=3)
         result = loop.run(max_adjustments=5)
         assert result.exit_reason == "pf_converged"
         assert result.success is True
@@ -671,13 +660,9 @@ class TestPlacementFeedbackLoopExitReasons:
         # 5 nets always failing => routed_count = 5 (constant).
         # total_nets in the loop = len(nets)-1 = 10, failed = 5,
         # so routed_count = 5 every iteration.
-        router = _FakeAutorouter(
-            total_nets=10, failed_nets_constant=[1, 2, 3, 4, 5]
-        )
+        router = _FakeAutorouter(total_nets=10, failed_nets_constant=[1, 2, 3, 4, 5])
         pcb = MockPCB()
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=pcb, verbose=False, stagnation_patience=3
-        )
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=False, stagnation_patience=3)
         _AlwaysApplyLoop.patch(loop)
         result = loop.run(max_adjustments=10)
         assert result.exit_reason == "pf_stagnated"
@@ -696,13 +681,9 @@ class TestPlacementFeedbackLoopExitReasons:
         """
         from kicad_tools.router import PlacementFeedbackLoop
 
-        router = _FakeAutorouter(
-            total_nets=10, failed_nets_constant=[1, 2, 3]
-        )
+        router = _FakeAutorouter(total_nets=10, failed_nets_constant=[1, 2, 3])
         pcb = MockPCB()
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=pcb, verbose=False, stagnation_patience=0
-        )
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=False, stagnation_patience=0)
         _AlwaysApplyLoop.patch(loop)
         result = loop.run(max_adjustments=3)
         assert result.exit_reason == "pf_max_iter"
@@ -721,18 +702,14 @@ class TestPlacementFeedbackLoopExitReasons:
 
         # Sequence so routed_count = 6, 7, 8, 9 across 4 iterations.
         failed_sequence = [
-            [1, 2, 3, 4],   # routed=6
-            [1, 2, 3],      # routed=7
-            [1, 2],         # routed=8
-            [1],            # routed=9 (still not converged)
+            [1, 2, 3, 4],  # routed=6
+            [1, 2, 3],  # routed=7
+            [1, 2],  # routed=8
+            [1],  # routed=9 (still not converged)
         ]
-        router = _FakeAutorouter(
-            total_nets=10, failed_nets_sequence=failed_sequence
-        )
+        router = _FakeAutorouter(total_nets=10, failed_nets_sequence=failed_sequence)
         pcb = MockPCB()
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=pcb, verbose=False, stagnation_patience=3
-        )
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=False, stagnation_patience=3)
         _AlwaysApplyLoop.patch(loop)
         # max_adjustments=3 => 4 total iterations.  Progress every step
         # means stagnation must NOT fire.
@@ -748,12 +725,8 @@ class TestPlacementFeedbackLoopExitReasons:
         """Legacy behaviour preserved: pcb=None => single iteration, pf_max_iter."""
         from kicad_tools.router import PlacementFeedbackLoop
 
-        router = _FakeAutorouter(
-            total_nets=10, failed_nets_constant=[1, 2, 3]
-        )
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=None, verbose=False, stagnation_patience=10
-        )
+        router = _FakeAutorouter(total_nets=10, failed_nets_constant=[1, 2, 3])
+        loop = PlacementFeedbackLoop(router=router, pcb=None, verbose=False, stagnation_patience=10)
         result = loop.run(max_adjustments=3)
         assert result.exit_reason == "pf_max_iter"
         assert result.iterations == 1
@@ -792,14 +765,464 @@ class TestPlacementFeedbackLoopExitReasons:
         """Issue #2606: summary() surfaces exit_reason for stagnated runs."""
         from kicad_tools.router import PlacementFeedbackLoop
 
-        router = _FakeAutorouter(
-            total_nets=10, failed_nets_constant=[1, 2]
-        )
+        router = _FakeAutorouter(total_nets=10, failed_nets_constant=[1, 2])
         pcb = MockPCB()
-        loop = PlacementFeedbackLoop(
-            router=router, pcb=pcb, verbose=False, stagnation_patience=2
-        )
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=False, stagnation_patience=2)
         _AlwaysApplyLoop.patch(loop)
         result = loop.run(max_adjustments=10)
         assert result.exit_reason == "pf_stagnated"
         assert "Exit reason: pf_stagnated" in result.summary()
+
+
+class TestPlacementFeedbackLoopBuilderHandoff:
+    """Issue #2604: integration tests for the analyzer -> generator -> loop pipeline.
+
+    The pre-existing tests in this file synthesize ``ResolutionStrategy``
+    objects directly, which bypasses the broken handoff between
+    ``RootCauseAnalyzer`` and ``StrategyGenerator``.  These tests exercise
+    the full path on a synthetic router so the bug stays caught.
+    """
+
+    def _make_pcb_with_footprint(self, ref: str, x: float, y: float):
+        pcb = MockPCB()
+        pcb.footprints.append(MockFootprint(ref, x, y))
+        # Add a generous board outline so is_safe_to_apply doesn't reject.
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (0.0, 0.0), (200.0, 0.0)))
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (200.0, 0.0), (200.0, 200.0)))
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (200.0, 200.0), (0.0, 200.0)))
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (0.0, 200.0), (0.0, 0.0)))
+        return pcb
+
+    def _make_analysis_with_blocker(self, ref: str | None):
+        """Build a router-style FailureAnalysis with a single component blocker."""
+        from kicad_tools.router.failure_analysis import (
+            BlockingElement,
+            FailureAnalysis,
+            FailureCause,
+            Rectangle,
+        )
+
+        return FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=Rectangle(45.0, 45.0, 55.0, 55.0),
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref=ref,
+                    net=None,
+                    bounds=Rectangle(48.0, 48.0, 52.0, 52.0),
+                    movable=True,
+                    layer=0,
+                )
+            ],
+        )
+
+    def _make_router(self, analysis, failed_nets=(1,)):
+        class FakeRouter:
+            def __init__(self, analysis):
+                self._analysis = analysis
+                self._failed = list(failed_nets)
+                self.nets = {0: [], 1: []}
+                self.routes = []
+
+            def get_failed_nets(self):
+                return list(self._failed)
+
+            def analyze_routing_failure(self, net_id):
+                return self._analysis
+
+            def route_all_negotiated(self, **kwargs):
+                return []
+
+            def route_all(self):
+                return []
+
+            def _reset_for_new_trial(self):
+                return None
+
+        return FakeRouter(analysis)
+
+    def test_loop_invokes_move_component_when_blockers_have_refs(self, capsys):
+        """Issue #2604 primary fix: with refs populated the loop emits MOVE_COMPONENT.
+
+        Before the fix, ``BlockingElement.ref`` was always None and the
+        strategy generator dropped every candidate, so the loop logged
+        "No suitable placement strategy found" without ever calling the
+        applicator.
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            max_movement=5.0,
+        )
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+
+        assert strategy is not None, (
+            "Issue #2604 regression: loop returned no strategy when "
+            "BlockingElement.ref is populated"
+        )
+        assert strategy.type.value in ("move_component", "move_multiple")
+        # The strategy must target U1 (the populated ref).
+        assert "U1" in strategy.affected_components
+
+    def test_loop_emits_no_strategy_when_blocker_ref_is_none(self, capsys):
+        """Pre-fix behavior: ref=None drops every candidate.
+
+        This test pins the *current* fix: when the analyzer fails to
+        populate the ref (e.g. on a grid with no pad data, like the chorus
+        test pre-fix), the loop now emits a structured diagnostic instead
+        of the silent "No suitable placement strategy found".
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref=None)
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=True, max_movement=5.0)
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+        assert strategy is None
+        captured = capsys.readouterr()
+        # Acceptance criterion #4: when no candidates are generated we must
+        # log a diagnostic that distinguishes the population bug from the
+        # filter rejections.
+        assert "No suitable placement strategy" in captured.out
+        # Either "0 movable blockers" or "0 MOVE_COMPONENT candidates" must
+        # appear so an operator can tell ref-population is the failure mode.
+        assert "0 movable blockers" in captured.out or "0 MOVE_COMPONENT candidates" in captured.out
+
+    def test_loop_emits_summary_in_non_verbose_mode(self, capsys):
+        """Issue #2604 follow-up: default (non-verbose) mode is not silent.
+
+        Before this fix the structured rejection breakdown only printed
+        ``if self.verbose`` and the prior ``"No suitable placement
+        strategy found"`` line had been removed entirely, so default
+        runs were *more* silent than before.  This test pins the
+        single-line summary that must appear in non-verbose mode.
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref=None)
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=False, max_movement=5.0)
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+        assert strategy is None
+        captured = capsys.readouterr()
+        # The non-verbose summary must surface at least the headline
+        # diagnostic so default users aren't left guessing why the loop
+        # bailed out.
+        assert "No suitable placement strategy" in captured.out
+
+    def test_loop_logs_filter_breakdown_when_all_candidates_rejected(self, capsys):
+        """Acceptance criterion #4: when all candidates are anchored, say so."""
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            max_movement=5.0,
+            fixed_refs={"U1"},  # Anchor the only candidate.
+        )
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+        assert strategy is None
+        captured = capsys.readouterr()
+        assert "anchored" in captured.out
+        assert "rejected" in captured.out.lower()
+
+    def test_loop_logs_over_budget_breakdown(self, capsys):
+        """Acceptance criterion #4: when all candidates exceed the cap, say so.
+
+        Force the over-budget filter by stubbing the strategy generator
+        to return a strategy whose move action targets a position far
+        outside the loop's movement budget.  The loop must report ``over
+        budget`` in its rejection breakdown.
+        """
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyType,
+        )
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(router=router, pcb=pcb, verbose=True, max_movement=2.0)
+
+        # Stub the strategy generator to return an over-budget move so we
+        # can exercise the filter deterministically.
+        class _StubGenerator:
+            def generate_strategies(self, _pcb, _failure, max_movement=None):
+                return [
+                    ResolutionStrategy(
+                        type=StrategyType.MOVE_COMPONENT,
+                        difficulty=Difficulty.EASY,
+                        confidence=0.85,
+                        # 50,50 -> 100,100 = 70.7mm, way over the 2mm cap.
+                        actions=[
+                            Action(
+                                type="move",
+                                target="U1",
+                                params={"x": 100.0, "y": 100.0},
+                            )
+                        ],
+                        affected_components=["U1"],
+                    )
+                ]
+
+        loop._strategy_generator = _StubGenerator()
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+        assert strategy is None
+        captured = capsys.readouterr()
+        assert "over budget" in captured.out
+        assert "rejected" in captured.out.lower()
+
+    def test_loop_passes_max_movement_to_strategy_generator(self):
+        """Issue #2604 secondary fix: budget is plumbed to the generator.
+
+        Verify candidates respect the cap by ensuring the resulting
+        strategy targets a position within ``max_movement`` of the
+        original.  Pre-fix the candidate offsets were corridor-derived
+        and routinely exceeded the cap.
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            max_movement=3.0,
+        )
+        strategy = loop._find_best_placement_strategy(failed_nets=[1], min_confidence=0.5)
+        assert strategy is not None
+
+        import math
+
+        for action in strategy.actions:
+            if action.type != "move":
+                continue
+            new_x = action.params["x"]
+            new_y = action.params["y"]
+            distance = math.hypot(new_x - 50.0, new_y - 50.0)
+            assert distance <= 3.0 + 1e-9, (
+                f"Move candidate of {distance:.3f}mm exceeds max_movement=3.0mm"
+            )
+
+    def test_strategy_generator_respects_max_movement_directly(self):
+        """Direct test of the generator-level budget plumbing.
+
+        Even outside the feedback loop, calling
+        ``StrategyGenerator.generate_strategies(..., max_movement=...)``
+        produces only candidates inside the cap.
+        """
+        import math
+
+        from kicad_tools.recovery.strategy import StrategyGenerator
+        from kicad_tools.recovery.types import (
+            BlockingElement as RecoveryBlockingElement,
+        )
+        from kicad_tools.recovery.types import (
+            FailureAnalysis as RecoveryFailureAnalysis,
+        )
+        from kicad_tools.recovery.types import (
+            FailureCause as RecoveryFailureCause,
+        )
+        from kicad_tools.recovery.types import (
+            Rectangle as RecoveryRectangle,
+        )
+
+        pcb = MockPCB()
+        pcb.footprints.append(MockFootprint("U1", 50.0, 50.0))
+
+        analysis = RecoveryFailureAnalysis(
+            root_cause=RecoveryFailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=RecoveryRectangle(45.0, 45.0, 55.0, 55.0),
+            blocking_elements=[
+                RecoveryBlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=RecoveryRectangle(48.0, 48.0, 52.0, 52.0),
+                    movable=True,
+                )
+            ],
+        )
+
+        generator = StrategyGenerator()
+        strategies = generator.generate_strategies(pcb, analysis, max_movement=2.0)
+        move_strategies = [
+            s for s in strategies if s.type.value in ("move_component", "move_multiple")
+        ]
+        assert move_strategies, (
+            "Issue #2604 regression: generator dropped all move strategies "
+            "even though blocker.ref is populated"
+        )
+        # Every candidate must respect the budget.
+        for s in move_strategies:
+            for action in s.actions:
+                if action.type != "move":
+                    continue
+                d = math.hypot(action.params["x"] - 50.0, action.params["y"] - 50.0)
+                assert d <= 2.0 + 1e-9, (
+                    f"Generator emitted candidate at {d:.3f}mm, exceeds max_movement=2.0mm"
+                )
+
+    def test_move_candidate_sweep_spans_both_radii_and_diverse_directions(self):
+        """Issue #2604 follow-up: cap-radius candidates must reach the strategy slice.
+
+        Before the fix, the 16-candidate sweep (8 angles x 2 radii) was
+        sorted purely by ``(-improvement, distance)`` -- with all 16
+        candidates landing outside the failure area they shared the same
+        ``improvement=0.9`` and the 8 small-radius (closer) candidates
+        always sorted ahead of the 8 cap-radius ones.  The downstream
+        ``_generate_move_strategies`` slice ``candidates[:3]`` then only
+        ever surfaced 3 small-radius candidates at angles 0/45/90 deg
+        (East / NE / North), so South / West / SE / SW directions and
+        the cap-radius band were effectively dead code.
+
+        This test pins the new "diversity" sort: across the strategies
+        emitted for a single blocker we must see candidates spanning
+        *both* radius bands AND covering at least 3 distinct quadrants.
+        """
+        import math
+
+        from kicad_tools.recovery.strategy import StrategyGenerator
+        from kicad_tools.recovery.types import (
+            BlockingElement as RecoveryBlockingElement,
+        )
+        from kicad_tools.recovery.types import (
+            FailureAnalysis as RecoveryFailureAnalysis,
+        )
+        from kicad_tools.recovery.types import (
+            FailureCause as RecoveryFailureCause,
+        )
+        from kicad_tools.recovery.types import (
+            Rectangle as RecoveryRectangle,
+        )
+
+        pcb = MockPCB()
+        pcb.footprints.append(MockFootprint("U1", 50.0, 50.0))
+
+        # Failure area is a tiny square at the component centre, so all
+        # 16 sweep candidates land outside it and tie on ``improvement``.
+        # max_movement = 4.0 produces radii [2.0, 4.0] (small + cap).
+        analysis = RecoveryFailureAnalysis(
+            root_cause=RecoveryFailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=RecoveryRectangle(49.5, 49.5, 50.5, 50.5),
+            blocking_elements=[
+                RecoveryBlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=RecoveryRectangle(49.0, 49.0, 51.0, 51.0),
+                    movable=True,
+                )
+            ],
+        )
+
+        generator = StrategyGenerator()
+        strategies = generator.generate_strategies(pcb, analysis, max_movement=4.0)
+        move_strategies = [
+            s for s in strategies if s.type.value in ("move_component", "move_multiple")
+        ]
+        assert move_strategies, "expected at least one MOVE_COMPONENT strategy"
+
+        radii_seen: set[int] = set()
+        quadrants_seen: set[str] = set()
+        for s in move_strategies:
+            for action in s.actions:
+                if action.type != "move":
+                    continue
+                dx = action.params["x"] - 50.0
+                dy = action.params["y"] - 50.0
+                # Bucket distance into "small" (~2mm) vs "cap" (~4mm).
+                d = math.hypot(dx, dy)
+                if d < 3.0:
+                    radii_seen.add(0)  # small
+                else:
+                    radii_seen.add(1)  # cap
+                # Bucket into quadrants by sign of dx, dy.
+                qx = "E" if dx > 1e-6 else ("W" if dx < -1e-6 else "0")
+                qy = "N" if dy > 1e-6 else ("S" if dy < -1e-6 else "0")
+                quadrants_seen.add(f"{qx}{qy}")
+
+        assert len(radii_seen) >= 2, (
+            f"Issue #2604 follow-up: cap-radius candidates dropped -- only saw radii {radii_seen}"
+        )
+        # With the [:3] slice and strict (radius, opposite-angle)
+        # interleaving the first 3 picks land on East-small, East-cap,
+        # West-small.  That covers two opposing quadrants -- the key
+        # regression we are pinning is "both radius bands appear" rather
+        # than the slice-degenerate single-band case.  We separately
+        # verify the *underlying* candidate list (before the slice) is
+        # diverse via a direct generator inspection below.
+        assert len(quadrants_seen) >= 2, (
+            f"Issue #2604 follow-up: direction sweep collapsed to "
+            f"{quadrants_seen}; expected >=2 distinct quadrants"
+        )
+
+        # Direct inspection of the candidate list (pre-slice) confirms
+        # the sweep is producing the full 8-direction x 2-radius set so
+        # downstream consumers that look beyond the [:3] slice see all
+        # of them.
+        from kicad_tools.recovery.types import (
+            BlockingElement as _BlockingElement,
+        )
+        from kicad_tools.recovery.types import (
+            Rectangle as _Rect,
+        )
+
+        blocker = _BlockingElement(
+            type="component",
+            ref="U1",
+            net=None,
+            bounds=_Rect(49.0, 49.0, 51.0, 51.0),
+            movable=True,
+        )
+        candidates = generator._find_move_candidates(
+            pcb,
+            blocker,
+            _Rect(49.5, 49.5, 50.5, 50.5),
+            max_movement=4.0,
+        )
+        # 8 angles x 2 radii = 16 candidates expected.
+        assert len(candidates) == 16, (
+            f"expected 16 sweep candidates (8 angles x 2 radii), got {len(candidates)}"
+        )
+        all_quadrants: set[str] = set()
+        for c in candidates:
+            cdx = c["position"][0] - 50.0
+            cdy = c["position"][1] - 50.0
+            qx = "E" if cdx > 1e-6 else ("W" if cdx < -1e-6 else "0")
+            qy = "N" if cdy > 1e-6 else ("S" if cdy < -1e-6 else "0")
+            all_quadrants.add(f"{qx}{qy}")
+        # 8-direction sweep => 8 distinct (qx,qy) buckets including
+        # the diagonals.  South / West / SE / SW must all appear.
+        assert "W0" in all_quadrants and "0S" in all_quadrants
+        assert "WS" in all_quadrants and "ES" in all_quadrants

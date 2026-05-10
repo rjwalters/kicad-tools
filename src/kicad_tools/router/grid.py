@@ -98,11 +98,7 @@ class RoutedNetsUnblocker:
 
         # Build mask: cells that are blocked by routed nets (not by pads/obstacles)
         # A routed-net cell has: blocked=True, pad_blocked=False, net != 0
-        routed_mask = (
-            self._grid._blocked
-            & ~self._grid._pad_blocked
-            & (self._grid._net != 0)
-        )
+        routed_mask = self._grid._blocked & ~self._grid._pad_blocked & (self._grid._net != 0)
 
         # Clear those cells
         self._grid._blocked[routed_mask] = False
@@ -422,6 +418,16 @@ class RoutingGrid:
         # manufacturability at that pitch.
         self._component_pads: dict[str, list[Pad]] = {}
 
+        # Issue #2604 follow-up: track per-pad pin_pitch so reverse lookups
+        # (``find_pad_ref_at``) can mirror the reduced clearance envelope
+        # ``_add_pad_unsafe`` applies for fine-pitch pads.  Without this the
+        # query side would use the standard envelope and risk attributing a
+        # cell blocked by a *neighbour* (e.g. a passive on chorus-test near
+        # U5/U7/U9 BGAs) to the fine-pitch pad whose smaller real envelope
+        # never actually covered that cell.  Keyed by ``id(pad)`` so we can
+        # store None entries for pads with no recorded pitch.
+        self._pad_pin_pitch: dict[int, float | None] = {}
+
         # R-tree spatial index for segment clearance queries (Issue #1249).
         # Per-layer rtree.index.Index for fast envelope-based candidate pruning
         # in validate_segment_clearance, replacing O(R*S) brute-force iteration.
@@ -453,9 +459,7 @@ class RoutingGrid:
         # Check if GPU should be used based on grid size
         grid_cells = self.cols * self.rows * self.num_layers
         if not should_use_gpu(self._config, grid_cells, "grid"):
-            logger.debug(
-                f"Grid size {grid_cells} below threshold, using CPU backend"
-            )
+            logger.debug(f"Grid size {grid_cells} below threshold, using CPU backend")
             return BackendType.CPU, np
 
         # Check memory availability
@@ -500,7 +504,9 @@ class RoutingGrid:
         self._net = xp.zeros(grid_shape, dtype=np.int32)
         self._usage_count = xp.zeros(grid_shape, dtype=np.int16)
         self._history_cost = xp.zeros(grid_shape, dtype=np.float32)
-        self._present_cost_ema: np.ndarray | None = None  # Lazy; allocated on first use (Issue #2333)
+        self._present_cost_ema: np.ndarray | None = (
+            None  # Lazy; allocated on first use (Issue #2333)
+        )
         self._is_obstacle = xp.zeros(grid_shape, dtype=np.bool_)
         self._is_zone = xp.zeros(grid_shape, dtype=np.bool_)
         self._pad_blocked = xp.zeros(grid_shape, dtype=np.bool_)
@@ -746,6 +752,38 @@ class RoutingGrid:
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         self.grid[layer_idx][gy][gx].blocked = True
 
+    def _clearance_for_pin_pitch(self, pin_pitch: float | None) -> float:
+        """Return the grid-level clearance halo to apply around a pad.
+
+        Mirrors the per-call logic in ``_add_pad_unsafe`` so callers that
+        need to *reproduce* the envelope (notably ``find_pad_ref_at``) get
+        the exact same value.  This factoring fixes an asymmetry flagged
+        in Issue #2604 review: previously the lookup side always used the
+        standard envelope, which on chorus-test U5/U7/U9 (fine-pitch BGAs
+        surrounded by standard-pitch passives) could mistakenly attribute
+        a passive's clearance halo to the BGA pad whose *real* envelope
+        was the smaller fine-pitch one.
+
+        Args:
+            pin_pitch: The component pin pitch in mm, or None when not
+                available.  When below ``rules.fine_pitch_threshold``
+                (and ``rules.min_trace_width`` is configured) the envelope
+                shrinks to ``min_trace_width / 2`` -- the minimum needed
+                to keep a necked-down trace from overlapping pad copper.
+                Full manufacturer clearance is validated in post-routing
+                DRC.
+
+        Returns:
+            Clearance distance in mm to pad outside the pad's metal.
+        """
+        if (
+            pin_pitch is not None
+            and pin_pitch < self.rules.fine_pitch_threshold
+            and self.rules.min_trace_width is not None
+        ):
+            return self.rules.min_trace_width / 2
+        return self.rules.trace_clearance + self.rules.trace_width / 2
+
     def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
 
@@ -771,6 +809,12 @@ class RoutingGrid:
         if pad.ref:
             self._component_pads.setdefault(pad.ref, []).append(pad)
 
+        # Issue #2604 follow-up: remember the pin_pitch this pad was added
+        # with so ``find_pad_ref_at`` can reproduce the reduced fine-pitch
+        # clearance envelope and avoid false-positive ref attribution near
+        # BGA / fine-pitch clusters.
+        self._pad_pin_pitch[id(pad)] = pin_pitch
+
         # Clearance model: trace clearance + trace half-width from pad edge.
         # The pathfinder checks if the trace CENTER can be placed at a cell,
         # so we must block cells where the trace edge would violate clearance.
@@ -792,17 +836,7 @@ class RoutingGrid:
         # needed for grid-level blocking -- the actual manufacturer clearance is
         # validated during DRC after routing. This ensures at least 1-3 passable
         # grid cells between adjacent fine-pitch pads for A* to find paths.
-        if (
-            pin_pitch is not None
-            and pin_pitch < self.rules.fine_pitch_threshold
-            and self.rules.min_trace_width is not None
-        ):
-            # Use min_trace_width/2 as clearance: ensures the necked-down trace
-            # edge doesn't physically overlap pad copper. The full manufacturer
-            # clearance (0.127mm) is validated in post-routing DRC.
-            clearance = self.rules.min_trace_width / 2
-        else:
-            clearance = self.rules.trace_clearance + self.rules.trace_width / 2
+        clearance = self._clearance_for_pin_pitch(pin_pitch)
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
@@ -1208,9 +1242,7 @@ class RoutingGrid:
                 max(seg.x1, seg.x2) + search_margin,
                 max(seg.y1, seg.y2) + search_margin,
             )
-            candidate_ids = list(
-                self._seg_rtree[seg_layer_idx].intersection(query_envelope)
-            )
+            candidate_ids = list(self._seg_rtree[seg_layer_idx].intersection(query_envelope))
             layer_items = self._seg_rtree_items.get(seg_layer_idx, {})
 
             for cand_id in candidate_ids:
@@ -1377,9 +1409,7 @@ class RoutingGrid:
                 seg_half_width = seg.width / 2
 
                 # Point-to-segment distance from via center to segment
-                dist = self._point_to_segment_distance(
-                    via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
-                )
+                dist = self._point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
 
                 # Edge-to-edge clearance: center distance minus radii
                 clearance = dist - via_radius - seg_half_width
@@ -1437,9 +1467,7 @@ class RoutingGrid:
                 continue
 
             for existing_via in route.vias:
-                distance = math.sqrt(
-                    (via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2
-                )
+                distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
                 existing_via_radius = existing_via.diameter / 2
                 clearance = distance - via_radius - existing_via_radius
 
@@ -1497,15 +1525,10 @@ class RoutingGrid:
 
             for existing_via in route.vias:
                 # Skip checking against self (exact same position and drill)
-                if (
-                    abs(via.x - existing_via.x) < 1e-6
-                    and abs(via.y - existing_via.y) < 1e-6
-                ):
+                if abs(via.x - existing_via.x) < 1e-6 and abs(via.y - existing_via.y) < 1e-6:
                     continue
 
-                distance = math.sqrt(
-                    (via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2
-                )
+                distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
                 existing_drill_radius = existing_via.drill / 2
                 clearance = distance - drill_radius - existing_drill_radius
 
@@ -1814,10 +1837,7 @@ class RoutingGrid:
         # Issue #1692: Use the maximum trace width (across all net classes)
         # so that wide-trace nets routed later still clear this via.
         trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
-        radius = int(
-            (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
-            / self.resolution
-        )
+        radius = int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution)
         # Issue #1797: Add safety margin to prevent grid-quantization
         # clearance violations between traces and vias (mirrors the +1
         # applied in mark_route() for segments, see Issue #1666).
@@ -1940,10 +1960,7 @@ class RoutingGrid:
         # Include trace half-width to match _mark_via calculation
         # Issue #1692: Use the same max_trace_width as _mark_via
         trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
-        radius = int(
-            (via.diameter / 2 + self.rules.via_clearance + trace_w / 2)
-            / self.resolution
-        )
+        radius = int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution)
         # Issue #1797: Must match _mark_via safety margin so the same
         # cells are cleared during rip-up.
         radius += 1
@@ -2067,6 +2084,98 @@ class RoutingGrid:
             cells.add((gx, gy, layer_idx))
         return cells
 
+    def find_pad_ref_at(
+        self,
+        wx: float,
+        wy: float,
+        layer_idx: int | None = None,
+        max_distance: float | None = None,
+    ) -> str | None:
+        """Find the component reference whose pad/clearance envelope covers
+        the given world coordinate.
+
+        Used by failure analysis to recover the owner of a component-blocked
+        grid cell without storing a per-cell ``ref`` field (which would cost
+        ~16-32B per cell for millions of cells).
+
+        Args:
+            wx: World x-coordinate (mm).
+            wy: World y-coordinate (mm).
+            layer_idx: Optional layer index to filter SMD pads.  PTH pads
+                ignore the layer filter (they block all layers).
+            max_distance: Optional bounded search radius from (wx, wy).
+                When None, searches the full pad list (O(n)).  Set to
+                ``rules.trace_clearance + rules.trace_width`` for fast
+                proximity matching.
+
+        Returns:
+            The owning component reference, or None if no pad envelope
+            (including the clearance halo) covers the point.
+        """
+        if not self._pads:
+            return None
+
+        best_ref: str | None = None
+        best_dist = float("inf")
+
+        for pad in self._pads:
+            if not pad.ref:
+                continue
+
+            # Layer filter: PTH pads block all layers, SMD pads only their own.
+            if layer_idx is not None and not pad.through_hole:
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                if pad_layer_idx != layer_idx:
+                    continue
+
+            # Issue #2604 follow-up: mirror ``_add_pad_unsafe``'s reduced
+            # clearance envelope for fine-pitch pads.  Without this, pads
+            # added with ``pin_pitch < fine_pitch_threshold`` would be
+            # queried with the larger standard envelope and could
+            # false-positive on cells actually blocked by neighbouring
+            # standard-pitch pads (relevant on chorus-test U5/U7/U9).
+            pad_pitch = self._pad_pin_pitch.get(id(pad))
+            clearance = self._clearance_for_pin_pitch(pad_pitch)
+
+            # Compute effective pad bounds (mirrors _add_pad_unsafe logic)
+            if pad.through_hole:
+                if pad.width > 0 and pad.height > 0:
+                    ew, eh = pad.width, pad.height
+                elif pad.drill > 0:
+                    ew = pad.drill + 0.7
+                    eh = ew
+                else:
+                    ew = 1.7
+                    eh = 1.7
+            else:
+                ew = pad.width
+                eh = pad.height
+
+            x1 = pad.x - ew / 2 - clearance
+            y1 = pad.y - eh / 2 - clearance
+            x2 = pad.x + ew / 2 + clearance
+            y2 = pad.y + eh / 2 + clearance
+
+            # Quick bounded-distance prune
+            if max_distance is not None:
+                dx = max(x1 - wx, 0.0, wx - x2)
+                dy = max(y1 - wy, 0.0, wy - y2)
+                if dx * dx + dy * dy > max_distance * max_distance:
+                    continue
+
+            # Inside the envelope: pick the pad whose center is closest to
+            # the query point (handles overlapping clearance envelopes from
+            # neighbouring components on the same layer).
+            if x1 <= wx <= x2 and y1 <= wy <= y2:
+                cdx = wx - pad.x
+                cdy = wy - pad.y
+                d2 = cdx * cdx + cdy * cdy
+                if d2 < best_dist:
+                    best_dist = d2
+                    best_ref = pad.ref
+
+        return best_ref
+
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts).
 
@@ -2148,9 +2257,7 @@ class RoutingGrid:
             # First call: initialise to the current present cost
             self._present_cost_ema = new_present.copy()
         else:
-            self._present_cost_ema = (
-                alpha * new_present + (1.0 - alpha) * self._present_cost_ema
-            )
+            self._present_cost_ema = alpha * new_present + (1.0 - alpha) * self._present_cost_ema
 
     def get_negotiated_cost(
         self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
@@ -2321,9 +2428,7 @@ class RoutingGrid:
             expanded = np.zeros_like(base_blocked)
             for dy in range(kernel_size):
                 for dx in range(kernel_size):
-                    expanded |= padded[
-                        :, dy : dy + self.rows, dx : dx + self.cols
-                    ]
+                    expanded |= padded[:, dy : dy + self.rows, dx : dx + self.cols]
 
         return expanded
 

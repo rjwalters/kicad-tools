@@ -719,6 +719,123 @@ class TestStrategyGenerator:
             assert isinstance(strategy.affected_nets, list)
             assert 0 <= strategy.estimated_improvement <= 1
 
+    def test_emits_move_strategy_when_blocker_has_ref(self):
+        """Issue #2604: ``MOVE_COMPONENT`` strategies must be emitted.
+
+        Pre-fix the strategy generator dropped every blocker because
+        ``BlockingElement.ref`` was always None.  With ref populated the
+        generator must emit at least one move strategy targeting that
+        component.
+        """
+
+        class MockFootprint:
+            def __init__(self, ref, x, y):
+                self.reference = ref
+                self.position = (x, y)
+                self.pads = []
+
+        class MockPCB:
+            def __init__(self):
+                self.footprints = [MockFootprint("U1", 50.0, 50.0)]
+                self.segments = []
+                self.vias = []
+                self.zones = []
+                self.layers = {}
+                self.nets = {}
+
+        bounds = Rectangle(min_x=48.0, min_y=48.0, max_x=52.0, max_y=52.0)
+        failure_area = Rectangle(min_x=45.0, min_y=45.0, max_x=55.0, max_y=55.0)
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=failure_area,
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=bounds,
+                    movable=True,
+                )
+            ],
+            net="DAC_CLK",
+        )
+        generator = StrategyGenerator()
+        strategies = generator.generate_strategies(MockPCB(), analysis)
+        move_strategies = [
+            s
+            for s in strategies
+            if s.type == StrategyType.MOVE_COMPONENT
+            or s.type == StrategyType.MOVE_MULTIPLE
+        ]
+        assert move_strategies, (
+            "Issue #2604 regression: generator dropped every move strategy "
+            "even though blocker.ref is populated"
+        )
+        # Strategy must target U1.
+        assert any("U1" in s.affected_components for s in move_strategies)
+
+    def test_max_movement_caps_candidate_offsets(self):
+        """Issue #2604 secondary fix: max_movement clamps generator output."""
+        import math
+
+        class MockFootprint:
+            def __init__(self, ref, x, y):
+                self.reference = ref
+                self.position = (x, y)
+                self.pads = []
+
+        class MockPCB:
+            def __init__(self):
+                self.footprints = [MockFootprint("U1", 50.0, 50.0)]
+                self.segments = []
+                self.vias = []
+                self.zones = []
+                self.layers = {}
+                self.nets = {}
+
+        bounds = Rectangle(min_x=48.0, min_y=48.0, max_x=52.0, max_y=52.0)
+        # Use a wide failure area -- pre-fix this would have produced
+        # candidates ~14mm away.
+        failure_area = Rectangle(min_x=40.0, min_y=40.0, max_x=60.0, max_y=60.0)
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=failure_area,
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=bounds,
+                    movable=True,
+                )
+            ],
+            net="DAC_CLK",
+        )
+        generator = StrategyGenerator()
+        strategies = generator.generate_strategies(
+            MockPCB(), analysis, max_movement=3.0
+        )
+        move_strategies = [
+            s
+            for s in strategies
+            if s.type == StrategyType.MOVE_COMPONENT
+        ]
+        assert move_strategies
+        for s in move_strategies:
+            for action in s.actions:
+                if action.type != "move":
+                    continue
+                d = math.hypot(
+                    action.params["x"] - 50.0, action.params["y"] - 50.0
+                )
+                assert d <= 3.0 + 1e-6, (
+                    f"Candidate at {d:.3f}mm exceeds max_movement=3.0mm"
+                )
+
 
 class TestModuleExports:
     """Tests for module exports."""

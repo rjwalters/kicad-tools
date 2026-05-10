@@ -925,6 +925,31 @@ class RootCauseAnalyzer:
 
         return Rectangle(min_x, min_y, max_x, max_y)
 
+    def _lookup_blocking_ref(
+        self,
+        grid: RoutingGrid,
+        wx: float,
+        wy: float,
+        layer_idx: int,
+    ) -> str | None:
+        """Look up the component reference owning a blocked grid cell.
+
+        Wraps ``RoutingGrid.find_pad_ref_at`` with a defensive fallback
+        for grids/test fixtures that don't expose the helper.
+
+        This is the fix for Issue #2604 -- ``GridCell`` has no ``ref``
+        field, so the analyzer recovers ownership via a spatial lookup
+        against the grid's pad list every time it sees a component
+        blocker.
+        """
+        finder = getattr(grid, "find_pad_ref_at", None)
+        if finder is None:
+            return None
+        try:
+            return finder(wx, wy, layer_idx=layer_idx)
+        except Exception:
+            return None
+
     def _find_blocking_elements(
         self,
         grid: RoutingGrid,
@@ -983,7 +1008,11 @@ class RootCauseAnalyzer:
                     movable = True  # Traces can be ripped up
                 else:
                     element_type = "component"
-                    ref = cell.ref if hasattr(cell, "ref") else None
+                    # GridCell does not carry a ``ref`` field (would cost
+                    # ~16-32B per cell across millions of cells).  Recover
+                    # the owning component via spatial lookup against the
+                    # grid's pad list.  See ``RoutingGrid.find_pad_ref_at``.
+                    ref = self._lookup_blocking_ref(grid, wx, wy, layer)
                     movable = True
 
                 # Skip if same net
@@ -1045,11 +1074,17 @@ class RootCauseAnalyzer:
                     if not cell.blocked:
                         continue
 
-                    cell_ref = cell.ref if hasattr(cell, "ref") else None
+                    wx, wy = grid.grid_to_world(gx, gy)
+                    # Recover ref via spatial lookup -- ``GridCell`` has
+                    # no per-cell ``ref`` field.  Skip cells owned by the
+                    # component being placed (no self-conflict).
+                    if cell.is_zone:
+                        cell_ref: str | None = None
+                    else:
+                        cell_ref = self._lookup_blocking_ref(grid, wx, wy, layer_idx)
                     if cell_ref == ref:
                         continue  # Don't conflict with self
 
-                    wx, wy = grid.grid_to_world(gx, gy)
                     cell_bounds = Rectangle(
                         wx - grid.resolution / 2,
                         wy - grid.resolution / 2,
