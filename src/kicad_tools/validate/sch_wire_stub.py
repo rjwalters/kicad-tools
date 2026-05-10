@@ -268,24 +268,21 @@ def find_wire_stubs(
         for lbl in sch.global_labels:
             labels_pos.append(lbl.position)
         no_connects = [(nc.position[0], nc.position[1]) for nc in sch.no_connects]
-        # Precompute every wire endpoint so we can check whether a
-        # given wire endpoint coincides with another wire (and is
-        # therefore part of a chain, not dangling).
-        all_wire_endpoints: list[tuple[float, float]] = []
-        for w in sch.wires:
-            all_wire_endpoints.append(w.start)
-            all_wire_endpoints.append(w.end)
+        # Precompute every wire endpoint with its owning wire's index
+        # so we can check whether a given wire endpoint coincides with
+        # *another* wire (and is therefore part of a chain, not
+        # dangling).  Tracking the owning wire by index — not by
+        # position — keeps legitimate shared corners detectable.  A
+        # position-based filter would drop other wires that happen to
+        # share an endpoint with the wire under inspection.
+        indexed_endpoints: list[tuple[int, tuple[float, float]]] = []
+        for w_idx, w in enumerate(sch.wires):
+            indexed_endpoints.append((w_idx, w.start))
+            indexed_endpoints.append((w_idx, w.end))
 
-        for wire in sch.wires:
+        for w_idx, wire in enumerate(sch.wires):
+            other_endpoints = [pos for idx, pos in indexed_endpoints if idx != w_idx]
             for endpoint in (wire.start, wire.end):
-                # Exclude this wire's other endpoint from the "other
-                # wires" set so a single isolated wire still flags
-                # both endpoints if both dangle.
-                other_endpoints = [
-                    p
-                    for p in all_wire_endpoints
-                    if not _approx_point(p, endpoint)
-                ]
                 if _endpoint_is_connected(
                     endpoint,
                     pin_positions,
