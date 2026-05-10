@@ -512,3 +512,294 @@ class TestDetectPfStagnation:
         """patience<1 disables the detector."""
         assert detect_pf_stagnation([46, 46, 46, 46], patience=0) is False
         assert detect_pf_stagnation([], patience=0) is False
+
+
+class _FakeAutorouter:
+    """Minimal Autorouter stand-in for PlacementFeedbackLoop integration tests.
+
+    Mocks just the attributes / methods the loop calls:
+
+    - ``nets`` -- dict whose ``len()`` is ``total_nets + 1`` (the loop
+      subtracts 1 for net 0).
+    - ``routes`` -- list of (returned-by-route-all) routes; not actually
+      validated by the loop, so an empty list is fine.
+    - ``route_all_negotiated`` / ``route_all`` -- both return ``routes``.
+    - ``get_failed_nets`` -- returns the configured list (constant across
+      calls by default).
+    - ``_reset_for_new_trial`` -- no-op.
+    - ``analyze_routing_failure`` -- returns None (so the strategy
+      generator pipeline produces zero strategies and the loop's
+      ``_find_best_placement_strategy`` returns None).
+    """
+
+    def __init__(
+        self,
+        total_nets: int,
+        failed_nets_sequence: list[list[int]] | None = None,
+        failed_nets_constant: list[int] | None = None,
+        per_call_delay: float = 0.0,
+    ):
+        # ``nets`` is a dict[int, ...]; the loop only inspects ``len()``.
+        self.nets: dict[int, list] = {i: [] for i in range(total_nets + 1)}
+        self.routes: list = []
+        self._call_index = 0
+        self._failed_sequence = failed_nets_sequence
+        self._failed_constant = failed_nets_constant if failed_nets_constant is not None else []
+        self._per_call_delay = per_call_delay
+        self.route_all_negotiated_calls = 0
+        self.route_all_calls = 0
+
+    def route_all_negotiated(self, **kwargs):
+        self.route_all_negotiated_calls += 1
+        if self._per_call_delay > 0:
+            import time as _t
+            _t.sleep(self._per_call_delay)
+        self._call_index += 1
+        return self.routes
+
+    def route_all(self, **kwargs):
+        self.route_all_calls += 1
+        if self._per_call_delay > 0:
+            import time as _t
+            _t.sleep(self._per_call_delay)
+        self._call_index += 1
+        return self.routes
+
+    def get_failed_nets(self) -> list[int]:
+        # Return failures relative to the *last* call (the loop calls
+        # get_failed_nets immediately after route_all_*).
+        idx = max(self._call_index - 1, 0)
+        if self._failed_sequence is not None:
+            i = min(idx, len(self._failed_sequence) - 1)
+            return list(self._failed_sequence[i])
+        return list(self._failed_constant)
+
+    def _reset_for_new_trial(self) -> None:
+        pass
+
+    def analyze_routing_failure(self, net_id):
+        # No analysis => strategy generator yields nothing => loop
+        # exits with "No suitable placement strategy found".
+        return None
+
+
+class _AlwaysApplyLoop:
+    """Subclass-helper: bypass the strategy-generation pipeline.
+
+    For integration tests we want the outer loop to actually iterate
+    multiple times so we can observe the stagnation/timeout exits.
+    Real strategy generation requires a populated ``Autorouter`` and a
+    realistic PCB; the helpers below let us drive the loop directly by
+    monkey-patching ``_find_best_placement_strategy`` to always return
+    a no-op move strategy, and the applicator to always succeed.
+    """
+
+    @staticmethod
+    def patch(loop):
+        # Always produce a dummy strategy so the loop never short-circuits
+        # with "No suitable placement strategy found".
+        dummy_strategy = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=0.99,
+            actions=[
+                Action(type="move", target="C1", params={"x": 0.0, "y": 0.0})
+            ],
+        )
+
+        def _dummy_strategy(_failed, _conf):
+            return dummy_strategy
+
+        # The applicator unconditionally succeeds but moves nothing,
+        # preserving the routed-count plateau the stagnation detector
+        # is meant to catch.
+        class _DummyApplicator:
+            def apply_strategy(self, _pcb, _strategy):
+                return ApplicationResult(
+                    success=True,
+                    components_moved=[],
+                    message="(dummy: no-op move)",
+                )
+
+            def is_safe_to_apply(self, _strategy, _pcb):
+                return True
+
+        loop._find_best_placement_strategy = _dummy_strategy  # type: ignore[method-assign]
+        loop._strategy_applicator = _DummyApplicator()
+        # _snapshot_positions calls _find_footprint which iterates
+        # pcb.footprints -- our MockPCB has none, so this is a no-op.
+        return loop
+
+
+class TestPlacementFeedbackLoopExitReasons:
+    """Issue #2606: integration tests covering each ``exit_reason`` path.
+
+    Each test uses a monkey-patched ``Autorouter`` plus an
+    ``_AlwaysApplyLoop``-patched ``PlacementFeedbackLoop`` so the loop's
+    routing call is fast and deterministic and the iteration actually
+    proceeds.  We exercise the four exit reasons --
+    ``pf_converged``, ``pf_max_iter``, ``pf_stagnated``,
+    ``pf_timeout`` -- by manipulating the fake router's
+    ``failed_nets`` sequence and the loop's configuration.
+    """
+
+    def test_pf_converged(self):
+        """Empty failed_nets on iteration 0 => pf_converged."""
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _FakeAutorouter(total_nets=10, failed_nets_constant=[])
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=None, verbose=False, stagnation_patience=3
+        )
+        result = loop.run(max_adjustments=5)
+        assert result.exit_reason == "pf_converged"
+        assert result.success is True
+        assert result.iterations == 1
+        # Only one routing call was made.
+        assert router.route_all_negotiated_calls == 1
+
+    def test_pf_stagnated_exits_before_max_iter(self):
+        """Constant failed_nets across iterations triggers pf_stagnated.
+
+        The loop must NOT burn ``max_adjustments+1`` iterations when
+        the fully-routed-net count has plateaued.  With ``patience=3``
+        we expect at most 4 iterations (1 baseline + 3 unchanged) before
+        the detector fires.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # 5 nets always failing => routed_count = 5 (constant).
+        # total_nets in the loop = len(nets)-1 = 10, failed = 5,
+        # so routed_count = 5 every iteration.
+        router = _FakeAutorouter(
+            total_nets=10, failed_nets_constant=[1, 2, 3, 4, 5]
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=False, stagnation_patience=3
+        )
+        _AlwaysApplyLoop.patch(loop)
+        result = loop.run(max_adjustments=10)
+        assert result.exit_reason == "pf_stagnated"
+        assert result.success is False
+        # 1 baseline + patience(3) unchanged = 4 iterations total.
+        assert result.iterations <= 4
+        # And we did NOT burn the full max_adjustments+1 (=11) budget.
+        assert router.route_all_negotiated_calls <= 4
+
+    def test_pf_stagnated_disabled_when_patience_zero(self):
+        """stagnation_patience=0 disables the detector; loop runs to max_iter.
+
+        With patience=0 and a strategy-always-applies stub, the loop
+        runs the full ``max_adjustments + 1`` iterations and exits via
+        the legacy ``iteration >= max_adjustments`` branch.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _FakeAutorouter(
+            total_nets=10, failed_nets_constant=[1, 2, 3]
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=False, stagnation_patience=0
+        )
+        _AlwaysApplyLoop.patch(loop)
+        result = loop.run(max_adjustments=3)
+        assert result.exit_reason == "pf_max_iter"
+        # Full budget consumed: 1 baseline + 3 adjustments = 4 iters.
+        assert result.iterations == 4
+
+    def test_pf_max_iter_progress_not_stagnated(self):
+        """Monotonically improving routed_count => pf_max_iter (not stagnated).
+
+        Fake router returns shrinking failed-net lists across calls,
+        so routed_count grows every iteration.  The stagnation detector
+        must NOT fire, and the loop must exit via the max_adjustments
+        cap instead.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # Sequence so routed_count = 6, 7, 8, 9 across 4 iterations.
+        failed_sequence = [
+            [1, 2, 3, 4],   # routed=6
+            [1, 2, 3],      # routed=7
+            [1, 2],         # routed=8
+            [1],            # routed=9 (still not converged)
+        ]
+        router = _FakeAutorouter(
+            total_nets=10, failed_nets_sequence=failed_sequence
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=False, stagnation_patience=3
+        )
+        _AlwaysApplyLoop.patch(loop)
+        # max_adjustments=3 => 4 total iterations.  Progress every step
+        # means stagnation must NOT fire.
+        result = loop.run(max_adjustments=3)
+        assert result.exit_reason == "pf_max_iter"
+        assert result.success is False
+        # Full budget consumed because the detector didn't fire.
+        assert result.iterations == 4
+        # Sanity check the detector with the observed history:
+        assert detect_pf_stagnation([6, 7, 8, 9], patience=3) is False
+
+    def test_pf_max_iter_no_pcb(self):
+        """Legacy behaviour preserved: pcb=None => single iteration, pf_max_iter."""
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _FakeAutorouter(
+            total_nets=10, failed_nets_constant=[1, 2, 3]
+        )
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=None, verbose=False, stagnation_patience=10
+        )
+        result = loop.run(max_adjustments=3)
+        assert result.exit_reason == "pf_max_iter"
+        assert result.iterations == 1
+        assert router.route_all_negotiated_calls == 1
+
+    def test_pf_timeout(self):
+        """outer_timeout shorter than the per-iteration delay => pf_timeout.
+
+        Fake router sleeps 0.4s per call.  outer_timeout=0.3s means the
+        second iteration's pre-route guard will trip and exit cleanly.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _FakeAutorouter(
+            total_nets=10,
+            failed_nets_constant=[1, 2, 3],
+            per_call_delay=0.4,
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=10,  # prevent stagnated-exit
+            outer_timeout=0.3,
+        )
+        _AlwaysApplyLoop.patch(loop)
+        result = loop.run(max_adjustments=10)
+        assert result.exit_reason == "pf_timeout"
+        # First iteration always runs (the timeout is checked at the
+        # top of each iteration); after that the guard trips.
+        assert result.iterations <= 2
+        assert router.route_all_negotiated_calls <= 2
+
+    def test_pf_summary_includes_exit_reason(self):
+        """Issue #2606: summary() surfaces exit_reason for stagnated runs."""
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _FakeAutorouter(
+            total_nets=10, failed_nets_constant=[1, 2]
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=False, stagnation_patience=2
+        )
+        _AlwaysApplyLoop.patch(loop)
+        result = loop.run(max_adjustments=10)
+        assert result.exit_reason == "pf_stagnated"
+        assert "Exit reason: pf_stagnated" in result.summary()

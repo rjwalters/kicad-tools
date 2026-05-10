@@ -238,6 +238,8 @@ class PlacementFeedbackLoop:
         verbose: bool = True,
         fixed_refs: set[str] | list[str] | None = None,
         max_movement: float | None = 5.0,
+        stagnation_patience: int = 3,
+        outer_timeout: float | None = None,
     ):
         """Initialize the feedback loop.
 
@@ -257,12 +259,24 @@ class PlacementFeedbackLoop:
                 in mm.  Strategies that would move any component by
                 more than this distance are filtered out.  Set to None
                 to disable the cap.  Default: 5.0mm.
+            stagnation_patience: Issue #2606: number of consecutive
+                outer iterations with no fully-routed-net-count
+                improvement before declaring ``pf_stagnated`` and
+                exiting the loop early.  Default 3.  Set to 0 to
+                disable stagnation detection.
+            outer_timeout: Issue #2606: optional hard wall-clock budget
+                for the entire outer feedback loop, in seconds.  When
+                exceeded between iterations the loop exits with
+                ``pf_timeout``.  Default None (no outer cap; only the
+                per-iteration negotiated-router ``timeout`` applies).
         """
         self.router = router
         self.pcb = pcb
         self.verbose = verbose
         self.fixed_refs: set[str] = set(fixed_refs or [])
         self.max_movement: float | None = max_movement
+        self.stagnation_patience: int = stagnation_patience
+        self.outer_timeout: float | None = outer_timeout
         self._strategy_generator = StrategyGenerator()
         self._strategy_applicator = StrategyApplicator()
         # Snapshot of original positions, populated lazily the first time
@@ -296,6 +310,15 @@ class PlacementFeedbackLoop:
         """
         adjustments: list[PlacementAdjustment] = []
         total_moved = 0
+        # Issue #2606: rolling history of fully-routed-net counts across
+        # outer iterations.  Used by ``detect_pf_stagnation`` to decide
+        # whether the loop is making progress.
+        routed_history: list[int] = []
+        # Issue #2606: track outer wall-clock budget if requested.
+        start_time = time.time()
+        # Track exit reason; default to ``pf_max_iter`` to match the
+        # backwards-compatible default on ``PlacementFeedbackResult``.
+        exit_reason = "pf_max_iter"
 
         if self.verbose:
             print("\n=== Placement-Routing Feedback Loop ===")
@@ -306,6 +329,10 @@ class PlacementFeedbackLoop:
                 print(f"  Anchored refs:   {anchored_str}")
             if self.max_movement is not None:
                 print(f"  Max movement:    {self.max_movement:.2f}mm")
+            if self.stagnation_patience > 0:
+                print(f"  Stagnation patience: {self.stagnation_patience}")
+            if self.outer_timeout is not None:
+                print(f"  Outer timeout:   {self.outer_timeout:.1f}s")
 
         # Build kwargs for negotiated routing once -- avoids passing
         # None when the underlying API expects positional defaults and
@@ -316,7 +343,31 @@ class PlacementFeedbackLoop:
         if per_net_timeout is not None:
             negotiated_kwargs["per_net_timeout"] = per_net_timeout
 
+        # ``iteration`` must be defined outside the loop body so the
+        # final ``iteration + 1`` line still works when the loop exits
+        # without ever entering (e.g. ``max_adjustments=-1``).  In
+        # practice ``max_adjustments + 1 >= 1`` so the loop always runs
+        # at least once; the assignment is purely defensive.
+        iteration = 0
         for iteration in range(max_adjustments + 1):
+            # Issue #2606: hard outer wall-clock guard.  Checked at the
+            # top of each iteration so we can bail out before kicking
+            # off another (potentially multi-minute) negotiated-router
+            # run.
+            if (
+                self.outer_timeout is not None
+                and time.time() - start_time > self.outer_timeout
+            ):
+                if self.verbose:
+                    elapsed = time.time() - start_time
+                    print(
+                        f"\n  Outer timeout exceeded "
+                        f"({elapsed:.1f}s > {self.outer_timeout:.1f}s); "
+                        f"exiting placement feedback loop."
+                    )
+                exit_reason = "pf_timeout"
+                break
+
             if self.verbose:
                 print(f"\n--- Iteration {iteration} ---")
 
@@ -331,10 +382,12 @@ class PlacementFeedbackLoop:
 
             # Check for failures
             failed_nets = self.router.get_failed_nets()
+            total_nets = len(self.router.nets) - 1  # -1 for net 0
+            routed_count = total_nets - len(failed_nets)
+            routed_history.append(routed_count)
 
             if self.verbose:
-                routed_count = len(self.router.nets) - len(failed_nets) - 1  # -1 for net 0
-                print(f"  Routed: {routed_count}/{len(self.router.nets) - 1} nets")
+                print(f"  Routed: {routed_count}/{total_nets} nets")
                 print(f"  Failed: {len(failed_nets)} nets")
 
             # Success - all nets routed
@@ -349,7 +402,26 @@ class PlacementFeedbackLoop:
                     failed_nets=[],
                     total_components_moved=total_moved,
                     placement_diff=self._build_placement_diff(),
+                    exit_reason="pf_converged",
                 )
+
+            # Issue #2606: progress-based stagnation check.  After each
+            # iteration's routing call, see whether the rolling history
+            # of fully-routed-net counts shows ``patience`` consecutive
+            # iterations with no improvement; if so, exit the outer
+            # loop cleanly with ``pf_stagnated`` instead of burning
+            # another full negotiated-router run.
+            if self.stagnation_patience > 0 and detect_pf_stagnation(
+                routed_history, patience=self.stagnation_patience
+            ):
+                if self.verbose:
+                    print(
+                        f"\n  Placement feedback stagnated: routed count "
+                        f"{routed_count}/{total_nets} unchanged for "
+                        f"{self.stagnation_patience} iterations"
+                    )
+                exit_reason = "pf_stagnated"
+                break
 
             # Check if we can make placement adjustments
             if self.pcb is None:
@@ -413,6 +485,7 @@ class PlacementFeedbackLoop:
             print(f"  Final failed nets: {len(failed_nets)}")
             print(f"  Total components moved: {total_moved}")
             print(f"  Total iterations: {iteration + 1}")
+            print(f"  Exit reason: {exit_reason}")
 
         return PlacementFeedbackResult(
             success=len(failed_nets) == 0,
@@ -422,6 +495,7 @@ class PlacementFeedbackLoop:
             failed_nets=failed_nets,
             total_components_moved=total_moved,
             placement_diff=self._build_placement_diff(),
+            exit_reason=exit_reason,
         )
 
     def _clear_routes(self) -> None:
