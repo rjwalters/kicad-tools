@@ -564,6 +564,7 @@ class RoutingOrchestrator:
                     grid=grid, rules=self.rules, net_class_map=self.net_class_map,
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
+                    manufacturer=getattr(self.rules, "manufacturer", None),
                 )
 
         if self._escape is not None:
@@ -1183,6 +1184,7 @@ class RoutingOrchestrator:
                     grid=grid, rules=self.rules, net_class_map=self.net_class_map,
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
+                    manufacturer=getattr(self.rules, "manufacturer", None),
                 )
         return self._escape
 

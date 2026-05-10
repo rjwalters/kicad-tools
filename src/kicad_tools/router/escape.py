@@ -721,6 +721,7 @@ class EscapeRouter:
         net_class_map: dict[str, NetClassRouting] | None = None,
         edge_clearance: float | None = None,
         board_bounds: tuple[float, float, float, float] | None = None,
+        manufacturer: str | None = None,
     ):
         """Initialize the escape router.
 
@@ -735,6 +736,12 @@ class EscapeRouter:
                 they do not violate the edge clearance zone.
             board_bounds: Board outline bounding box (min_x, min_y, max_x, max_y)
                 in mm. Required together with edge_clearance for clamping.
+            manufacturer: Manufacturer identifier (e.g. ``"jlcpcb"``,
+                ``"jlcpcb-tier1"``).  When provided, capability flags such as
+                ``via_in_pad_supported`` are looked up via
+                ``mfr_limits.get_mfr_limits()`` and used to enable in-pad
+                escape on fine-pitch SSOP/TSSOP packages (Issue #2605).
+                Falls back to ``rules.manufacturer`` when not supplied.
         """
         self.grid = grid
         self.rules = rules
@@ -743,6 +750,24 @@ class EscapeRouter:
         self.net_class_map = net_class_map or {}
         self.edge_clearance = edge_clearance
         self.board_bounds = board_bounds
+
+        # Issue #2605: Resolve manufacturer capability flags.  Caller-supplied
+        # arg wins; otherwise fall back to ``rules.manufacturer``.  If the
+        # manufacturer is unknown we silently treat it as "no via-in-pad"
+        # rather than raising -- the router should never crash because of an
+        # unrecognized manufacturer string.
+        self.manufacturer: str | None = manufacturer or getattr(rules, "manufacturer", None)
+        self._mfr_limits = None
+        if self.manufacturer is not None:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                self._mfr_limits = get_mfr_limits(self.manufacturer)
+            except (ValueError, ImportError):
+                self._mfr_limits = None
+        self.via_in_pad_supported: bool = bool(
+            self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
+        )
 
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.

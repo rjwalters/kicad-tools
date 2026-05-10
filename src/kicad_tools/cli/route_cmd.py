@@ -4002,6 +4002,10 @@ def main(argv: list[str] | None = None) -> int:
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
+        # Issue #2605: forward manufacturer so the escape router can opt in
+        # to in-pad escape for fine-pitch SSOP/TSSOP when the manufacturer
+        # supports via-in-pad processing.
+        manufacturer=getattr(args, "manufacturer", None),
     )
 
     # Import progress helpers

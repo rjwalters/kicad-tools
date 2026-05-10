@@ -31,6 +31,12 @@ class MfrLimits:
         min_via_annular: Minimum via annular ring width
         min_via_diameter: Computed minimum via diameter (drill + 2*annular)
         min_edge_clearance: Minimum copper-to-board-edge clearance
+        via_in_pad_supported: Whether the manufacturer supports via-in-pad
+            (vias drilled directly inside SMD pads, requiring filled and
+            plated-over via processing).  Default ``False`` (conservative).
+            When ``True``, the escape router may place vias dead-centre on
+            fine-pitch SSOP/TSSOP pads to escape into an inner layer
+            instead of deferring those pins to the main router.
     """
 
     name: str
@@ -39,6 +45,7 @@ class MfrLimits:
     min_via_drill: float
     min_via_annular: float
     min_edge_clearance: float = 0.0
+    via_in_pad_supported: bool = False
 
     @property
     def min_via_diameter(self) -> float:
@@ -57,6 +64,20 @@ MFR_JLCPCB = MfrLimits(
     min_via_drill=0.3,  # 0.3mm is standard, 0.2mm costs extra
     min_via_annular=0.15,  # 6 mil annular ring
     min_edge_clearance=0.3,  # 0.3mm copper-to-edge (matches .kicad_dru files)
+    via_in_pad_supported=False,  # plain JLCPCB does not include via-in-pad
+)
+
+# JLCPCB Capability+ / tier 1 process supports via-in-pad with epoxy fill +
+# plating over (typical surcharge ~$30/order).  Users must opt in
+# explicitly to get this behavior in the router.
+MFR_JLCPCB_TIER1 = MfrLimits(
+    name="jlcpcb-tier1",
+    min_trace=0.127,  # 5 mil
+    min_clearance=0.127,  # 5 mil
+    min_via_drill=0.3,
+    min_via_annular=0.15,
+    min_edge_clearance=0.3,
+    via_in_pad_supported=True,
 )
 
 MFR_OSHPARK = MfrLimits(
@@ -66,6 +87,7 @@ MFR_OSHPARK = MfrLimits(
     min_via_drill=0.254,  # 10 mil
     min_via_annular=0.127,  # 5 mil
     min_edge_clearance=0.381,  # 15 mil copper-to-edge (matches .kicad_dru files)
+    via_in_pad_supported=False,  # not a standard OSHPark offering
 )
 
 MFR_PCBWAY = MfrLimits(
@@ -75,11 +97,13 @@ MFR_PCBWAY = MfrLimits(
     min_via_drill=0.2,  # 8 mil (can go smaller for extra cost)
     min_via_annular=0.15,  # 6 mil
     min_edge_clearance=0.25,  # 0.25mm copper-to-edge (matches .kicad_dru files)
+    via_in_pad_supported=True,  # PCBWay offers via-in-pad as a standard option
 )
 
 # Mapping of manufacturer names to their limits
 MFR_LIMITS: dict[str, MfrLimits] = {
     "jlcpcb": MFR_JLCPCB,
+    "jlcpcb-tier1": MFR_JLCPCB_TIER1,
     "seeed": MFR_JLCPCB,  # Seeed Fusion uses JLCPCB-compatible rules
     "seeed-fusion": MFR_JLCPCB,
     "oshpark": MFR_OSHPARK,
@@ -91,6 +115,10 @@ _MFR_ALIASES: dict[str, str] = {
     "seeed_fusion": "seeed-fusion",
     "seeedfusion": "seeed-fusion",
     "seeedstudio": "seeed",
+    "jlcpcb-capabilityplus": "jlcpcb-tier1",
+    "jlcpcb_capabilityplus": "jlcpcb-tier1",
+    "jlcpcb-capability-plus": "jlcpcb-tier1",
+    "jlcpcb_tier1": "jlcpcb-tier1",
 }
 
 
