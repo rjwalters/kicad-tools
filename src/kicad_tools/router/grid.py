@@ -2067,6 +2067,93 @@ class RoutingGrid:
             cells.add((gx, gy, layer_idx))
         return cells
 
+    def find_pad_ref_at(
+        self,
+        wx: float,
+        wy: float,
+        layer_idx: int | None = None,
+        max_distance: float | None = None,
+    ) -> str | None:
+        """Find the component reference whose pad/clearance envelope covers
+        the given world coordinate.
+
+        Used by failure analysis to recover the owner of a component-blocked
+        grid cell without storing a per-cell ``ref`` field (which would cost
+        ~16-32B per cell for millions of cells).
+
+        Args:
+            wx: World x-coordinate (mm).
+            wy: World y-coordinate (mm).
+            layer_idx: Optional layer index to filter SMD pads.  PTH pads
+                ignore the layer filter (they block all layers).
+            max_distance: Optional bounded search radius from (wx, wy).
+                When None, searches the full pad list (O(n)).  Set to
+                ``rules.trace_clearance + rules.trace_width`` for fast
+                proximity matching.
+
+        Returns:
+            The owning component reference, or None if no pad envelope
+            (including the clearance halo) covers the point.
+        """
+        if not self._pads:
+            return None
+
+        # Use the same clearance envelope used at add_pad time so we
+        # match the cells that were actually blocked.
+        clearance = self.rules.trace_clearance + self.rules.trace_width / 2
+
+        best_ref: str | None = None
+        best_dist = float("inf")
+
+        for pad in self._pads:
+            if not pad.ref:
+                continue
+
+            # Layer filter: PTH pads block all layers, SMD pads only their own.
+            if layer_idx is not None and not pad.through_hole:
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                if pad_layer_idx != layer_idx:
+                    continue
+
+            # Compute effective pad bounds (mirrors _add_pad_unsafe logic)
+            if pad.through_hole:
+                if pad.width > 0 and pad.height > 0:
+                    ew, eh = pad.width, pad.height
+                elif pad.drill > 0:
+                    ew = pad.drill + 0.7
+                    eh = ew
+                else:
+                    ew = 1.7
+                    eh = 1.7
+            else:
+                ew = pad.width
+                eh = pad.height
+
+            x1 = pad.x - ew / 2 - clearance
+            y1 = pad.y - eh / 2 - clearance
+            x2 = pad.x + ew / 2 + clearance
+            y2 = pad.y + eh / 2 + clearance
+
+            # Quick bounded-distance prune
+            if max_distance is not None:
+                dx = max(x1 - wx, 0.0, wx - x2)
+                dy = max(y1 - wy, 0.0, wy - y2)
+                if dx * dx + dy * dy > max_distance * max_distance:
+                    continue
+
+            # Inside the envelope: pick the pad whose center is closest to
+            # the query point (handles overlapping clearance envelopes from
+            # neighbouring components on the same layer).
+            if x1 <= wx <= x2 and y1 <= wy <= y2:
+                cdx = wx - pad.x
+                cdy = wy - pad.y
+                d2 = cdx * cdx + cdy * cdy
+                if d2 < best_dist:
+                    best_dist = d2
+                    best_ref = pad.ref
+
+        return best_ref
+
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts).
 

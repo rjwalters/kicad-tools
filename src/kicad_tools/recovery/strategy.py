@@ -48,12 +48,22 @@ class StrategyGenerator:
     BYPASS_CAP_DISTANCE_THRESHOLD = 5.0
     CLUSTER_DISTANCE_THRESHOLD = 10.0
 
-    def generate_strategies(self, pcb: PCB, failure: FailureAnalysis) -> list[ResolutionStrategy]:
+    def generate_strategies(
+        self,
+        pcb: PCB,
+        failure: FailureAnalysis,
+        max_movement: float | None = None,
+    ) -> list[ResolutionStrategy]:
         """Generate ranked strategies to resolve failure.
 
         Args:
             pcb: The PCB being analyzed.
             failure: Detailed failure analysis.
+            max_movement: Optional cap on per-component movement distance,
+                in mm.  When provided, the move-strategy candidate generator
+                produces offsets within this budget (sweeping multiple
+                angles) instead of using the corridor-derived offsets that
+                routinely exceed the loop's movement cap.  See Issue #2604.
 
         Returns:
             List of resolution strategies, ranked by (difficulty, confidence).
@@ -62,7 +72,7 @@ class StrategyGenerator:
 
         # Strategy 1: Move blocking components
         if failure.has_movable_blockers:
-            strategies.extend(self._generate_move_strategies(pcb, failure))
+            strategies.extend(self._generate_move_strategies(pcb, failure, max_movement))
 
         # Strategy 2: Add vias to change layers
         if failure.root_cause in [FailureCause.CONGESTION, FailureCause.BLOCKED_PATH]:
@@ -92,7 +102,10 @@ class StrategyGenerator:
         return self._rank_strategies(strategies)
 
     def _generate_move_strategies(
-        self, pcb: PCB, failure: FailureAnalysis
+        self,
+        pcb: PCB,
+        failure: FailureAnalysis,
+        max_movement: float | None = None,
     ) -> list[ResolutionStrategy]:
         """Generate component move strategies.
 
@@ -109,7 +122,9 @@ class StrategyGenerator:
                 continue
 
             # Find good positions for this component
-            candidates = self._find_move_candidates(pcb, blocker, failure.failure_area)
+            candidates = self._find_move_candidates(
+                pcb, blocker, failure.failure_area, max_movement=max_movement
+            )
 
             for candidate in candidates[:3]:  # Top 3 positions
                 # Analyze side effects
@@ -417,7 +432,11 @@ class StrategyGenerator:
         )
 
     def _find_move_candidates(
-        self, pcb: PCB, blocker: BlockingElement, failure_area: Rectangle
+        self,
+        pcb: PCB,
+        blocker: BlockingElement,
+        failure_area: Rectangle,
+        max_movement: float | None = None,
     ) -> list[dict[str, Any]]:
         """Find candidate positions for moving a component.
 
@@ -425,6 +444,13 @@ class StrategyGenerator:
         1. Clear the failure area
         2. Don't create new conflicts
         3. Maintain functional groupings
+        4. Stay within ``max_movement`` of the current position when set
+
+        When ``max_movement`` is provided, generates candidates by sweeping
+        a fixed set of angles at radii up to the cap, which keeps every
+        emitted position inside the loop's movement budget.  Without a cap
+        we fall back to the legacy corridor-derived offsets (preserved for
+        backwards compatibility with non-feedback callers).
         """
         candidates: list[dict[str, Any]] = []
 
@@ -439,33 +465,81 @@ class StrategyGenerator:
         comp_width = blocker.bounds.width
         comp_height = blocker.bounds.height
 
-        # Generate candidate positions around the failure area
-        offsets = [
-            (failure_area.width + comp_width, 0),  # Right
-            (-(failure_area.width + comp_width), 0),  # Left
-            (0, failure_area.height + comp_height),  # Below
-            (0, -(failure_area.height + comp_height)),  # Above
-            (failure_area.width + comp_width, failure_area.height + comp_height),  # Diagonal
-        ]
+        offsets: list[tuple[float, float]]
+        if max_movement is not None and max_movement > 0:
+            # Budget-aware: sweep 8 compass directions at two radii within
+            # the cap.  This produces candidates the feedback loop's
+            # ``_strategy_within_movement_budget`` filter will accept by
+            # construction, fixing the secondary half of Issue #2604.
+            radii: list[float] = []
+            # Try a "small nudge" first (typically enough to clear a single
+            # routing channel) and then push to the budget edge.
+            small = max(0.5, max_movement * 0.5)
+            if small < max_movement:
+                radii.append(small)
+            radii.append(max_movement)
+
+            offsets = []
+            angles_deg = (0, 45, 90, 135, 180, 225, 270, 315)
+            for radius in radii:
+                for ang in angles_deg:
+                    rad = math.radians(ang)
+                    offsets.append(
+                        (radius * math.cos(rad), radius * math.sin(rad))
+                    )
+        else:
+            # Legacy corridor-derived offsets -- preserved for callers that
+            # do not pass a movement budget (e.g. CLI explain mode).
+            offsets = [
+                (failure_area.width + comp_width, 0),  # Right
+                (-(failure_area.width + comp_width), 0),  # Left
+                (0, failure_area.height + comp_height),  # Below
+                (0, -(failure_area.height + comp_height)),  # Above
+                (
+                    failure_area.width + comp_width,
+                    failure_area.height + comp_height,
+                ),  # Diagonal
+            ]
+
+        budget = max_movement if max_movement is not None else float("inf")
+        # ``failure_area`` may come from either ``recovery.types.Rectangle``
+        # (which exposes ``contains_point``) or the router's analyzer
+        # ``Rectangle`` (which exposes ``contains``).  Pick the right
+        # method once so each iteration stays cheap.
+        if hasattr(failure_area, "contains_point"):
+            in_area = failure_area.contains_point  # type: ignore[attr-defined]
+        elif hasattr(failure_area, "contains"):
+            in_area = failure_area.contains  # type: ignore[attr-defined]
+        else:
+            in_area = lambda _x, _y: False  # noqa: E731
 
         for dx, dy in offsets:
             new_x = fp.position[0] + dx
             new_y = fp.position[1] + dy
 
-            # Check if position is valid (simple bounds check)
-            confidence = 0.85 if abs(dx) + abs(dy) < 10 else 0.7
-            improvement = 0.9 if not failure_area.contains_point(new_x, new_y) else 0.5
+            distance = math.hypot(dx, dy)
+            # Confidence drops with distance and when the candidate would
+            # still land inside the failure area.
+            if budget != float("inf"):
+                # Closer moves are preferred -- they're cheaper to apply
+                # and are less likely to create new conflicts.
+                confidence = 0.85 if distance <= budget * 0.6 else 0.7
+            else:
+                confidence = 0.85 if distance < 10 else 0.7
+            improvement = 0.9 if not in_area(new_x, new_y) else 0.5
 
             candidates.append(
                 {
                     "position": (new_x, new_y),
                     "confidence": confidence,
                     "improvement": improvement,
+                    "distance": distance,
                 }
             )
 
-        # Sort by improvement
-        candidates.sort(key=lambda c: c["improvement"], reverse=True)
+        # Sort by improvement first, then by distance ascending so close
+        # moves win ties.
+        candidates.sort(key=lambda c: (-c["improvement"], c.get("distance", 0.0)))
         return candidates
 
     def _find_via_positions(

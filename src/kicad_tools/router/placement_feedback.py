@@ -438,8 +438,10 @@ class PlacementFeedbackLoop:
             strategy = self._find_best_placement_strategy(failed_nets, min_confidence)
 
             if strategy is None:
-                if self.verbose:
-                    print("  No suitable placement strategy found")
+                # The detailed rejection breakdown is already printed by
+                # ``_find_best_placement_strategy`` when verbose -- avoid
+                # duplicating the generic "No suitable placement strategy
+                # found" message here.
                 break
 
             # Apply the strategy
@@ -521,13 +523,34 @@ class PlacementFeedbackLoop:
 
         all_strategies: list[ResolutionStrategy] = []
 
+        # Diagnostic counters (Issue #2604 acceptance criterion #4):
+        # when no strategy survives filtering, log a structured breakdown
+        # of WHY each candidate was rejected so silent failure becomes loud.
+        analyses_seen = 0
+        analyses_with_movable_blockers = 0
+        candidates_total = 0
+        rejected_low_confidence = 0
+        rejected_anchored = 0
+        rejected_over_budget = 0
+        rejected_unsafe = 0
+        accepted = 0
+
         # Analyze each failed net and collect strategies
         for net_id in failed_nets[:5]:  # Limit analysis to first 5 failures
             analysis = self.router.analyze_routing_failure(net_id)
             if analysis is None:
                 continue
+            analyses_seen += 1
 
-            strategies = self._strategy_generator.generate_strategies(self.pcb, analysis)
+            # Track whether the analyzer reported movable blockers at all
+            # so we can distinguish "ref-population bug" from
+            # "all candidates filtered out".
+            if getattr(analysis, "has_movable_blockers", False):
+                analyses_with_movable_blockers += 1
+
+            strategies = self._strategy_generator.generate_strategies(
+                self.pcb, analysis, max_movement=self.max_movement
+            )
 
             # Filter to placement-related strategies
             for strategy in strategies:
@@ -536,25 +559,103 @@ class PlacementFeedbackLoop:
                     StrategyType.MOVE_MULTIPLE,
                 ]:
                     continue
+                candidates_total += 1
                 if strategy.confidence < min_confidence:
+                    rejected_low_confidence += 1
                     continue
                 # Reject strategies that touch any anchored ref.
                 if self._strategy_touches_fixed_refs(strategy):
+                    rejected_anchored += 1
                     continue
                 # Reject strategies that exceed the max movement budget.
                 if not self._strategy_within_movement_budget(strategy):
+                    rejected_over_budget += 1
                     continue
                 # Check if safe to apply (board bounds, etc.)
                 if not self._strategy_applicator.is_safe_to_apply(strategy, self.pcb):
+                    rejected_unsafe += 1
                     continue
+                accepted += 1
                 all_strategies.append(strategy)
 
         if not all_strategies:
+            if self.verbose:
+                self._log_strategy_rejection_breakdown(
+                    analyses_seen=analyses_seen,
+                    analyses_with_movable_blockers=analyses_with_movable_blockers,
+                    candidates_total=candidates_total,
+                    rejected_low_confidence=rejected_low_confidence,
+                    rejected_anchored=rejected_anchored,
+                    rejected_over_budget=rejected_over_budget,
+                    rejected_unsafe=rejected_unsafe,
+                )
             return None
 
         # Sort by confidence (highest first) and pick the best
         all_strategies.sort(key=lambda s: -s.confidence)
         return all_strategies[0]
+
+    def _log_strategy_rejection_breakdown(
+        self,
+        *,
+        analyses_seen: int,
+        analyses_with_movable_blockers: int,
+        candidates_total: int,
+        rejected_low_confidence: int,
+        rejected_anchored: int,
+        rejected_over_budget: int,
+        rejected_unsafe: int,
+    ) -> None:
+        """Print a structured diagnostic when no strategy survives filtering.
+
+        Issue #2604 acceptance criterion #4: distinguish between
+        "no candidates generated" (ref-population bug),
+        "all anchored" (fixed_refs too aggressive),
+        "all over budget" (max_movement too tight),
+        and "all unsafe" (board-bounds reject).
+        """
+        if candidates_total == 0:
+            if analyses_seen == 0:
+                print(
+                    "  No suitable placement strategy: 0 failure analyses "
+                    "produced (router returned None for all failed nets)."
+                )
+            elif analyses_with_movable_blockers == 0:
+                print(
+                    f"  No suitable placement strategy: {analyses_seen} "
+                    f"analyses produced 0 movable blockers "
+                    f"(component refs unresolved -- see Issue #2604)."
+                )
+            else:
+                print(
+                    f"  No suitable placement strategy: {analyses_seen} "
+                    f"analyses, {analyses_with_movable_blockers} with "
+                    f"movable blockers, but 0 MOVE_COMPONENT candidates "
+                    f"generated (strategy generator may have rejected "
+                    f"every blocker)."
+                )
+            return
+
+        breakdown: list[str] = []
+        if rejected_low_confidence:
+            breakdown.append(f"{rejected_low_confidence} below confidence threshold")
+        if rejected_anchored:
+            breakdown.append(f"{rejected_anchored} anchored")
+        if rejected_over_budget:
+            cap = (
+                f"{self.max_movement:.2f}mm"
+                if self.max_movement is not None
+                else "n/a"
+            )
+            breakdown.append(f"{rejected_over_budget} over budget ({cap})")
+        if rejected_unsafe:
+            breakdown.append(f"{rejected_unsafe} unsafe (board bounds)")
+        breakdown_str = "; ".join(breakdown) if breakdown else "no reason recorded"
+        print(
+            f"  No suitable placement strategy: rejected "
+            f"{candidates_total} MOVE_COMPONENT candidates "
+            f"({breakdown_str})."
+        )
 
     def _strategy_touches_fixed_refs(self, strategy: ResolutionStrategy) -> bool:
         """Return True if any affected component is in ``fixed_refs``."""

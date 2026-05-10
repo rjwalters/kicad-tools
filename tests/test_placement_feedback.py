@@ -803,3 +803,319 @@ class TestPlacementFeedbackLoopExitReasons:
         result = loop.run(max_adjustments=10)
         assert result.exit_reason == "pf_stagnated"
         assert "Exit reason: pf_stagnated" in result.summary()
+
+
+class TestPlacementFeedbackLoopBuilderHandoff:
+    """Issue #2604: integration tests for the analyzer -> generator -> loop pipeline.
+
+    The pre-existing tests in this file synthesize ``ResolutionStrategy``
+    objects directly, which bypasses the broken handoff between
+    ``RootCauseAnalyzer`` and ``StrategyGenerator``.  These tests exercise
+    the full path on a synthetic router so the bug stays caught.
+    """
+
+    def _make_pcb_with_footprint(self, ref: str, x: float, y: float):
+        pcb = MockPCB()
+        pcb.footprints.append(MockFootprint(ref, x, y))
+        # Add a generous board outline so is_safe_to_apply doesn't reject.
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (0.0, 0.0), (200.0, 0.0)))
+        pcb.graphic_items.append(
+            MockGraphicItem("Edge.Cuts", (200.0, 0.0), (200.0, 200.0))
+        )
+        pcb.graphic_items.append(
+            MockGraphicItem("Edge.Cuts", (200.0, 200.0), (0.0, 200.0))
+        )
+        pcb.graphic_items.append(MockGraphicItem("Edge.Cuts", (0.0, 200.0), (0.0, 0.0)))
+        return pcb
+
+    def _make_analysis_with_blocker(self, ref: str | None):
+        """Build a router-style FailureAnalysis with a single component blocker."""
+        from kicad_tools.router.failure_analysis import (
+            BlockingElement,
+            FailureAnalysis,
+            FailureCause,
+            Rectangle,
+        )
+
+        return FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=Rectangle(45.0, 45.0, 55.0, 55.0),
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref=ref,
+                    net=None,
+                    bounds=Rectangle(48.0, 48.0, 52.0, 52.0),
+                    movable=True,
+                    layer=0,
+                )
+            ],
+        )
+
+    def _make_router(self, analysis, failed_nets=(1,)):
+        class FakeRouter:
+            def __init__(self, analysis):
+                self._analysis = analysis
+                self._failed = list(failed_nets)
+                self.nets = {0: [], 1: []}
+                self.routes = []
+
+            def get_failed_nets(self):
+                return list(self._failed)
+
+            def analyze_routing_failure(self, net_id):
+                return self._analysis
+
+            def route_all_negotiated(self, **kwargs):
+                return []
+
+            def route_all(self):
+                return []
+
+            def _reset_for_new_trial(self):
+                return None
+
+        return FakeRouter(analysis)
+
+    def test_loop_invokes_move_component_when_blockers_have_refs(self, capsys):
+        """Issue #2604 primary fix: with refs populated the loop emits MOVE_COMPONENT.
+
+        Before the fix, ``BlockingElement.ref`` was always None and the
+        strategy generator dropped every candidate, so the loop logged
+        "No suitable placement strategy found" without ever calling the
+        applicator.
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            max_movement=5.0,
+        )
+        strategy = loop._find_best_placement_strategy(
+            failed_nets=[1], min_confidence=0.5
+        )
+
+        assert strategy is not None, (
+            "Issue #2604 regression: loop returned no strategy when "
+            "BlockingElement.ref is populated"
+        )
+        assert strategy.type.value in ("move_component", "move_multiple")
+        # The strategy must target U1 (the populated ref).
+        assert "U1" in strategy.affected_components
+
+    def test_loop_emits_no_strategy_when_blocker_ref_is_none(self, capsys):
+        """Pre-fix behavior: ref=None drops every candidate.
+
+        This test pins the *current* fix: when the analyzer fails to
+        populate the ref (e.g. on a grid with no pad data, like the chorus
+        test pre-fix), the loop now emits a structured diagnostic instead
+        of the silent "No suitable placement strategy found".
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref=None)
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=True, max_movement=5.0
+        )
+        strategy = loop._find_best_placement_strategy(
+            failed_nets=[1], min_confidence=0.5
+        )
+        assert strategy is None
+        captured = capsys.readouterr()
+        # Acceptance criterion #4: when no candidates are generated we must
+        # log a diagnostic that distinguishes the population bug from the
+        # filter rejections.
+        assert "No suitable placement strategy" in captured.out
+        # Either "0 movable blockers" or "0 MOVE_COMPONENT candidates" must
+        # appear so an operator can tell ref-population is the failure mode.
+        assert (
+            "0 movable blockers" in captured.out
+            or "0 MOVE_COMPONENT candidates" in captured.out
+        )
+
+    def test_loop_logs_filter_breakdown_when_all_candidates_rejected(self, capsys):
+        """Acceptance criterion #4: when all candidates are anchored, say so."""
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            max_movement=5.0,
+            fixed_refs={"U1"},  # Anchor the only candidate.
+        )
+        strategy = loop._find_best_placement_strategy(
+            failed_nets=[1], min_confidence=0.5
+        )
+        assert strategy is None
+        captured = capsys.readouterr()
+        assert "anchored" in captured.out
+        assert "rejected" in captured.out.lower()
+
+    def test_loop_logs_over_budget_breakdown(self, capsys):
+        """Acceptance criterion #4: when all candidates exceed the cap, say so.
+
+        Force the over-budget filter by stubbing the strategy generator
+        to return a strategy whose move action targets a position far
+        outside the loop's movement budget.  The loop must report ``over
+        budget`` in its rejection breakdown.
+        """
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyType,
+        )
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router, pcb=pcb, verbose=True, max_movement=2.0
+        )
+
+        # Stub the strategy generator to return an over-budget move so we
+        # can exercise the filter deterministically.
+        class _StubGenerator:
+            def generate_strategies(self, _pcb, _failure, max_movement=None):
+                return [
+                    ResolutionStrategy(
+                        type=StrategyType.MOVE_COMPONENT,
+                        difficulty=Difficulty.EASY,
+                        confidence=0.85,
+                        # 50,50 -> 100,100 = 70.7mm, way over the 2mm cap.
+                        actions=[
+                            Action(
+                                type="move",
+                                target="U1",
+                                params={"x": 100.0, "y": 100.0},
+                            )
+                        ],
+                        affected_components=["U1"],
+                    )
+                ]
+
+        loop._strategy_generator = _StubGenerator()
+        strategy = loop._find_best_placement_strategy(
+            failed_nets=[1], min_confidence=0.5
+        )
+        assert strategy is None
+        captured = capsys.readouterr()
+        assert "over budget" in captured.out
+        assert "rejected" in captured.out.lower()
+
+    def test_loop_passes_max_movement_to_strategy_generator(self):
+        """Issue #2604 secondary fix: budget is plumbed to the generator.
+
+        Verify candidates respect the cap by ensuring the resulting
+        strategy targets a position within ``max_movement`` of the
+        original.  Pre-fix the candidate offsets were corridor-derived
+        and routinely exceeded the cap.
+        """
+        from kicad_tools.router.placement_feedback import PlacementFeedbackLoop
+
+        pcb = self._make_pcb_with_footprint("U1", 50.0, 50.0)
+        analysis = self._make_analysis_with_blocker(ref="U1")
+        router = self._make_router(analysis)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            max_movement=3.0,
+        )
+        strategy = loop._find_best_placement_strategy(
+            failed_nets=[1], min_confidence=0.5
+        )
+        assert strategy is not None
+
+        import math
+
+        for action in strategy.actions:
+            if action.type != "move":
+                continue
+            new_x = action.params["x"]
+            new_y = action.params["y"]
+            distance = math.hypot(new_x - 50.0, new_y - 50.0)
+            assert distance <= 3.0 + 1e-9, (
+                f"Move candidate of {distance:.3f}mm exceeds max_movement=3.0mm"
+            )
+
+    def test_strategy_generator_respects_max_movement_directly(self):
+        """Direct test of the generator-level budget plumbing.
+
+        Even outside the feedback loop, calling
+        ``StrategyGenerator.generate_strategies(..., max_movement=...)``
+        produces only candidates inside the cap.
+        """
+        import math
+
+        from kicad_tools.recovery.strategy import StrategyGenerator
+        from kicad_tools.recovery.types import (
+            BlockingElement as RecoveryBlockingElement,
+        )
+        from kicad_tools.recovery.types import (
+            FailureAnalysis as RecoveryFailureAnalysis,
+        )
+        from kicad_tools.recovery.types import (
+            FailureCause as RecoveryFailureCause,
+        )
+        from kicad_tools.recovery.types import (
+            Rectangle as RecoveryRectangle,
+        )
+
+        pcb = MockPCB()
+        pcb.footprints.append(MockFootprint("U1", 50.0, 50.0))
+
+        analysis = RecoveryFailureAnalysis(
+            root_cause=RecoveryFailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(50.0, 50.0),
+            failure_area=RecoveryRectangle(45.0, 45.0, 55.0, 55.0),
+            blocking_elements=[
+                RecoveryBlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=RecoveryRectangle(48.0, 48.0, 52.0, 52.0),
+                    movable=True,
+                )
+            ],
+        )
+
+        generator = StrategyGenerator()
+        strategies = generator.generate_strategies(pcb, analysis, max_movement=2.0)
+        move_strategies = [
+            s for s in strategies if s.type.value in ("move_component", "move_multiple")
+        ]
+        assert move_strategies, (
+            "Issue #2604 regression: generator dropped all move strategies "
+            "even though blocker.ref is populated"
+        )
+        # Every candidate must respect the budget.
+        for s in move_strategies:
+            for action in s.actions:
+                if action.type != "move":
+                    continue
+                d = math.hypot(action.params["x"] - 50.0, action.params["y"] - 50.0)
+                assert d <= 2.0 + 1e-9, (
+                    f"Generator emitted candidate at {d:.3f}mm, "
+                    f"exceeds max_movement=2.0mm"
+                )
