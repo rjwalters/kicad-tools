@@ -222,6 +222,7 @@ from .placement_feedback import (
     PlacementDiffEntry,
     PlacementFeedbackLoop,
     PlacementFeedbackResult,
+    detect_pf_stagnation,
 )
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .rules import (
@@ -467,6 +468,7 @@ __all__ = [
     "PlacementFeedbackResult",
     "PlacementAdjustment",
     "PlacementDiffEntry",
+    "detect_pf_stagnation",
     # Escape Routing (dense packages)
     "EscapeRouter",
     "EscapeRoute",

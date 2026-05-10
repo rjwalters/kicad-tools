@@ -9,6 +9,7 @@ routing failures.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,58 @@ from kicad_tools.recovery import (
     StrategyGenerator,
     StrategyType,
 )
+
+
+def detect_pf_stagnation(
+    routed_history: list[int],
+    *,
+    patience: int = 3,
+) -> bool:
+    """Return True if the last ``patience`` iterations all match the same routed count.
+
+    This is the placement-feedback-layer analogue of the inner-router rip-up
+    cohort stagnation detector added in #2597.  It compares the rolling
+    history of "fully routed net count" across consecutive outer
+    ``PlacementFeedbackLoop`` iterations and signals stagnation when no
+    progress has been made for ``patience`` iterations.
+
+    Need at least ``patience + 1`` entries to make a stagnation call -- the
+    first entry establishes a baseline and the next ``patience`` entries
+    must all match it.  Returns False on shorter histories.
+
+    The check uses strict equality on the last ``patience + 1`` entries
+    (``len(set(window)) == 1``).  A single non-matching entry anywhere in
+    the window resets the stagnation signal, even if the most recent
+    entries are flat (i.e. a recent improvement followed by flat counts is
+    not yet stagnated; the helper waits until ``patience + 1`` flat entries
+    line up).
+
+    Args:
+        routed_history: Per-iteration fully-routed-net counts, oldest first.
+        patience: Number of *consecutive identical follow-up* iterations
+            required to declare stagnation.  Default 3 means "baseline + 3
+            unchanged iterations" => 4 total entries with the same count.
+
+    Returns:
+        True if the most recent ``patience + 1`` entries all share a single
+        value; False otherwise (including when history is too short).
+
+    Examples:
+        >>> detect_pf_stagnation([46, 46, 46, 46], patience=3)
+        True
+        >>> detect_pf_stagnation([40, 43, 44, 45], patience=3)
+        False
+        >>> detect_pf_stagnation([46, 46, 46], patience=3)
+        False
+        >>> detect_pf_stagnation([46, 46, 46], patience=2)
+        True
+    """
+    if patience < 1:
+        return False
+    if len(routed_history) < patience + 1:
+        return False
+    last_window = routed_history[-(patience + 1):]
+    return len(set(last_window)) == 1
 
 
 @dataclass

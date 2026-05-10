@@ -21,6 +21,7 @@ from kicad_tools.recovery import (
 from kicad_tools.router import (
     PlacementAdjustment,
     PlacementFeedbackResult,
+    detect_pf_stagnation,
 )
 
 
@@ -410,3 +411,77 @@ class TestModuleExports:
         assert PlacementAdjustment is not None
         assert PlacementFeedbackLoop is not None
         assert PlacementFeedbackResult is not None
+
+
+class TestDetectPfStagnation:
+    """Unit tests for the pure-function ``detect_pf_stagnation`` helper.
+
+    Issue #2606: detect when ``PlacementFeedbackLoop`` is no longer making
+    progress between outer iterations so the loop can exit cleanly instead
+    of burning a multi-minute negotiated-router run on every iteration.
+    """
+
+    def test_empty_history(self):
+        assert detect_pf_stagnation([], patience=3) is False
+
+    def test_single_entry(self):
+        assert detect_pf_stagnation([46], patience=3) is False
+
+    def test_two_entries_insufficient(self):
+        """Need patience+1 entries -- two flat values is not enough at patience=3."""
+        assert detect_pf_stagnation([46, 46], patience=3) is False
+
+    def test_three_entries_insufficient(self):
+        """Three flat values is still too short at patience=3 (needs four)."""
+        assert detect_pf_stagnation([46, 46, 46], patience=3) is False
+
+    def test_four_flat_entries_triggers(self):
+        """Four consecutive identical entries at patience=3 => stagnated."""
+        assert detect_pf_stagnation([46, 46, 46, 46], patience=3) is True
+
+    def test_improvement_followed_by_three_flat(self):
+        """[40, 46, 46, 46, 46] -- the trailing 4 entries are flat => stagnated."""
+        assert (
+            detect_pf_stagnation([40, 46, 46, 46, 46], patience=3) is True
+        )
+
+    def test_still_improving(self):
+        """Monotonically increasing history is never stagnated."""
+        assert detect_pf_stagnation([40, 43, 44, 45], patience=3) is False
+
+    def test_last_entry_improves(self):
+        """A final improvement breaks stagnation (window is not all equal)."""
+        assert detect_pf_stagnation([46, 46, 46, 47], patience=3) is False
+
+    def test_strict_equality_semantics(self):
+        """Window [47, 46, 46, 46] has 2 distinct values => not stagnated.
+
+        Confirms the helper's strict ``len(set(window)) == 1`` semantics:
+        even though the most-recent three entries are flat, the inclusion
+        of the patience+1th entry differing keeps stagnation off.
+        """
+        assert (
+            detect_pf_stagnation([46, 47, 46, 46, 46], patience=3) is False
+        )
+
+    def test_configurable_patience_short(self):
+        """patience=2 fires on three flat entries."""
+        assert detect_pf_stagnation([46, 46, 46], patience=2) is True
+
+    def test_configurable_patience_long(self):
+        """patience=5 needs six flat entries -- four is not enough."""
+        assert detect_pf_stagnation([46, 46, 46, 46], patience=5) is False
+
+    def test_configurable_patience_long_satisfied(self):
+        """patience=5 satisfied by six flat entries."""
+        assert (
+            detect_pf_stagnation(
+                [46, 46, 46, 46, 46, 46], patience=5
+            )
+            is True
+        )
+
+    def test_zero_patience_disabled(self):
+        """patience<1 disables the detector."""
+        assert detect_pf_stagnation([46, 46, 46, 46], patience=0) is False
+        assert detect_pf_stagnation([], patience=0) is False
