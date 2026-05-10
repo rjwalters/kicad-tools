@@ -668,6 +668,173 @@ class TestAssignLayersForPourNets:
         assert ("+5V", "F.Cu", 1) in result
         assert ("+1.8V", "F.Cu", 2) in result
 
+    # ------------------------------------------------------------------
+    # Split-ground tests (issue #2593): when there are multiple distinct
+    # GROUND-class nets, each must get a distinct (layer, priority) so
+    # one ground does not silently override another to zero copper.
+    # ------------------------------------------------------------------
+
+    def test_4_layer_split_ground_basic(self):
+        """4-layer + 2 grounds: split across In1.Cu and In2.Cu (issue #2593)."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GND", NetClass.GROUND), ("GNDA", NetClass.GROUND)],
+        )
+        # Canonical "GND" goes to In1.Cu
+        assert ("GND", "In1.Cu", 1) in result
+        # Other ground goes to the second inner layer
+        assert ("GNDA", "In2.Cu", 1) in result
+        # Each (layer, priority) pair is distinct across all assignments
+        layer_priority_pairs = [(layer, prio) for _, layer, prio in result]
+        assert len(layer_priority_pairs) == len(set(layer_priority_pairs))
+
+    def test_4_layer_split_ground_demotes_power(self):
+        """4-layer + 2 grounds + 1 power: power demoted to F.Cu (issue #2593)."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("GNDA", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+            ],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("GNDA", "In2.Cu", 1) in result
+        # Power must NOT land on In2.Cu (reserved for the second ground).
+        assert ("+3.3V", "F.Cu", 0) in result
+        assert ("+3.3V", "In2.Cu", 0) not in result
+
+    def test_4_layer_split_ground_demotes_multiple_power(self):
+        """4-layer + 2 grounds + N power: all power on F.Cu with distinct priorities."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("GNDA", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+            ],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("GNDA", "In2.Cu", 1) in result
+        # Both power nets on F.Cu with distinct, non-zero priorities
+        fcu_assignments = [(n, p) for n, l, p in result if l == "F.Cu"]
+        fcu_nets = {n for n, _ in fcu_assignments}
+        assert fcu_nets == {"+3.3V", "+5V"}
+        fcu_priorities = [p for _, p in fcu_assignments]
+        assert len(fcu_priorities) == len(set(fcu_priorities))
+        # No power net got assigned to In2.Cu
+        in2_nets = {n for n, l, _ in result if l == "In2.Cu"}
+        assert "+3.3V" not in in2_nets
+        assert "+5V" not in in2_nets
+
+    def test_4_layer_split_ground_three_grounds(self, capsys):
+        """4-layer + 3 grounds: extras spill to B.Cu and a warning is emitted."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("GNDA", NetClass.GROUND),
+                ("GNDD", NetClass.GROUND),
+            ],
+        )
+        # Canonical "GND" first on In1.Cu, second alphabetical -> In2.Cu
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("GNDA", "In2.Cu", 1) in result
+        # Third ground spills to B.Cu with a non-zero priority distinct
+        # from any other ground's (layer, priority).
+        gndd_entries = [(l, p) for n, l, p in result if n == "GNDD"]
+        assert len(gndd_entries) == 1
+        assert gndd_entries[0][0] == "B.Cu"
+        # Every ground net has a distinct (layer, priority) pair
+        ground_lp = [(l, p) for n, l, p in result if n in {"GND", "GNDA", "GNDD"}]
+        assert len(ground_lp) == len(set(ground_lp))
+        # A warning was printed to stderr about >2 ground domains
+        captured = capsys.readouterr()
+        assert "more than 2 ground domains" in captured.err.lower() or (
+            "manual stackup" in captured.err.lower()
+        )
+
+    def test_2_layer_split_ground_distinct_priorities(self):
+        """2-layer + 2 grounds: both on B.Cu with distinct priorities (issue #2593)."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            2,
+            [("GNDA", NetClass.GROUND), ("GNDD", NetClass.GROUND)],
+        )
+        # Both grounds on B.Cu
+        bcu_assignments = [(n, p) for n, l, p in result if l == "B.Cu"]
+        bcu_nets = {n for n, _ in bcu_assignments}
+        assert bcu_nets == {"GNDA", "GNDD"}
+        # Distinct priorities so no zone is silently overridden
+        bcu_priorities = [p for _, p in bcu_assignments]
+        assert len(bcu_priorities) == len(set(bcu_priorities))
+
+    def test_4_layer_split_ground_canonical_gnd_picks_in1cu(self):
+        """4-layer split-ground: literal 'GND' is preferred for In1.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        # Provide the inputs in a non-canonical order to ensure the
+        # selection logic, not the input order, decides In1.Cu.
+        result = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GNDA", NetClass.GROUND),
+                ("GNDD", NetClass.GROUND),
+                ("GND", NetClass.GROUND),
+            ],
+        )
+        assert ("GND", "In1.Cu", 1) in result
+
+    def test_4_layer_split_ground_no_canonical_uses_alpha(self):
+        """4-layer split-ground without 'GND': alphabetical decides In1.Cu."""
+        from kicad_tools.router.net_class import NetClass
+
+        # Reverse the input order; alphabetical should still put GNDA on In1.
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GNDD", NetClass.GROUND), ("GNDA", NetClass.GROUND)],
+        )
+        assert ("GNDA", "In1.Cu", 1) in result
+        assert ("GNDD", "In2.Cu", 1) in result
+
+    def test_4_layer_split_ground_logs_to_stderr(self, capsys):
+        """4-layer split-ground emits an info line naming the detected grounds."""
+        from kicad_tools.router.net_class import NetClass
+
+        _assign_layers_for_pour_nets(
+            4,
+            [("GNDA", NetClass.GROUND), ("GNDD", NetClass.GROUND)],
+        )
+        captured = capsys.readouterr()
+        assert "split-ground detected" in captured.err.lower()
+        # Both ground names appear in the message
+        assert "GNDA" in captured.err
+        assert "GNDD" in captured.err
+
+    def test_4_layer_split_ground_no_overlap_between_grounds(self):
+        """Critical regression test for #2593: no two ground nets get the
+        same (layer, priority) — that's the exact condition that produced
+        the 'will get zero copper' fill warning on chorus-test-revA."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GNDA", NetClass.GROUND), ("GNDD", NetClass.GROUND)],
+        )
+        ground_lp = [(l, p) for n, l, p in result if n in {"GNDA", "GNDD"}]
+        assert len(ground_lp) == 2
+        assert len(set(ground_lp)) == 2  # all distinct
+
 
 class TestAutoCreateZones4Layer:
     """Tests for auto_create_zones_for_pour_nets with 4-layer boards."""
