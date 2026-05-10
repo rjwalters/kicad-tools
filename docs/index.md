@@ -24,6 +24,7 @@ Step-by-step guides for common tasks:
 | [Query API](guides/query-api.md) | Fluent interface for finding components |
 | [Placement Optimization](guides/placement-optimization.md) | Optimize component placement |
 | [Routing](guides/routing.md) | Autoroute PCBs with the A* router |
+| [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
 | [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
 
 ### Reference

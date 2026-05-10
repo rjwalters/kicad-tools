@@ -169,9 +169,7 @@ class BenchmarkRunner:
             stats.get("connectivity"),
             nets_to_route_ids=nets_to_route_ids,
         )
-        unrouteable_nets = sorted(
-            router.net_names.get(nid, f"Net_{nid}") for nid in unrouted_ids
-        )
+        unrouteable_nets = sorted(router.net_names.get(nid, f"Net_{nid}") for nid in unrouted_ids)
 
         # DRC violation count: run a quick error-only DRC pass on the
         # routed PCB so the benchmark captures regressions in design-
@@ -246,7 +244,7 @@ class BenchmarkRunner:
             pcb_path = case.get_pcb_path(self.base_dir)
             if pcb_path is None or not pcb_path.exists():
                 return 0
-            pcb = PCB.from_file(str(pcb_path))
+            pcb = PCB.load(str(pcb_path))
             checker = DRCChecker(pcb=pcb, manufacturer="jlcpcb", layers=4)
             results = checker.check_all()
             return results.error_count
@@ -282,9 +280,7 @@ class BenchmarkRunner:
             pcb_path = case.get_pcb_path(self.base_dir)
             if pcb_path is None or not pcb_path.exists():
                 if self.verbose:
-                    print(
-                        f"    SKIP: {case.name} -- PCB file not available: {pcb_path}"
-                    )
+                    print(f"    SKIP: {case.name} -- PCB file not available: {pcb_path}")
                 return []
 
         results = []

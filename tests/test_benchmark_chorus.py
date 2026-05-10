@@ -10,11 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.benchmark import (
     ABSOLUTE_THRESHOLDS,
-    BENCHMARK_CASES,
     REGRESSION_THRESHOLDS,
     BenchmarkResult,
     check_regression,
@@ -22,7 +19,6 @@ from kicad_tools.benchmark import (
 )
 from kicad_tools.benchmark.cases import get_case_by_name
 from kicad_tools.benchmark.runner import _classify_nets_by_connectivity
-
 
 # ---------------------------------------------------------------------------
 # Case registration / path resolution
