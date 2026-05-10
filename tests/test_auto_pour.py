@@ -453,3 +453,123 @@ class TestAutoPourIfMissing:
         # VCC's original inset polygon must still be present verbatim.
         assert "(xy 0.3 0.3)" in text
         assert "(xy 49.7 0.3)" in text
+
+
+class TestErcMarkerNetExclusion:
+    """Tests for the ERC-marker (PWR_FLAG) exclusion filter (#2592).
+
+    KiCad's netlister emits ``PWR_FLAG`` (and user-named flag variants)
+    as ordinary net names, even though those symbols have no electrical
+    connection -- they exist purely to silence the *Input Power pin not
+    driven by any Output Power pin* ERC error.  The name-based classifier
+    in ``router/net_class.py`` matches them as ``NetClass.POWER`` because
+    they start with ``PWR``, so without a dedicated filter they would
+    end up as poured zones that starve legitimate power rails of copper.
+    """
+
+    def test_pwr_flag_excluded_from_pour_nets(self, tmp_path: Path):
+        """``PWR_FLAG`` must not produce a zone even when classified POWER."""
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "+3.3V"), (2, "GND"), (3, "PWR_FLAG"), (4, "SIG1")],
+            pad_nets=[(1, "+3.3V"), (2, "GND"), (3, "PWR_FLAG"), (4, "SIG1")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path)
+
+        # Exactly two zones: +3.3V and GND.  PWR_FLAG must not appear.
+        assert count == 2
+        assert set(names) == {"+3.3V", "GND"}
+        assert "PWR_FLAG" not in names
+
+        # And the file must not contain a PWR_FLAG zone definition.
+        text = pcb_path.read_text()
+        assert '(net_name "PWR_FLAG")' not in text
+        assert '(net "PWR_FLAG")' not in text
+
+    def test_user_named_flag_variant_excluded(self, tmp_path: Path):
+        """User-named flag nets (e.g., ``+3V3_FLAG``) are also filtered."""
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "+3.3V"), (2, "GND"), (3, "+3V3_FLAG"), (4, "SIG1")],
+            pad_nets=[(1, "+3.3V"), (2, "GND"), (3, "+3V3_FLAG"), (4, "SIG1")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path)
+
+        # +3V3_FLAG must not be poured even though it would otherwise
+        # match both the POWER pattern and the per-rail naming idiom.
+        assert "+3V3_FLAG" not in names
+        assert set(names) == {"+3.3V", "GND"}
+        assert count == 2
+
+    def test_pwr_flag_only_does_not_count_as_power_only_board(
+        self, tmp_path: Path
+    ):
+        """A board whose only power-classified net is ``PWR_FLAG`` runs normally.
+
+        Without the filter, the all-power-board guard would treat the
+        board as having one power net (``PWR_FLAG``) and one signal net
+        (``SIG1``), and produce a spurious zone for ``PWR_FLAG``.  With
+        the filter, ``PWR_FLAG`` is invisible to the pour stage entirely:
+        no zones are created and the function returns cleanly without
+        triggering the all-power early return.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "PWR_FLAG"), (2, "SIG1")],
+            pad_nets=[(1, "PWR_FLAG"), (2, "SIG1")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path)
+
+        # No zones -- no real pour nets -- and no all-power guard hit.
+        assert count == 0
+        assert names == []
+        text = pcb_path.read_text()
+        assert "(zone" not in text
+
+    def test_pwr_flag_classifier_unchanged(self):
+        """``classify_from_name`` may still tag PWR_FLAG as POWER.
+
+        The fix lives in the *pour-net selection* layer, not the
+        classifier.  Other consumers (e.g., trace-width selection in
+        ``apply_net_class_rules``) should keep getting a POWER answer
+        for legacy reasons; the auto-pour filter is what excludes the
+        net from zones.  This test pins down that design decision so a
+        future refactor does not silently move the carve-out.
+        """
+        from kicad_tools.router.net_class import NetClass, classify_from_name
+
+        # The classifier is allowed to return POWER here -- this is the
+        # *expected* behaviour given the ``^PWR`` pattern.  What matters
+        # is that auto_pour_if_missing filters it out (covered above).
+        result = classify_from_name("PWR_FLAG")
+        assert result == NetClass.POWER
+
+    def test_is_erc_marker_net_helper(self):
+        """The internal helper recognises canonical and variant spellings."""
+        from kicad_tools.router.auto_pour import _is_erc_marker_net
+
+        # Canonical ERC markers
+        assert _is_erc_marker_net("PWR_FLAG")
+        assert _is_erc_marker_net("+3V3_FLAG")
+        assert _is_erc_marker_net("VBUS_FLAG")
+        assert _is_erc_marker_net("#FLG01")
+        assert _is_erc_marker_net("#FLG")
+
+        # Real net names that must NOT be treated as ERC markers
+        assert not _is_erc_marker_net("PWR_5V")  # legitimate per-rail name
+        assert not _is_erc_marker_net("+3.3V")
+        assert not _is_erc_marker_net("GND")
+        assert not _is_erc_marker_net("SIG1")
+        assert not _is_erc_marker_net("FLAG_OUT")  # _FLAG anchored at end only

@@ -11,12 +11,55 @@ voltage divider whose only nets are VIN, VOUT, GND) from being
 inadvertently drained of routable nets: auto-pour is only applied when
 the board has at least one signal (non-power/ground) net, indicating
 that the power nets are infrastructure rather than the entire design.
+
+ERC-marker net exclusion
+------------------------
+
+KiCad's netlister exports the ``PWR_FLAG`` virtual symbol as if it were
+an ordinary net, even though the symbol carries no electrical
+connection -- its sole purpose is to silence the *Input Power pin not
+driven by any Output Power pin* ERC error.  Because the resulting net
+name starts with ``PWR``, the name-based classifier in
+:mod:`kicad_tools.router.net_class` matches it as :class:`NetClass.POWER`
+and would otherwise produce a spurious zone.  See
+:func:`_is_erc_marker_net` and the ``ERC_MARKER_NET_PATTERNS`` constant
+below for the filter that excludes such names from the pour-net set.
+The schematic-side analogue lives in
+``src/kicad_tools/cli/sch_connectivity.py`` (``"PWR_FLAG is an ERC
+annotation, not a real net name"``).
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+# ERC-only marker nets that must never be poured.  These are synthetic
+# net names emitted by KiCad's netlister for symbols whose sole purpose
+# is to silence ERC, not to carry copper.  The schematic-side connectivity
+# walker has the equivalent carve-out in
+# ``src/kicad_tools/cli/sch_connectivity.py`` (search for
+# ``"PWR_FLAG is an ERC annotation"``).
+#
+# Patterns are anchored regular expressions; ``_is_erc_marker_net`` uses
+# ``re.match`` (anchors at the start) so each entry is tested against
+# the full net name.
+ERC_MARKER_NET_PATTERNS: tuple[str, ...] = (
+    r"^PWR_FLAG$",  # KiCad's stock power:PWR_FLAG symbol
+    r"^#FLG(?:\d*|_.*|$)",  # Reference-designator spelling (#FLG, #FLG01, #FLG_VBUS)
+    r".*_FLAG$",  # User-named flag variants (e.g., +3V3_FLAG, VBUS_FLAG)
+)
+
+
+def _is_erc_marker_net(name: str) -> bool:
+    """Return True when *name* is an ERC-only marker, not a real net.
+
+    See module docstring for context.  Used by :func:`auto_pour_if_missing`
+    to skip such nets when building the pour-net set, and by the
+    ``kct route`` skip-pour-nets path to avoid the misleading
+    ``Auto-skip: PWR_FLAG (pour nets — use zone fill)`` log line.
+    """
+    return any(re.match(p, name) for p in ERC_MARKER_NET_PATTERNS)
 
 
 def _detect_uninset_zones(
@@ -216,8 +259,16 @@ def auto_pour_if_missing(
     pour_nets: list[tuple[str, NetClass]] = []
     signal_net_count = 0
     for net_id, classification in classifications.items():
+        net_name = net_names[net_id]
+        # ERC-marker nets (PWR_FLAG and friends) carry no copper; the
+        # name-based classifier reports them as POWER but they must not
+        # be poured.  Treat them as if they did not exist for the
+        # all-power guard below -- a board whose only "power" net is
+        # PWR_FLAG should not be mistaken for a power-only design.
+        if _is_erc_marker_net(net_name):
+            continue
         if classification.net_class in (NetClass.POWER, NetClass.GROUND):
-            pour_nets.append((net_names[net_id], classification.net_class))
+            pour_nets.append((net_name, classification.net_class))
         else:
             signal_net_count += 1
 
