@@ -6974,6 +6974,8 @@ class Autorouter:
         max_movement: float | None = 5.0,
         timeout: float | None = None,
         per_net_timeout: float | None = None,
+        stagnation_patience: int = 3,
+        outer_timeout: float | None = None,
     ) -> PlacementFeedbackResult:
         """Route with automatic placement adjustment on failures.
 
@@ -7014,6 +7016,16 @@ class Autorouter:
                 Default: no limit.
             per_net_timeout: Optional per-net timeout, in seconds, also
                 forwarded to the negotiated router.  Default: no limit.
+            stagnation_patience: Issue #2606: number of consecutive
+                outer iterations with no fully-routed-net-count
+                improvement before exiting early with
+                ``exit_reason="pf_stagnated"``.  Default 3.  Set to 0
+                to disable.
+            outer_timeout: Issue #2606: optional hard wall-clock budget
+                for the entire outer feedback loop, in seconds.  When
+                exceeded between iterations the loop exits with
+                ``exit_reason="pf_timeout"``.  Default None (no outer
+                cap).
 
         Returns:
             PlacementFeedbackResult with:
@@ -7069,6 +7081,8 @@ class Autorouter:
             verbose=verbose,
             fixed_refs=fixed_refs,
             max_movement=max_movement,
+            stagnation_patience=stagnation_patience,
+            outer_timeout=outer_timeout,
         )
 
         return feedback_loop.run(

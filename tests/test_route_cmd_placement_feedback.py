@@ -77,6 +77,11 @@ def _make_base_args(**overrides):
         "placement_feedback_max_movement": 5.0,
         "placement_feedback_anchor": None,
         "placement_feedback_no_anchor": None,
+        # Issue #2606 defaults: stagnation patience matches parser
+        # default (3); outer_timeout is None (disabled) by default so
+        # the "not forwarded when default" invariant holds.
+        "placement_feedback_stagnation_patience": 3,
+        "placement_feedback_outer_timeout": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -182,6 +187,53 @@ class TestPlacementFeedbackParser:
         assert "--placement-feedback-budget" in help_text
         assert "--placement-feedback-max-movement" in help_text
         assert "--placement-feedback-anchor" in help_text
+        # Issue #2606: new flags surface in help text.
+        assert "--placement-feedback-stagnation-patience" in help_text
+        assert "--placement-feedback-outer-timeout" in help_text
+
+    # Issue #2606: stagnation-patience + outer-timeout flag parsing.
+
+    def test_stagnation_patience_default(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.placement_feedback_stagnation_patience == 3
+
+    def test_stagnation_patience_parses(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "route",
+                "test.kicad_pcb",
+                "--placement-feedback-stagnation-patience",
+                "5",
+            ]
+        )
+        assert args.placement_feedback_stagnation_patience == 5
+
+    def test_outer_timeout_default(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.placement_feedback_outer_timeout is None
+
+    def test_outer_timeout_parses(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "route",
+                "test.kicad_pcb",
+                "--placement-feedback-outer-timeout",
+                "60.0",
+            ]
+        )
+        assert args.placement_feedback_outer_timeout == 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +270,12 @@ class TestPlacementFeedbackForwarding:
             assert "--placement-feedback-max-movement" not in call_args
             assert "--placement-feedback-anchor" not in call_args
             assert "--placement-feedback-no-anchor" not in call_args
+            # Issue #2606: at default values these must NOT appear in
+            # sub-argv so the "byte-identical" invariant holds.
+            assert (
+                "--placement-feedback-stagnation-patience" not in call_args
+            )
+            assert "--placement-feedback-outer-timeout" not in call_args
 
     def test_forwarded_when_enabled(self):
         """--placement-feedback is forwarded when set."""
@@ -309,6 +367,76 @@ class TestPlacementFeedbackForwarding:
             assert "--placement-feedback-no-anchor" in call_args
             idx = call_args.index("--placement-feedback-no-anchor")
             assert call_args[idx + 1] == "J3"
+
+    # Issue #2606: stagnation-patience + outer-timeout flag forwarding.
+
+    def test_stagnation_patience_not_forwarded_when_default(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _make_base_args(
+            placement_feedback=True,
+            placement_feedback_stagnation_patience=3,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert (
+                "--placement-feedback-stagnation-patience" not in call_args
+            )
+
+    def test_stagnation_patience_forwarded_when_non_default(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _make_base_args(
+            placement_feedback=True,
+            placement_feedback_stagnation_patience=5,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--placement-feedback-stagnation-patience" in call_args
+            idx = call_args.index(
+                "--placement-feedback-stagnation-patience"
+            )
+            assert call_args[idx + 1] == "5"
+
+    def test_outer_timeout_not_forwarded_when_default(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _make_base_args(
+            placement_feedback=True,
+            placement_feedback_outer_timeout=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--placement-feedback-outer-timeout" not in call_args
+
+    def test_outer_timeout_forwarded_when_set(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _make_base_args(
+            placement_feedback=True,
+            placement_feedback_outer_timeout=60.0,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--placement-feedback-outer-timeout" in call_args
+            idx = call_args.index("--placement-feedback-outer-timeout")
+            assert call_args[idx + 1] == "60.0"
 
 
 # ---------------------------------------------------------------------------
