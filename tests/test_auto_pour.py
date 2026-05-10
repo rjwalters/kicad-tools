@@ -573,3 +573,175 @@ class TestErcMarkerNetExclusion:
         assert not _is_erc_marker_net("GND")
         assert not _is_erc_marker_net("SIG1")
         assert not _is_erc_marker_net("FLAG_OUT")  # _FLAG anchored at end only
+
+
+# ----------------------------------------------------------------------
+# Issue #2593 -- split-ground integration tests
+# ----------------------------------------------------------------------
+
+# 4-layer skeleton with split ground (GNDA + GNDD) plus signal nets so
+# the all-power guard does not trigger.
+_PCB_HEADER_4L = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+"""
+
+
+def _make_pcb_4l(
+    net_defs: list[tuple[int, str]],
+    pad_nets: list[tuple[int, str]],
+) -> str:
+    """Build a minimal 4-layer PCB string (GNDA / GNDD split-ground tests)."""
+    parts = [_PCB_HEADER_4L]
+    parts.append('  (net 0 "")\n')
+    for nid, name in net_defs:
+        parts.append(f'  (net {nid} "{name}")\n')
+
+    parts.append('  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n')
+    for idx, (nid, name) in enumerate(pad_nets):
+        x_off = idx * 2.0
+        parts.append(
+            f'    (pad "{idx + 1}" smd roundrect (at {x_off} 0) '
+            f'(size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") '
+            f'(roundrect_rratio 0.25) (net {nid} "{name}"))\n'
+        )
+    parts.append("  )\n")
+    parts.append(_PCB_FOOTER)
+    return "".join(parts)
+
+
+class TestAutoPourSplitGround:
+    """Integration tests for split-ground auto-pour (issue #2593).
+
+    Verifies that auto_pour_if_missing produces zones on distinct copper
+    layers for multiple GROUND-class nets (GNDA / GNDD) on a 4-layer
+    board, so the KiCad fill engine does not silently zero out one of
+    the ground domains.
+    """
+
+    def test_split_ground_zones_use_distinct_layers(self, tmp_path: Path):
+        """4-layer board with GNDA + GNDD: each ground gets its own inner layer."""
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb_4l(
+            net_defs=[
+                (1, "GNDA"),
+                (2, "GNDD"),
+                (3, "+3.3V"),
+                (4, "SDA"),
+                (5, "SCL"),
+            ],
+            pad_nets=[
+                (1, "GNDA"),
+                (2, "GNDD"),
+                (3, "+3.3V"),
+                (4, "SDA"),
+                (5, "SCL"),
+            ],
+        )
+        pcb_path = tmp_path / "split_ground.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path)
+
+        # Three pour zones: GNDA, GNDD, +3.3V
+        assert count == 3
+        assert set(names) == {"GNDA", "GNDD", "+3.3V"}
+
+        # Inspect the saved file: each ground should have its own zone
+        # on a distinct copper layer.
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_obj = PCB.load(str(pcb_path))
+        layers_by_net = {z.net_name: z.layer for z in pcb_obj.zones}
+
+        assert "GNDA" in layers_by_net
+        assert "GNDD" in layers_by_net
+        assert "+3.3V" in layers_by_net
+
+        # Both grounds end up on inner layers (one on In1.Cu, one on
+        # In2.Cu) -- never on the same layer.
+        assert layers_by_net["GNDA"] != layers_by_net["GNDD"]
+        assert {layers_by_net["GNDA"], layers_by_net["GNDD"]} == {"In1.Cu", "In2.Cu"}
+
+        # Power demoted to F.Cu because both inner layers are reserved.
+        assert layers_by_net["+3.3V"] == "F.Cu"
+
+    def test_split_ground_priorities_distinct_per_layer(self, tmp_path: Path):
+        """No two ground zones share a (layer, priority) -- the exact
+        condition KiCad's fill engine reports as 'will get zero copper'."""
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = _make_pcb_4l(
+            net_defs=[
+                (1, "GNDA"),
+                (2, "GNDD"),
+                (3, "SDA"),
+            ],
+            pad_nets=[
+                (1, "GNDA"),
+                (2, "GNDD"),
+                (3, "SDA"),
+            ],
+        )
+        pcb_path = tmp_path / "split_ground_pri.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        auto_pour_if_missing(pcb_path)
+
+        pcb_obj = PCB.load(str(pcb_path))
+        ground_zones = [z for z in pcb_obj.zones if z.net_name in {"GNDA", "GNDD"}]
+        assert len(ground_zones) == 2
+
+        # Distinct (layer, priority) for each ground -- this is the
+        # invariant the fix guarantees.
+        layer_priority = {(z.layer, z.priority) for z in ground_zones}
+        assert len(layer_priority) == 2
+
+    def test_split_ground_zone_text_has_distinct_layer_clauses(self, tmp_path: Path):
+        """Both ground zones are written to the file with a distinct ``(layer ...)`` clause.
+
+        Lighter-weight assertion that doesn't depend on the PCB schema
+        layer parsing the same way -- just inspects the raw S-expression
+        text to make sure two ground zone blocks each name a different
+        copper layer.
+        """
+        import re
+
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb_4l(
+            net_defs=[(1, "GNDA"), (2, "GNDD"), (3, "SDA")],
+            pad_nets=[(1, "GNDA"), (2, "GNDD"), (3, "SDA")],
+        )
+        pcb_path = tmp_path / "split_ground_text.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        auto_pour_if_missing(pcb_path)
+
+        text = pcb_path.read_text()
+        # Find each (zone ...) block and look for its layer + net_name.
+        # The minimal generator output uses (layer "X.Cu") inside zones.
+        zone_blocks = re.findall(
+            r'\(zone\b.*?\(net_name\s+"([^"]+)"\).*?\(layer\s+"([^"]+)"\)',
+            text,
+            re.DOTALL,
+        )
+        layers_by_net = {n: l for n, l in zone_blocks if n in {"GNDA", "GNDD"}}
+        # Both grounds must appear and be on different copper layers.
+        assert layers_by_net.get("GNDA") is not None
+        assert layers_by_net.get("GNDD") is not None
+        assert layers_by_net["GNDA"] != layers_by_net["GNDD"]
