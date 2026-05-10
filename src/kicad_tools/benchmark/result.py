@@ -37,6 +37,28 @@ class BenchmarkResult:
     nets_routed: int = 0
     completion_rate: float = 0.0
 
+    # Per-net completeness breakdown (Issue #2611).
+    #
+    # These three fields partition the multi-pad signal nets in
+    # ``nets_total`` into three exclusive buckets so a benchmark can
+    # detect regressions in *kind* of failure (a fully routed net
+    # becoming partial is materially different from a partial net
+    # becoming unrouted).
+    #
+    # - ``nets_fully_routed``: all pads connected. Equivalent to the
+    #   legacy ``nets_routed`` once the runner is connectivity-aware.
+    # - ``nets_partial``: at least one pad connected, but at least one
+    #   pad still unreachable from the largest connected component.
+    # - ``nets_unrouted``: zero pads connected — the structural-floor
+    #   candidates. For chorus-test-revA this number is 8 today
+    #   (DAC_CLK + 7 small nets in the U5/U7/U9 cluster).
+    # - ``unrouteable_nets``: names of the ``nets_unrouted`` set, kept
+    #   so regression reports can diff which specific nets regressed.
+    nets_fully_routed: int = 0
+    nets_partial: int = 0
+    nets_unrouted: int = 0
+    unrouteable_nets: list[str] = field(default_factory=list)
+
     # Quality metrics
     total_segments: int = 0
     total_vias: int = 0

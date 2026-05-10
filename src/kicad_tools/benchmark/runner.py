@@ -12,6 +12,62 @@ from .cases import BENCHMARK_CASES, BenchmarkCase, Difficulty
 from .result import BenchmarkResult
 
 
+def _classify_nets_by_connectivity(
+    connectivity: dict[int, dict] | None,
+    nets_to_route_ids: set[int] | None = None,
+) -> tuple[int, int, int, list[int]]:
+    """Partition multi-pad nets into fully/partial/unrouted buckets.
+
+    Issue #2611: the router exposes per-net connectivity through
+    ``router.get_statistics()["connectivity"]`` when pad data is
+    available.  This helper reduces that dict into the three counts the
+    benchmark needs plus the list of net IDs that have zero connected
+    pads (structural-floor candidates).
+
+    Args:
+        connectivity: Mapping of net ID to ``{total_pads, connected_pads,
+            connected}`` (as produced by
+            :func:`kicad_tools.router.observability.validate_net_connectivity`).
+            ``None`` when the router could not produce pad-aware stats,
+            in which case all counts return 0 and the caller should fall
+            back to legacy ``nets_routed``.
+        nets_to_route_ids: Optional set restricting which nets to count.
+            When provided, only nets in this set are considered (matches
+            the router's own filtering of multi-pad signal nets).
+
+    Returns:
+        Tuple ``(fully, partial, unrouted, unrouted_ids)``.
+        ``unrouted_ids`` is the list of net IDs whose
+        ``connected_pads == 0``.
+    """
+    if connectivity is None:
+        return 0, 0, 0, []
+
+    fully = 0
+    partial = 0
+    unrouted = 0
+    unrouted_ids: list[int] = []
+
+    for net_id, info in connectivity.items():
+        if nets_to_route_ids is not None and net_id not in nets_to_route_ids:
+            continue
+        total = info.get("total_pads", 0)
+        if total < 2:
+            # Single-pad nets are trivially "connected" but are not part
+            # of the multi-pad signal-net population we benchmark.
+            continue
+        connected_pads = info.get("connected_pads", 0)
+        if info.get("connected", False) and connected_pads == total:
+            fully += 1
+        elif connected_pads == 0:
+            unrouted += 1
+            unrouted_ids.append(net_id)
+        else:
+            partial += 1
+
+    return fully, partial, unrouted, unrouted_ids
+
+
 class BenchmarkRunner:
     """Runner for executing routing benchmarks and collecting results."""
 
@@ -99,8 +155,31 @@ class BenchmarkRunner:
         tracemalloc.stop()
         memory_peak_mb = peak / (1024 * 1024)
 
-        # Get router statistics
+        # Get router statistics.  When the router has pad data, this
+        # also returns a ``connectivity`` dict mapping net ID to
+        # ``{total_pads, connected_pads, connected}`` -- the source of
+        # truth for the partial/unrouted breakdown.
         stats = router.get_statistics()
+
+        # Build the per-net completeness breakdown (Issue #2611).
+        # ``nets_to_route_ids`` restricts the count to multi-pad signal
+        # nets -- the same population the router targets.
+        nets_to_route_ids = {n for n in router.nets if n > 0}
+        fully, partial, unrouted, unrouted_ids = _classify_nets_by_connectivity(
+            stats.get("connectivity"),
+            nets_to_route_ids=nets_to_route_ids,
+        )
+        unrouteable_nets = sorted(
+            router.net_names.get(nid, f"Net_{nid}") for nid in unrouted_ids
+        )
+
+        # DRC violation count: run a quick error-only DRC pass on the
+        # routed PCB so the benchmark captures regressions in design-
+        # rule cleanliness, not just connectivity.  The DRC run is best-
+        # effort: if it fails for any reason we record 0 and continue,
+        # matching the prior runner behaviour rather than crashing the
+        # benchmark on a DRC-checker bug.
+        drc_violations = self._count_drc_errors(case) if not case.is_synthetic() else 0
 
         # Build result
         result = BenchmarkResult(
@@ -109,9 +188,14 @@ class BenchmarkRunner:
             nets_total=total_nets,
             nets_routed=stats["nets_routed"],
             completion_rate=stats["nets_routed"] / total_nets if total_nets > 0 else 0.0,
+            nets_fully_routed=fully,
+            nets_partial=partial,
+            nets_unrouted=unrouted,
+            unrouteable_nets=unrouteable_nets,
             total_segments=stats["segments"],
             total_vias=stats["vias"],
             total_length_mm=stats["total_length_mm"],
+            drc_violations=drc_violations,
             max_congestion=stats.get("max_congestion", 0.0),
             avg_congestion=stats.get("avg_congestion", 0.0),
             congested_regions=stats.get("congested_regions", 0),
@@ -139,6 +223,38 @@ class BenchmarkRunner:
 
         return result
 
+    def _count_drc_errors(self, case: BenchmarkCase) -> int:
+        """Run a DRC pass on the case's source PCB and return error count.
+
+        Issue #2611: ``BenchmarkResult.drc_violations`` was declared but
+        never populated -- it defaulted to 0 forever, which masked any
+        regression in design-rule cleanliness.  This helper closes that
+        gap by loading the same PCB the router consumed and running a
+        manufacturer-default DRC check, returning the ``error_count``
+        (warnings are intentionally ignored to match the issue's
+        "errors-only" wording).
+
+        Best-effort: any failure -- missing file, parse error, checker
+        exception -- yields 0 rather than aborting the benchmark.  The
+        benchmark's job is to measure, not to gate on DRC tooling
+        availability.
+        """
+        try:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate import DRCChecker
+
+            pcb_path = case.get_pcb_path(self.base_dir)
+            if pcb_path is None or not pcb_path.exists():
+                return 0
+            pcb = PCB.from_file(str(pcb_path))
+            checker = DRCChecker(pcb=pcb, manufacturer="jlcpcb", layers=4)
+            results = checker.check_all()
+            return results.error_count
+        except Exception as e:  # noqa: BLE001 - best-effort DRC
+            if self.verbose:
+                print(f"    WARNING: DRC check failed: {e}")
+            return 0
+
     def run_case(
         self,
         case: BenchmarkCase,
@@ -155,6 +271,21 @@ class BenchmarkRunner:
         """
         if strategies is None:
             strategies = self.STRATEGIES
+
+        # Issue #2611: skip the case entirely (with a clear message)
+        # when the source PCB is missing.  Boards under boards/external/
+        # are local-only and not present on a fresh CI runner; the case
+        # registration should not gate the benchmark suite on their
+        # presence.  This emits one skip log per case rather than one
+        # exception per strategy (3x noise).
+        if not case.is_synthetic():
+            pcb_path = case.get_pcb_path(self.base_dir)
+            if pcb_path is None or not pcb_path.exists():
+                if self.verbose:
+                    print(
+                        f"    SKIP: {case.name} -- PCB file not available: {pcb_path}"
+                    )
+                return []
 
         results = []
         for strategy in strategies:
