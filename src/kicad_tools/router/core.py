@@ -342,6 +342,7 @@ class Autorouter:
         physics_enabled: bool = True,
         force_python: bool = False,
         record_decisions: bool = False,
+        max_search_iterations: int = 0,
     ):
         """Initialize the autorouter.
 
@@ -358,11 +359,18 @@ class Autorouter:
             force_python: If True, force use of Python backend even if C++ is
                 available. Default False (use C++ when available for 10-100x speedup).
             record_decisions: If True, record routing decisions for later querying.
+            max_search_iterations: Issue #2610 -- override for the C++ A*
+                iteration backstop (default 0 = use cols*rows*4).  Positive
+                values let dense boards trade memory for completeness via
+                the ``--max-search-iterations`` CLI flag.
         """
         self.rules = rules or DesignRules()
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.layer_stack = layer_stack
         self._force_python = force_python
+        # Issue #2610: stored so _create_grid_and_routers can pass it to
+        # create_hybrid_router on the initial construction.
+        self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -592,7 +600,12 @@ class Autorouter:
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
         router = create_hybrid_router(
-            grid, self.rules, force_python=self._force_python, net_class_map=self.net_class_map
+            grid,
+            self.rules,
+            force_python=self._force_python,
+            net_class_map=self.net_class_map,
+            # Issue #2610: thread the C++ iteration backstop override through.
+            max_search_iterations=getattr(self, "_max_search_iterations", 0),
         )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager

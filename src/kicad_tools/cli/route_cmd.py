@@ -4079,6 +4079,8 @@ def main(argv: list[str] | None = None) -> int:
                 force_python=force_python,
                 validate_drc=not args.force,
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
+                # Issue #2610: thread --max-search-iterations through.
+                max_search_iterations=getattr(args, "max_search_iterations", 0) or 0,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
@@ -4443,6 +4445,10 @@ def main(argv: list[str] | None = None) -> int:
             per_net_timeout_val = getattr(args, "per_net_timeout", None)
             if per_net_timeout_val:
                 flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
+            # Issue #2610: report the iteration backstop override if set.
+            _max_iter_val = getattr(args, "max_search_iterations", 0) or 0
+            if _max_iter_val:
+                flush_print(f"  Max search iterations: {_max_iter_val}")
             if args.profile:
                 profile_output = args.profile_output or "route_profile.prof"
                 flush_print(f"  Profiling enabled: {profile_output}")

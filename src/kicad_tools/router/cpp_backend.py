@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 3
+_REQUIRED_CPP_BUILD_VERSION = 4
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -700,12 +700,22 @@ class CppPathfinder:
         rules: DesignRules,
         diagonal_routing: bool = True,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        max_search_iterations: int = 0,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
 
         # Net class map for per-net trace width lookup
         self._net_class_map = net_class_map or {}
+
+        # Issue #2610: Override for the C++ A* iteration backstop.  ``0`` (the
+        # default) preserves the historical ``cols * rows * 4`` cap; positive
+        # values let users trade memory for completeness on dense boards via
+        # the ``--max-search-iterations`` CLI flag.  Threaded into every
+        # ``route_resumable()`` call below so a per-pathfinder override
+        # covers all subsequent nets without per-call plumbing through
+        # the strategy layer.
+        self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
 
         # Convert Python rules to C++ DesignRules
         cpp_rules = router_cpp.DesignRules()
@@ -926,6 +936,15 @@ class CppPathfinder:
         # previous net.
         self._last_failure_info = None
 
+        # Issue #2610: Convert the per-net timeout into the (seconds, float)
+        # contract the C++ binding expects.  ``None`` or ``0`` => no deadline
+        # (the C++ search runs until success / open-set exhaustion / the
+        # iteration backstop).  Positive values establish a wall-clock
+        # deadline that is shared across the initial ``route_resumable()``
+        # call and all subsequent ``resume()`` invocations, so a single
+        # per-net budget covers the whole retry sequence.
+        timeout_seconds = float(per_net_timeout) if per_net_timeout else 0.0
+
         try:
             result = self._impl.route_resumable(
                 start.x,
@@ -944,6 +963,12 @@ class CppPathfinder:
                 via_radius_cells,
                 start_pad_bounds,
                 end_pad_bounds,
+                # Issue #2559 / Epic #2556 Phase 1C: defaults preserve pre-#2559 behavior.
+                -1,  # partner_net (diff-pair plumbing not used here)
+                0,   # intra_pair_radius_cells
+                # Issue #2610: per-net wall-clock deadline + iteration override.
+                timeout_seconds,
+                self._max_search_iterations,
             )
 
             if not result.success:
@@ -1047,6 +1072,12 @@ class CppPathfinder:
         the pathfinder so ``get_last_failure_info()`` can return it to the
         negotiated strategy after ``route()`` returns ``None``.
 
+        Issue #2610: ``failure_reason`` may now be ``FAILURE_TIMEOUT`` when
+        the wall-clock per-net deadline expired (vs. ``FAILURE_ITERATION_LIMIT``
+        for the memory-backstop cap, vs. ``FAILURE_NO_PATH`` for a genuine
+        unreachable goal).  We also record the C++ pathfinder's iteration
+        counter so callers can log "aborted at N iterations" cleanly.
+
         Note: We capture even when we are about to fall back to the Python
         router.  If the Python fallback also fails, the cpp-side
         diagnostic is still actionable (the via blocker has not moved).
@@ -1065,11 +1096,17 @@ class CppPathfinder:
         if reason == router_cpp.FAILURE_NONE:
             return
 
+        # Issue #2610: iteration counter is a Pathfinder property, not a
+        # field of RouteResult.  Read it off ``self._impl`` so callers can
+        # see how close the search came to the memory cap.
+        iterations = int(getattr(self._impl, "iterations", 0))
+
         self._last_failure_info = {
             "failure_reason": int(reason),
             "blocking_via_net": int(getattr(result, "blocking_via_net", 0)),
             "failure_x": float(getattr(result, "failure_x", 0.0)),
             "failure_y": float(getattr(result, "failure_y", 0.0)),
+            "iterations": iterations,
         }
 
     def get_last_failure_info(self) -> dict | None:
@@ -1612,6 +1649,7 @@ def create_hybrid_router(
     diagonal_routing: bool = True,
     force_python: bool = False,
     net_class_map: dict[str, NetClassRouting] | None = None,
+    max_search_iterations: int = 0,
 ):
     """Create a router, preferring C++ backend if available.
 
@@ -1625,6 +1663,10 @@ def create_hybrid_router(
         diagonal_routing: Enable 45-degree diagonal routing
         force_python: Force use of Python backend (for testing)
         net_class_map: Optional net class map for per-net trace widths
+        max_search_iterations: Issue #2610 -- override for the C++ A*
+            iteration backstop.  ``0`` (default) preserves the historical
+            ``cols * rows * 4`` cap.  Positive values let dense boards
+            trade memory for completeness via ``--max-search-iterations``.
 
     Returns:
         Either CppPathfinder or Python Router instance
@@ -1632,7 +1674,13 @@ def create_hybrid_router(
     if _CPP_AVAILABLE and not force_python:
         try:
             cpp_grid = CppGrid.from_routing_grid(grid)
-            return CppPathfinder(cpp_grid, rules, diagonal_routing, net_class_map=net_class_map)
+            return CppPathfinder(
+                cpp_grid,
+                rules,
+                diagonal_routing,
+                net_class_map=net_class_map,
+                max_search_iterations=max_search_iterations,
+            )
         except Exception:
             # Fall back to Python if C++ initialization fails
             pass
