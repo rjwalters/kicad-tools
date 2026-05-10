@@ -250,9 +250,10 @@ def main(argv: list[str] | None = None) -> int:
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
     # Exit 1 = reserved for tool-level failures (file not found, parse error) above
-    # Exit 0 = no errors (warnings may be present without --strict)
+    # Exit 0 = no errors (warnings may be present without --strict; infos
+    #   never affect exit code -- they are advisory by definition).
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    warning_count = sum(1 for v in violations if v.is_warning)
 
     if error_count > 0 or (warning_count > 0 and args.strict):
         return 2
@@ -308,7 +309,8 @@ def output_table(
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
 
     print(f"\n{'=' * 60}")
     print("PURE PYTHON DRC CHECK")
@@ -321,6 +323,8 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if info_count > 0:
+        print(f"  Infos:      {info_count}")
     if results.suppressed_count > 0:
         print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
 
@@ -333,27 +337,33 @@ def output_table(
     by_rule: dict[str, dict[str, int]] = {}
     for v in violations:
         if v.rule_id not in by_rule:
-            by_rule[v.rule_id] = {"errors": 0, "warnings": 0}
+            by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0}
         if v.is_error:
             by_rule[v.rule_id]["errors"] += 1
+        elif v.is_info:
+            by_rule[v.rule_id]["infos"] += 1
         else:
             by_rule[v.rule_id]["warnings"] += 1
 
     print(f"\n{'-' * 60}")
     print("BY RULE:")
     for rule_id, counts in sorted(
-        by_rule.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
+        by_rule.items(),
+        key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"]),
     ):
         parts = []
         if counts["errors"]:
             parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
         if counts["warnings"]:
             parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
+        if counts["infos"]:
+            parts.append(f"{counts['infos']} info{'s' if counts['infos'] != 1 else ''}")
         print(f"  {rule_id}: {', '.join(parts)}")
 
     # Detailed output
     errors = [v for v in violations if v.is_error]
-    warnings = [v for v in violations if not v.is_error]
+    warnings = [v for v in violations if v.is_warning]
+    infos = [v for v in violations if v.is_info]
 
     if errors:
         print(f"\n{'-' * 60}")
@@ -370,16 +380,32 @@ def output_table(
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
 
+    if infos:
+        print(f"\n{'-' * 60}")
+        print("INFOS (advisory only):")
+        display_infos = infos if verbose else infos[:10]
+        for v in display_infos:
+            _print_violation(v, verbose)
+        if len(infos) > 10 and not verbose:
+            print(f"\n  ... and {len(infos) - 10} more infos (use --verbose)")
+
     print(f"\n{'=' * 60}")
     if errors:
         print("DRC FAILED - Fix errors before manufacturing")
-    else:
+    elif warnings:
         print("DRC WARNING - Review warnings")
+    else:
+        print("DRC PASSED - Advisory infos only")
 
 
 def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
     """Print a single violation."""
-    symbol = "X" if v.is_error else "!"
+    if v.is_error:
+        symbol = "X"
+    elif v.is_info:
+        symbol = "i"
+    else:
+        symbol = "!"
     print(f"\n{indent}[{symbol}] {v.rule_id}")
     print(f"{indent}    {v.message}")
 
@@ -406,11 +432,13 @@ def output_json(
 ) -> None:
     """Output violations as JSON."""
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
 
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
+        "infos": info_count,
         "rules_checked": results.rules_checked,
         "passed": error_count == 0,
     }
@@ -437,11 +465,13 @@ def write_json_report(
 ) -> None:
     """Write DRC results as a JSON report file."""
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
 
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
+        "infos": info_count,
         "rules_checked": results.rules_checked,
         "passed": error_count == 0,
     }
@@ -483,22 +513,30 @@ def output_summary(
     for v in violations:
         key = v.rule_id
         if key not in by_rule:
-            by_rule[key] = {"errors": 0, "warnings": 0}
+            by_rule[key] = {"errors": 0, "warnings": 0, "infos": 0}
         if v.is_error:
             by_rule[key]["errors"] += 1
+        elif v.is_info:
+            by_rule[key]["infos"] += 1
         else:
             by_rule[key]["warnings"] += 1
 
-    print(f"{'Rule ID':<30} {'Errors':<8} {'Warnings':<8}")
-    print("-" * 50)
+    print(f"{'Rule ID':<30} {'Errors':<8} {'Warnings':<10} {'Infos':<8}")
+    print("-" * 60)
 
     for rule_id, counts in sorted(by_rule.items()):
-        print(f"{rule_id:<30} {counts['errors']:<8} {counts['warnings']:<8}")
+        print(
+            f"{rule_id:<30} {counts['errors']:<8} "
+            f"{counts['warnings']:<10} {counts['infos']:<8}"
+        )
 
-    print("-" * 50)
+    print("-" * 60)
     total_errors = sum(c["errors"] for c in by_rule.values())
     total_warnings = sum(c["warnings"] for c in by_rule.values())
-    print(f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<8}")
+    total_infos = sum(c["infos"] for c in by_rule.values())
+    print(
+        f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8}"
+    )
 
 
 if __name__ == "__main__":

@@ -82,6 +82,17 @@ def _emit_single_pad_net_warning(
     GROUND) are silently allowed because a single test point or
     pour-only net is a legitimate design pattern.
 
+    The remaining nets are categorized using the same regex rules used
+    by :class:`kicad_tools.validate.rules.SinglePadNetRule` (see issue
+    #2613).  Categorized output ensures the warning is not a firehose:
+
+    - **Genuine NCs** (KiCad-emitted ``unconnected-(REF-PIN-PadN)``):
+      reported at INFO level, no action required.
+    - **Connector NCs** (``Net-(REF-PadN)`` on a J/P prefix, typically
+      intentional GPIO no-connects): reported at INFO level.
+    - **Real defects** (everything else): reported at WARNING level
+      with a pointer to ``kct check --only single_pad_net``.
+
     See ``kct check --only single_pad_net`` for the full DRC-style
     report (this banner exists to surface the defect early in the
     pipeline; the actionable error lives in the check command).
@@ -94,6 +105,10 @@ def _emit_single_pad_net_warning(
         return
 
     from kicad_tools.cli.progress import flush_print
+    from kicad_tools.validate.rules.single_pad_net import (
+        _CONNECTOR_NET_PATTERN,
+        _KICAD_NC_PATTERN,
+    )
 
     try:
         from kicad_tools.router.net_class import classify_and_apply_rules
@@ -121,13 +136,54 @@ def _emit_single_pad_net_warning(
     if not signal_single_pad_names:
         return
 
+    # Categorize each surviving single-pad net using the same regex
+    # rules as the validate rule.  Note that this banner cannot validate
+    # the footprint-ref-prefix match (it has no Footprint handle), so
+    # connector_nc here is detected purely from the net name pattern.
+    # A net like ``Net-(J5-1)`` whose lone pad is actually on a
+    # non-connector footprint is rare in practice; the DRC-side
+    # validate rule does the stricter cross-check.
+    genuine_nc: list[str] = []
+    connector_nc: list[str] = []
+    defects: list[str] = []
+    for name in signal_single_pad_names:
+        if _KICAD_NC_PATTERN.match(name):
+            genuine_nc.append(name)
+        elif _CONNECTOR_NET_PATTERN.match(name):
+            connector_nc.append(name)
+        else:
+            defects.append(name)
+
     flush_print("")
+    # Banner header reflects categorized counts so agents see signal
+    # vs. noise at a glance.
+    parts: list[str] = []
+    if defects:
+        parts.append(f"{len(defects)} defect(s)")
+    if connector_nc:
+        parts.append(f"{len(connector_nc)} connector NC")
+    if genuine_nc:
+        parts.append(f"{len(genuine_nc)} explicit NC")
+    summary = ", ".join(parts)
     flush_print(
         f"  WARNING: {len(signal_single_pad_names)} single-pad signal "
-        "net(s) detected (likely missing footprint or schematic/PCB drift):"
+        f"net(s) detected ({summary}):"
     )
-    for name in signal_single_pad_names:
-        flush_print(f"    - {name}")
+    if defects:
+        flush_print("    DEFECTS (likely missing footprint or schematic/PCB drift):")
+        for name in defects:
+            flush_print(f"      - {name}")
+    if connector_nc:
+        flush_print(
+            "    INFO -- connector-pin NCs "
+            "(typically intentional GPIO no-connects):"
+        )
+        for name in connector_nc:
+            flush_print(f"      - {name}")
+    if genuine_nc:
+        flush_print("    INFO -- explicit NCs from symbol pin attributes:")
+        for name in genuine_nc:
+            flush_print(f"      - {name}")
     flush_print(
         "  Run 'kct check --only single_pad_net <pcb>' for details. "
         "Routing will proceed but these nets cannot be connected."

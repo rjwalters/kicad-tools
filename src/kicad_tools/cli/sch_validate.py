@@ -3302,6 +3302,158 @@ def check_value_consistency(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def _resolve_lib_symbols_for_design(
+    schematic_path: str,
+) -> tuple[list[tuple[str, Schematic]], dict[str, object]]:
+    """Build the (sheets, lib_symbols) inputs used by the new ERC rules.
+
+    Walks the schematic hierarchy starting at ``schematic_path``,
+    loads every sheet, and resolves every ``lib_id`` used to a
+    :class:`LibrarySymbol` via the schematic's embedded
+    ``lib_symbols`` section.
+
+    Returns:
+        Tuple ``(sheets, lib_symbols)`` where ``sheets`` is a list of
+        ``(sheet_path_string, Schematic)`` pairs and ``lib_symbols``
+        maps each placed ``lib_id`` to its resolved
+        :class:`LibrarySymbol`.  Returns empty values if the
+        hierarchy cannot be loaded.
+    """
+    sheets: list[tuple[str, Schematic]] = []
+    lib_symbols: dict[str, object] = {}
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+            except Exception:
+                continue
+            sheets.append((str(node.path), sch))
+            for sym in sch.symbols:
+                if sym.lib_id and sym.lib_id not in lib_symbols:
+                    resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is not None:
+                        lib_symbols[sym.lib_id] = resolved
+    except Exception:
+        # Fall back to single-sheet loading.
+        try:
+            sch = Schematic.load(schematic_path)
+            sheets = [(schematic_path, sch)]
+            for sym in sch.symbols:
+                if sym.lib_id and sym.lib_id not in lib_symbols:
+                    resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is not None:
+                        lib_symbols[sym.lib_id] = resolved
+        except Exception:
+            return [], {}
+
+    return sheets, lib_symbols
+
+
+def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
+    """Detect labels asserting a named signal that only reach one pin.
+
+    A label with a meaningful name (e.g., ``UART_TX``) syntactically
+    implies a multi-endpoint net.  When a global or local label is
+    attached to exactly one pin and no other pin or sheet asserts the
+    same name, the implied counterpart connection is missing -- a
+    real schematic defect that KiCad's built-in ERC does NOT catch.
+
+    See :mod:`kicad_tools.validate.sch_orphan_label` for the
+    underlying algorithm and the chorus-test-revA forensic context
+    (issue #2613).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.validate.sch_orphan_label import find_orphan_labels
+
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        if not sheets:
+            return issues
+        findings = find_orphan_labels(sheets, lib_symbols)
+        for f in findings:
+            issues.append(
+                ValidationIssue(
+                    severity=f.kind,
+                    category="orphan_label",
+                    message=(
+                        f"Label '{f.label_name}' asserts a named net but only "
+                        f"reaches one pin ({f.pin_ref}); the implied "
+                        f"counterpart connection is missing"
+                    ),
+                    location=f"{Path(f.sheet).name} @ "
+                    f"({f.position_mm[0]:.2f}, {f.position_mm[1]:.2f}) mm",
+                    items=[f.label_name, f.pin_ref],
+                )
+            )
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="orphan_label",
+                message=f"Orphan-label check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
+    """Detect wires whose free endpoint is short of a pin by N grid units.
+
+    Catches the "off-by-one-grid" defect class found in the
+    chorus-test-revA schematic (issue #2613): wires drawn on a
+    2.54 mm grid that terminate one or more grid steps short of the
+    intended pin (e.g. seven wires in ``connectors.kicad_sch``
+    terminating at ``x=81.28`` while J2 pins are at ``x=83.82``).
+
+    See :mod:`kicad_tools.validate.sch_wire_stub` for the underlying
+    algorithm.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.validate.sch_wire_stub import find_wire_stubs
+
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        if not sheets:
+            return issues
+        findings = find_wire_stubs(sheets, lib_symbols)
+        for f in findings:
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="wire_stub",
+                    message=(
+                        f"Wire endpoint at ({f.dangling_endpoint[0]:.2f}, "
+                        f"{f.dangling_endpoint[1]:.2f}) mm is "
+                        f"{f.grid_steps_short} grid step(s) short of pin "
+                        f"{f.candidate_pin_ref} at "
+                        f"({f.candidate_pin_position[0]:.2f}, "
+                        f"{f.candidate_pin_position[1]:.2f}) mm "
+                        f"-- extend the wire by {f.grid_steps_short * 2.54:.2f} "
+                        f"mm along {f.axis} to land on the pin"
+                    ),
+                    location=f"{Path(f.sheet).name} @ "
+                    f"({f.dangling_endpoint[0]:.2f}, "
+                    f"{f.dangling_endpoint[1]:.2f}) mm",
+                    items=[f.candidate_pin_ref],
+                )
+            )
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="wire_stub",
+                message=f"Wire-stub check failed: {e}",
+            )
+        )
+
+    return issues
+
+
 def validate_schematic(
     schematic_path: str,
     lib_paths: list[str] = None,
@@ -3389,6 +3541,14 @@ def validate_schematic(
 
     # Matched channel symmetry detection
     _run("matched_channel_symmetry", check_matched_channel_symmetry)
+
+    # Orphan-label detection (label asserts named signal but only
+    # reaches one pin in the design -- issue #2613).
+    _run("orphan_label", check_orphan_labels)
+
+    # Wire-stub detection (wire endpoint misses a pin by an integer
+    # multiple of the schematic grid -- issue #2613).
+    _run("wire_stub", check_wire_stubs)
 
     return result
 
