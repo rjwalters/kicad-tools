@@ -27,6 +27,16 @@ below for the filter that excludes such names from the pour-net set.
 The schematic-side analogue lives in
 ``src/kicad_tools/cli/sch_connectivity.py`` (``"PWR_FLAG is an ERC
 annotation, not a real net name"``).
+
+Split-ground designs (multiple distinct ``NetClass.GROUND`` nets, e.g.
+mixed-signal boards with both ``GNDA`` and ``GNDD``) are detected
+automatically by the layer/priority allocator in
+``kicad_tools.zones.generator._assign_layers_for_pour_nets``.  On a
+4-layer stackup the two ground domains receive dedicated inner layers
+(``In1.Cu`` / ``In2.Cu``) and the power tree is moved to ``F.Cu``; on
+a 2-layer stackup each ground gets a distinct priority on ``B.Cu`` to
+avoid the "zero copper" override that occurs when zones share both
+layer and priority.  See that function's docstring for the full rule.
 """
 
 from __future__ import annotations

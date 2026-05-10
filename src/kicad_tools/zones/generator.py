@@ -717,59 +717,168 @@ def parse_power_nets(spec: str) -> list[tuple[str, str]]:
     return result
 
 
+def _order_ground_nets_canonically(
+    ground_nets: list[tuple[str, "NetClass"]],
+) -> list[tuple[str, "NetClass"]]:
+    """Order ground nets so the canonical "system ground" is first.
+
+    The canonical ground (assigned to the most-preferred layer/priority,
+    e.g. ``In1.Cu`` on a 4-layer board) is selected by:
+
+    1. Exact name match ``GND`` if present.
+    2. Else, alphabetical first.
+
+    Note: the issue's curator notes mention pin count as a tie-breaker
+    proxy for "system ground", but pin counts are not available at this
+    layer of the API (the function receives only ``(name, NetClass)``
+    pairs).  Falling back to alphabetical ordering keeps the assignment
+    deterministic and reproducible across runs without an API change.
+    The remaining grounds are emitted in alphabetical order so the same
+    set of split-ground nets always produces the same layer assignment.
+    """
+    if not ground_nets:
+        return []
+
+    # Stable alphabetical order first
+    sorted_nets = sorted(ground_nets, key=lambda nc: nc[0])
+
+    # Promote exact "GND" to head if present
+    for i, (name, _) in enumerate(sorted_nets):
+        if name == "GND":
+            return [sorted_nets[i]] + sorted_nets[:i] + sorted_nets[i + 1 :]
+    return sorted_nets
+
+
 def _assign_layers_for_pour_nets(
     copper_layer_count: int,
     pour_nets: list[tuple[str, "NetClass"]],
 ) -> list[tuple[str, str, int]]:
     """Assign layers and priorities for pour nets based on board stackup.
 
-    For 2-layer boards:
-    - GROUND nets -> B.Cu, priority 1
-    - POWER nets  -> F.Cu, priority 0
+    Single-ground designs (the common case):
 
-    For 4-layer boards:
-    - GROUND nets -> In1.Cu (dedicated ground plane), priority 1
-    - First POWER net  -> In2.Cu, priority 0
-    - Additional POWER nets -> F.Cu with descending priorities
-      so each successive power net gets a lower priority
+    - 2-layer: GROUND -> ``B.Cu`` priority 1; first POWER -> ``F.Cu`` with
+      a descending priority scheme so multiple power nets coexist.
+    - 4-layer: GROUND -> ``In1.Cu`` priority 1; first POWER -> ``In2.Cu``
+      priority 0; additional POWER -> ``F.Cu`` with non-zero priorities.
+
+    Split-ground designs (mixed-signal boards with multiple distinct
+    ``NetClass.GROUND`` nets, e.g. ``GNDA`` + ``GNDD``):
+
+    - 2-layer: each ground gets ``B.Cu`` with a *distinct* descending
+      priority (canonical first).  True plane separation is impossible
+      on a 2-layer stack; the priority distinction is the best the
+      generator can do.  The router still emits its overlap warning so
+      the user knows to migrate to a 4-layer stack.
+    - 4-layer: the first two grounds split across the two inner layers
+      (``In1.Cu`` and ``In2.Cu``, both priority 1), giving each ground
+      domain a dedicated plane.  Power must move to ``F.Cu`` because
+      both inner layers are now reserved for ground planes.  Additional
+      grounds (>2) fall back to ``B.Cu`` with distinct descending
+      priorities and a stderr warning is emitted -- >2 ground domains
+      are unusual and require manual stackup planning.
+
+    Canonical-ground selection (which ground gets the "best" slot):
+
+    1. Exact net name ``GND`` if present.
+    2. Else, alphabetical first.
+
+    See ``_order_ground_nets_canonically`` for the full rule.
 
     Args:
         copper_layer_count: Number of copper layers (2, 4, 6, etc.)
         pour_nets: List of (net_name, NetClass) tuples
 
     Returns:
-        List of (net_name, layer, priority) tuples
+        List of (net_name, layer, priority) tuples.  Every ground-class
+        net has a *distinct* (layer, priority) pair so no ground zone
+        gets silently overridden to zero copper.
     """
     from kicad_tools.router.net_class import NetClass
 
-    ground_nets = [(n, c) for n, c in pour_nets if c == NetClass.GROUND]
+    ground_nets_raw = [(n, c) for n, c in pour_nets if c == NetClass.GROUND]
     power_nets = [(n, c) for n, c in pour_nets if c != NetClass.GROUND]
+
+    # Canonicalize ground ordering so split-ground assignment is stable.
+    ground_nets = _order_ground_nets_canonically(ground_nets_raw)
+    split_ground = len(ground_nets) > 1
+
+    if split_ground:
+        ground_names = ", ".join(n for n, _ in ground_nets)
+        print(
+            f"Auto-pour: split-ground detected ({ground_names}) "
+            f"-- assigning distinct layers/priorities so each ground "
+            f"domain receives copper",
+            file=sys.stderr,
+        )
 
     assignments: list[tuple[str, str, int]] = []
 
     if copper_layer_count >= 4:
         # 4+ layer board: use inner layers for power/ground planes
-        for net_name, _ in ground_nets:
-            assignments.append((net_name, "In1.Cu", 1))
+        if not split_ground:
+            # Common case: single ground on In1.Cu, power tree on In2.Cu/F.Cu
+            for net_name, _ in ground_nets:
+                assignments.append((net_name, "In1.Cu", 1))
 
-        if len(power_nets) == 1:
-            # Single power net gets its own inner layer
-            assignments.append((power_nets[0][0], "In2.Cu", 0))
+            if len(power_nets) == 1:
+                # Single power net gets its own inner layer
+                assignments.append((power_nets[0][0], "In2.Cu", 0))
+            else:
+                # Multiple power nets: first gets In2.Cu, rest go on F.Cu
+                # with decreasing priorities so they don't fully override each other.
+                # NOTE: Full-board overlapping zones on the same layer still produce
+                # zero-copper for lower-priority zones.  The overlap warning will
+                # fire, prompting the user to use smaller boundaries or `zones split`.
+                for i, (net_name, _) in enumerate(power_nets):
+                    if i == 0:
+                        assignments.append((net_name, "In2.Cu", 0))
+                    else:
+                        assignments.append((net_name, "F.Cu", i))
         else:
-            # Multiple power nets: first gets In2.Cu, rest go on F.Cu
-            # with decreasing priorities so they don't fully override each other.
-            # NOTE: Full-board overlapping zones on the same layer still produce
-            # zero-copper for lower-priority zones.  The overlap warning will
-            # fire, prompting the user to use smaller boundaries or `zones split`.
-            for i, (net_name, _) in enumerate(power_nets):
-                if i == 0:
-                    assignments.append((net_name, "In2.Cu", 0))
-                else:
-                    assignments.append((net_name, "F.Cu", i))
+            # Split-ground: dedicate both inner layers to ground domains.
+            # First two grounds get In1.Cu and In2.Cu (both priority 1 --
+            # they are on distinct layers so there is no overlap conflict).
+            assignments.append((ground_nets[0][0], "In1.Cu", 1))
+            assignments.append((ground_nets[1][0], "In2.Cu", 1))
+
+            # >2 grounds: spill to B.Cu with distinct descending priorities
+            # and warn the user.
+            extra_grounds = ground_nets[2:]
+            if extra_grounds:
+                extra_names = ", ".join(n for n, _ in extra_grounds)
+                print(
+                    f"WARNING: more than 2 ground domains ({extra_names}) "
+                    f"-- placing on B.Cu with distinct priorities; "
+                    f"manual stackup planning recommended for >2 ground domains",
+                    file=sys.stderr,
+                )
+                for i, (net_name, _) in enumerate(extra_grounds):
+                    # Descending priorities starting from len(extra) so they
+                    # are distinct on the same layer.
+                    assignments.append((net_name, "B.Cu", len(extra_grounds) - i))
+
+            # Power moves to F.Cu because both inner layers are reserved.
+            # 1 power net -> F.Cu priority 0 (matches single-power semantics
+            # of "highest plane priority" being zero).  N power nets get
+            # distinct descending priorities so multiple power planes
+            # coexist on F.Cu.
+            if len(power_nets) == 1:
+                assignments.append((power_nets[0][0], "F.Cu", 0))
+            else:
+                for i, (net_name, _) in enumerate(power_nets):
+                    assignments.append((net_name, "F.Cu", len(power_nets) - i))
     else:
         # 2-layer board
-        for net_name, _ in ground_nets:
-            assignments.append((net_name, "B.Cu", 1))
+        if not split_ground:
+            for net_name, _ in ground_nets:
+                assignments.append((net_name, "B.Cu", 1))
+        else:
+            # Split-ground on 2-layer: distinct descending priorities on B.Cu.
+            # Plane separation is impossible on this stackup; the priority
+            # distinction at least prevents the silent zero-copper bug.
+            for i, (net_name, _) in enumerate(ground_nets):
+                assignments.append((net_name, "B.Cu", len(ground_nets) - i))
 
         for i, (net_name, _) in enumerate(power_nets):
             assignments.append((net_name, "F.Cu", len(power_nets) - i))
@@ -798,6 +907,21 @@ def auto_create_zones_for_pour_nets(
     - First POWER net gets a zone on In2.Cu with priority 0
     - Additional POWER nets get zones on F.Cu with distinct
       non-zero priorities
+
+    Split-ground designs (multiple distinct GROUND-class nets, e.g.
+    ``GNDA`` + ``GNDD``) get special handling so each ground domain
+    receives its own copper plane:
+
+    - 4-layer: the two grounds split across ``In1.Cu`` and ``In2.Cu``
+      (both priority 1), and POWER moves to ``F.Cu`` since both inner
+      layers are now reserved.  Canonical ground (``GND`` if present,
+      else alphabetical first) is placed on ``In1.Cu``.
+    - 2-layer: each ground gets ``B.Cu`` with a distinct descending
+      priority.  True plane separation is impossible on this stackup.
+    - >2 grounds: extras spill to ``B.Cu`` with distinct priorities;
+      a stderr warning is emitted recommending manual stackup planning.
+
+    See ``_assign_layers_for_pour_nets`` for full assignment rules.
 
     Args:
         pcb_path: Path to .kicad_pcb file (modified in place)
