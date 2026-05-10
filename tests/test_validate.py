@@ -79,9 +79,22 @@ class TestDRCViolation:
         assert warning.is_warning is True
 
     def test_violation_invalid_severity(self):
-        """Test that invalid severity raises ValueError."""
+        """Test that invalid severity raises ValueError.
+
+        Note: ``"info"`` is now a valid severity (issue #2613 added it
+        for the categorized single_pad_net rule and other advisory
+        findings).  This test uses a never-valid value to assert the
+        guard still rejects unknown severities.
+        """
         with pytest.raises(ValueError, match="severity must be"):
-            DRCViolation(rule_id="test", severity="info", message="test")
+            DRCViolation(rule_id="test", severity="critical", message="test")
+
+    def test_violation_info_severity_is_valid(self):
+        """``"info"`` severity is accepted post-#2613 for advisory findings."""
+        v = DRCViolation(rule_id="test", severity="info", message="advisory")
+        assert v.is_info is True
+        assert v.is_error is False
+        assert v.is_warning is False
 
     def test_violation_to_dict(self):
         """Test converting violation to dictionary."""

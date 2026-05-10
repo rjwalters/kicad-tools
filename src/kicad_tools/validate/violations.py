@@ -17,7 +17,11 @@ class DRCViolation:
 
     Attributes:
         rule_id: Unique identifier for the rule, e.g., "clearance_trace_trace"
-        severity: Either "error" or "warning"
+        severity: One of "error", "warning", or "info".  ``info`` is used
+            for advisory findings that are categorized by the rule as
+            non-actionable (e.g., a single-pad net that matches the
+            KiCad-emitted ``unconnected-(REF-PIN-PadN)`` convention for
+            explicit symbol no-connect pins).
         message: Human-readable description of the violation
         location: (x_mm, y_mm) tuple of the violation location, or None
         layer: Layer name where violation occurs, e.g., "F.Cu"
@@ -38,18 +42,25 @@ class DRCViolation:
 
     def __post_init__(self) -> None:
         """Validate severity value."""
-        if self.severity not in ("error", "warning"):
-            raise ValueError(f"severity must be 'error' or 'warning', got {self.severity!r}")
+        if self.severity not in ("error", "warning", "info"):
+            raise ValueError(
+                f"severity must be 'error', 'warning', or 'info', got {self.severity!r}"
+            )
 
     @property
     def is_error(self) -> bool:
-        """Check if this is an error (not a warning)."""
+        """Check if this is an error (not a warning or info)."""
         return self.severity == "error"
 
     @property
     def is_warning(self) -> bool:
-        """Check if this is a warning (not an error)."""
+        """Check if this is a warning (not an error or info)."""
         return self.severity == "warning"
+
+    @property
+    def is_info(self) -> bool:
+        """Check if this is an informational finding (not an error or warning)."""
+        return self.severity == "info"
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization.
@@ -102,8 +113,13 @@ class DRCResults:
         return sum(1 for v in self.violations if v.is_warning)
 
     @property
+    def info_count(self) -> int:
+        """Count of violations with severity='info'."""
+        return sum(1 for v in self.violations if v.is_info)
+
+    @property
     def passed(self) -> bool:
-        """True if no errors (warnings are allowed)."""
+        """True if no errors (warnings and infos are allowed)."""
         return self.error_count == 0
 
     @property
@@ -115,6 +131,11 @@ class DRCResults:
     def warnings(self) -> list[DRCViolation]:
         """List of only warning violations."""
         return [v for v in self.violations if v.is_warning]
+
+    @property
+    def infos(self) -> list[DRCViolation]:
+        """List of only informational violations."""
+        return [v for v in self.violations if v.is_info]
 
     def __iter__(self):
         """Iterate over all violations."""
@@ -152,6 +173,7 @@ class DRCResults:
             "passed": self.passed,
             "error_count": self.error_count,
             "warning_count": self.warning_count,
+            "info_count": self.info_count,
             "rules_checked": self.rules_checked,
             "violations": [v.to_dict() for v in self.violations],
         }
@@ -159,7 +181,9 @@ class DRCResults:
     def summary(self) -> str:
         """Generate a human-readable summary."""
         status = "PASSED" if self.passed else "FAILED"
+        info_part = f", {self.info_count} infos" if self.info_count else ""
         return (
             f"DRC {status}: {self.error_count} errors, "
-            f"{self.warning_count} warnings ({self.rules_checked} rules checked)"
+            f"{self.warning_count} warnings{info_part} "
+            f"({self.rules_checked} rules checked)"
         )
