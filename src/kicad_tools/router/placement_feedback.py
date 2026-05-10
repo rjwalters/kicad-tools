@@ -75,7 +75,7 @@ def detect_pf_stagnation(
         return False
     if len(routed_history) < patience + 1:
         return False
-    last_window = routed_history[-(patience + 1):]
+    last_window = routed_history[-(patience + 1) :]
     return len(set(last_window)) == 1
 
 
@@ -354,10 +354,7 @@ class PlacementFeedbackLoop:
             # top of each iteration so we can bail out before kicking
             # off another (potentially multi-minute) negotiated-router
             # run.
-            if (
-                self.outer_timeout is not None
-                and time.time() - start_time > self.outer_timeout
-            ):
+            if self.outer_timeout is not None and time.time() - start_time > self.outer_timeout:
                 if self.verbose:
                     elapsed = time.time() - start_time
                     print(
@@ -579,6 +576,13 @@ class PlacementFeedbackLoop:
                 all_strategies.append(strategy)
 
         if not all_strategies:
+            # Issue #2604 follow-up: previously we only emitted the full
+            # breakdown when ``verbose`` was set, which left default
+            # (non-verbose) runs *more* silent than before -- the prior
+            # "No suitable placement strategy found" line had been removed
+            # entirely.  Restore a one-line summary in non-verbose mode so
+            # operators always see *something* when the loop bails out,
+            # while verbose users still get the full structured breakdown.
             if self.verbose:
                 self._log_strategy_rejection_breakdown(
                     analyses_seen=analyses_seen,
@@ -589,11 +593,70 @@ class PlacementFeedbackLoop:
                     rejected_over_budget=rejected_over_budget,
                     rejected_unsafe=rejected_unsafe,
                 )
+            else:
+                print(
+                    self._format_strategy_rejection_summary(
+                        analyses_seen=analyses_seen,
+                        analyses_with_movable_blockers=analyses_with_movable_blockers,
+                        candidates_total=candidates_total,
+                        rejected_low_confidence=rejected_low_confidence,
+                        rejected_anchored=rejected_anchored,
+                        rejected_over_budget=rejected_over_budget,
+                        rejected_unsafe=rejected_unsafe,
+                    )
+                )
             return None
 
         # Sort by confidence (highest first) and pick the best
         all_strategies.sort(key=lambda s: -s.confidence)
         return all_strategies[0]
+
+    def _format_strategy_rejection_summary(
+        self,
+        *,
+        analyses_seen: int,
+        analyses_with_movable_blockers: int,
+        candidates_total: int,
+        rejected_low_confidence: int,
+        rejected_anchored: int,
+        rejected_over_budget: int,
+        rejected_unsafe: int,
+    ) -> str:
+        """Return a single-line summary of why no strategy survived filtering.
+
+        Used in non-verbose mode to keep default runs from being silently
+        unhelpful (see Issue #2604 review feedback).  Verbose mode still
+        gets the full structured breakdown via
+        ``_log_strategy_rejection_breakdown``.
+        """
+        if candidates_total == 0:
+            if analyses_seen == 0:
+                cause = "0 failure analyses produced by router"
+            elif analyses_with_movable_blockers == 0:
+                cause = f"{analyses_seen} analyses, 0 movable blockers (refs unresolved)"
+            else:
+                cause = (
+                    f"{analyses_with_movable_blockers}/{analyses_seen} "
+                    f"analyses with movable blockers, 0 MOVE_COMPONENT "
+                    f"candidates generated"
+                )
+            return f"  No suitable placement strategy: {cause}."
+
+        parts: list[str] = []
+        if rejected_low_confidence:
+            parts.append(f"{rejected_low_confidence} low-confidence")
+        if rejected_anchored:
+            parts.append(f"{rejected_anchored} anchored")
+        if rejected_over_budget:
+            cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
+            parts.append(f"{rejected_over_budget} over-budget({cap})")
+        if rejected_unsafe:
+            parts.append(f"{rejected_unsafe} unsafe")
+        breakdown = ", ".join(parts) if parts else "no reason recorded"
+        return (
+            f"  No suitable placement strategy: rejected {candidates_total} "
+            f"candidates ({breakdown}). Re-run with --verbose for details."
+        )
 
     def _log_strategy_rejection_breakdown(
         self,
@@ -642,11 +705,7 @@ class PlacementFeedbackLoop:
         if rejected_anchored:
             breakdown.append(f"{rejected_anchored} anchored")
         if rejected_over_budget:
-            cap = (
-                f"{self.max_movement:.2f}mm"
-                if self.max_movement is not None
-                else "n/a"
-            )
+            cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
             breakdown.append(f"{rejected_over_budget} over budget ({cap})")
         if rejected_unsafe:
             breakdown.append(f"{rejected_unsafe} unsafe (board bounds)")

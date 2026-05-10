@@ -484,9 +484,16 @@ class StrategyGenerator:
             for radius in radii:
                 for ang in angles_deg:
                     rad = math.radians(ang)
-                    offsets.append(
-                        (radius * math.cos(rad), radius * math.sin(rad))
-                    )
+                    offsets.append((radius * math.cos(rad), radius * math.sin(rad)))
+
+            # Track the (radius_index, angle_index) so we can promote
+            # diversity later -- otherwise the post-sort `[:3]` slice in
+            # ``_generate_move_strategies`` always falls into the first
+            # angles of the smallest radius, dropping the cap-radius and
+            # South/West/SE/SW candidates entirely (Issue #2604 follow-up).
+            offset_meta = [
+                (r_idx, a_idx) for r_idx in range(len(radii)) for a_idx in range(len(angles_deg))
+            ]
         else:
             # Legacy corridor-derived offsets -- preserved for callers that
             # do not pass a movement budget (e.g. CLI explain mode).
@@ -500,6 +507,9 @@ class StrategyGenerator:
                     failure_area.height + comp_height,
                 ),  # Diagonal
             ]
+            # No (radius, angle) structure for the legacy path -- mark all
+            # entries the same so the diversity sort is a no-op.
+            offset_meta = [(0, i) for i in range(len(offsets))]
 
         budget = max_movement if max_movement is not None else float("inf")
         # ``failure_area`` may come from either ``recovery.types.Rectangle``
@@ -513,7 +523,7 @@ class StrategyGenerator:
         else:
             in_area = lambda _x, _y: False  # noqa: E731
 
-        for dx, dy in offsets:
+        for (dx, dy), (r_idx, a_idx) in zip(offsets, offset_meta, strict=False):
             new_x = fp.position[0] + dx
             new_y = fp.position[1] + dy
 
@@ -534,12 +544,51 @@ class StrategyGenerator:
                     "confidence": confidence,
                     "improvement": improvement,
                     "distance": distance,
+                    "_radius_idx": r_idx,
+                    "_angle_idx": a_idx,
                 }
             )
 
-        # Sort by improvement first, then by distance ascending so close
-        # moves win ties.
-        candidates.sort(key=lambda c: (-c["improvement"], c.get("distance", 0.0)))
+        # Promote diversity across the (radius, angle) sweep so the
+        # downstream ``[:3]`` slice in ``_generate_move_strategies`` does
+        # not collapse to a single radius band or three adjacent angles.
+        # Strategy:
+        #   1. Primary key: improvement (descending) -- correctness first.
+        #   2. Secondary key: a "spread + round-robin" rank that
+        #      interleaves radii and spaces angles across the 8 compass
+        #      directions, so the first 3 picks span both radii and
+        #      cover non-adjacent quadrants (e.g. East / West / North
+        #      instead of East / NE / North).
+        #   3. Tertiary tie-breaker: distance ascending.
+        # This addresses the Issue #2604 follow-up where the 8-direction
+        # x 2-radius sweep degenerated to "first 3 small-radius candidates
+        # at 0/45/90 degrees" -- South/West/SE/SW and the cap-radius band
+        # were never tried.
+        radius_band_count = max(len({c["_radius_idx"] for c in candidates}), 1)
+        # Compass spread: opposites first (E, W), then poles (N, S),
+        # then diagonals -- so the first 4 unique angles span all
+        # quadrants.  Indices follow ``angles_deg``: 0=E, 1=NE, 2=N,
+        # 3=NW, 4=W, 5=SW, 6=S, 7=SE.
+        spread_rank = {0: 0, 4: 1, 2: 2, 6: 3, 1: 4, 5: 5, 3: 6, 7: 7}
+
+        def _diversity_key(c: dict[str, Any]) -> tuple[float, int, int, float]:
+            imp = -c["improvement"]
+            a_idx = c.get("_angle_idx", 0)
+            r_idx = c.get("_radius_idx", 0)
+            a_spread = spread_rank.get(a_idx, a_idx)
+            # Interleave radii within each angle slot so the [:3] slice
+            # always includes both small-radius and cap-radius candidates.
+            rr = a_spread * radius_band_count + r_idx
+            return (imp, rr, a_idx, c.get("distance", 0.0))
+
+        candidates.sort(key=_diversity_key)
+
+        # Strip private metadata before returning -- callers expect the
+        # legacy {"position", "confidence", "improvement", "distance"}
+        # shape.
+        for c in candidates:
+            c.pop("_radius_idx", None)
+            c.pop("_angle_idx", None)
         return candidates
 
     def _find_via_positions(
