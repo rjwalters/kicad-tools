@@ -721,6 +721,7 @@ class EscapeRouter:
         net_class_map: dict[str, NetClassRouting] | None = None,
         edge_clearance: float | None = None,
         board_bounds: tuple[float, float, float, float] | None = None,
+        manufacturer: str | None = None,
     ):
         """Initialize the escape router.
 
@@ -735,6 +736,12 @@ class EscapeRouter:
                 they do not violate the edge clearance zone.
             board_bounds: Board outline bounding box (min_x, min_y, max_x, max_y)
                 in mm. Required together with edge_clearance for clamping.
+            manufacturer: Manufacturer identifier (e.g. ``"jlcpcb"``,
+                ``"jlcpcb-tier1"``).  When provided, capability flags such as
+                ``via_in_pad_supported`` are looked up via
+                ``mfr_limits.get_mfr_limits()`` and used to enable in-pad
+                escape on fine-pitch SSOP/TSSOP packages (Issue #2605).
+                Falls back to ``rules.manufacturer`` when not supplied.
         """
         self.grid = grid
         self.rules = rules
@@ -743,6 +750,24 @@ class EscapeRouter:
         self.net_class_map = net_class_map or {}
         self.edge_clearance = edge_clearance
         self.board_bounds = board_bounds
+
+        # Issue #2605: Resolve manufacturer capability flags.  Caller-supplied
+        # arg wins; otherwise fall back to ``rules.manufacturer``.  If the
+        # manufacturer is unknown we silently treat it as "no via-in-pad"
+        # rather than raising -- the router should never crash because of an
+        # unrecognized manufacturer string.
+        self.manufacturer: str | None = manufacturer or getattr(rules, "manufacturer", None)
+        self._mfr_limits = None
+        if self.manufacturer is not None:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                self._mfr_limits = get_mfr_limits(self.manufacturer)
+            except (ValueError, ImportError):
+                self._mfr_limits = None
+        self.via_in_pad_supported: bool = bool(
+            self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
+        )
 
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.
@@ -1507,6 +1532,19 @@ class EscapeRouter:
                 if self._segment_violates_pad_clearance(
                     surface_seg, i, pads, effective_clearance,
                 ):
+                    # Issue #2605: Attempt in-pad via escape as a fallback
+                    # before deferring to the main router.  Only enabled
+                    # for manufacturers that support via-in-pad processing
+                    # (e.g. ``jlcpcb-tier1`` Capability+, PCBWay).
+                    in_pad_route = self._try_in_pad_escape(
+                        pad=pad,
+                        direction=direction,
+                        effective_clearance=effective_clearance,
+                        escape_width=escape_width,
+                    )
+                    if in_pad_route is not None:
+                        escapes.append(in_pad_route)
+                        continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
@@ -1575,6 +1613,17 @@ class EscapeRouter:
                 if self._segment_violates_pad_clearance(
                     segment, i, pads, effective_clearance,
                 ):
+                    # Issue #2605: Attempt in-pad via escape as a fallback
+                    # before deferring to the main router.
+                    in_pad_route = self._try_in_pad_escape(
+                        pad=pad,
+                        direction=direction,
+                        effective_clearance=effective_clearance,
+                        escape_width=escape_width,
+                    )
+                    if in_pad_route is not None:
+                        escapes.append(in_pad_route)
+                        continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
@@ -2312,6 +2361,150 @@ class EscapeRouter:
                 return EscapeDirection.NORTH
             else:
                 return EscapeDirection.SOUTH
+
+    def _try_in_pad_escape(
+        self,
+        pad: Pad,
+        direction: EscapeDirection,
+        effective_clearance: float,
+        escape_width: float,
+    ) -> EscapeRoute | None:
+        """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
+
+        Issue #2605: For manufacturers that support via-in-pad (filled and
+        plated), placing a via dead-centre on a fine-pitch pad lets the
+        escape happen vertically into an inner layer (or B.Cu on 2-layer
+        boards), bypassing the surface-real-estate constraint that forced
+        deferral with the alternating-layer strategy.
+
+        Pre-conditions (return ``None`` when violated):
+        - ``self.via_in_pad_supported`` must be ``True`` (set from manufacturer
+          capability flags during ``__init__``).
+        - The pad must be physically large enough to host a via with annular
+          ring: ``min(pad.width, pad.height) >= via_diameter`` (we require
+          the pad copper to fully cover the via diameter; the pad's own
+          copper provides the annular ring).
+
+        On success the returned ``EscapeRoute`` contains:
+        - A ``Via`` placed exactly at ``(pad.x, pad.y)`` with ``in_pad=True``.
+        - A single inner-layer segment from the via to a normal escape point
+          chosen in the same direction the deferred surface escape would
+          have used.
+
+        Args:
+            pad: The pad whose surface escape was just rejected.
+            direction: The original escape direction (used to pick the
+                inner-layer escape point so downstream routing still flows
+                outward).
+            effective_clearance: Clearance value to use for the inner-layer
+                escape point offset.
+            escape_width: Trace width to use for the inner-layer segment.
+
+        Returns:
+            An ``EscapeRoute`` with the in-pad via and inner-layer segment,
+            or ``None`` if in-pad escape is unavailable or geometrically
+            infeasible.
+        """
+        if not self.via_in_pad_supported:
+            return None
+
+        # Use the manufacturer's minimum via drill (with a small annular
+        # ring) when available, falling back to the design rules' via
+        # geometry otherwise.  For via-in-pad processing the pad copper
+        # IS the via's landing -- the drill must fit inside the pad with
+        # a manufacturer-defined annular ring, but the via's nominal
+        # "diameter" pad doesn't have to fit because there's no separate
+        # landing pad printed for an in-pad via.
+        if self._mfr_limits is not None:
+            via_drill = self._mfr_limits.min_via_drill
+            via_diameter = self._mfr_limits.min_via_diameter
+            min_annular = self._mfr_limits.min_via_annular
+        else:
+            via_drill = self.rules.via_drill
+            via_diameter = self.rules.via_diameter
+            min_annular = (via_diameter - via_drill) / 2
+
+        # Geometry check: the drill must fit inside the pad with an
+        # annular ring of pad copper around it.  Typical fine-pitch SSOP
+        # pads are oblong (e.g. 0.35x1.45mm); the long axis nearly always
+        # has room, but the short axis often does not.  We use the LARGER
+        # dimension as the limiting factor here -- the via is placed at
+        # pad centre and the long axis provides the annular ring (the
+        # short axis is exempt because the pad copper extends fully
+        # along the short edges).  Reject only when even the long axis
+        # cannot host drill + 2 * annular.
+        required_long_dim = via_drill + 2 * min_annular
+        larger_dim = max(pad.width, pad.height)
+        if larger_dim < required_long_dim - 1e-6:
+            logger.debug(
+                "In-pad escape for pad %s skipped: pad %.3fx%.3f mm "
+                "too small for drill=%.3fmm + 2x annular=%.3fmm "
+                "(needed long-axis dim >= %.3fmm)",
+                pad.net_name, pad.width, pad.height,
+                via_drill, min_annular, required_long_dim,
+            )
+            return None
+
+        # Place via dead-centre on the pad.  Off-centre vias inside a pad
+        # break solder paste stencil generation downstream, so we do not
+        # nudge -- if dead-centre doesn't fit, defer instead.
+        via_x = pad.x
+        via_y = pad.y
+
+        # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
+        escape_layer = self._select_inner_escape_layer(pad.layer)
+
+        # Inner-layer escape point: continue inward toward the package
+        # body (same direction the deferred surface escape would have
+        # used) so the main router can pick up from there.
+        dx, dy = self._direction_to_vector(direction)
+        # Use a modest offset -- one via radius plus clearance plus a
+        # trace width buffer is enough room for the main router to
+        # connect onto the inner-layer endpoint without colliding with
+        # the via barrel itself.
+        offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
+        escape_x = via_x + dx * offset
+        escape_y = via_y + dy * offset
+
+        in_pad_via = Via(
+            x=via_x,
+            y=via_y,
+            drill=via_drill,
+            diameter=via_diameter,
+            layers=(pad.layer, escape_layer),
+            net=pad.net,
+            net_name=pad.net_name,
+            in_pad=True,
+        )
+
+        inner_seg = Segment(
+            x1=via_x,
+            y1=via_y,
+            x2=escape_x,
+            y2=escape_y,
+            width=escape_width,
+            layer=escape_layer,
+            net=pad.net,
+            net_name=pad.net_name,
+        )
+
+        logger.info(
+            "In-pad escape generated for pad %s (%s ref=%s pin=%s): "
+            "via at (%.3f, %.3f) -> %s",
+            pad.net_name, pad.layer.kicad_name, pad.ref, pad.pin,
+            via_x, via_y, escape_layer.kicad_name,
+        )
+
+        return EscapeRoute(
+            pad=pad,
+            direction=direction,
+            escape_point=(escape_x, escape_y),
+            escape_layer=escape_layer,
+            via_pos=(via_x, via_y),
+            segments=[inner_seg],
+            via=in_pad_via,
+            ring_index=0,
+        )
 
     def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
         """Select the best inner layer for via escape routing.

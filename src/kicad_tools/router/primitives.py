@@ -103,6 +103,13 @@ class Via:
     layers: tuple[Layer, Layer]
     net: int = 0
     net_name: str = ""
+    # Issue #2605: in-pad escape via marker.  When True, this via was
+    # placed dead-centre on a fine-pitch SMD pad as part of escape routing.
+    # The pad's own copper provides the annular ring, so segment-to-pad
+    # clearance checks against the parent pad must be exempted.  KiCad's
+    # board file does not need a separate fill/plating attribute -- the
+    # manufacturer reads via-in-pad from the order options / DRU.
+    in_pad: bool = False
 
     def to_sexp(self) -> str:
         """Generate KiCad S-expression."""

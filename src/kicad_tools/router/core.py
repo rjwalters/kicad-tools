@@ -7105,6 +7105,7 @@ class Autorouter:
                 self.grid, self.rules, net_class_map=self.net_class_map,
                 edge_clearance=self._edge_clearance,
                 board_bounds=self._board_bbox,
+                manufacturer=getattr(self.rules, "manufacturer", None),
             )
         return self._escape_router
 

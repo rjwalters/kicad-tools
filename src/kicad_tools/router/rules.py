@@ -62,6 +62,14 @@ class DesignRules:
         0.0,
     )  # mm (grid origin shift for mixed-pitch alignment)
 
+    # Manufacturer identifier (Issue #2605)
+    # Used by the escape router (and potentially other consumers) to look up
+    # manufacturer capability flags such as ``via_in_pad_supported`` via
+    # ``mfr_limits.get_mfr_limits()``.  When ``None`` (default), the escape
+    # router behaves as if the manufacturer does NOT support via-in-pad,
+    # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
+    manufacturer: str | None = None
+
     # Per-component clearance overrides (Issue #1016)
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins
