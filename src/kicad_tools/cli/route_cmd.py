@@ -1015,6 +1015,7 @@ def _auto_skip_pour_nets(
     try:
         import re as _re
 
+        from kicad_tools.router.auto_pour import _is_erc_marker_net
         from kicad_tools.router.net_class import classify_and_apply_rules
 
         pcb_text = pcb_path.read_text()
@@ -1042,10 +1043,19 @@ def _auto_skip_pour_nets(
                 nets_with_zones.add(zm.group(1))
             del pcb_text  # free memory
 
+            # ERC-marker nets (PWR_FLAG and friends) are misclassified as
+            # pour nets by the name pattern but carry no copper and have
+            # no zone -- exclude them from both the auto-skip and the
+            # "pour nets without zones" warning so the user does not see
+            # a misleading "use zone fill" log line for a non-existent
+            # zone.  See router/auto_pour.py for the filter.
             auto_skip = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net and name not in skip_nets and name in nets_with_zones
+                if routing.is_pour_net
+                and name not in skip_nets
+                and name in nets_with_zones
+                and not _is_erc_marker_net(name)
             ]
             if auto_skip:
                 skip_nets.extend(auto_skip)
@@ -1053,11 +1063,15 @@ def _auto_skip_pour_nets(
                     print(
                         f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)"
                     )
-            # Warn about pour nets without zones
+            # Warn about pour nets without zones (excluding ERC markers
+            # which never get zones by design).
             no_zone = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net and name not in skip_nets and name not in nets_with_zones
+                if routing.is_pour_net
+                and name not in skip_nets
+                and name not in nets_with_zones
+                and not _is_erc_marker_net(name)
             ]
             if no_zone and not quiet:
                 print(f"Routing: {', '.join(sorted(no_zone))} (power nets without zones)")

@@ -995,3 +995,97 @@ class TestPourNetsWithoutZonesSerialization:
         config2 = {}
         result2 = set(config2.get("pour_nets_without_zones", []))
         assert result2 == set()
+
+
+# ===========================================================================
+# Tests for ERC-marker net exclusion (#2592)
+# ===========================================================================
+
+# Minimal PCB with GND, +3.3V, PWR_FLAG and a signal -- mimics what KiCad's
+# netlister produces when a schematic uses a PWR_FLAG to silence ERC.
+PWR_FLAG_PCB = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0.05))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "PWR_FLAG")
+  (net 4 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu") (at 10 10) (attr smd)
+    (property "Reference" "R1") (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "+3.3V"))
+  )
+  (footprint "R_0603"
+    (layer "F.Cu") (at 30 10) (attr smd)
+    (property "Reference" "R2") (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "PWR_FLAG"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 4 "SIG1"))
+  )
+
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5)
+    (connect_pads (clearance 0.25))
+    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 40) (xy 0 40))))
+)
+"""
+
+
+class TestAutoSkipExcludesErcMarkers:
+    """Verify ``_auto_skip_pour_nets`` does not list PWR_FLAG (#2592).
+
+    ``classify_from_name`` matches ``PWR_FLAG`` against ``^PWR`` and so
+    reports it as a pour-classified power net.  But because PWR_FLAG is
+    purely an ERC annotation it will never have an associated zone, and
+    listing it under ``Auto-skip: ... (pour nets — use zone fill)`` or
+    ``Routing: ... (power nets without zones)`` would be misleading.
+    """
+
+    @pytest.fixture
+    def pcb_with_pwr_flag(self, tmp_path: Path) -> Path:
+        p = tmp_path / "board_pwr_flag.kicad_pcb"
+        p.write_text(PWR_FLAG_PCB)
+        return p
+
+    def test_pwr_flag_not_in_auto_skip(self, pcb_with_pwr_flag: Path) -> None:
+        """PWR_FLAG must not be added to ``skip_nets`` even if classified POWER."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped, no_zone = _auto_skip_pour_nets(
+            pcb_with_pwr_flag, skip_nets, quiet=True
+        )
+
+        # GND has a zone -> auto-skipped.  +3.3V is a pour net without
+        # zone -> reported in no_zone.  PWR_FLAG must appear in NEITHER.
+        assert "GND" in auto_skipped
+        assert "PWR_FLAG" not in auto_skipped
+        assert "PWR_FLAG" not in skip_nets
+        assert "PWR_FLAG" not in no_zone
+
+    def test_pwr_flag_not_in_auto_skip_log(
+        self, pcb_with_pwr_flag: Path, capsys
+    ) -> None:
+        """The auto-skip / routing log lines must not mention PWR_FLAG."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        _auto_skip_pour_nets(pcb_with_pwr_flag, skip_nets, quiet=False)
+
+        out = capsys.readouterr().out
+        assert "PWR_FLAG" not in out
