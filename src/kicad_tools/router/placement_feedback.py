@@ -147,6 +147,28 @@ class PlacementFeedbackResult:
             ``placement_diff`` collapses multiple moves of the same
             component into a single before/after entry suitable for
             JSON-serializing as a diff artifact.
+        exit_reason: Why the outer feedback loop terminated.  One of:
+
+            * ``"pf_converged"`` -- ``failed_nets`` was empty after a
+              routing pass; the loop achieved 100% connectivity.
+            * ``"pf_max_iter"`` -- the loop reached
+              ``max_adjustments + 1`` iterations without converging, or
+              hit a non-stagnation early-exit condition (no PCB
+              provided, no suitable strategy found).  This is the
+              backwards-compatible default so old callers reading the
+              field always see something sensible.
+            * ``"pf_stagnated"`` -- ``detect_pf_stagnation`` fired:
+              fully-routed-net count was unchanged for
+              ``stagnation_patience`` consecutive iterations.  See
+              #2606.
+            * ``"pf_timeout"`` -- the optional outer wall-clock budget
+              passed via ``outer_timeout`` was exceeded between
+              iterations.
+
+            Symmetric with the ``route_all_negotiated`` callback's
+            ``converged``/``stagnated``/``timeout`` strings (#2597) but
+            distinguished by the ``pf_`` prefix so callers / CI can tell
+            the layers apart.
     """
 
     success: bool
@@ -156,6 +178,7 @@ class PlacementFeedbackResult:
     failed_nets: list[int] = field(default_factory=list)
     total_components_moved: int = 0
     placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
+    exit_reason: str = "pf_max_iter"
 
     def summary(self) -> str:
         """Generate a human-readable summary."""
@@ -163,6 +186,7 @@ class PlacementFeedbackResult:
             "Placement-Routing Feedback Result:",
             f"  Success: {self.success}",
             f"  Iterations: {self.iterations}",
+            f"  Exit reason: {self.exit_reason}",
             f"  Routes: {len(self.routes)}",
             f"  Components moved: {self.total_components_moved}",
             f"  Failed nets: {len(self.failed_nets)}",

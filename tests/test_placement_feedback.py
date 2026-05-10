@@ -385,6 +385,33 @@ class TestPlacementFeedbackResult:
         assert "Components moved: 1" in summary
         assert "Failed nets: 1" in summary
         assert "Adjustments:" in summary
+        # Issue #2606: summary surfaces exit_reason on its own line.
+        assert "Exit reason: pf_max_iter" in summary
+
+    def test_feedback_result_exit_reason_default(self):
+        """Issue #2606: exit_reason defaults to ``pf_max_iter`` for back-compat."""
+        result = PlacementFeedbackResult(
+            success=False,
+            routes=[],
+            iterations=4,
+        )
+        assert result.exit_reason == "pf_max_iter"
+
+    def test_feedback_result_exit_reason_explicit(self):
+        """Callers can set exit_reason to any of the four canonical values."""
+        for reason in (
+            "pf_converged",
+            "pf_max_iter",
+            "pf_stagnated",
+            "pf_timeout",
+        ):
+            result = PlacementFeedbackResult(
+                success=False,
+                routes=[],
+                iterations=1,
+                exit_reason=reason,
+            )
+            assert result.exit_reason == reason
 
 
 class TestModuleExports:
