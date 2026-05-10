@@ -187,6 +187,71 @@ def _validate_sexp_parentheses(content: str) -> bool:
     return depth == 0
 
 
+def _connectivity_snapshot(router: "Autorouter"):
+    """Capture per-net connectivity + deep-copied routes (issue #2596).
+
+    Thin wrapper around
+    :func:`kicad_tools.router.connectivity_invariant.snapshot_connectivity`
+    so each pipeline call site has a single-line invocation.
+
+    Returns:
+        :class:`ConnectivitySnapshot` to pass to
+        :func:`_enforce_connectivity_invariant_or_exit` after the phase
+        runs.
+    """
+    from kicad_tools.router.connectivity_invariant import snapshot_connectivity
+
+    return snapshot_connectivity(router)
+
+
+def _enforce_connectivity_invariant_or_exit(
+    router: "Autorouter",
+    snapshot,
+    *,
+    phase: str,
+    args: argparse.Namespace,
+    quiet: bool = False,
+) -> None:
+    """Enforce the post-phase connectivity invariant (issue #2596).
+
+    Reverts regressed nets in default mode; in ``--strict`` mode this
+    function calls :func:`sys.exit` with code 6 (the same code used by
+    the post-save ``verify_output_connectivity`` block) so the
+    behaviour is identical regardless of which guard catches the
+    regression first.
+
+    Args:
+        router: The :class:`Autorouter` whose routes were just mutated.
+        snapshot: Snapshot returned by :func:`_connectivity_snapshot`.
+        phase: Short label identifying the phase (``"optimize"`` or
+            ``"nudge"``).
+        args: Parsed CLI arguments (used for ``--strict`` and
+            ``--verbose``).
+        quiet: Suppress all stdout output.
+    """
+    from kicad_tools.router.connectivity_invariant import (
+        ConnectivityRegressionError,
+        enforce_connectivity_invariant,
+    )
+
+    strict = bool(getattr(args, "strict", False))
+    verbose = bool(getattr(args, "verbose", False))
+    try:
+        enforce_connectivity_invariant(
+            router,
+            snapshot,
+            phase=phase,
+            strict=strict,
+            verbose=verbose,
+            quiet=quiet,
+        )
+    except ConnectivityRegressionError:
+        # Strict mode: regression detected.  Mirror the exit-code-6
+        # contract documented near the bottom of main() for the post-save
+        # output connectivity verification.
+        sys.exit(6)
+
+
 def _finalize_routes(
     router: "Autorouter",
     multi_pad_net_ids: set[int],
@@ -1466,6 +1531,10 @@ def route_with_layer_escalation(
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
+        # Issue #2596: snapshot per-net connectivity before optimize so
+        # we can revert any net whose pad-to-pad connectivity regresses.
+        _ci_snapshot = _connectivity_snapshot(final_result.router)
+
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
             for route in final_result.router.routes:
@@ -1473,14 +1542,35 @@ def route_with_layer_escalation(
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
 
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot,
+            phase="optimize",
+            args=args,
+            quiet=quiet,
+        )
+
     # Post-optimization DRC nudge pass
     if final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity again before nudge.  The
+        # post-optimize routes are the new baseline -- nudge must not
+        # regress them further.
+        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
 
         with spinner("DRC nudge pass...", quiet=quiet):
             nudge_result = drc_verify_and_nudge(final_result.router)
         if not quiet and nudge_result.initial_violations > 0:
             print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -1959,6 +2049,9 @@ def route_with_rule_relaxation(
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
+        # Issue #2596: snapshot per-net connectivity before optimize.
+        _ci_snapshot = _connectivity_snapshot(final_result.router)
+
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
             for route in final_result.router.routes:
@@ -1966,14 +2059,33 @@ def route_with_rule_relaxation(
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
 
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot,
+            phase="optimize",
+            args=args,
+            quiet=quiet,
+        )
+
     # Post-optimization DRC nudge pass
     if final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity before nudge.
+        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
 
         with spinner("DRC nudge pass...", quiet=quiet):
             nudge_result = drc_verify_and_nudge(final_result.router)
         if not quiet and nudge_result.initial_violations > 0:
             print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -2471,6 +2583,9 @@ def route_with_combined_escalation(
         )
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
+        # Issue #2596: snapshot per-net connectivity before optimize.
+        _ci_snapshot = _connectivity_snapshot(final_result.router)
+
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
             for route in final_result.router.routes:
@@ -2478,14 +2593,33 @@ def route_with_combined_escalation(
                 optimized_routes.append(optimized_route)
             final_result.router.routes = optimized_routes
 
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot,
+            phase="optimize",
+            args=args,
+            quiet=quiet,
+        )
+
     # Post-optimization DRC nudge pass
     if final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity before nudge.
+        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
 
         with spinner("DRC nudge pass...", quiet=quiet):
             nudge_result = drc_verify_and_nudge(final_result.router)
         if not quiet and nudge_result.initial_violations > 0:
             print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            final_result.router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -3256,9 +3390,11 @@ def main(argv: list[str] | None = None) -> int:
         "--strict",
         action="store_true",
         help=(
-            "Fail with exit code 6 if output connectivity verification detects "
-            "any disconnected net. Without this flag, disconnected nets in the "
-            "written output are reported as warnings but do not affect the exit code."
+            "Fail with exit code 6 if connectivity is reduced by the optimize "
+            "or DRC nudge pipeline phases (issue #2596), or if output "
+            "connectivity verification detects any disconnected net. Without "
+            "this flag, regressions are reverted (optimize/nudge) or reported "
+            "as warnings (output verification) but do not affect the exit code."
         ),
     )
     parser.add_argument(
@@ -4371,6 +4507,10 @@ def main(argv: list[str] | None = None) -> int:
         collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
         optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
+        # Issue #2596: snapshot per-net connectivity before optimize so
+        # any net whose pad-to-pad connectivity regresses can be reverted.
+        _ci_snapshot = _connectivity_snapshot(router)
+
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
             for route in router.routes:
@@ -4378,14 +4518,33 @@ def main(argv: list[str] | None = None) -> int:
                 optimized_routes.append(optimized_route)
             router.routes = optimized_routes
 
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot,
+            phase="optimize",
+            args=args,
+            quiet=quiet,
+        )
+
     # Post-optimization DRC nudge pass
     if router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity before nudge.
+        _ci_snapshot_nudge = _connectivity_snapshot(router)
 
         with spinner("DRC nudge pass...", quiet=quiet):
             nudge_result = drc_verify_and_nudge(router)
         if not quiet and nudge_result.initial_violations > 0:
             print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
 
         # Get post-optimization statistics
         post_segments = sum(len(r.segments) for r in router.routes)
@@ -4790,7 +4949,10 @@ def main(argv: list[str] | None = None) -> int:
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations)
     # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
-    # 6 = Output connectivity verification failed (--strict mode only)
+    # 6 = Connectivity regression detected (--strict mode only): either
+    #     the optimize / DRC nudge phases reduced the number of fully-
+    #     connected nets (issue #2596) or post-save output verification
+    #     reported disconnected pads (issue #2264).
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
