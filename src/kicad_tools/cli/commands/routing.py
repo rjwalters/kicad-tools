@@ -225,6 +225,31 @@ def run_route_command(args) -> int:
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:
         sub_argv.extend(["--auto-fix-passes", str(args.auto_fix_passes)])
+    # Issue #2595: forward placement-feedback flags.
+    if getattr(args, "placement_feedback", False):
+        sub_argv.append("--placement-feedback")
+    if getattr(args, "placement_feedback_budget", 3) != 3:
+        sub_argv.extend(
+            ["--placement-feedback-budget", str(args.placement_feedback_budget)]
+        )
+    if getattr(args, "placement_feedback_max_movement", 5.0) != 5.0:
+        sub_argv.extend(
+            [
+                "--placement-feedback-max-movement",
+                str(args.placement_feedback_max_movement),
+            ]
+        )
+    if getattr(args, "placement_feedback_anchor", None):
+        sub_argv.extend(
+            ["--placement-feedback-anchor", args.placement_feedback_anchor]
+        )
+    if getattr(args, "placement_feedback_no_anchor", None):
+        sub_argv.extend(
+            [
+                "--placement-feedback-no-anchor",
+                args.placement_feedback_no_anchor,
+            ]
+        )
     if getattr(args, "export_failed_nets", None):
         sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     if getattr(args, "no_cache", False):

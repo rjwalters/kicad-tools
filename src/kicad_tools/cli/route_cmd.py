@@ -661,6 +661,177 @@ def _should_auto_fix(args) -> bool:
     return True
 
 
+# =============================================================================
+# Issue #2595: Placement-routing feedback helpers
+# =============================================================================
+
+
+def _parse_ref_list(value: str | None) -> set[str]:
+    """Parse a comma-separated component-ref list into a set."""
+    if not value:
+        return set()
+    return {ref.strip() for ref in value.split(",") if ref.strip()}
+
+
+def _auto_detect_anchored_refs(pcb) -> set[str]:
+    """Auto-detect components that should be anchored during placement feedback.
+
+    A footprint is anchored when *any* of the following hold:
+
+    1. Its reference starts with ``J`` or ``P`` (connectors and headers
+       are mechanically constrained -- the human chose their position
+       on the board edge for cabling and they cannot move freely).
+    2. Its KiCad ``locked`` attribute is set to True (the human pinned
+       it explicitly in the layout editor).
+
+    Args:
+        pcb: A loaded ``PCB`` object whose ``footprints`` are iterable.
+
+    Returns:
+        Set of component references to anchor.
+    """
+    anchored: set[str] = set()
+    for fp in getattr(pcb, "footprints", []) or []:
+        ref = getattr(fp, "reference", "") or ""
+        if not ref:
+            continue
+        # Connectors (J*) and headers/test-points (P*) are mechanically
+        # constrained.  We deliberately do NOT auto-anchor U* or any
+        # other prefix -- ICs and passives are the things we WANT the
+        # feedback loop to be able to nudge.
+        if ref[0].upper() in ("J", "P"):
+            anchored.add(ref)
+            continue
+        if getattr(fp, "locked", False):
+            anchored.add(ref)
+    return anchored
+
+
+def _resolve_placement_feedback_anchors(pcb, args) -> set[str]:
+    """Compute the final set of anchored refs for the feedback loop.
+
+    Combines auto-detected anchors (connectors, locked footprints) with
+    the user's ``--placement-feedback-anchor`` overrides, then removes
+    any refs the user explicitly opted out via
+    ``--placement-feedback-no-anchor``.
+
+    Args:
+        pcb: Loaded PCB object.
+        args: Parsed CLI args.
+
+    Returns:
+        Set of refs to anchor.
+    """
+    anchors = _auto_detect_anchored_refs(pcb)
+    anchors |= _parse_ref_list(getattr(args, "placement_feedback_anchor", None))
+    anchors -= _parse_ref_list(getattr(args, "placement_feedback_no_anchor", None))
+    return anchors
+
+
+def _placement_diff_path(args, pcb_path: Path) -> Path:
+    """Resolve the path of the ``<output>_placement_diff.json`` artifact."""
+    if getattr(args, "output", None):
+        output_path = Path(args.output)
+    else:
+        output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
+    return output_path.with_suffix("").with_name(
+        output_path.stem + "_placement_diff.json"
+    )
+
+
+def _run_placement_feedback(
+    router,
+    pcb_path: Path,
+    args,
+    quiet: bool,
+) -> list[dict] | None:
+    """Drive the placement-routing feedback loop for ``kct route``.
+
+    Loads the PCB so the loop can mutate footprint positions, computes
+    the anchor set, invokes ``router.route_with_placement_feedback``,
+    persists ``<output>_placement_diff.json`` beside the routed PCB,
+    and prints a human-readable summary of what moved.
+
+    Args:
+        router: The ``Autorouter`` whose state will be reset by the loop.
+        pcb_path: Path to the (already-loaded) input PCB so we can
+            create an in-memory ``PCB`` for placement mutation.
+        args: Parsed CLI args (must include ``placement_feedback_*``).
+        quiet: When True, suppress all stdout output.
+
+    Returns:
+        The placement diff as a list of dicts (suitable for JSON
+        serialization), or None when the loop did not run / produced
+        no diff.
+    """
+    import json
+
+    from kicad_tools.schema.pcb import PCB
+
+    if not quiet:
+        print("\n--- Placement-Routing Feedback ---")
+        failed = router.get_failed_nets()
+        print(f"  Initial pass left {len(failed)} unrouted net(s); attempting feedback")
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as exc:
+        if not quiet:
+            print(f"  Warning: could not load PCB for feedback ({exc}); skipping")
+        return None
+
+    anchored = _resolve_placement_feedback_anchors(pcb, args)
+    if not quiet and anchored:
+        print(f"  Anchored refs ({len(anchored)}): {', '.join(sorted(anchored))}")
+
+    budget = int(getattr(args, "placement_feedback_budget", 3) or 3)
+    max_movement = float(
+        getattr(args, "placement_feedback_max_movement", 5.0) or 5.0
+    )
+    use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
+
+    timeout = getattr(args, "timeout", None)
+    per_net_timeout = getattr(args, "per_net_timeout", None)
+
+    try:
+        result = router.route_with_placement_feedback(
+            pcb=pcb,
+            max_adjustments=budget,
+            use_negotiated=use_negotiated,
+            verbose=not quiet,
+            fixed_refs=anchored,
+            max_movement=max_movement,
+            timeout=timeout,
+            per_net_timeout=per_net_timeout,
+        )
+    except Exception as exc:
+        if not quiet:
+            print(f"  Warning: placement feedback failed ({exc}); keeping initial routes")
+        return None
+
+    if not quiet:
+        print(f"  Feedback iterations: {result.iterations}")
+        print(f"  Components moved:   {result.total_components_moved}")
+        print(f"  Final failed nets:  {len(result.failed_nets)}")
+
+    diff_data = [entry.to_dict() for entry in result.placement_diff]
+
+    # Persist the diff JSON beside the routed PCB.  We write it even
+    # when the diff is empty so consumers (CI, humans) can rely on the
+    # file's presence to detect that the feedback loop was invoked.
+    diff_path = _placement_diff_path(args, pcb_path)
+    try:
+        diff_path.parent.mkdir(parents=True, exist_ok=True)
+        diff_path.write_text(json.dumps(diff_data, indent=2) + "\n")
+        if not quiet:
+            print(f"  Placement diff saved to: {diff_path}")
+    except OSError as exc:
+        if not quiet:
+            print(f"  Warning: could not write placement diff ({exc})")
+
+    return diff_data
+
+
 def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
     """Fill copper-pour zones after routing completes.
 
@@ -2989,6 +3160,71 @@ def main(argv: list[str] | None = None) -> int:
             "where fixing one violation exposes or resolves others."
         ),
     )
+    # Issue #2595: placement-feedback opt-in flags.  When the initial
+    # routing pass leaves nets unrouted with BLOCKED_BY_COMPONENT root
+    # cause, --placement-feedback invokes the existing closed-loop
+    # placement adjuster (Autorouter.route_with_placement_feedback) to
+    # nudge non-anchored components and re-route.  Connectors (J*) and
+    # locked footprints are anchored automatically.
+    parser.add_argument(
+        "--placement-feedback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After the initial routing pass, if any nets failed with "
+            "BLOCKED_BY_COMPONENT root cause, invoke the placement-routing "
+            "feedback loop to nudge non-anchored components and re-route "
+            "(default: disabled).  Use --no-placement-feedback to disable "
+            "explicitly.  Connectors (refs starting with 'J' or 'P') and "
+            "footprints with the KiCad 'locked' attribute are never moved "
+            "(see --placement-feedback-anchor / --placement-feedback-no-anchor "
+            "for overrides).  Issue #2595."
+        ),
+    )
+    parser.add_argument(
+        "--placement-feedback-budget",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Maximum number of placement adjustments to attempt when "
+            "--placement-feedback is set (default: 3). Each adjustment "
+            "moves one or more components and re-routes from scratch."
+        ),
+    )
+    parser.add_argument(
+        "--placement-feedback-max-movement",
+        type=float,
+        default=5.0,
+        metavar="MM",
+        help=(
+            "Hard cap on per-component movement distance for the placement "
+            "feedback loop, in mm (default: 5.0). Strategies that would "
+            "move any component by more than this distance are filtered out."
+        ),
+    )
+    parser.add_argument(
+        "--placement-feedback-anchor",
+        default=None,
+        metavar="REFS",
+        help=(
+            "Additional component references to anchor (never move) during "
+            "the placement feedback loop, comma-separated. Combined with the "
+            "auto-detected anchors (connectors, locked footprints). "
+            "Example: --placement-feedback-anchor U5,U7"
+        ),
+    )
+    parser.add_argument(
+        "--placement-feedback-no-anchor",
+        default=None,
+        metavar="REFS",
+        help=(
+            "Component references to remove from the anchor set, "
+            "comma-separated. Use this to allow movement of components that "
+            "would otherwise be auto-anchored (e.g. a non-mechanical "
+            "connector). Example: --placement-feedback-no-anchor J3"
+        ),
+    )
     parser.add_argument(
         "--no-optimize",
         action="store_true",
@@ -4336,6 +4572,26 @@ def main(argv: list[str] | None = None) -> int:
         if _interrupt_state["interrupted"]:
             _save_partial_results()
             return 5  # Exit code 5 indicates interruption with partial results saved
+
+        # Issue #2595: placement-routing feedback loop.  When the user
+        # opted in via --placement-feedback and the initial pass left
+        # nets unrouted, invoke route_with_placement_feedback() to
+        # nudge non-anchored components and re-route from scratch.
+        # The helper writes <output>_placement_diff.json beside the
+        # routed PCB; the return value is not consumed here because
+        # downstream stages (cache, optimize, save) read directly from
+        # router.routes (which the feedback loop mutates in place).
+        if (
+            getattr(args, "placement_feedback", False)
+            and router.routes is not None
+            and router.get_failed_nets()
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=pcb_path,
+                args=args,
+                quiet=quiet,
+            )
 
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
