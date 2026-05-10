@@ -357,9 +357,11 @@ def build_native(
             # ``sys.modules`` for ``kicad_tools.router.router_cpp``.  We
             # must drop that stale entry and invalidate the path-based
             # caches so the reloaded ``cpp_backend`` actually picks up
-            # the freshly-written ``.so``.
+            # the freshly-written ``.so``.  ``sys`` is already imported
+            # at module scope -- do NOT shadow it with a local import
+            # here (would trigger ``UnboundLocalError`` on the earlier
+            # ``sys.executable`` reference at the cmake configure step).
             import importlib
-            import sys
 
             sys.modules.pop("kicad_tools.router.router_cpp", None)
             importlib.invalidate_caches()
