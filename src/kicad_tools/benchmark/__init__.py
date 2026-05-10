@@ -17,7 +17,15 @@ Example::
 
 from .cases import BENCHMARK_CASES, BenchmarkCase, Difficulty
 from .generators import generate_bga_breakout, generate_random_board
-from .regression import Regression, check_regression, load_baseline, save_baseline
+from .regression import (
+    ABSOLUTE_THRESHOLDS,
+    REGRESSION_THRESHOLDS,
+    Regression,
+    check_regression,
+    format_regression_report,
+    load_baseline,
+    save_baseline,
+)
 from .result import BenchmarkResult
 from .runner import BenchmarkRunner
 
@@ -30,7 +38,10 @@ __all__ = [
     # Runner
     "BenchmarkRunner",
     # Regression detection
+    "ABSOLUTE_THRESHOLDS",
+    "REGRESSION_THRESHOLDS",
     "check_regression",
+    "format_regression_report",
     "load_baseline",
     "save_baseline",
     # Generators

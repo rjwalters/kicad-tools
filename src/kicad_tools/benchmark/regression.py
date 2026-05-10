@@ -41,9 +41,23 @@ class Regression:
 REGRESSION_THRESHOLDS = {
     # (warning_threshold, error_threshold, higher_is_worse)
     "completion_rate": (0.05, 0.10, False),  # 5%/10% drop is warning/error
+    "nets_fully_routed": (0.05, 0.10, False),  # Issue #2611: 5%/10% drop
     "total_vias": (0.20, 0.50, True),  # 20%/50% increase is warning/error
     "total_length_mm": (0.15, 0.30, True),  # 15%/30% increase
     "routing_time_sec": (1.0, 2.0, True),  # 100%/200% increase (perf can vary)
+    "drc_violations": (0.20, 0.50, True),  # 20%/50% increase
+}
+
+
+# Absolute-threshold metrics: any *increase* above the baseline value is
+# an error, regardless of the percentage change.  Used for the
+# structural-floor count (Issue #2611) where the baseline expresses
+# "8 nets cannot be routed today; if a 9th appears, that's a real
+# regression even though 9/8 = 12.5% is within the warning band of
+# other metrics".  Decreases are silently celebrated rather than flagged.
+ABSOLUTE_THRESHOLDS = {
+    # metric_name: (severity_on_increase)
+    "nets_unrouted": "error",
 }
 
 
@@ -57,13 +71,14 @@ def check_regression(
     Args:
         current: Current benchmark results
         baseline: Baseline results to compare against
-        metrics: Metrics to check (default: all in REGRESSION_THRESHOLDS)
+        metrics: Metrics to check (default: all in REGRESSION_THRESHOLDS
+            plus all in ABSOLUTE_THRESHOLDS).
 
     Returns:
         List of detected regressions
     """
     if metrics is None:
-        metrics = list(REGRESSION_THRESHOLDS.keys())
+        metrics = list(REGRESSION_THRESHOLDS.keys()) + list(ABSOLUTE_THRESHOLDS.keys())
 
     # Index baseline by (case_name, strategy)
     baseline_map: dict[tuple[str, str], BenchmarkResult] = {}
@@ -80,6 +95,32 @@ def check_regression(
             continue  # No baseline to compare against
 
         for metric in metrics:
+            # Absolute-threshold metrics (Issue #2611): any increase
+            # above baseline is a regression, no relative-percentage
+            # gating.  Used for the structural-floor count where
+            # baseline = "this many nets are unrouteable today" and
+            # any increase = a new net joined the floor.
+            if metric in ABSOLUTE_THRESHOLDS:
+                base_val_abs = getattr(base, metric, None)
+                curr_val_abs = getattr(curr, metric, None)
+                if base_val_abs is None or curr_val_abs is None:
+                    continue
+                if curr_val_abs > base_val_abs:
+                    regressions.append(
+                        Regression(
+                            case_name=curr.case_name,
+                            strategy=curr.strategy,
+                            metric=metric,
+                            baseline_value=float(base_val_abs),
+                            current_value=float(curr_val_abs),
+                            # threshold encodes "increase above this is
+                            # a regression" -- the baseline itself.
+                            threshold=float(base_val_abs),
+                            severity=ABSOLUTE_THRESHOLDS[metric],
+                        )
+                    )
+                continue
+
             if metric not in REGRESSION_THRESHOLDS:
                 continue
 

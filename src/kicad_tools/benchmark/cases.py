@@ -97,11 +97,19 @@ BENCHMARK_CASES: list[BenchmarkCase] = [
         trace_width=0.2,
         trace_clearance=0.15,
     ),
-    # Hard complexity -- 4-layer RPi DAC hat with dense BGA escape and I2S routing
+    # Hard complexity -- 4-layer RPi DAC hat with dense PCM5122 SSOP-28
+    # 0.65mm-pitch escape and I2S routing.
+    #
+    # Issue #2611: pinned to v18 (was v9_grid50 — 9 revisions and 214 net
+    # mismatches out of date).  The PCB lives under boards/external/ which
+    # is local-only; runner.run_single handles the FileNotFoundError
+    # gracefully when the fixture is absent.  See
+    # scripts/ci/fetch_chorus_test.py and docs/benchmark.md for fetching
+    # the board on a fresh runner.
     BenchmarkCase(
         name="chorus_test_revA",
-        pcb_path="boards/external/chorus-test-revA/kicad/chorus-test-revA_v9_grid50.kicad_pcb",
-        expected_completion=1.0,
+        pcb_path="boards/external/chorus-test-revA/kicad/chorus-test-revA_v18.kicad_pcb",
+        expected_completion=0.55,  # ~26/46 fully-routed baseline
         expected_max_vias=200,
         difficulty=Difficulty.HARD,
         skip_nets=["+3.3V", "+3.3VA", "+5V", "GNDA", "GNDD"],
