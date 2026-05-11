@@ -466,9 +466,13 @@ class NetClassRouting:
     declared via :attr:`diffpair_partner`).
 
     Default is ``False`` for backward compatibility with all pre-#2636
-    boards.  Predefined classes (e.g. ``NET_CLASS_HIGH_SPEED``) keep
-    ``coupled_routing=False`` until a follow-up issue flips them on with
-    empirical board coverage from Phase 4's board 06.
+    boards.  ``NET_CLASS_HIGH_SPEED`` was flipped to ``True`` in #2651
+    (Epic #2556 Phase 2.5a) -- it is the canonical HSDI class that
+    consumers opt into via ``high_speed_nets=`` and is the producer-side
+    half of the Phase 2 coupled-routing pipeline.  Other predefined
+    classes (``POWER``, ``HIGH_CURRENT_SIGNAL``, ``CLOCK``, ``AUDIO``,
+    ``DIGITAL``, ``DEBUG``, ``DEFAULT``) keep ``coupled_routing=False``
+    because they carry single-ended signals.
 
     NOTE -- name collision with the ``use_coupled_routing`` function
     parameter on :meth:`DiffPairRouter.route_differential_pair`.  The
@@ -676,6 +680,7 @@ NET_CLASS_HIGH_SPEED = NetClassRouting(
     intra_pair_clearance=0.075,  # Issue #2559 / Epic #2556 Phase 1C
     cost_multiplier=0.85,
     length_critical=True,
+    coupled_routing=True,  # Issue #2651 / Epic #2556 Phase 2.5a: producer-side flip
 )
 
 NET_CLASS_AUDIO = NetClassRouting(
