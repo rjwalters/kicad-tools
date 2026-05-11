@@ -167,6 +167,10 @@ from .length import (
     ViolationType,
     create_match_group,
 )
+from .match_group_detection import (
+    BUS_GROUP_PATTERNS,
+    detect_match_groups,
+)
 from .match_group_length import (
     MatchGroup,
     MatchGroupSource,
@@ -412,6 +416,9 @@ __all__ = [
     "MatchGroup",
     "MatchGroupSource",
     "MatchGroupTracker",
+    # Match-group detection (Epic #2661 Phase 1C / Issue #2689)
+    "BUS_GROUP_PATTERNS",
+    "detect_match_groups",
     # I/O
     "route_pcb",
     "load_pcb_for_routing",

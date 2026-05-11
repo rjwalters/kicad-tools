@@ -51,9 +51,9 @@ class TestExplicitDeclaration:
         )
         assert len(out) == 1
         assert out[0].source == MatchGroupSource.EXPLICIT
-        assert out[0].group_id == "DDR_BYTE0"
-        assert out[0].members == [1, 2, 3, 4]
-        assert out[0].reference is None  # No reference policy -> "longest"
+        assert out[0].name == "DDR_BYTE0"
+        assert out[0].net_ids == [1, 2, 3, 4]
+        assert out[0].reference_net_id is None  # No reference policy -> "longest"
 
     def test_multiple_classes_merge_into_single_group(self):
         """The MIPI-lane use case: per-pair classes share a group."""
@@ -79,8 +79,8 @@ class TestExplicitDeclaration:
             net_to_class=net_to_class,
         )
         assert len(out) == 1
-        assert out[0].group_id == "MIPI_CSI"
-        assert out[0].members == [1, 2, 3, 4]
+        assert out[0].name == "MIPI_CSI"
+        assert out[0].net_ids == [1, 2, 3, 4]
 
     def test_explicit_reference_resolution(self):
         net_names = {1: "DQ0", 2: "DQ1", 3: "DQ2", 4: "DQS_P"}
@@ -98,7 +98,7 @@ class TestExplicitDeclaration:
             net_to_class=net_to_class,
         )
         assert len(out) == 1
-        assert out[0].reference == 4  # DQS_P's net id.
+        assert out[0].reference_net_id == 4  # DQS_P's net id.
 
     def test_explicit_reference_missing_from_netlist_falls_back(self, caplog):
         net_names = {1: "DQ0", 2: "DQ1", 3: "DQ2"}
@@ -113,7 +113,7 @@ class TestExplicitDeclaration:
                 net_class_routing={"DDR": nc},
                 net_to_class=dict.fromkeys(net_names.values(), "DDR"),
             )
-        assert out[0].reference is None
+        assert out[0].reference_net_id is None
         assert any("not in the net list" in r.message for r in caplog.records)
 
     def test_explicit_reference_not_a_member_falls_back(self, caplog):
@@ -136,7 +136,7 @@ class TestExplicitDeclaration:
                 net_class_routing={"DDR": nc_ddr, "OTHER": nc_other},
                 net_to_class=net_to_class,
             )
-        assert out[0].reference is None
+        assert out[0].reference_net_id is None
         assert any("not a member of the group" in r.message for r in caplog.records)
 
     def test_no_net_class_routing_returns_empty(self):
@@ -170,9 +170,9 @@ class TestLegacyApiSource:
         out = detect_match_groups(net_names, length_tracker=tracker)
         assert len(out) == 1
         assert out[0].source == MatchGroupSource.LEGACY_API
-        assert out[0].group_id == "MEM_BUS"
-        assert out[0].members == [10, 11, 12, 13]
-        assert out[0].reference is None
+        assert out[0].name == "MEM_BUS"
+        assert out[0].net_ids == [10, 11, 12, 13]
+        assert out[0].reference_net_id is None
 
     def test_legacy_with_no_tracker_skipped(self):
         out = detect_match_groups({10: "MEM_D0"})
@@ -202,16 +202,16 @@ class TestSuffixInference:
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         assert len(out) == 1
         assert out[0].source == MatchGroupSource.SUFFIX
-        assert out[0].group_id == "DDR_DATA"
-        assert out[0].members == list(range(8))
+        assert out[0].name == "DDR_DATA"
+        assert out[0].net_ids == list(range(8))
 
     def test_address_bus_16_nets(self):
         # Address-line false-positive risk -- only valid when group is large.
         net_names = {i: f"A{i}" for i in range(16)}
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         assert len(out) == 1
-        assert out[0].group_id == "ADDR_BUS"
-        assert len(out[0].members) == 16
+        assert out[0].name == "ADDR_BUS"
+        assert len(out[0].net_ids) == 16
 
     def test_mipi_csi_lane_data(self):
         net_names = {
@@ -226,8 +226,8 @@ class TestSuffixInference:
         }
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         assert len(out) == 1
-        assert out[0].group_id == "MIPI_CSI_DATA"
-        assert len(out[0].members) == 8
+        assert out[0].name == "MIPI_CSI_DATA"
+        assert len(out[0].net_ids) == 8
 
     def test_hdmi_tmds_data_lanes_clock_excluded(self):
         # 6 data nets (3 lanes x P/N) + 2 clock nets.  The clock is
@@ -246,11 +246,11 @@ class TestSuffixInference:
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         # The data lanes form one group of 6 (TMDS_CLK_* doesn't match
         # the data pattern).
-        data_groups = [g for g in out if g.group_id == "HDMI_TMDS_DATA"]
+        data_groups = [g for g in out if g.name == "HDMI_TMDS_DATA"]
         assert len(data_groups) == 1
-        assert len(data_groups[0].members) == 6
-        assert 7 not in data_groups[0].members
-        assert 8 not in data_groups[0].members
+        assert len(data_groups[0].net_ids) == 6
+        assert 7 not in data_groups[0].net_ids
+        assert 8 not in data_groups[0].net_ids
 
 
 # =============================================================================
@@ -274,7 +274,7 @@ class TestSourcePriority:
         )
         # Exactly ONE group, named CUSTOM_BUS (not DDR_DATA), source EXPLICIT.
         assert len(out) == 1
-        assert out[0].group_id == "CUSTOM_BUS"
+        assert out[0].name == "CUSTOM_BUS"
         assert out[0].source == MatchGroupSource.EXPLICIT
 
     def test_explicit_preempts_legacy_on_overlap(self):
@@ -291,7 +291,7 @@ class TestSourcePriority:
         )
         # Only the EXPLICIT group is reported.
         assert len(out) == 1
-        assert out[0].group_id == "EXPLICIT_BUS"
+        assert out[0].name == "EXPLICIT_BUS"
         assert out[0].source == MatchGroupSource.EXPLICIT
 
     def test_legacy_preempts_suffix(self):
@@ -305,7 +305,7 @@ class TestSourcePriority:
             enable_suffix_inference=True,
         )
         assert len(out) == 1
-        assert out[0].group_id == "LEGACY_DDR"
+        assert out[0].name == "LEGACY_DDR"
         assert out[0].source == MatchGroupSource.LEGACY_API
 
     def test_legacy_partial_coverage_only_suffix_takes_rest(self):
@@ -331,7 +331,7 @@ class TestSourcePriority:
         # Legacy emits its 2-net group; suffix refuses the remaining 2.
         assert len(out) == 1
         assert out[0].source == MatchGroupSource.LEGACY_API
-        assert out[0].members == [0, 1]
+        assert out[0].net_ids == [0, 1]
 
 
 # =============================================================================
@@ -371,9 +371,9 @@ class TestFalsePositiveRefusal:
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         # 3 DQ nets is exactly the min-group threshold; emit the group.
         assert len(out) == 1
-        assert out[0].group_id == "DDR_DATA"
-        assert out[0].members == [1, 2, 3]
-        assert 4 not in out[0].members
+        assert out[0].name == "DDR_DATA"
+        assert out[0].net_ids == [1, 2, 3]
+        assert 4 not in out[0].net_ids
 
 
 # =============================================================================
@@ -405,8 +405,8 @@ class TestDDRStrobeMaskInteraction:
         # Only the DDR_DATA group is reported; mask + strobe individually
         # are below min-group threshold.
         assert len(out) == 1
-        assert out[0].group_id == "DDR_DATA"
-        assert out[0].members == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert out[0].name == "DDR_DATA"
+        assert out[0].net_ids == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 # =============================================================================
@@ -430,7 +430,7 @@ class TestClockSentinelResolution:
             net_to_class=dict.fromkeys(net_names.values(), "MIPI"),
         )
         assert len(out) == 1
-        assert out[0].reference == 1  # MIPI_CLK_P
+        assert out[0].reference_net_id == 1  # MIPI_CLK_P
 
     def test_sclk_resolved_via_clk_suffix(self):
         net_names = {1: "DATA0", 2: "DATA1", 3: "SCLK"}
@@ -445,7 +445,7 @@ class TestClockSentinelResolution:
             net_to_class=dict.fromkeys(net_names.values(), "SPI"),
         )
         assert len(out) == 1
-        assert out[0].reference == 3  # SCLK
+        assert out[0].reference_net_id == 3  # SCLK
 
     def test_clockdiv2_resolved_via_clock_pattern(self):
         net_names = {1: "DATA0", 2: "DATA1", 3: "CLOCKDIV2"}
@@ -459,7 +459,7 @@ class TestClockSentinelResolution:
             net_class_routing={"BUS": nc},
             net_to_class=dict.fromkeys(net_names.values(), "BUS"),
         )
-        assert out[0].reference == 3  # CLOCKDIV2
+        assert out[0].reference_net_id == 3  # CLOCKDIV2
 
     def test_no_clock_match_falls_back_with_warning(self, caplog):
         net_names = {1: "DATA0", 2: "DATA1", 3: "DATA2"}
@@ -474,7 +474,7 @@ class TestClockSentinelResolution:
                 net_class_routing={"BUS": nc},
                 net_to_class=dict.fromkeys(net_names.values(), "BUS"),
             )
-        assert out[0].reference is None
+        assert out[0].reference_net_id is None
         assert any(
             "'clock' sentinel" in r.message and "no member" in r.message for r in caplog.records
         )
@@ -492,7 +492,7 @@ class TestClockSentinelResolution:
                 net_class_routing={"BUS": nc},
                 net_to_class=dict.fromkeys(net_names.values(), "BUS"),
             )
-        assert out[0].reference == 1  # Lowest net id wins.
+        assert out[0].reference_net_id == 1  # Lowest net id wins.
         assert any("'clock' sentinel matched" in r.message for r in caplog.records)
 
 
@@ -562,7 +562,7 @@ class TestOutputDeterminism:
     def test_members_sorted_by_net_id(self):
         net_names = {30: "DQ0", 10: "DQ1", 20: "DQ2"}
         out = detect_match_groups(net_names, enable_suffix_inference=True)
-        assert out[0].members == [10, 20, 30]
+        assert out[0].net_ids == [10, 20, 30]
 
     def test_sources_emitted_in_priority_order(self):
         # Construct a netlist where each source emits one group, with
@@ -606,29 +606,53 @@ class TestOutputDeterminism:
 
 
 class TestMatchGroupDataclass:
-    def test_default_members_empty(self):
-        g = MatchGroup(group_id="TEST")
-        assert g.members == []
-        assert g.reference is None
-        assert g.source == MatchGroupSource.EXPLICIT
+    def test_default_construction(self):
+        # MatchGroup is now imported from Phase 1B
+        # (router.match_group_length, PR #2693); ``net_ids`` is
+        # required positional, ``reference_net_id`` defaults to
+        # ``None``, and the default source is ``LEGACY_API`` to match
+        # the legacy ``Autorouter.add_match_group`` entry point.
+        g = MatchGroup(name="TEST", net_ids=[])
+        assert g.net_ids == []
+        assert g.reference_net_id is None
+        assert g.source == MatchGroupSource.LEGACY_API
 
     def test_explicit_construction(self):
         g = MatchGroup(
-            group_id="DDR_DATA",
-            members=[1, 2, 3, 4],
-            reference=2,
+            name="DDR_DATA",
+            net_ids=[1, 2, 3, 4],
+            reference_net_id=2,
             source=MatchGroupSource.SUFFIX,
         )
-        assert g.group_id == "DDR_DATA"
-        assert g.members == [1, 2, 3, 4]
-        assert g.reference == 2
+        assert g.name == "DDR_DATA"
+        assert g.net_ids == [1, 2, 3, 4]
+        assert g.reference_net_id == 2
         assert g.source == MatchGroupSource.SUFFIX
 
-    def test_source_enum_has_three_values(self):
-        # No KICAD_GROUP -- intentionally absent (no KiCad analog
-        # for match groups yet).
+    def test_source_enum_includes_phase1b_kicad_group(self):
+        # Phase 1B (PR #2693) added ``KICAD_GROUP`` to the canonical
+        # ``MatchGroupSource`` enum so it stays parallel with
+        # :class:`~kicad_tools.router.diffpair_detection.DetectionSource`.
+        # This Phase 1C detector intentionally never EMITS ``KICAD_GROUP``
+        # (no KiCad ``(match_group ...)`` directive exists yet), but the
+        # enum value is part of the shared contract.
         values = {s.value for s in MatchGroupSource}
-        assert values == {"explicit", "legacy_api", "suffix"}
+        assert values == {"explicit", "kicad_group", "suffix", "legacy_api"}
+        # The detector never synthesises KICAD_GROUP itself; verify it
+        # doesn't appear when all three input paths are exercised.
+        net_names = {i: f"DQ{i}" for i in range(8)}
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_BYTE0")
+        constraints = create_match_group("LEGACY_BUS", [100, 101, 102], tolerance=0.2)
+        tracker = LengthTracker(constraints=constraints)
+        out = detect_match_groups(
+            net_names,
+            net_class_routing={"DDR": nc},
+            net_to_class=dict.fromkeys(net_names.values(), "DDR"),
+            length_tracker=tracker,
+            enable_suffix_inference=True,
+        )
+        sources = {g.source for g in out}
+        assert MatchGroupSource.KICAD_GROUP not in sources
 
 
 # =============================================================================
@@ -665,9 +689,9 @@ class TestExpandedFixtures:
             net_to_class=dict.fromkeys(net_names.values(), "DDR_BYTE0"),
         )
         assert len(out) == 1
-        assert out[0].group_id == "DDR_DATA_BYTE_0"
-        assert len(out[0].members) == 11
-        assert out[0].reference == 10  # DQS_P
+        assert out[0].name == "DDR_DATA_BYTE_0"
+        assert len(out[0].net_ids) == 11
+        assert out[0].reference_net_id == 10  # DQS_P
 
     def test_4_lane_mipi_csi_via_explicit(self):
         """4-lane MIPI CSI: 1 clock pair + 4 data pairs = 10 nets."""
@@ -694,7 +718,7 @@ class TestExpandedFixtures:
             net_to_class=dict.fromkeys(net_names.values(), "MIPI_CSI"),
         )
         assert len(out) == 1
-        assert len(out[0].members) == 10
+        assert len(out[0].net_ids) == 10
         # "clock" sentinel finds CSI_CLK_P (lowest id, matches ^CLK
         # via CLK_).
-        assert out[0].reference == 1
+        assert out[0].reference_net_id == 1

@@ -24,12 +24,19 @@ The output is a list of :class:`MatchGroup` instances annotated with a
 :class:`MatchGroupSource` enum so downstream consumers (DRC rule,
 serpentine tuner) can apply policy by source if needed.
 
-**Important parallel-development note**: Phase 1B (#2688) builds the
-companion ``MatchGroupTracker``.  This module defines its own
-``MatchGroup`` and ``MatchGroupSource`` types so it can land
-independently; the type shapes are coordinated with Phase 1B so the
-two modules can interoperate once both are merged.  See
-``MatchGroup``'s docstring for the type contract.
+**Type ownership (Epic #2661 Phase 1B / Issue #2688)**: ``MatchGroup``
+and ``MatchGroupSource`` are owned by
+:mod:`kicad_tools.router.match_group_length` (Phase 1B, PR #2693).
+This Phase 1C detector imports those types rather than redefining them
+so the detection layer and the measurement / tracker layer share a
+single canonical shape.  Phase 1B's enum has four values
+(``EXPLICIT``, ``KICAD_GROUP``, ``SUFFIX``, ``LEGACY_API``); this
+detector only produces three (``EXPLICIT``, ``LEGACY_API``,
+``SUFFIX``) because KiCad's PCB s-expression has no
+``(match_group ...)`` directive analogous to
+``(diff_pair_template ...)`` yet.  ``KICAD_GROUP`` remains a valid
+enum member -- this module simply never emits it; a future Phase 2
+detector for a hypothetical KiCad directive would be the producer.
 
 The public entry point :func:`detect_match_groups` mirrors
 :func:`kicad_tools.router.diffpair_detection.detect_diff_pairs` (PR
@@ -48,11 +55,11 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from kicad_tools.analysis.trace_length import CRITICAL_NET_PATTERNS
+
+from .match_group_length import MatchGroup, MatchGroupSource
 
 if TYPE_CHECKING:
     from .length import LengthTracker
@@ -62,79 +69,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Type contract -- coordinated with Phase 1B (#2688)
-# =============================================================================
-
-
-class MatchGroupSource(Enum):
-    """Where a match group came from in the layered detector.
-
-    Three-tier (not four).  ``KICAD_GROUP`` is intentionally absent:
-    KiCad's PCB s-expression does not currently have a
-    ``(match_group ...)`` directive analogous to
-    ``(diff_pair_template ...)``, so the parallel ``KICAD_GROUP``
-    source from diff-pair detection has no analog here.  Phase 2 of
-    Epic #2661 (not this issue) may revisit if KiCad upstream adds
-    such a directive.
-
-    The ordering of values matches detection priority:
-    ``EXPLICIT > LEGACY_API > SUFFIX``.
-    """
-
-    EXPLICIT = "explicit"
-    """Declared via ``NetClassRouting.length_match_group``."""
-
-    LEGACY_API = "legacy_api"
-    """Registered via ``Autorouter.add_match_group(...)``.
-
-    The legacy Python API path that has existed since before this
-    epic.  Surfaced from ``LengthTracker.match_groups`` so already-
-    routed boards that pre-date Phase 1A don't lose their group
-    membership.
-    """
-
-    SUFFIX = "suffix"
-    """Opt-in inference from :data:`BUS_GROUP_PATTERNS`.
-
-    Only reported when ``enable_suffix_inference=True`` is passed to
-    :func:`detect_match_groups`.  Refuses low-confidence groups
-    (fewer than ``_MIN_GROUP_SIZE`` members) so that random GPIO
-    names (``A0`` alone, ``DQ0``/``DQ1`` pair) don't get incorrectly
-    classified.
-    """
-
-
-@dataclass
-class MatchGroup:
-    """A length-match group plus metadata about its source and policy.
-
-    Attributes:
-        group_id: Stable identifier for the group.  By convention
-            this is the group name from the source (the
-            ``length_match_group`` field, the ``add_match_group(name=...)``
-            argument, or the :data:`BUS_GROUP_PATTERNS` template).
-        members: Net IDs that belong to the group, in deterministic
-            sorted order (lowest net id first).
-        reference: Net ID to use as the reference (the "pace car") for
-            length-matching, or ``None`` to mean "use the longest
-            trace in the group".  Set by the reference resolver from
-            ``NetClassRouting.length_match_reference``.
-        source: Which detection path produced this group.
-
-    Notes:
-        This dataclass is intentionally minimal -- Phase 1B (#2688)
-        owns the measurement / tolerance logic and may extend the
-        contract with serialisation methods (``to_dict`` /
-        ``from_dict``).  This module does not invent such methods; if
-        Phase 1B adds them, the existing instances round-trip
-        trivially because all fields are JSON-compatible primitives.
-    """
-
-    group_id: str
-    members: list[int] = field(default_factory=list)
-    reference: int | None = None
-    source: MatchGroupSource = MatchGroupSource.EXPLICIT
+# Re-export the canonical types so downstream callers can keep importing
+# them from this module if they wish (back-compat affordance; the
+# authoritative definition lives in :mod:`.match_group_length`).
+__all__ = [
+    "BUS_GROUP_PATTERNS",
+    "MatchGroup",
+    "MatchGroupSource",
+    "detect_match_groups",
+]
 
 
 # =============================================================================
@@ -273,8 +216,9 @@ def detect_match_groups(
           groups are too likely to be false positives.
         - The ``"clock"`` sentinel value of
           ``NetClassRouting.length_match_reference`` is resolved
-          inside this function -- the returned ``MatchGroup.reference``
-          is a concrete net-id, never the sentinel string.
+          inside this function -- the returned
+          ``MatchGroup.reference_net_id`` is a concrete net-id, never
+          the sentinel string.
     """
     name_to_id = _name_to_id_map(net_names)
     claimed_net_ids: set[int] = set()
@@ -287,8 +231,8 @@ def detect_match_groups(
         net_to_class=net_to_class,
     )
     for group in explicit_groups:
-        group.members.sort()
-        group.reference = _resolve_reference(
+        group.net_ids.sort()
+        group.reference_net_id = _resolve_reference(
             group=group,
             net_names=net_names,
             name_to_id=name_to_id,
@@ -296,12 +240,14 @@ def detect_match_groups(
             net_to_class=net_to_class,
         )
         out.append(group)
-        claimed_net_ids.update(group.members)
+        claimed_net_ids.update(group.net_ids)
         logger.info(
             "[match_group] %s (%d nets, source: explicit, ref=%s)",
-            group.group_id,
-            len(group.members),
-            net_names.get(group.reference) if group.reference is not None else "longest",
+            group.name,
+            len(group.net_ids),
+            net_names.get(group.reference_net_id)
+            if group.reference_net_id is not None
+            else "longest",
         )
 
     # 2. Legacy-API groups (existing add_match_group registrations).
@@ -323,9 +269,9 @@ def detect_match_groups(
             if not members:
                 continue
             group = MatchGroup(
-                group_id=name,
-                members=members,
-                reference=None,  # Legacy API has no reference policy.
+                name=name,
+                net_ids=members,
+                reference_net_id=None,  # Legacy API has no reference policy.
                 source=MatchGroupSource.LEGACY_API,
             )
             out.append(group)
@@ -344,15 +290,15 @@ def detect_match_groups(
         suffix_groups = _infer_suffix_groups(remaining_names)
         for group in suffix_groups:
             # Re-check claim set in case two suffix patterns collide.
-            if set(group.members) & claimed_net_ids:
+            if set(group.net_ids) & claimed_net_ids:
                 continue
-            group.members.sort()
+            group.net_ids.sort()
             out.append(group)
-            claimed_net_ids.update(group.members)
+            claimed_net_ids.update(group.net_ids)
             logger.info(
                 "[match_group] %s (%d nets, source: suffix)",
-                group.group_id,
-                len(group.members),
+                group.name,
+                len(group.net_ids),
             )
 
     return out
@@ -396,9 +342,9 @@ def _gather_explicit_groups(
 
     return [
         MatchGroup(
-            group_id=name,
-            members=sorted(ids),
-            reference=None,  # Resolved after the gather pass.
+            name=name,
+            net_ids=sorted(ids),
+            reference_net_id=None,  # Resolved after the gather pass.
             source=MatchGroupSource.EXPLICIT,
         )
         for name, ids in sorted(group_to_ids.items())
@@ -440,9 +386,9 @@ def _infer_suffix_groups(net_names: dict[int, str]) -> list[MatchGroup]:
             continue
         out.append(
             MatchGroup(
-                group_id=group_name,
-                members=sorted(ids),
-                reference=None,
+                name=group_name,
+                net_ids=sorted(ids),
+                reference_net_id=None,
                 source=MatchGroupSource.SUFFIX,
             )
         )
@@ -469,7 +415,7 @@ def _resolve_reference(
     cannot find a matching member.
 
     The resolver consults the FIRST class in ``net_class_routing``
-    whose ``length_match_group`` equals ``group.group_id`` and uses
+    whose ``length_match_group`` equals ``group.name`` and uses
     that class's ``length_match_reference`` value.  When multiple
     classes share the same group name and disagree on the reference,
     the first one wins (deterministic by ``sorted()`` order in
@@ -482,7 +428,7 @@ def _resolve_reference(
     reference_policy: str | None = None
     for class_name in sorted(net_class_routing.keys()):
         nc = net_class_routing[class_name]
-        if nc.effective_length_match_group() == group.group_id:
+        if nc.effective_length_match_group() == group.name:
             reference_policy = nc.effective_length_match_reference()
             if reference_policy is not None:
                 break
@@ -497,15 +443,15 @@ def _resolve_reference(
             logger.warning(
                 "[match_group] group %s declares reference net %r which is "
                 "not in the net list; falling back to longest",
-                group.group_id,
+                group.name,
                 reference_policy,
             )
             return None
-        if ref_id not in group.members:
+        if ref_id not in group.net_ids:
             logger.warning(
                 "[match_group] group %s declares reference net %r which is "
                 "not a member of the group; falling back to longest",
-                group.group_id,
+                group.name,
                 reference_policy,
             )
             return None
@@ -535,7 +481,7 @@ def _resolve_clock_sentinel(
     clock_regexes = _get_clock_regexes()
 
     matches: list[int] = []
-    for nid in group.members:
+    for nid in group.net_ids:
         name = net_names.get(nid)
         if name is None:
             continue
@@ -549,7 +495,7 @@ def _resolve_clock_sentinel(
             "[match_group] group %s: 'clock' sentinel declared but no "
             "member name matches any clock regex from CRITICAL_NET_PATTERNS; "
             "falling back to longest",
-            group.group_id,
+            group.name,
         )
         return None
 
@@ -558,7 +504,7 @@ def _resolve_clock_sentinel(
         logger.warning(
             "[match_group] group %s: 'clock' sentinel matched %d members "
             "(%s); picking lowest net id %d (%s) for determinism",
-            group.group_id,
+            group.name,
             len(matches),
             [net_names.get(m) for m in matches],
             matches[0],
