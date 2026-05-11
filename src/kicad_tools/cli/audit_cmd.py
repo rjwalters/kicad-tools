@@ -91,6 +91,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Override auto-detected PCB path (takes precedence over project.kct)",
     )
     parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields. When supplied, enables the diff-pair DRC rules "
+            "(routing_continuity, length_skew) to fire on routed boards "
+            "(Issue #2684)."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -128,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_erc=args.skip_erc,
             no_assembly=args.no_assembly,
             pcb_override=args.pcb,
+            net_class_map_path=args.net_class_map,
         )
         result = audit.run()
     except ValueError as e:
