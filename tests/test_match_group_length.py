@@ -12,12 +12,18 @@ This module tests:
   :class:`DiffPairLengthTracker.measure_net_from_pcb` (the Phase 2.5c sister
   primitive); a drift-prevention test asserts the two helpers stay byte-for-
   byte aligned.
+* Phase 1D wiring (Issue #2690): ``Autorouter._finalize_routing`` populates
+  the tracker after every ``route_all_*`` entry point; ``add_match_group``
+  flows through detection to the tracker; the no-group / detection-failure
+  paths preserve the working diff-pair path.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from unittest.mock import patch
+
+import pytest
 
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.router.diffpair_length import DiffPairLengthTracker
@@ -794,3 +800,357 @@ class TestPublicExports:
         from kicad_tools.router import MatchGroupSource as Exported
 
         assert Exported is MatchGroupSource
+
+
+# =============================================================================
+# 11. Phase 1D wiring -- Autorouter._finalize_routing populates the tracker
+#     (Issue #2690 / Epic #2661 Phase 1D)
+# =============================================================================
+#
+# The #2587 dormant-signal lesson: a feature whose record_routes call is
+# unreachable from the production code path silently regresses.  These
+# tests pin the contract that every ``route_all_*`` strategy invokes
+# ``_finalize_routing`` which in turn invokes ``update_match_group_skew``
+# on the legacy-API-declared group below.
+#
+# The fixture uses a 4-net DDR-style group declared via the legacy
+# ``Autorouter.add_match_group(...)`` API.  The Phase 1C detector's
+# LEGACY_API source surfaces this group from ``LengthTracker.match_groups``;
+# Phase 1D then populates the tracker with the routed lengths.
+
+
+def _build_synthetic_ddr_group_autorouter():
+    """Build a minimal Autorouter with a 4-net DDR-style group routable end-to-end.
+
+    Two components (``J1`` and ``U1``) sit on opposite sides of a small
+    30x30 mm board, with four matching ``DDR_DQ0..DDR_DQ3`` nets.  The
+    legacy ``Autorouter.add_match_group("DDR_BUS", ...)`` call surfaces
+    the group via the Phase 1C detector's LEGACY_API source, so any
+    strategy that wires ``_finalize_routing`` correctly populates
+    ``match_group_tracker.get_all_skews()``.
+    """
+    from kicad_tools.router.core import Autorouter
+
+    ar = Autorouter(width=30.0, height=30.0)
+    ar.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 2.0,
+                "y": 8.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "DDR_DQ0",
+            },
+            {
+                "number": "2",
+                "x": 2.0,
+                "y": 12.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "DDR_DQ1",
+            },
+            {
+                "number": "3",
+                "x": 2.0,
+                "y": 16.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 3,
+                "net_name": "DDR_DQ2",
+            },
+            {
+                "number": "4",
+                "x": 2.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 4,
+                "net_name": "DDR_DQ3",
+            },
+        ],
+    )
+    ar.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 28.0,
+                "y": 8.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "DDR_DQ0",
+            },
+            {
+                "number": "2",
+                "x": 28.0,
+                "y": 12.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "DDR_DQ1",
+            },
+            {
+                "number": "3",
+                "x": 28.0,
+                "y": 16.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 3,
+                "net_name": "DDR_DQ2",
+            },
+            {
+                "number": "4",
+                "x": 28.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 4,
+                "net_name": "DDR_DQ3",
+            },
+        ],
+    )
+    # Legacy-API match group declaration -- the LEGACY_API source path.
+    ar.add_match_group("DDR_BUS", [1, 2, 3, 4], tolerance=0.5)
+    return ar
+
+
+class TestFinalizeRoutingWiresMatchGroupTracker:
+    """Drift-prevention gate -- ``_finalize_routing`` wires the match-group tracker.
+
+    Mirrors ``TestFinalizeRoutingDriftPrevention`` in
+    ``tests/test_diffpair_length.py:637-741`` byte-for-byte modulo the
+    diff-pair -> match-group renames.  Without these tests, a future
+    strategy that bypasses ``_finalize_routing`` would silently regress:
+    its routes would land on ``self.routes`` but
+    ``match_group_tracker.get_all_skews()`` would stay empty.
+    """
+
+    @pytest.mark.parametrize(
+        "strategy_name",
+        [
+            "route_all",
+            "route_all_negotiated",
+            "route_all_interleaved",
+        ],
+    )
+    def test_strategy_populates_match_group_tracker(self, strategy_name):
+        ar = _build_synthetic_ddr_group_autorouter()
+
+        # Each strategy is a top-level entry point on Autorouter that
+        # must end with a _finalize_routing call.  Invoked through
+        # getattr so the parametrize-id reflects which strategy regressed.
+        strategy = getattr(ar, strategy_name)
+        if strategy_name == "route_all_negotiated":
+            # max_iterations=2 keeps the test fast; the contract is
+            # invocation-shape, not convergence.
+            strategy(max_iterations=2)
+        else:
+            strategy()
+
+        # Acceptance criterion 1: tracker.lengths is non-empty.
+        # The #2587 dormant-signal gate -- if this is empty, the
+        # _finalize_routing call never reached update_match_group_skew.
+        assert ar.match_group_tracker.lengths, (
+            f"{strategy_name}: match_group_tracker.lengths is empty -- "
+            f"_finalize_routing is not being invoked on this strategy's "
+            f"return path, or update_match_group_skew is not reachable."
+        )
+
+        # Acceptance criterion 2: get_all_skews() returns a non-empty
+        # dict containing the legacy-API-declared "DDR_BUS" group.
+        skews = ar.match_group_tracker.get_all_skews()
+        assert skews, f"{strategy_name}: match_group_tracker.get_all_skews() is empty"
+        assert "DDR_BUS" in skews, f"{strategy_name}: DDR_BUS group missing from skews: {skews}"
+        # Skew is a real non-negative float (the contract is "non-None
+        # float", not a specific value -- routing is non-deterministic).
+        skew_mm = skews["DDR_BUS"]
+        assert isinstance(skew_mm, float)
+        assert skew_mm >= 0.0  # max(L) - min(L) is always non-negative
+
+    def test_finalize_routing_idempotent(self):
+        """``_finalize_routing`` can be called multiple times safely.
+
+        ``record_routes`` overwrites previously-recorded lengths, and
+        ``update_match_group_skew`` re-derives ``detected_groups`` each
+        call so repeated invocations leave the tracker in the same state
+        as a single invocation (modulo non-determinism in detection,
+        which is deterministic for these synthetic inputs).
+        """
+        ar = _build_synthetic_ddr_group_autorouter()
+        ar.route_all()
+        first_skew = dict(ar.match_group_tracker.get_all_skews())
+
+        # Direct second invocation must not corrupt the tracker.
+        ar._finalize_routing()
+        second_skew = dict(ar.match_group_tracker.get_all_skews())
+
+        assert first_skew == second_skew
+        assert first_skew  # non-empty
+
+    def test_finalize_routing_noop_when_no_groups(self):
+        """When no match groups are declared, ``_finalize_routing`` is a no-op.
+
+        Documents the contract that ``_finalize_routing`` does NOT
+        spuriously populate the tracker for boards without match groups
+        (no legacy API call, no explicit declaration, suffix inference off).
+        """
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=20.0, height=20.0)
+        ar.add_component(
+            "J1",
+            [
+                {
+                    "number": "1",
+                    "x": 2.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG_A",
+                },
+            ],
+        )
+        ar.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 18.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG_A",
+                },
+            ],
+        )
+        ar.route_all()
+
+        # No groups -> no skews recorded.  Tracker stays empty.
+        assert ar.match_group_tracker.get_all_skews() == {}
+        assert ar.match_group_tracker.lengths == {}
+
+    def test_finalize_routing_detection_failure_preserves_diff_pair_path(self):
+        """A failing match-group detector must NOT regress the diff-pair tracker.
+
+        Phase 1D's block ordering contract: the diff-pair block runs
+        FIRST.  If the match-group detector raises (ImportError, generic
+        Exception, ...), ``_finalize_routing`` returns cleanly and the
+        diff-pair tracker remains populated.  This is the regression
+        gate against the Phase 1D additions breaking the existing
+        Phase 3H-cont path.
+        """
+        from kicad_tools.router.core import Autorouter
+
+        # Build a USB pair AND a DDR group so both detectors have work.
+        ar = Autorouter(width=30.0, height=30.0)
+        ar.add_component(
+            "J1",
+            [
+                {
+                    "number": "1",
+                    "x": 2.0,
+                    "y": 8.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": 2.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+        ar.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 28.0,
+                    "y": 8.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": 28.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+
+        # Monkey-patch detect_match_groups to raise so the match-group
+        # block enters its except branch.  The diff-pair block must run
+        # to completion regardless.
+        with patch(
+            "kicad_tools.router.match_group_detection.detect_match_groups",
+            side_effect=RuntimeError("synthetic Phase 1C detection failure"),
+        ):
+            ar.route_all()
+
+        # The diff-pair path is unbroken: USB_D+/USB_D- pair was
+        # detected and the diff-pair tracker is populated.
+        diff_skews = ar.diffpair_length_tracker.get_all_skews()
+        assert diff_skews, (
+            "diff-pair tracker is empty -- the Phase 1D additions broke "
+            "the Phase 3H-cont diff-pair path (block ordering violation)"
+        )
+        assert ("USB_D+", "USB_D-") in diff_skews
+
+        # The match-group path silently no-ops on detector failure.
+        assert ar.match_group_tracker.get_all_skews() == {}
+
+    def test_legacy_add_match_group_flows_to_tracker(self):
+        """Integration test: the legacy API populates the new tracker.
+
+        ``Autorouter.add_match_group("TEST", [...])`` writes into
+        ``self._length_tracker.match_groups``; the Phase 1C detector's
+        LEGACY_API source surfaces this; Phase 1D's
+        ``update_match_group_skew`` records routed lengths.  The whole
+        chain must work end-to-end without caller code change.
+        """
+        ar = _build_synthetic_ddr_group_autorouter()
+        ar.route_all()
+
+        skews = ar.match_group_tracker.get_all_skews()
+        assert "DDR_BUS" in skews
+        # The legacy-API source produces a real float skew (not None).
+        assert skews["DDR_BUS"] is not None
+        assert isinstance(skews["DDR_BUS"], float)
+
+        # And the underlying lengths are populated for all four members.
+        assert 1 in ar.match_group_tracker.lengths
+        assert 2 in ar.match_group_tracker.lengths
+        assert 3 in ar.match_group_tracker.lengths
+        assert 4 in ar.match_group_tracker.lengths
+
+    def test_match_group_tracker_property_returns_internal_tracker(self):
+        """The ``match_group_tracker`` property returns the live tracker.
+
+        Mirrors the diff-pair property contract: the returned object
+        IS the autorouter's internal tracker (no defensive copy).
+        """
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=10.0, height=10.0)
+        assert ar.match_group_tracker is ar._match_group_tracker
+        # And it's a real MatchGroupTracker, not None.
+        assert isinstance(ar.match_group_tracker, MatchGroupTracker)
