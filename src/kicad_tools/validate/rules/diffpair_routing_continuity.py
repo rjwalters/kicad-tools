@@ -293,6 +293,12 @@ class DiffPairRoutingContinuityRule(DRCRule):
         # of the rule).  Empty engaged set means 0 checks; the rule has
         # nothing to validate.
         results.rules_checked = len(self._engaged)
+        # Phase 4N (#2660): per-rule counter for CI "rule exercised"
+        # assertion.  Only populated when the engaged set is non-empty
+        # so a board with no engaged pairs has no entry (which the
+        # CI gate reads as "rule did not run").
+        if self._engaged:
+            results.rules_checked_by_rule["diffpair_routing_continuity"] = len(self._engaged)
 
         if not self._engaged:
             return results

@@ -257,8 +257,13 @@ class DiffPairLengthSkewRule(DRCRule):
                 continue
 
             # This pair counts toward rules_checked (one check per
-            # engaged pair with measured skew).
+            # engaged pair with measured skew).  Phase 4N (#2660): also
+            # bump the per-rule counter so the CI gate can confirm the
+            # rule was exercised on at least one pair.
             results.rules_checked += 1
+            results.rules_checked_by_rule["diffpair_length_skew"] = (
+                results.rules_checked_by_rule.get("diffpair_length_skew", 0) + 1
+            )
 
             tolerance_mm = self._threshold_map.get(key, self._default_tolerance_mm)
             if skew_mm > tolerance_mm:

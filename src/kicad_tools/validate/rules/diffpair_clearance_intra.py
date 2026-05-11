@@ -161,7 +161,15 @@ class DiffPairClearanceIntraRule(DRCRule):
                 results.add(v)
 
         # One rule check per layer (matches ClearanceRule convention).
+        # Phase 4N (#2660): the *per-rule* counter records how many pairs
+        # were actually inspected -- this is the CI signal "rule actually
+        # ran on this board".  Bumping this only when ``diff_pair_set``
+        # is non-empty matches the "rule was exercised" semantic: a board
+        # with no detected pairs does NOT exercise the rule, even if the
+        # layer-walk loop ran.
         results.rules_checked = len(pcb.copper_layers)
+        if diff_pair_set:
+            results.rules_checked_by_rule["diffpair_clearance_intra"] = len(diff_pair_set)
 
         return results
 

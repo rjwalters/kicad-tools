@@ -121,6 +121,59 @@ Per the Epic #2556 Phase 4L mitigation strategy, this board is scaffolded
 now with PCIe / MIPI pairs declared but DRC tolerated at "non-strict" if
 #2648 hasn't landed yet.  Re-route and tighten when #2648 merges.
 
+## CI Gate (Phase 4N, #2660)
+
+This board is **re-routed from scratch on every pull request** by the
+`diffpair-routing-regression` job in `.github/workflows/ci.yml`.  Unlike
+the diff-driven `routed-pcb-drc-check` job (which only runs when a PR
+touches a committed `*_routed.kicad_pcb`), this job always runs so that
+algorithmic regressions in the router are caught even when the committed
+PCB stays untouched.
+
+The job:
+
+1. Runs `python boards/06-diffpair-test/generate_design.py --step route --seed 42`
+   to re-route the unrouted PCB deterministically.
+2. Loads the freshly-routed PCB, constructs the per-protocol
+   `NetClassRouting` map from `build_net_class_map()`, and runs
+   `DRCChecker` with `--mfr jlcpcb`.
+3. Asserts the DRC **error count** is within the per-board allowlist in
+   `.github/routed-drc-tolerance.yml` (currently 28: 25x `ImpedanceRule`
+   per [#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
+   + 3x `diffpair_clearance_intra` per
+   [#2677](https://github.com/rjwalters/kicad-tools/issues/2677)).
+4. Asserts each of the three diff-pair DRC rule_ids was actually
+   exercised by the check, i.e. the JSON summary's
+   `rules_checked_by_rule[rule_id] >= 1` for each of:
+     - `diffpair_clearance_intra`
+     - `diffpair_length_skew`
+     - `diffpair_routing_continuity`
+
+   This guards against silent regressions that disable diff-pair
+   detection (e.g. flipping `coupled_routing` back to `False` on the
+   net classes).  Without this assertion a regression that produces 0
+   diff-pair violations because no rule ran would slip through the
+   allowlist check.
+
+### Interpreting a failure
+
+| Failure mode                                                | Likely cause                                                      |
+|-------------------------------------------------------------|-------------------------------------------------------------------|
+| `Diff-pair rule(s) NOT exercised`                           | Detection broken: `coupled_routing` flag flipped, suffix detection broken, or the routed PCB has no matching pair traces. |
+| `DRC regression: <N> error(s) exceeds allowlist value 28`   | The router introduced new DRC errors beyond the documented #2672/#2677 baseline.  Bisect against the routing algorithm. |
+| Re-route step fails with non-zero exit                      | Routing algorithm regression (board hangs or crashes during `route_all`).  Reproduce locally with `--seed 42`. |
+
+### Tightening the allowlist
+
+When [#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
+(impedance-width selection) and
+[#2677](https://github.com/rjwalters/kicad-tools/issues/2677) (BGA
+partner-via escape) land, the board 06 entry in
+`.github/routed-drc-tolerance.yml` should be reduced.  Eventually the
+entry should be **removed** entirely (per the YAML's "absence == strict
+0 errors" convention) once the board routes cleanly under JLCPCB tier-1
+rules.
+
 ## Out of Scope
 
 Per issue [#2658](https://github.com/rjwalters/kicad-tools/issues/2658)

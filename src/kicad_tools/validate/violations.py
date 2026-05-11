@@ -95,11 +95,27 @@ class DRCResults:
 
     Attributes:
         violations: List of all violations found
-        rules_checked: Number of rules that were checked
+        rules_checked: Number of rules that were checked (aggregate)
+        rules_checked_by_rule: Per-rule check counter mapping
+            ``rule_id -> count`` of times the rule actually ran (Issue
+            #2660 / Epic #2556 Phase 4N).  Rules that short-circuit
+            (e.g., a diff-pair rule on a board with no engaged pairs)
+            contribute ``0`` -- and the absence of an entry / a value of
+            ``0`` is the CI-side signal that the rule did NOT exercise
+            on the board.  Allows the ``diffpair-routing-regression``
+            CI gate to assert that the three diff-pair rules
+            (``diffpair_clearance_intra``, ``diffpair_length_skew``,
+            ``diffpair_routing_continuity``) actually ran against
+            board 06 on every PR, catching regressions in detection
+            logic (e.g., accidentally flipping ``coupled_routing`` back
+            to ``False``) that would otherwise silently report 0
+            errors.
+        suppressed_count: Number of violations suppressed by filters
     """
 
     violations: list[DRCViolation] = field(default_factory=list)
     rules_checked: int = 0
+    rules_checked_by_rule: dict[str, int] = field(default_factory=dict)
     suppressed_count: int = 0
 
     @property
@@ -154,9 +170,20 @@ class DRCResults:
         self.violations.append(violation)
 
     def merge(self, other: DRCResults) -> None:
-        """Merge violations from another DRCResults into this one."""
+        """Merge violations from another DRCResults into this one.
+
+        Sums ``rules_checked`` (aggregate counter) and per-rule entries
+        in ``rules_checked_by_rule`` so a downstream consumer can ask
+        "how many times did rule X run across all categories" after
+        ``DRCChecker.check_all()`` has called ``merge()`` on every
+        per-rule result.
+        """
         self.violations.extend(other.violations)
         self.rules_checked += other.rules_checked
+        for rule_id, count in other.rules_checked_by_rule.items():
+            self.rules_checked_by_rule[rule_id] = (
+                self.rules_checked_by_rule.get(rule_id, 0) + count
+            )
         self.suppressed_count += other.suppressed_count
 
     def filter_by_rule(self, rule_id: str) -> list[DRCViolation]:
@@ -175,6 +202,7 @@ class DRCResults:
             "warning_count": self.warning_count,
             "info_count": self.info_count,
             "rules_checked": self.rules_checked,
+            "rules_checked_by_rule": dict(self.rules_checked_by_rule),
             "violations": [v.to_dict() for v in self.violations],
         }
 
