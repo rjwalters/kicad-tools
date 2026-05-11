@@ -32,6 +32,7 @@ LVS Example:
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -683,6 +684,61 @@ class SchematicPCBChecker:
             unmatched_sch.discard(sch_ref)
             unmatched_pcb.discard(pcb_ref)
 
+    def _collect_schematic_components(self) -> dict[str, dict[str, str]]:
+        """Return {reference: {value, footprint}} for every schematic symbol.
+
+        Uses :func:`kicad_tools.schema.bom.extract_bom` with
+        ``hierarchical=True`` when a schematic path is known so that
+        symbols placed inside sub-sheets are included. When the checker
+        was constructed with a loaded :class:`Schematic` object (no
+        path), falls back to root-sheet-only enumeration and emits a
+        runtime warning -- this prevents the hierarchical-blindness bug
+        where every PCB footprint was reported as "extra" / every
+        schematic symbol as "missing" (see issue #2625).
+        """
+        sch_components: dict[str, dict[str, str]] = {}
+
+        if self._schematic_path:
+            from kicad_tools.schema.bom import extract_bom
+
+            bom = extract_bom(self._schematic_path, hierarchical=True)
+            for item in bom.items:
+                if item.is_power_symbol:
+                    continue
+                if not item.on_board:
+                    continue
+                if item.reference and not item.reference.startswith("#"):
+                    sch_components[item.reference] = {
+                        "value": item.value or "",
+                        "footprint": item.footprint or "",
+                    }
+            return sch_components
+
+        # Fallback: no path -> enumerate root sheet only.
+        if self._schematic_has_sheets():
+            warnings.warn(
+                "SchematicPCBChecker was constructed with a Schematic "
+                "object instead of a path; hierarchical sub-sheets will "
+                "be skipped and PCB footprints from those sheets will "
+                "appear as extra. Pass a schematic path to enable "
+                "hierarchical traversal.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+        for sym in self.schematic.symbols:
+            if sym.reference and not sym.reference.startswith("#"):
+                sch_components[sym.reference] = {
+                    "value": sym.value or "",
+                    "footprint": getattr(sym, "footprint", "") or "",
+                }
+        return sch_components
+
+    def _schematic_has_sheets(self) -> bool:
+        """Return True if the loaded schematic contains sub-sheet references."""
+        sheets = getattr(self.schematic, "sheets", None)
+        return bool(sheets)
+
     def _check_components(self) -> list[ConsistencyIssue]:
         """Check component consistency (missing/extra).
 
@@ -691,12 +747,11 @@ class SchematicPCBChecker:
         """
         issues: list[ConsistencyIssue] = []
 
-        # Build reference sets, excluding power symbols
-        sch_refs = {
-            sym.reference
-            for sym in self.schematic.symbols
-            if sym.reference and not sym.reference.startswith("#")
-        }
+        # Walk all sub-sheets via extract_bom() when a path is known
+        # (issue #2625) so hierarchical schematics aren't reported as
+        # having every footprint extra.
+        sch_components = self._collect_schematic_components()
+        sch_refs = set(sch_components.keys())
 
         pcb_refs = {
             fp.reference
@@ -706,9 +761,7 @@ class SchematicPCBChecker:
 
         # Find components missing from PCB
         for ref in sorted(sch_refs - pcb_refs):
-            # Get footprint from schematic if available
-            sym = next(s for s in self.schematic.symbols if s.reference == ref)
-            footprint = getattr(sym, "footprint", "") or ""
+            footprint = sch_components[ref].get("footprint", "")
             footprint_hint = f" ({footprint})" if footprint else ""
 
             issues.append(
@@ -799,7 +852,9 @@ class SchematicPCBChecker:
         from kicad_tools.schematic.models import Schematic as ModelsSchematic
 
         sch_path = self._schematic_path or (
-            str(self.schematic.path) if hasattr(self.schematic, "path") and self.schematic.path else None
+            str(self.schematic.path)
+            if hasattr(self.schematic, "path") and self.schematic.path
+            else None
         )
         if not sch_path:
             return {}
@@ -823,14 +878,9 @@ class SchematicPCBChecker:
         """
         issues: list[ConsistencyIssue] = []
 
-        # Build lookup maps
-        sch_components: dict[str, dict[str, str]] = {}
-        for sym in self.schematic.symbols:
-            if sym.reference and not sym.reference.startswith("#"):
-                sch_components[sym.reference] = {
-                    "value": sym.value or "",
-                    "footprint": sym.footprint or "",
-                }
+        # Walk all sub-sheets so values/footprints from hierarchical
+        # designs are compared (issue #2625).
+        sch_components = self._collect_schematic_components()
 
         pcb_components: dict[str, dict[str, str]] = {}
         for fp in self.pcb.footprints:
