@@ -964,9 +964,19 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # high-side MOSFET gates.  Sit just above each phase's HS MOSFET so the
     # GATE_DRV_*H -> GATE_*H net runs vertically.  R20-R22 use the same 0805
     # footprint generator as R3/R4.
-    R20_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 64)  # Phase A HS
-    R21_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 64)  # Phase B HS
-    R22_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 64)  # Phase C HS
+    #
+    # Iteration 3 (#2682): moved y=64 -> y=62 to clear the TO-220 Vertical
+    # courtyard north edge.  Q1/Q3/Q5 use Package_TO_SOT_THT:TO-220-3_Vertical
+    # whose F.CrtYd extends to y=-3.4 relative to the pin-2 origin, i.e., the
+    # courtyard reaches up to (Q*_y - 3.4) = 164.6 absolute.  At the previous
+    # y=64 (abs 164) the R20-R22 0805 body (1.3 mm tall) extended to y=164.65,
+    # OVERLAPPING the TO-220 courtyard by ~0.05 mm.  Moving to y=62 leaves
+    # the body north edge at y=162.65 with 1.95 mm clearance from the TO-220
+    # courtyard, restoring routability for GATE_AH/BH/CH (previously
+    # "No path found" because Q1/Q3/Q5 + R20-R22 footprints were touching).
+    R20_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 62)  # Phase A HS
+    R21_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 62)  # Phase B HS
+    R22_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 62)  # Phase C HS
 
     # Motor connector (right edge, bottom -- near MOSFETs)
     J2_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 76)
