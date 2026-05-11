@@ -977,6 +977,57 @@ class DiffPairRouter:
         """
         self.autorouter = autorouter
 
+    def _resolve_detection_inputs(
+        self,
+    ) -> tuple[dict | None, dict[str, str] | None, list | None]:
+        """Pull layered-detection context off the autorouter.
+
+        Returns the ``(net_class_routing, net_to_class, kicad_groups)``
+        triple needed by :func:`_layered_detect_diff_pairs`.  Supports
+        both attribute conventions:
+
+        * ``net_class_routing`` + ``net_to_class`` -- preferred (set by
+          callers that have built a class-name-keyed map).
+        * ``net_class_map`` -- the autorouter's per-net-name map; when
+          present, we synthesise a ``net_to_class`` map from it so the
+          explicit declaration path can be consulted.
+
+        Issue #2638 / Epic #2556 Phase 2E: the explicit-declaration
+        path in ``_gather_explicit_pairs`` was previously dead for
+        callers that only set ``autorouter.net_class_map`` (the common
+        case).  Phase 2E plumbs the fallback through so the
+        engagement-layer single-ended refusal -- which depends on
+        explicit pairs being detected -- can fire.
+        """
+        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
+        net_to_class = getattr(self.autorouter, "net_to_class", None)
+        kicad_groups = getattr(self.autorouter, "kicad_diff_pair_groups", None)
+
+        if net_class_routing is None:
+            net_class_map = getattr(self.autorouter, "net_class_map", None)
+            if net_class_map:
+                net_class_routing = net_class_map
+                if net_to_class is None:
+                    # Synthesise a net_name -> class_name map.  We use
+                    # the NetClassRouting.name attribute so the
+                    # class-name-keyed lookup in _gather_explicit_pairs
+                    # can find each entry under a stable key.  Because
+                    # multiple net names may map to the same
+                    # NetClassRouting instance, we also register each
+                    # NetClassRouting under its own .name so
+                    # _gather_explicit_pairs' subsequent lookup
+                    # ``net_class_routing.get(class_name)`` succeeds.
+                    synth_routing: dict = dict(net_class_map)
+                    synth_to_class: dict[str, str] = {}
+                    for net_name, nc in net_class_map.items():
+                        cls_name = nc.name
+                        synth_to_class[net_name] = cls_name
+                        synth_routing.setdefault(cls_name, nc)
+                    net_class_routing = synth_routing
+                    net_to_class = synth_to_class
+
+        return net_class_routing, net_to_class, kicad_groups
+
     def detect_differential_pairs(self) -> list[DifferentialPair]:
         """Detect differential pairs from net names.
 
@@ -984,14 +1035,15 @@ class DiffPairRouter:
         detector (``diffpair_detection.detect_diff_pairs``) which
         consults explicit ``NetClassRouting.diffpair_partner`` and
         KiCad-group declarations in priority order before falling back
-        to suffix inference.  When the autorouter does not provide
-        ``net_class_routing`` / ``net_to_class`` / ``kicad_diff_pair_groups``
-        attributes, behaviour collapses to the legacy suffix-only
-        result.
+        to suffix inference.
+
+        Issue #2638, Phase 2E: the layered-detection inputs are now
+        pulled from either explicit ``net_class_routing`` /
+        ``net_to_class`` attributes OR the autorouter's
+        ``net_class_map`` (see :meth:`_resolve_detection_inputs`), so
+        explicit declarations are honoured for both attribute shapes.
         """
-        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
-        net_to_class = getattr(self.autorouter, "net_to_class", None)
-        kicad_groups = getattr(self.autorouter, "kicad_diff_pair_groups", None)
+        net_class_routing, net_to_class, kicad_groups = self._resolve_detection_inputs()
 
         detected = _layered_detect_diff_pairs(
             self.autorouter.net_names,
@@ -1008,9 +1060,7 @@ class DiffPairRouter:
         Returns a list of ``(pair, source)`` tuples where ``source`` is
         one of ``"explicit"``, ``"kicad_group"``, ``"suffix"``.
         """
-        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
-        net_to_class = getattr(self.autorouter, "net_to_class", None)
-        kicad_groups = getattr(self.autorouter, "kicad_diff_pair_groups", None)
+        net_class_routing, net_to_class, kicad_groups = self._resolve_detection_inputs()
 
         detected = _layered_detect_diff_pairs(
             self.autorouter.net_names,
@@ -1030,26 +1080,14 @@ class DiffPairRouter:
         """Resolve whether ``pair`` should engage CoupledPathfinder.
 
         Issue #2638, Epic #2556 Phase 2E: thin wrapper that pulls
-        net-class context off the autorouter and defers to
+        net-class context off the autorouter via
+        :meth:`_resolve_detection_inputs` and defers to
         :func:`should_engage_coupled`.
-
-        The autorouter exposes one of two attribute shapes:
-
-        * ``net_class_routing`` + ``net_to_class`` -- the layered
-          detector's convention.
-        * ``net_class_map`` -- the autorouter's per-net-name map.
-          We surface this as ``net_class_routing`` for the helper,
-          which handles the net-name-keyed convention via its
-          :func:`_lookup_net_class` fallback.
 
         Returns:
             ``(engaged, reason)`` from :func:`should_engage_coupled`.
         """
-        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
-        net_to_class = getattr(self.autorouter, "net_to_class", None)
-        if net_class_routing is None:
-            # Fall back to the autorouter's per-net-name map.
-            net_class_routing = getattr(self.autorouter, "net_class_map", None)
+        net_class_routing, net_to_class, _ = self._resolve_detection_inputs()
         return should_engage_coupled(pair, net_class_routing, net_to_class)
 
     def _get_pair_pads(self, pair: DifferentialPair) -> tuple[list[Pad], list[Pad]] | None:
