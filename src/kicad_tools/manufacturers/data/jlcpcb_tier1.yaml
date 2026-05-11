@@ -1,0 +1,118 @@
+# JLCPCB Capability Plus (tier 1) Design Rules Configuration
+#
+# JLCPCB Capability Plus is an advanced manufacturing tier that offers
+# additional capabilities such as via-in-pad (epoxy-filled, plated-over),
+# typically at a per-order surcharge. The scalar DRC limits (trace width,
+# clearance, via drill, annular ring, edge clearance) for Capability Plus
+# match the standard JLCPCB advanced PCB process; the practical difference
+# is the additional via-in-pad capability, which is currently not modelled
+# as a scalar field in DesignRules. See router/mfr_limits.py
+# (MFR_JLCPCB_TIER1.via_in_pad_supported=True) for that capability.
+#
+# Source: https://jlcpcb.com/capabilities/pcb-capabilities
+#         https://jlcpcb.com/capabilities/Capabilities (Capability Plus tier)
+# Last verified: 2026-05-10
+#
+# All measurements in millimeters unless otherwise noted.
+#
+# NOTE: Values mirror jlcpcb.yaml. Any time JLCPCB publishes tighter
+# Capability Plus numbers, update this file (do NOT relax values below
+# the base jlcpcb profile - DRC rules for tier1 must be at least as
+# strict as the base profile to avoid regressions for users who specify
+# the tier1 profile).
+
+design_rules:
+  2layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0            # No inner layers
+
+  2layer_2oz:
+    min_trace_width_mm: 0.1524      # 6 mil (per JLCPCB published specs for 2oz copper)
+    min_clearance_mm: 0.1524        # 6 mil (per JLCPCB published specs for 2oz copper)
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
+
+  4layer_1oz:
+    min_trace_width_mm: 0.1016      # 4 mil
+    min_clearance_mm: 0.1016        # 4 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.45
+    min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_hole_to_edge_mm: 0.4
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+
+  4layer_2oz:
+    min_trace_width_mm: 0.1524      # 6 mil outer (per JLCPCB published specs for 2oz copper)
+    min_clearance_mm: 0.1016        # 4 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.45
+    min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_hole_to_edge_mm: 0.4
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.5
+
+  6layer_1oz:
+    min_trace_width_mm: 0.0889      # 3.5 mil
+    min_clearance_mm: 0.0889        # 3.5 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.45
+    min_annular_ring_mm: 0.15       # 6 mil (per JLCPCB specs)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_hole_to_edge_mm: 0.4
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5

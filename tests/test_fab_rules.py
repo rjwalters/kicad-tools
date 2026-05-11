@@ -180,10 +180,12 @@ class TestCmdList:
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
-        assert len(data) == 5  # jlcpcb, oshpark, seeed, pcbway, flashpcb
+        # jlcpcb, jlcpcb-tier1, oshpark, seeed, pcbway, flashpcb
+        assert len(data) == 6
 
         ids = {p["id"] for p in data}
         assert "jlcpcb" in ids
+        assert "jlcpcb-tier1" in ids
         assert "oshpark" in ids
         assert "flashpcb" in ids
 
