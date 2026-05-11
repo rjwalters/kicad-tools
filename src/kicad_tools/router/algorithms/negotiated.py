@@ -1492,7 +1492,11 @@ class NegotiatedRouter:
         if not nets_to_reroute:
             return False, overflow_history[-1] if overflow_history else 0
 
-        # Shuffle the order of conflicting nets
+        # Shuffle the order of conflicting nets.
+        # Issue #2589: uses the global ``random`` module.  This is the
+        # primary source of run-to-run nondeterminism in the negotiated
+        # router; ``kct route --seed N`` seeds the global RNG at startup
+        # so this shuffle becomes deterministic for the same input.
         shuffled = nets_to_reroute.copy()
         random.shuffle(shuffled)
 
@@ -1617,7 +1621,9 @@ class NegotiatedRouter:
         if not nets_to_reroute:
             return False, overflow_history[-1] if overflow_history else 0
 
-        # Select random subset (50-75% of conflicting nets)
+        # Select random subset (50-75% of conflicting nets).
+        # Issue #2589: uses the global ``random`` module; deterministic
+        # when the CLI seeds it via ``kct route --seed N``.
         subset_size = max(1, len(nets_to_reroute) * 2 // 3)
         subset = random.sample(nets_to_reroute, min(subset_size, len(nets_to_reroute)))
 
@@ -1692,6 +1698,8 @@ class NegotiatedRouter:
         net_set = set(all_nets)
         ordered = [n for n in reversed(net_order) if n in net_set]
         remaining = [n for n in all_nets if n not in set(net_order)]
+        # Issue #2589: uses the global ``random`` module; deterministic
+        # when the CLI seeds it via ``kct route --seed N``.
         random.shuffle(remaining)
         reorder = ordered + remaining
 

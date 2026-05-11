@@ -56,6 +56,7 @@ Layer Stack Configuration:
 import argparse
 import logging
 import math
+import random
 import shutil
 import signal
 import sys
@@ -3248,6 +3249,28 @@ def main(argv: list[str] | None = None) -> int:
         "Prevents individual nets from monopolizing the router. Use 0 to disable.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Seed the global ``random`` module with N before routing for "
+            "reproducible results (Issue #2589). When set, escape strategies "
+            "in the negotiated router (``_escape_shuffle_order``, "
+            "``_escape_random_subset``, ``_escape_full_reorder``) and the "
+            "MST fine-grid trial shuffle become deterministic across "
+            "invocations, so two runs with identical inputs and the same "
+            "--seed produce byte-identical routed output (modulo UUID lines, "
+            "which are intentionally random per element). Without --seed the "
+            "router uses Python's default os.urandom-derived entropy and "
+            "results vary run-to-run. Note: --seed does NOT remove all "
+            "sources of variance -- wall-clock escape budgets (e.g. "
+            "--timeout) can still terminate early on a loaded machine; "
+            "for fully reproducible CI runs combine --seed with a generous "
+            "--timeout."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -3833,6 +3856,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #2589: Seed the global ``random`` module for reproducible runs.
+    # When ``--seed`` is supplied, all unseeded ``random.shuffle`` /
+    # ``random.sample`` callsites in the negotiated router
+    # (``algorithms/negotiated.py`` escape strategies, ``core.py`` MST trial
+    # shuffle) and any other unseeded global-random consumers downstream
+    # become deterministic.  This is the primary fix for board-03 run-to-run
+    # variance.  When ``--seed`` is omitted, the global RNG is left at its
+    # default os.urandom-derived state -- existing behaviour is preserved.
+    if args.seed is not None:
+        random.seed(args.seed)
+        if not getattr(args, "quiet", False):
+            print(f"[seed] Seeded global random with --seed {args.seed}")
 
     # Resolve two-phase iteration count.
     # Priority: --two-phase-iterations (explicit) > --iterations (explicit) > 20 (default)

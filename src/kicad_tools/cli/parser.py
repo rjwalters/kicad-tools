@@ -2398,6 +2398,23 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Seed the global random module for reproducible routing "
+            "(Issue #2589). The python backend's escape strategies "
+            "(_escape_shuffle_order, _escape_random_subset, "
+            "_escape_full_reorder) and MST fine-grid trial shuffle call "
+            "random.shuffle/random.sample without per-instance seeding, "
+            "so two runs with identical inputs but no --seed produce "
+            "different byte output. When --seed N is set the router is "
+            "deterministic for the same input (modulo per-element UUID "
+            "generation, which is intentional). Recommended for CI."
+        ),
+    )
+    route_parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(

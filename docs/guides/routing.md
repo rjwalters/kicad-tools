@@ -331,6 +331,39 @@ See [LLM Routing Example](https://github.com/rjwalters/kicad-tools/tree/main/exa
 
 ---
 
+## Determinism and Reproducibility
+
+By default the python router backend uses Python's global `random` module without seeding,
+so two `kct route` invocations on the same input can produce different byte output and,
+on stuck boards, different DRC error counts run-to-run (issue #2589).
+
+For reproducible routing (CI baselines, regression debugging, board regeneration),
+pass `--seed N`:
+
+```bash
+# Two runs with --seed 42 produce byte-identical output
+# (modulo per-element UUIDs which are intentionally random)
+kct route board.kicad_pcb --backend python --seed 42 -o run1.kicad_pcb
+kct route board.kicad_pcb --backend python --seed 42 -o run2.kicad_pcb
+```
+
+What `--seed` covers:
+
+- `random.shuffle` in `_escape_shuffle_order`, `_escape_random_subset`, and `_escape_full_reorder`
+  (the negotiated router's escape strategies that fire under congestion).
+- `random.shuffle` in the MST fine-grid trial loop (`router/core.py`).
+
+What `--seed` does *not* cover:
+
+- Per-element UUID generation in the output PCB file -- these stay random by design.
+- Wall-clock-based escape budgets driven by `--timeout`: on a heavily loaded machine, fewer
+  routing iterations may complete before timeout, producing a different (still deterministic
+  within a budget) intermediate result. For fully reproducible CI runs, combine `--seed` with
+  a generous `--timeout`.
+- The C++ backend (`--backend cpp`): already deterministic for a given input grid.
+
+---
+
 ## Troubleshooting
 
 ### Unroutable Nets

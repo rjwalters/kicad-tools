@@ -273,6 +273,10 @@ def run_route_command(args) -> int:
         sub_argv.append("--no-cache")
     if getattr(args, "backend", "auto") != "auto":
         sub_argv.extend(["--backend", args.backend])
+    # Issue #2589: forward --seed for deterministic runs.  Default is None
+    # (router uses os.urandom-derived state, existing behaviour).
+    if getattr(args, "seed", None) is not None:
+        sub_argv.extend(["--seed", str(args.seed)])
     if getattr(args, "strict", False):
         sub_argv.append("--strict")
     # Issue #2464: Forward differential pair routing flags
