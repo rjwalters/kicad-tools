@@ -502,6 +502,29 @@ class NetClassRouting:
     via the ``threshold_map`` constructor argument.
     """
 
+    # Differential pair length-match skew tolerance (Issue #2647, Epic #2556 Phase 3H)
+    skew_tolerance_mm: float | None = None
+    """Maximum allowed length skew (|L_p - L_n|, in mm) for differential pairs
+    in this class.
+
+    ``None`` (the default) means "use the rule's module-level default of
+    0.5 mm" -- a conservative value covering USB 3.0 / PCIe Gen 2+ (~0.5-1 mm),
+    MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm) headroom while still
+    permitting the looser USB 2.0 HS budget (~3 mm) to be set explicitly.
+    Setting ``0.3`` is appropriate for tight HSDI lanes; setting ``3.0``
+    accommodates USB 2.0 full-/high-speed pairs.
+
+    The :class:`~kicad_tools.router.diffpair_length.DiffPairLengthTracker`
+    measures skew per pair unconditionally (no per-class gate); this field
+    only controls the DRC rule's firing threshold (Phase 3J / Issue J).
+    Phase 3I (serpentine insertion) consumes the accessor to choose which
+    side to lengthen.
+
+    Orthogonal to :attr:`length_critical`, which is a routing-priority hint
+    rather than a skew gate (`length_critical=False` pairs still get
+    measured).
+    """
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
@@ -532,6 +555,30 @@ class NetClassRouting:
         """
         if self.coupled_continuity_threshold is not None:
             return self.coupled_continuity_threshold
+        return default
+
+    def effective_skew_tolerance(self, default: float = 0.5) -> float:
+        """Return the length-match skew tolerance for diff pairs in this class.
+
+        Backward-compatible accessor (Issue #2647 / Epic #2556 Phase 3H):
+        returns ``default`` when :attr:`skew_tolerance_mm` is unset
+        (``None``).  ``default`` mirrors the (Phase 3J / Issue J) DRC rule's
+        module-level ``DEFAULT_SKEW_TOLERANCE_MM`` so callers can override
+        the floor consistently without re-importing it.
+
+        Args:
+            default: Fallback value (in mm) when no per-class skew
+                tolerance is set.  Defaults to ``0.5`` -- a conservative
+                value that covers USB 3.0 / PCIe Gen 2+ (~0.5-1 mm),
+                MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm) while
+                still permitting the looser USB 2.0 HS budget (~3 mm) to
+                be set explicitly per class.
+
+        Returns:
+            The per-class skew tolerance in mm if set, else ``default``.
+        """
+        if self.skew_tolerance_mm is not None:
+            return self.skew_tolerance_mm
         return default
 
 

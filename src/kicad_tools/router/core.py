@@ -47,6 +47,7 @@ from .cache import (
 from .bus_routing import BusRouter
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
+from .diffpair_length import DiffPairLengthTracker
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
@@ -433,6 +434,12 @@ class Autorouter:
 
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
+
+        # Per-pair diff-pair skew tracking (Issue #2647, Epic #2556 Phase 3H).
+        # Sibling to ``_length_tracker`` -- the existing tracker handles
+        # generic match-group / min/max constraints; this one is keyed on
+        # detected diff pairs and exposes ``|L_p - L_n|`` for Phase 3I/J.
+        self._diffpair_length_tracker: DiffPairLengthTracker = DiffPairLengthTracker()
 
         # Sub-problem pattern cache (Issue #2336)
         # When set, enables cross-board reuse of routing solutions for
@@ -6915,6 +6922,62 @@ class Autorouter:
         """Update the length tracker with current route lengths."""
         for route in self.routes:
             self._length_tracker.record_route(route.net, route)
+
+    def update_diffpair_skew(
+        self,
+        detected_pairs: list,
+        board_thickness_mm: float | None = None,
+        num_copper_layers: int | None = None,
+    ) -> DiffPairLengthTracker:
+        """Populate the diff-pair length tracker with current route skews.
+
+        Sibling to :meth:`_update_length_tracker` (Issue #2647, Epic #2556
+        Phase 3H).  Measures the routed length of each half of each
+        detected pair and exposes per-pair skew via
+        :attr:`_diffpair_length_tracker`.
+
+        Args:
+            detected_pairs: List of
+                :class:`~kicad_tools.router.diffpair_detection.DetectedPair`
+                objects from
+                :func:`~kicad_tools.router.diffpair_detection.detect_diff_pairs`.
+            board_thickness_mm: Total stackup thickness in mm.  When
+                ``None``, vias contribute ``0.0`` to the length
+                (documented zero-via-length default).
+            num_copper_layers: Number of copper layers in the stack.
+                Defaults to the layer-stack count when ``None`` (or 2
+                when no stack has been configured).
+
+        Returns:
+            The internal :class:`DiffPairLengthTracker` instance (also
+            accessible via :attr:`diffpair_length_tracker` for inspection).
+        """
+        if num_copper_layers is None:
+            # Best-effort default: pull the count from the configured
+            # layer stack when available; otherwise fall back to 2.
+            if self.layer_stack is not None:
+                num_copper_layers = len(self.layer_stack.layers)
+            else:
+                num_copper_layers = 2
+
+        self._diffpair_length_tracker.record_routes(
+            routes=self.routes,
+            detected_pairs=detected_pairs,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+        )
+        return self._diffpair_length_tracker
+
+    @property
+    def diffpair_length_tracker(self) -> DiffPairLengthTracker:
+        """Per-pair diff-pair skew tracker (Issue #2647, Epic #2556 Phase 3H).
+
+        Returns the :class:`DiffPairLengthTracker` instance populated by
+        :meth:`update_diffpair_skew`.  The tracker exposes per-pair
+        ``(L_p, L_n)`` lengths and ``|L_p - L_n|`` skew for Phase 3I
+        (serpentine insertion) and Phase 3J (DRC rule) consumers.
+        """
+        return self._diffpair_length_tracker
 
     def apply_length_tuning(
         self,
