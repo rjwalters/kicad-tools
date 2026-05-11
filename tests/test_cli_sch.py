@@ -3230,7 +3230,11 @@ class TestSchValidateMissingProjectInstances:
 {sym}
 {extra_symbols}
 )"""
-        sch_file = tmp_path / "test_inst.kicad_sch"
+        # Filename stem MUST equal the (project "test"...) name embedded
+        # in _INSTANCES_BLOCK above — _detect_project_info uses the root
+        # schematic's filename stem as the canonical project name.  See
+        # sch_re_annotate._detect_project_info and issue #2664.
+        sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(sch_text)
         return sch_file
 
@@ -3337,3 +3341,352 @@ class TestSchValidateMissingProjectInstances:
         pi_issues = [i for i in data["issues"] if i["category"] == "project_instances"]
         assert len(pi_issues) == 1
         assert pi_issues[0]["severity"] == "warning"
+
+    # -- new tests for issue #2664: wrong_project + loose_project_blocks ----
+
+    # Variant of _INSTANCES_BLOCK that names a *different* project.
+    # When the root schematic stem is "test", this instances block names
+    # "other-project" — kicad-cli will silently drop this symbol from the
+    # netlist because the project name does not match.
+    _WRONG_PROJECT_INSTANCES_BLOCK = """\
+    (instances
+      (project "other-project"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "{ref}")
+          (unit {unit})
+        )
+      )
+    )
+"""
+
+    # Variant where the (project ...) form is a *sibling* of (instances)
+    # at symbol-child indent — the malformed shape documented in #2624.
+    # (instances) itself is empty.  kicad-cli drops the symbol from the
+    # netlist because it only looks inside (instances).
+    _LOOSE_PROJECT_BLOCK = """\
+    (project "test"
+      (path "/00000000-0000-0000-0000-000000000001"
+        (reference "{ref}")
+        (unit {unit})
+      )
+    )
+    (instances)
+"""
+
+    def _make_schematic_with_block(
+        self,
+        tmp_path: Path,
+        block: str,
+        *,
+        lib_id: str = "Device:R",
+        ref: str = "R1",
+        value: str = "100k",
+        in_bom: str = "yes",
+        on_board: str = "yes",
+        uuid: str = "00000000-0000-0000-0000-000000000002",
+        unit: int = 1,
+        extra_symbols: str = "",
+    ) -> Path:
+        """Build a single-symbol schematic with the given child block.
+
+        ``block`` is the literal text (already formatted) to splice in at the
+        ``{instances}`` slot of ``_BASE_SYMBOL``.
+        """
+        sym = self._BASE_SYMBOL.format(
+            lib_id=lib_id,
+            ref=ref,
+            value=value,
+            in_bom=in_bom,
+            on_board=on_board,
+            uuid=uuid,
+            unit=unit,
+            instances=block,
+        )
+        sch_text = f"""(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+{sym}
+{extra_symbols}
+)"""
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(sch_text)
+        return sch_file
+
+    def test_wrong_project_flagged_as_error(self, tmp_path: Path):
+        """A symbol whose (instances) names the wrong project errors out."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(tmp_path, block)
+
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "error"
+        assert issues[0].category == "project_instances"
+        assert "Wrong project" in issues[0].message
+        assert "R1" in issues[0].message
+        # Fix hint must be present so users can grep for the command
+        assert "repair-instances" in issues[0].message
+
+    def test_wrong_project_power_symbol_flagged(self, tmp_path: Path):
+        """Power symbols with wrong_project are still flagged (they need repair too)."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(
+            ref="#PWR01", unit=1
+        )
+        sch_file = self._make_schematic_with_block(
+            tmp_path,
+            block,
+            lib_id="power:GND",
+            ref="#PWR01",
+            value="GND",
+        )
+
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "error"
+        assert "Wrong project" in issues[0].message
+
+    def test_loose_project_blocks_flagged_as_error(self, tmp_path: Path):
+        """A symbol with loose (project) blocks outside (instances) errors out."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        block = self._LOOSE_PROJECT_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(tmp_path, block)
+
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "error"
+        assert issues[0].category == "project_instances"
+        assert "Loose" in issues[0].message
+        assert "R1" in issues[0].message
+        assert "repair-instances" in issues[0].message
+
+    def test_loose_project_blocks_power_symbol_flagged(self, tmp_path: Path):
+        """Power symbols with loose_project_blocks are still flagged."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        block = self._LOOSE_PROJECT_BLOCK.format(ref="#PWR01", unit=1)
+        sch_file = self._make_schematic_with_block(
+            tmp_path,
+            block,
+            lib_id="power:GND",
+            ref="#PWR01",
+            value="GND",
+        )
+
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "error"
+        assert "Loose" in issues[0].message
+
+    def test_missing_instances_message_includes_fix_hint(self, tmp_path: Path):
+        """The legacy missing-instances message must include the repair hint."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        sch_file = self._make_schematic(tmp_path, include_instances=False)
+        issues = check_missing_project_instances(str(sch_file))
+
+        assert len(issues) == 1
+        assert issues[0].severity == "warning"
+        assert "repair-instances" in issues[0].message
+
+    def test_wrong_project_in_bom_on_board_skip_applies(self, tmp_path: Path):
+        """Graphical-only (in_bom=no, on_board=no) symbols skipped for wrong_project too."""
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(
+            tmp_path,
+            block,
+            in_bom="no",
+            on_board="no",
+        )
+
+        issues = check_missing_project_instances(str(sch_file))
+        assert len(issues) == 0
+
+    # List of unrelated checks to skip in end-to-end exit-code tests so the
+    # exit code reflects ONLY project_instances severity.  The minimal
+    # hand-built fixtures used here trigger noise from ERC, lib_symbols
+    # consistency, footprint completeness, etc. — none of which are
+    # relevant to whether project_instances raised the severity bar.
+    _OTHER_CHECKS = [
+        "erc",
+        "footprints",
+        "values",
+        "bom_variety",
+        "value_consistency",
+        "hierarchy",
+        "no_connect_input",
+        "global_label_directions",
+        "connector_pinout",
+        "duplicate_references",
+        "pin_assignment",
+        "swd_routing",
+        "power_short",
+        "power_polarity",
+        "i2c_pullups",
+        "boot0_pulldown",
+        "unconnected_component",
+        "nrst_filter",
+        "symbol_footprint_pin_count",
+        "lib_symbols_mismatch",
+        "matched_channel_symmetry",
+        "orphan_label",
+        "wire_stub",
+    ]
+
+    def _validate_argv(self, sch_file: Path) -> list[str]:
+        """Build argv that runs ONLY the project_instances check."""
+        argv = ["sch-validate", str(sch_file)]
+        for c in self._OTHER_CHECKS:
+            argv.extend(["--skip", c])
+        return argv
+
+    def test_exit_code_nonzero_on_wrong_project(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """End-to-end: kct sch validate exits non-zero when wrong_project present."""
+        from kicad_tools.cli.sch_validate import main
+
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(tmp_path, block)
+
+        monkeypatch.setattr("sys.argv", self._validate_argv(sch_file))
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        # error_count > 0 -> sys.exit(1)
+        assert exc_info.value.code == 1
+
+    def test_exit_code_nonzero_on_loose_project(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """End-to-end: kct sch validate exits non-zero when loose_project_blocks present."""
+        from kicad_tools.cli.sch_validate import main
+
+        block = self._LOOSE_PROJECT_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(tmp_path, block)
+
+        monkeypatch.setattr("sys.argv", self._validate_argv(sch_file))
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+
+    def test_exit_code_zero_on_missing_only(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """End-to-end: missing-instances alone stays a warning (exit 0)."""
+        from kicad_tools.cli.sch_validate import main
+
+        sch_file = self._make_schematic(tmp_path, include_instances=False)
+
+        monkeypatch.setattr("sys.argv", self._validate_argv(sch_file))
+        # Either no SystemExit at all, or SystemExit(0).
+        try:
+            main()
+            exit_code = 0
+        except SystemExit as e:
+            exit_code = e.code or 0
+        assert exit_code == 0
+
+    def test_json_output_wrong_project_is_error(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """JSON output for wrong_project surfaces severity=error in project_instances."""
+        from kicad_tools.cli.sch_validate import main
+
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
+        sch_file = self._make_schematic_with_block(tmp_path, block)
+
+        monkeypatch.setattr(
+            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
+        )
+        with contextlib.suppress(SystemExit):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        pi_issues = [
+            i for i in data["issues"] if i["category"] == "project_instances"
+        ]
+        assert len(pi_issues) == 1
+        assert pi_issues[0]["severity"] == "error"
+
+    def test_validator_and_repair_dry_run_agree(
+        self, tmp_path: Path, capsys
+    ):
+        """Validator and repair-instances --dry-run report the same count."""
+        from kicad_tools.cli.sch_repair_instances import run_repair_instances
+        from kicad_tools.cli.sch_validate import check_missing_project_instances
+
+        # Schematic with one wrong_project symbol + one loose_project symbol.
+        wrong_block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(
+            ref="R1", unit=1
+        )
+        loose_block = self._LOOSE_PROJECT_BLOCK.format(ref="R2", unit=1)
+
+        sym1 = self._BASE_SYMBOL.format(
+            lib_id="Device:R",
+            ref="R1",
+            value="10k",
+            in_bom="yes",
+            on_board="yes",
+            uuid="00000000-0000-0000-0000-000000000002",
+            unit=1,
+            instances=wrong_block,
+        )
+        sym2 = self._BASE_SYMBOL.format(
+            lib_id="Device:R",
+            ref="R2",
+            value="4.7k",
+            in_bom="yes",
+            on_board="yes",
+            uuid="00000000-0000-0000-0000-000000000003",
+            unit=1,
+            instances=loose_block,
+        )
+        sch_text = f"""(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+{sym1}
+{sym2}
+)"""
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(sch_text)
+
+        # Validator side
+        issues = check_missing_project_instances(str(sch_file))
+        validator_count = sum(1 for i in issues if i.severity == "error")
+        assert validator_count == 2  # one wrong + one loose
+
+        # Repair-instances dry-run side (JSON for stable counting)
+        run_repair_instances(
+            sch_file, dry_run=True, backup=False, format="json"
+        )
+        captured = capsys.readouterr()
+        # The JSON envelope reports a 'total' field
+        data = json.loads(captured.out)
+        repair_count = data["total"]
+
+        assert (
+            validator_count == repair_count
+        ), (
+            f"validate reported {validator_count} errors but "
+            f"repair-instances dry-run reported {repair_count}"
+        )

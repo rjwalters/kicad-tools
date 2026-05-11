@@ -180,6 +180,9 @@ def _extract_symbols_with_instance_info(
     """
     symbols = []
     ref_pattern = re.compile(r'\(property "Reference" "([^"]+)"')
+    value_pattern = re.compile(r'\(property "Value" "([^"]*)"')
+    in_bom_pattern = re.compile(r'\(in_bom\s+(yes|no)\)')
+    on_board_pattern = re.compile(r'\(on_board\s+(yes|no)\)')
 
     # Find symbol block starts: lines matching <ws>(symbol\n<ws>(lib_id "...")
     start_pattern = re.compile(
@@ -204,6 +207,21 @@ def _extract_symbols_with_instance_info(
             continue
 
         ref = ref_match.group(1)
+
+        # Extract Value property + in_bom/on_board for downstream consumers
+        # (e.g. validate's "graphical-only symbol" skip filter).  These are
+        # optional — sub-sheet symbol blocks always carry them in KiCad 8+,
+        # but minimal hand-built fixtures may omit them.  When absent, the
+        # defaults (value="", in_bom=True, on_board=True) match KiCad's
+        # behaviour: a symbol with no explicit (in_bom no) is in the BOM.
+        value_match = value_pattern.search(block)
+        sym_value = value_match.group(1) if value_match else ""
+        in_bom_match = in_bom_pattern.search(block)
+        sym_in_bom = (in_bom_match.group(1) == "yes") if in_bom_match else True
+        on_board_match = on_board_pattern.search(block)
+        sym_on_board = (
+            (on_board_match.group(1) == "yes") if on_board_match else True
+        )
 
         # Structural scan: locate the direct-child (instances ...) form and
         # any direct-child (project ...) forms (the malformed shape).
@@ -281,6 +299,9 @@ def _extract_symbols_with_instance_info(
             "unit_suffix": unit_suffix,
             "lib_id": lib_id,
             "uuid": sym_uuid,
+            "value": sym_value,
+            "in_bom": sym_in_bom,
+            "on_board": sym_on_board,
             "has_project_instance": has_project,
             "has_wrong_project": has_wrong_project,
             "has_loose_project_blocks": has_loose_project_blocks,
