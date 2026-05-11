@@ -845,9 +845,18 @@ class SchematicPCBChecker:
         result from ``{net_name: [PinRef]}`` into
         ``{reference: {pin_number: net_name}}``.
 
+        Walks the full sheet hierarchy via
+        ``extract_netlist(hierarchical=True)`` so sub-sheet pin nets are
+        included (issue #2633). Without this, ``_check_nets`` silently
+        skipped every sub-sheet ref because they were absent from the
+        root-only netlist.
+
         Returns:
             Mapping of reference -> {pin_number: net_name}.
-            Returns empty dict if no schematic path is available.
+            Returns empty dict if no schematic path is available
+            (hierarchical traversal requires a path; callers passing a
+            ``Schematic`` object without a path get root-only behaviour
+            and a warning is emitted upstream by ``_check_components``).
         """
         from kicad_tools.schematic.models import Schematic as ModelsSchematic
 
@@ -860,7 +869,7 @@ class SchematicPCBChecker:
             return {}
 
         models_sch = ModelsSchematic.load(sch_path)
-        netlist = models_sch.extract_netlist()
+        netlist = models_sch.extract_netlist(hierarchical=True)
 
         pin_nets: dict[str, dict[str, str]] = {}
         for net_name, pin_refs in netlist.items():

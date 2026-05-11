@@ -55,7 +55,12 @@ class SchematicIOMixin:
             raise FileNotFoundError(f"Schematic file not found: {path}")
 
         doc = parse_file(path)
-        return cls._from_sexp(doc)
+        sch = cls._from_sexp(doc)
+        # Track the source path so operations that need to walk
+        # sub-sheets (e.g., extract_netlist(hierarchical=True), run_erc)
+        # can resolve relative sheet references.
+        sch._saved_path = path
+        return sch
 
     @classmethod
     def _from_sexp(cls, doc: SExp) -> Schematic:

@@ -91,9 +91,8 @@ class SchematicNetlistMixin:
         for junc in self.junctions:
             junc_pos = (round(junc.x, 2), round(junc.y, 2))
             for seg_start, seg_end in wire_segments:
-                if (
-                    junc_pos in (seg_start, seg_end)
-                    or point_on_segment(junc_pos, seg_start, seg_end)
+                if junc_pos in (seg_start, seg_end) or point_on_segment(
+                    junc_pos, seg_start, seg_end
                 ):
                     union(junc_pos, seg_start)
                     union(junc_pos, seg_end)
@@ -107,9 +106,7 @@ class SchematicNetlistMixin:
                 # Track this pin at this position
                 if pos_rounded not in point_to_pins:
                     point_to_pins[pos_rounded] = []
-                point_to_pins[pos_rounded].append(
-                    PinRef(symbol_ref=sym.reference, pin=pin.number)
-                )
+                point_to_pins[pos_rounded].append(PinRef(symbol_ref=sym.reference, pin=pin.number))
 
                 # Connect to wires
                 connect_to_wire(pos_rounded)
@@ -158,11 +155,23 @@ class SchematicNetlistMixin:
 
         return parent, point_to_net_names, point_to_pins
 
-    def extract_netlist(self) -> dict[str, list[PinRef]]:
+    def extract_netlist(self, hierarchical: bool = False) -> dict[str, list[PinRef]]:
         """Extract netlist from schematic.
 
         Analyzes schematic connectivity to build a mapping from net names
         to the pins connected to each net.
+
+        Args:
+            hierarchical: When ``True``, walk every sub-sheet referenced
+                by this schematic and return a single merged netlist
+                covering the whole hierarchy. Sheet-pin / hierarchical-
+                label connections in the parent context resolve to the
+                parent's net name. Requires the schematic to have been
+                loaded via :meth:`Schematic.load` so the source file
+                path is known. When ``False`` (default), behaviour is
+                byte-identical to previous releases: only the root
+                sheet's wires, symbols, labels, and power symbols are
+                considered.
 
         Returns:
             Dict mapping net names to list of connected pins.
@@ -173,11 +182,39 @@ class SchematicNetlistMixin:
             - Power symbols (e.g., "+3.3V", "GND")
             - Auto-generated names for unnamed nets ("Net-(R1-1)")
 
+        Raises:
+            ValueError: If ``hierarchical=True`` is passed on a Schematic
+                that was not loaded from disk (no file path is available
+                to walk sub-sheets from).
+
         Example:
             >>> netlist = sch.extract_netlist()
             >>> print(netlist["+3.3V"])
             [PinRef(symbol_ref='U1', pin='VDD'), PinRef(symbol_ref='C1', pin='1')]
         """
+        if hierarchical:
+            # Lazy import to avoid an upward dependency from
+            # schematic/models/ on the operations/ layer. The walker
+            # already implements per-sheet extract_netlist() plus
+            # sheet-pin / hierarchical-label merging across sheets.
+            from pathlib import Path
+
+            from kicad_tools.operations.netlist import (
+                _collect_hierarchy_components,
+            )
+
+            saved_path = getattr(self, "_saved_path", None)
+            if saved_path is None:
+                raise ValueError(
+                    "extract_netlist(hierarchical=True) requires the "
+                    "Schematic to have been loaded from disk via "
+                    "Schematic.load(path); no file path is available "
+                    "to walk sub-sheets."
+                )
+
+            _, net_dict = _collect_hierarchy_components(Path(saved_path), "/")
+            return net_dict
+
         parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
 
         def find(p):
@@ -190,9 +227,7 @@ class SchematicNetlistMixin:
 
         # Group all points by their root (connected component)
         root_to_points: dict[tuple, list[tuple]] = {}
-        all_points = set(parent.keys()) | set(point_to_pins.keys()) | set(
-            point_to_net_names.keys()
-        )
+        all_points = set(parent.keys()) | set(point_to_pins.keys()) | set(point_to_net_names.keys())
         for point in all_points:
             root = find(point)
             if root not in root_to_points:
@@ -319,9 +354,7 @@ class SchematicNetlistMixin:
         netlist = self.extract_netlist()
         return netlist.get(net_name, [])
 
-    def are_connected(
-        self, symbol1: str, pin1: str, symbol2: str, pin2: str
-    ) -> bool:
+    def are_connected(self, symbol1: str, pin1: str, symbol2: str, pin2: str) -> bool:
         """Check if two pins are on the same net.
 
         Args:
