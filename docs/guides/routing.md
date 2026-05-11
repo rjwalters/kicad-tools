@@ -190,39 +190,21 @@ router.set_net_class_rules("HighSpeed", clearance=0.2)
 
 ## Differential Pairs
 
-### Automatic Detection
+Diff-pair routing is configured per net class on
+[`NetClassRouting`](../../src/kicad_tools/router/rules.py), not via imperative
+`Router.method(...)` calls. See the dedicated guides under
+[`docs/guides/diff-pairs/`](diff-pairs/README.md):
 
-```python
-# Detect pairs by naming convention (DATA_P/DATA_N)
-router.auto_detect_diff_pairs()
+- [Declaring a pair](diff-pairs/01-declaring-pairs.md) (`diffpair_partner`, suffix inference, single-ended refusal)
+- [Clearance](diff-pairs/02-clearance-and-classes.md) (`intra_pair_clearance`, `coupled_routing`)
+- [Impedance](diff-pairs/03-impedance-and-sizing.md) (`target_diff_impedance`, `kct impedance` CLI)
+- [Length matching](diff-pairs/04-length-matching.md) (`skew_tolerance_mm`, `Autorouter.update_diffpair_skew`)
+- [Protocol recipes](diff-pairs/05-protocol-recipes.md) (USB 2.0 / USB 3.0 / PCIe / MIPI)
+- [DRC rules](diff-pairs/06-drc-rules.md) (`diffpair_clearance_intra`, `_routing_continuity`, `_length_skew`, `impedance`)
 
-# Route as pairs
-result = router.route_diff_pairs()
-```
-
-### Manual Definition
-
-```python
-# Define diff pair
-router.add_diff_pair("USB_D", "USB_D+", "USB_D-",
-    spacing=0.15,           # Pair spacing
-    trace_width=0.2,
-    impedance=90,           # Target impedance
-)
-
-# Route it
-router.route_net("USB_D")
-```
-
-### Length Matching
-
-```python
-# Match lengths within tolerance
-router.set_length_match("USB_D+", "USB_D-", tolerance=0.5)  # mm
-
-# Add serpentine if needed
-router.enable_serpentine(min_amplitude=0.5, spacing=0.3)
-```
+The canonical pre-configured class is `NET_CLASS_HIGH_SPEED` in
+[`router/rules.py:675`](../../src/kicad_tools/router/rules.py) (already has
+`coupled_routing=True`).
 
 ---
 
