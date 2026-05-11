@@ -48,6 +48,10 @@ def _init_type_category_map() -> None:
             # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
             # Same category as other clearance subtypes -- fixable by rerouting.
             ViolationType.DIFFPAIR_CLEARANCE_INTRA: ViolationCategory.ROUTING,
+            # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
+            # Fixable by adjusting the route so the two halves stay coupled
+            # for a larger share of their length -- pure routing concern.
+            ViolationType.DIFFPAIR_ROUTING_CONTINUITY: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -122,6 +126,14 @@ class ViolationType(Enum):
     # *intra-pair* gap (allowed to be tighter than the manufacturer's inter-pair
     # ``min_clearance_mm``) against the per-class ``intra_pair_clearance``.
     DIFFPAIR_CLEARANCE_INTRA = "diffpair_clearance_intra"
+    # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
+    # Fires when an *engaged* differential pair's coupled fraction (the
+    # share of P's routed length whose nearest point on N is within the
+    # coupling window AND parallel within +/-15 degrees) falls below the
+    # per-class ``coupled_continuity_threshold`` (default 0.7).  Distinct
+    # from CLEARANCE because it checks a topology / geometry property
+    # (parallel-coupling continuity), not edge-to-edge spacing.
+    DIFFPAIR_ROUTING_CONTINUITY = "diffpair_routing_continuity"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
@@ -235,6 +247,16 @@ class ViolationType(Enum):
             # generic CLEARANCE type, masking the new violation type from
             # downstream consumers that filter by exact ``type`` value.
             "diffpair_clearance_intra": cls.DIFFPAIR_CLEARANCE_INTRA,
+            # Differential-pair routing continuity (Issue #2640, Epic #2556
+            # Phase 2G).  MUST be aliased explicitly even though the
+            # rule_id string ``"diffpair_routing_continuity"`` does NOT
+            # contain the substring ``"clearance"`` -- the fuzzy fallback
+            # at the bottom of from_string() would otherwise drop through
+            # to ``UNKNOWN``, which silently corrupts the violation type
+            # field for any downstream filter that compares by exact
+            # type value.  This entry is the only defense; do NOT delete
+            # it as "redundant".
+            "diffpair_routing_continuity": cls.DIFFPAIR_ROUTING_CONTINUITY,
             # edge clearance subtypes
             "edge_clearance_trace": cls.EDGE_CLEARANCE_TRACE,
             "edge_clearance_pad": cls.EDGE_CLEARANCE_PAD,
