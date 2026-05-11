@@ -2353,6 +2353,94 @@ class Autorouter:
                 pass
 
     # ------------------------------------------------------------------
+    # Post-route diff-pair skew bookkeeping
+    # (Issue #2657 / Epic #2556 Phase 3H-cont)
+    # ------------------------------------------------------------------
+
+    def _finalize_routing(self) -> None:
+        """Post-route consolidation: populate the diff-pair skew tracker.
+
+        Issue #2657 / Epic #2556 Phase 3H-cont: PR #2654 (Phase 3H) added
+        :meth:`update_diffpair_skew` and the sibling
+        ``_diffpair_length_tracker`` field, but left the *invocation* path
+        dormant -- no ``route_all_*`` strategy called the method, so
+        ``diffpair_length_tracker.get_all_skews()`` always returned ``{}``
+        in real runs.  This helper closes the gap.
+
+        It must be invoked once at the tail of every ``route_all_*`` /
+        ``route_with_*`` entry point (after ``self.routes`` is in its
+        final state) so consumers like Phase 3I (serpentine insertion)
+        and Phase 3J (length-skew DRC) can read populated per-pair
+        skew data.
+
+        Detection re-runs :func:`detect_diff_pairs` over the current
+        ``self.net_names`` and ``self.net_class_map`` to derive the
+        :class:`DetectedPair` list, mirroring the pattern used by
+        :meth:`_prepare_routing` (`core.py` start of every ``route_all_*``)
+        and :meth:`get_diff_pair_map` (Phase 2F).  Re-deriving (rather
+        than caching) avoids stale-state risk when callers add components
+        between passes and is consistent with PR #2653's
+        "consume on demand" approach for engaged_pairs.
+
+        ``board_thickness_mm`` is left as ``None`` -- the
+        ``DiffPairLengthTracker.record_routes`` contract documents this
+        as the zero-via-length default (vias contribute 0.0 mm).  See
+        the curator note on issue #2657 and the docstring at
+        ``diffpair_length.py:172``: ``router.rules.DesignRules`` has no
+        ``board_thickness_mm`` field (only ``manufacturers.base.DesignRules``
+        does), so threading real thickness through is deferred to a
+        follow-up.  For the AC test target (USB D+/D- on board 03), both
+        halves are on F.Cu with no vias, so the via-length policy does
+        not affect the skew.
+
+        Safe to call when there are no diff pairs (no-op via
+        ``record_routes`` early-exit on empty ``detected_pairs``).  Safe
+        to call multiple times: ``record_routes`` overwrites
+        previously-recorded lengths for the same net ids.
+        """
+        # Detection: defensive imports keep this helper robust against
+        # circular-import scenarios on partial installs.
+        try:
+            from .diffpair_detection import detect_diff_pairs
+        except ImportError:
+            return
+
+        if not self.net_names:
+            return
+
+        # Build net_to_class for explicit-declaration consultation.
+        # Identical construction to _prepare_routing / get_diff_pair_map.
+        net_to_class: dict[str, str] = {}
+        for net_name, net_class in self.net_class_map.items():
+            net_to_class[net_name] = net_class.name
+
+        try:
+            detected_pairs = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=self.net_class_map,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection failure must not break routing.
+            return
+
+        if not detected_pairs:
+            # No pairs -> nothing to record.  Keep tracker untouched so
+            # repeated finalize calls remain idempotent.
+            return
+
+        # board_thickness_mm=None: zero-via-length default (see docstring).
+        # num_copper_layers=None: update_diffpair_skew defaults to
+        # len(self.layer_stack.layers) or 2 -- matches the per-call branch
+        # at the original ``update_diffpair_skew`` definition.
+        self.update_diffpair_skew(
+            detected_pairs,
+            board_thickness_mm=None,
+            num_copper_layers=None,
+        )
+
+    # ------------------------------------------------------------------
     # Diff-pair partner map for escape routing
     # (Issue #2639 / Epic #2556 Phase 2F)
     # ------------------------------------------------------------------
@@ -3002,6 +3090,11 @@ class Autorouter:
             if failure_summary:
                 print(failure_summary)
 
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping so consumers (Phase 3I serpentine / 3J DRC)
+        # can read ``diffpair_length_tracker.get_all_skews()``.
+        self._finalize_routing()
+
         return all_routes
 
     def _attempt_blocked_component_ripup(
@@ -3436,6 +3529,10 @@ class Autorouter:
             if failure_summary:
                 print(failure_summary)
 
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+
         return all_routes
 
     def _route_net_with_mst_edges(self, net: int, mst_edges: list[MSTEdgeInfo]) -> list[Route]:
@@ -3632,6 +3729,10 @@ class Autorouter:
         print(f"  Failed nets: {len(result.failed_nets)}")
         print(f"  Conflicts resolved: {result.conflicts_resolved}")
         print(f"  Total time: {result.total_time_ms:.0f}ms")
+
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
 
         return list(escape_routes) + result.routes
 
@@ -4127,6 +4228,9 @@ class Autorouter:
         flush_print("\n--- Iteration 0: Initial routing with sharing ---")
         if progress_callback is not None:
             if not progress_callback(0.0, "Initial routing pass", True):
+                # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
+                # diff-pair skew bookkeeping even on early cancel.
+                self._finalize_routing()
                 return list(self.routes)
 
         # Use region-based parallelism for initial pass if enabled (Issue #965)
@@ -4211,6 +4315,9 @@ class Autorouter:
                 print("  No conflicts - routing complete!")
             if progress_callback is not None:
                 progress_callback(1.0, "Routing complete - no conflicts", False)
+            # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
+            # diff-pair skew bookkeeping (see _finalize_routing docstring).
+            self._finalize_routing()
             return list(self.routes)
         elif overflow == 0 and len(net_routes) < total_nets - len(single_pad_nets):
             # Some routable nets failed to route but no overflow - need rip-up.
@@ -5544,6 +5651,10 @@ class Autorouter:
                 1.0, f"Routing complete: {successful_nets}/{total_nets} nets ({status})", False
             )
 
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+
         return list(self.routes)
 
     def _route_net_negotiated(
@@ -5850,7 +5961,7 @@ class Autorouter:
         self._prepare_routing()
 
         tp_router = self._create_two_phase_router()
-        return tp_router.route_all(
+        result = tp_router.route_all(
             use_negotiated=use_negotiated,
             corridor_width_factor=corridor_width_factor,
             corridor_penalty=corridor_penalty,
@@ -5860,6 +5971,10 @@ class Autorouter:
             initial_routes=initial_routes,
             max_iterations=max_iterations,
         )
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+        return result
 
     def _route_net_with_corridor(
         self, net: int, present_cost_factor: float, per_net_timeout: float | None = None,
@@ -5977,7 +6092,7 @@ class Autorouter:
             List of Route objects (may be partial if timeout reached)
         """
         h_router = self._create_hierarchical_router()
-        return h_router.route_all(
+        result = h_router.route_all(
             num_cols=num_cols,
             num_rows=num_rows,
             corridor_width_factor=corridor_width_factor,
@@ -5986,6 +6101,10 @@ class Autorouter:
             timeout=timeout,
             per_net_timeout=per_net_timeout,
         )
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+        return result
 
     def _reset_for_new_trial(self):
         """Reset the router to initial state for a new trial."""
@@ -6122,7 +6241,7 @@ class Autorouter:
         """
         from .algorithms.monte_carlo import run_monte_carlo
 
-        return run_monte_carlo(
+        result = run_monte_carlo(
             autorouter=self,
             num_trials=num_trials,
             use_negotiated=use_negotiated,
@@ -6131,6 +6250,10 @@ class Autorouter:
             progress_callback=progress_callback,
             num_workers=num_workers,
         )
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+        return result
 
     def route_all_evolutionary(
         self,
@@ -6165,7 +6288,7 @@ class Autorouter:
         """
         from .algorithms.evolutionary import run_evolutionary
 
-        return run_evolutionary(
+        result = run_evolutionary(
             autorouter=self,
             pop_size=pop_size,
             generations=generations,
@@ -6175,6 +6298,10 @@ class Autorouter:
             num_workers=num_workers,
             timeout=timeout,
         )
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+        return result
 
     def route_all_block_aware(
         self,
@@ -6408,6 +6535,10 @@ class Autorouter:
             if failure_summary:
                 print(failure_summary)
 
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping (see _finalize_routing docstring).
+        self._finalize_routing()
+
         return all_routes
 
     def _build_net_routes_map(self) -> dict[int, list[Route]]:
@@ -6501,6 +6632,12 @@ class Autorouter:
                     f"\n  Post-route clearance correction rerouted {corrected} net(s) "
                     f"({elapsed:.1f}s)"
                 )
+
+        # Issue #2657 / Epic #2556 Phase 3H-cont: re-run finalize after
+        # post-route clearance correction since the latter can change
+        # route lengths.  _finalize_routing is idempotent (record_routes
+        # overwrites) so the inner strategies' calls are not invalidated.
+        self._finalize_routing()
 
         return result
 
@@ -7098,12 +7235,16 @@ class Autorouter:
                 fall-back to independent routing); pairs that fall through
                 are deferred to the main strategy.
         """
-        return self._diffpair.route_all_with_diffpairs(
+        result = self._diffpair.route_all_with_diffpairs(
             diffpair_config,
             net_order,
             non_diffpair_strategy=non_diffpair_strategy,
             coupled_only=coupled_only,
         )
+        # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
+        # skew bookkeeping.  Idempotent w.r.t. the inner route_all call.
+        self._finalize_routing()
+        return result
 
     def route_diffpair_prepass(
         self,
@@ -8239,6 +8380,12 @@ class Autorouter:
         if self.routing_failures:
             flush_print(f"  Still failed: {len(self.routing_failures)} net(s)")
 
+        # Issue #2657 / Epic #2556 Phase 3H-cont: re-run finalize after
+        # the fine-grid pass may have appended new routes to self.routes.
+        # _finalize_routing is idempotent so the inner Pass-1 call is
+        # not invalidated.
+        self._finalize_routing()
+
         return list(self.routes)
 
     # =========================================================================
@@ -8437,6 +8584,11 @@ class Autorouter:
 
         if clearance_failed_nets:
             print(f"\n  ⚠ {len(clearance_failed_nets)} net(s) still failed after max relaxation")
+
+        # Issue #2657 / Epic #2556 Phase 3H-cont: re-run finalize after
+        # the relaxation pass appends routes.  Idempotent w.r.t. the
+        # inner route_all_negotiated call.
+        self._finalize_routing()
 
         return list(self.routes), nets_relaxed
 
