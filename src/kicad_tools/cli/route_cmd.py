@@ -3339,6 +3339,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum length mismatch for differential pairs in mm (default: auto based on type)",
     )
     parser.add_argument(
+        "--length-match-diffpairs",
+        action="store_true",
+        help=(
+            "Enable per-pair differential length-match tuning (Epic #2556 "
+            "Phase 3I). Inserts serpentines on the shorter half of each "
+            "length-critical diff pair until skew is within the per-class "
+            "tolerance. Requires --differential-pairs to be set; emits a "
+            "warning and short-circuits otherwise."
+        ),
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -5059,6 +5070,62 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
+
+    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I (Issue #2648).
+    # Engaged via --length-match-diffpairs (opt-in).  Requires --differential-pairs;
+    # otherwise emit a warning and short-circuit (no detection means no pairs).
+    if getattr(args, "length_match_diffpairs", False) and router.routes:
+        if not args.differential_pairs:
+            if not quiet:
+                print(
+                    "\n--- Length-Match Diff-Pairs: skipped ---\n"
+                    "  --length-match-diffpairs requires --differential-pairs "
+                    "(no detection means no pairs to tune)."
+                )
+        else:
+            from kicad_tools.router.diffpair_detection import detect_diff_pairs
+
+            if not quiet:
+                print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
+            detected_pairs = detect_diff_pairs(net_names=router.net_names)
+            if not detected_pairs:
+                if not quiet:
+                    print("  No differential pairs detected; nothing to tune.")
+            else:
+                # Snapshot connectivity for the pad-to-pad invariant.
+                _ci_snapshot_skew = _connectivity_snapshot(router)
+                tune_results = router.apply_diffpair_length_tuning(
+                    detected_pairs=detected_pairs,
+                    verbose=not quiet,
+                )
+                _enforce_connectivity_invariant_or_exit(
+                    router,
+                    _ci_snapshot_skew,
+                    phase="length_match_diffpairs",
+                    args=args,
+                    quiet=quiet,
+                )
+                if not quiet:
+                    n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
+                    n_clean = sum(
+                        1 for r in tune_results.values() if r.reason == "already_within_tolerance"
+                    )
+                    n_rollback = sum(
+                        1
+                        for r in tune_results.values()
+                        if r.reason == "post_insertion_drc_violation"
+                    )
+                    n_budget = sum(
+                        1 for r in tune_results.values() if r.reason == "exceeded_max_inserts"
+                    )
+                    n_skipped = sum(
+                        1 for r in tune_results.values() if r.reason == "not_length_critical"
+                    )
+                    print(
+                        f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                        f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                        f"{n_skipped} skipped (not length-critical)"
+                    )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)

@@ -141,6 +141,7 @@ def tune_diff_pair_skew(
     intra_pair_clearance_mm: float,
     config: SerpentineConfig | None = None,
     max_inserts: int = MAX_INSERTS_PER_PAIR,
+    length_critical: bool = True,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -163,6 +164,13 @@ def tune_diff_pair_skew(
         max_inserts: Cascade-safety budget (default :data:`MAX_INSERTS_PER_PAIR`
             = 3).  The tuner stops after this many trombone attempts even
             if the pair remains out of tolerance.
+        length_critical: Engagement gate (default ``True``).  When ``False``
+            the tuner returns the pair unchanged with
+            ``reason="not_length_critical"``.  Callers that integrate from
+            the autorouter pipeline pass
+            ``net_class_routing.length_critical`` here -- pairs whose net
+            class is not flagged as length-critical are skipped, matching
+            the curator's engagement-gate spec on Issue #2648.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -182,6 +190,25 @@ def tune_diff_pair_skew(
     """
     p_id = pair.pair.positive.net_id
     n_id = pair.pair.negative.net_id
+
+    # Engagement gate: pairs whose net class does NOT have length_critical=True
+    # are not tuned (the curator's spec on Issue #2648).
+    if not length_critical:
+        p_route = routes_by_net.get(p_id)
+        n_route = routes_by_net.get(n_id)
+        result = DiffPairTuneResult(
+            success=True,
+            reason="not_length_critical",
+            message=(
+                f"Pair {pair.pair.positive.net_name}/{pair.pair.negative.net_name} "
+                "is not length_critical; skipping tuning per engagement gate."
+            ),
+        )
+        return (
+            p_route if p_route is not None else _empty_route(p_id, pair.pair.positive.net_name),
+            n_route if n_route is not None else _empty_route(n_id, pair.pair.negative.net_name),
+            result,
+        )
 
     p_route = routes_by_net.get(p_id)
     n_route = routes_by_net.get(n_id)
@@ -208,12 +235,16 @@ def tune_diff_pair_skew(
 
     # Already within tolerance -- byte-for-byte unchanged.
     if skew <= tolerance_mm:
-        return p_route, n_route, DiffPairTuneResult(
-            success=True,
-            reason="already_within_tolerance",
-            skew_before_mm=skew,
-            skew_after_mm=skew,
-            message=f"Pair already matched: skew={skew:.4f}mm <= tol={tolerance_mm:.4f}mm",
+        return (
+            p_route,
+            n_route,
+            DiffPairTuneResult(
+                success=True,
+                reason="already_within_tolerance",
+                skew_before_mm=skew,
+                skew_after_mm=skew,
+                message=f"Pair already matched: skew={skew:.4f}mm <= tol={tolerance_mm:.4f}mm",
+            ),
         )
 
     # The shorter half gets the trombone; the longer half is the target
@@ -285,8 +316,7 @@ def tune_diff_pair_skew(
             # etc.).  Treat the same as no_suitable_segment.
             result.reason = "no_suitable_segment"
             result.message = (
-                f"Trombone generation failed on net {shorter_id}: "
-                f"{serp_result.message}"
+                f"Trombone generation failed on net {shorter_id}: {serp_result.message}"
             )
             current_shorter = original_shorter_route
             break
@@ -322,8 +352,10 @@ def tune_diff_pair_skew(
         current_shorter = candidate_route
         result.inserts_applied += 1
         new_shorter_length = LengthTracker.calculate_route_length(current_shorter)
-        current_skew = abs(new_shorter_length - target_length) if longer_is_p else abs(
-            target_length - new_shorter_length
+        current_skew = (
+            abs(new_shorter_length - target_length)
+            if longer_is_p
+            else abs(target_length - new_shorter_length)
         )
         # Both branches reduce to abs(target_length - new_shorter_length)
         current_skew = abs(target_length - new_shorter_length)
@@ -524,7 +556,7 @@ def _post_insertion_clearance_ok(
 
     # Neighbor check (all other nets).
     for other_net_id, other_route in routes_by_net.items():
-        if other_net_id == shorter_net_id or other_net_id == longer_net_id:
+        if other_net_id in (shorter_net_id, longer_net_id):
             continue
         for new_seg in new_segments:
             for oseg in other_route.segments:
