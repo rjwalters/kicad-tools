@@ -37,7 +37,7 @@ plumbed through to ``route_main``.
 from __future__ import annotations
 
 import random
-import sys
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -84,8 +84,7 @@ def test_global_random_seed_differs_between_seeds():
     random.shuffle(items_b)
 
     assert items_a != items_b, (
-        "different seeds should produce different shuffles on a "
-        "non-trivial input (20 items)"
+        "different seeds should produce different shuffles on a non-trivial input (20 items)"
     )
 
 
@@ -102,11 +101,11 @@ def test_negotiated_random_callsites_use_global_random():
     The check is intentionally lightweight (substring match): a deeper
     AST inspection would be brittle to formatting changes.
     """
-    from kicad_tools.router.algorithms import negotiated
     from kicad_tools.router import core
+    from kicad_tools.router.algorithms import negotiated
 
-    neg_src = open(negotiated.__file__, encoding="utf-8").read()
-    core_src = open(core.__file__, encoding="utf-8").read()
+    neg_src = Path(negotiated.__file__).read_text(encoding="utf-8")
+    core_src = Path(core.__file__).read_text(encoding="utf-8")
 
     # The four sites the curator's investigation identified.
     assert "random.shuffle(shuffled)" in neg_src, (
