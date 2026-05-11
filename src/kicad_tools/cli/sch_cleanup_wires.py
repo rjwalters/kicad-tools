@@ -42,6 +42,15 @@ _QUANT = 1000
 # schematic wire is ever this short.
 _MICRO_STUB_FLOOR = 0.05
 
+# Tolerance (mm) used when deciding whether a wire endpoint coincides with
+# a "strong anchor" (label, pin, sheet pin, no-connect).  This matches
+# `validate/sch_orphan_label._COORD_EPS` so that files which pass the
+# orphan-label validator can never be torn apart by ``cleanup-wires``.
+# It is intentionally looser than the 1 um quantization bucket used for
+# everything else, because schematic edits / repairs frequently re-emit
+# coordinates with sub-um float drift.
+_ANCHOR_EPS = 0.01
+
 
 @dataclass
 class WireIssue:
@@ -175,29 +184,73 @@ def _build_connection_map(
 
     This excludes wire endpoints themselves -- we build those separately
     so we can check whether a given wire endpoint touches another wire.
+
+    The returned set covers all anchor kinds enumerated by
+    :func:`_collect_strong_anchors`, quantized to the 1 um bucket used for
+    fast exact lookup.  For tolerance-aware matching (e.g. against files
+    with sub-um float drift) callers should use the strong-anchor list
+    directly instead.
     """
     points: set[tuple[int, int]] = set()
+    for x, y in _collect_strong_anchors(schematic):
+        points.add((_quantize(x), _quantize(y)))
+    return points
+
+
+def _collect_strong_anchors(
+    schematic: Schematic,
+) -> list[tuple[float, float]]:
+    """Enumerate every "strong anchor" position in *schematic*.
+
+    A strong anchor is a non-wire object whose position is the canonical
+    end of a net segment in KiCad's electrical model: junctions, labels of
+    every kind (local / global / hierarchical / directive / netclass),
+    no-connect markers, symbol pins, and hierarchical sheet pins.
+
+    Wire endpoints anchored at any of these positions are by definition
+    load-bearing -- ``cleanup-wires`` must never remove them.
+    """
+    anchors: list[tuple[float, float]] = []
 
     # Junctions
     for junc in schematic.junctions:
-        points.add((_quantize(junc.position[0]), _quantize(junc.position[1])))
+        anchors.append((junc.position[0], junc.position[1]))
 
-    # Labels
+    # Local / global / hierarchical labels
     for lbl in schematic.labels:
-        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
-
+        anchors.append((lbl.position[0], lbl.position[1]))
     for lbl in schematic.global_labels:
-        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
-
+        anchors.append((lbl.position[0], lbl.position[1]))
     for lbl in schematic.hierarchical_labels:
-        points.add((_quantize(lbl.position[0]), _quantize(lbl.position[1])))
+        anchors.append((lbl.position[0], lbl.position[1]))
 
-    # No-connect markers count as connections for this purpose
+    # KiCad 8 introduced ``directive_label`` and ``netclass_flag`` nodes
+    # that are not exposed through :class:`Schematic` properties.  Read
+    # them directly so a wire endpoint anchored on one of them is still
+    # considered load-bearing.
+    for tag in ("directive_label", "netclass_flag"):
+        for node in schematic.sexp.find_all(tag):
+            if at := node.find("at"):
+                anchors.append(
+                    (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+                )
+
+    # No-connect markers
     for nc_node in schematic.sexp.find_all("no_connect"):
         if at := nc_node.find("at"):
-            x = at.get_float(0) or 0
-            y = at.get_float(1) or 0
-            points.add((_quantize(x), _quantize(y)))
+            anchors.append((at.get_float(0) or 0.0, at.get_float(1) or 0.0))
+
+    # Hierarchical sheet pins: each (sheet ...) block may contain
+    # (pin "NAME" SHAPE (at X Y R) ...) child nodes that mark the
+    # connection points on the sheet boundary.  These are NOT enumerated
+    # by Schematic.hierarchical_labels (those live inside the child sheet,
+    # not on the parent's sheet block).
+    for sheet_node in schematic.sexp.find_all("sheet"):
+        for pin_node in sheet_node.find_all("pin"):
+            if at := pin_node.find("at"):
+                anchors.append(
+                    (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+                )
 
     # Symbol pin positions -- use library data for accurate pin locations
     for sym in schematic.symbols:
@@ -208,15 +261,35 @@ def _build_connection_map(
                 sym.position, sym.rotation, sym.mirror
             )
             for pos in pin_positions.values():
-                points.add((_quantize(pos[0]), _quantize(pos[1])))
+                anchors.append((pos[0], pos[1]))
         else:
             # Fallback to symbol center when library data is unavailable
-            points.add((_quantize(sym.position[0]), _quantize(sym.position[1])))
+            anchors.append((sym.position[0], sym.position[1]))
         # Power symbols always connect via their position
         if sym.lib_id.startswith("power:"):
-            points.add((_quantize(sym.position[0]), _quantize(sym.position[1])))
+            anchors.append((sym.position[0], sym.position[1]))
 
-    return points
+    return anchors
+
+
+def _endpoint_at_strong_anchor(
+    point: tuple[float, float],
+    strong_anchors: list[tuple[float, float]],
+    tolerance: float = _ANCHOR_EPS,
+) -> bool:
+    """Return ``True`` if *point* is within *tolerance* mm of any anchor.
+
+    This is the tolerance-aware veto used by stub detection (Phase 3b).
+    It deliberately does NOT use the 1 um quantization bucket -- files
+    that round-trip through repair tools frequently introduce sub-um
+    float drift, which would otherwise miss a legitimate label/pin
+    anchor and let the stub heuristic remove a load-bearing wire.
+    """
+    px, py = point
+    return any(
+        abs(px - ax) <= tolerance and abs(py - ay) <= tolerance
+        for ax, ay in strong_anchors
+    )
 
 
 def _wire_endpoint_counts(
@@ -403,6 +476,7 @@ def find_cleanup_candidates(
 
     # Phase 3: dangling wires (endpoints not connected to anything else)
     connection_points = _build_connection_map(schematic, unique_wires)
+    strong_anchors = _collect_strong_anchors(schematic)
     endpoint_counts = _wire_endpoint_counts(unique_wires)
 
     for ws in unique_wires:
@@ -458,7 +532,10 @@ def find_cleanup_candidates(
                 continue
 
             # (a) Micro-stubs: unconditionally flag wires shorter than the
-            # floor -- no real schematic wire is ever this short.
+            # floor -- no real schematic wire is ever this short.  This is
+            # intentionally checked BEFORE the strong-anchor veto, because
+            # zero-area wire fragments at a label position are still
+            # invalid (KiCad treats them as ERC errors).
             if length < _MICRO_STUB_FLOOR:
                 issues.append(
                     WireIssue(
@@ -468,6 +545,19 @@ def find_cleanup_candidates(
                         end=end,
                     )
                 )
+                continue
+
+            # Hard veto: if EITHER endpoint coincides (within
+            # _ANCHOR_EPS) with any strong anchor -- a label of any kind,
+            # a symbol pin, a no-connect, or a hierarchical sheet pin --
+            # the wire is load-bearing and must never be classified as a
+            # stub.  This is the fix for the J2.24-style perpendicular
+            # L-shape into a label, where the wire endpoint is exactly on
+            # the label position but the quantization bucket misses it
+            # because of sub-um float drift introduced by repair tools.
+            if _endpoint_at_strong_anchor(
+                start, strong_anchors
+            ) or _endpoint_at_strong_anchor(end, strong_anchors):
                 continue
 
             electrically_dangling = 0

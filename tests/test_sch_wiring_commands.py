@@ -513,22 +513,25 @@ SCHEMATIC_WITH_T_JUNCTION_CONNECTED = """\
 
 
 # Schematic where a sub-mm stub has one endpoint sharing a wire endpoint
-# and the other endpoint landing on the body of another wire WITHOUT a
-# junction marker.  The old detection logic treated the body-touching end
-# as "connected" (via _endpoint_touches_other_wire_body), giving
-# dangling_ends == 0, so the stub escaped detection entirely.
+# (with NO strong anchor at that point) and the other endpoint landing on
+# the body of another wire WITHOUT a junction marker.  The old detection
+# logic treated the body-touching end as "connected" (via
+# _endpoint_touches_other_wire_body), giving dangling_ends == 0, so the
+# stub escaped detection entirely.
 #
 # Layout:
 #   Wire A: (100,50) -> (200,50)  horizontal, labels at both ends
-#   Wire B: (150,50) -> (150,60)  vertical, label at far end
-#   Stub:   (150,60) -> (160,60.4) 0.4mm diagonal stub from wire B end
+#   Wire B: (150,50) -> (150,60)  vertical -- both ends touch wire bodies
+#   Stub:   (150,60) -> (150.3,60.4) 0.4mm diagonal stub from wire B end
 #
-# The stub's start (150,60) shares an endpoint with wire B and a label.
-# The stub's end (160,60.4) lands on the body of wire A' (see wire-c).
-# Wire C: (100,60.4) -> (200,60.4) runs horizontally at y=60.4.
-# The stub endpoint at (160,60.4) sits on wire C's interior but has
-# no junction, label, pin, or shared wire endpoint there.
-# ERC flags (160,60.4) as "Wire endpoint is not connected".
+# The stub's start (150,60) shares an endpoint with wire B but has no
+# label, pin, junction, or other strong anchor -- so the strong-anchor
+# veto in Phase 3b does NOT apply.
+# The stub's end (150.3,60.4) lands on the body of wire C without any
+# junction.  ERC flags it as "Wire endpoint is not connected".
+#
+# Wire C: (100,60.4) -> (200,60.4) runs horizontally at y=60.4 with
+# labels at both ends so it isn't itself flagged as dangling.
 #
 # NOTE: we use a diagonal stub (not horizontal/vertical) to ensure it
 # cannot be flagged as a collinear overlap of wire C.
@@ -563,10 +566,6 @@ SCHEMATIC_WITH_ERC_STUB_WIRE_BODY = """\
   (label "NET2" (at 200 50 0)
     (effects (font (size 1.27 1.27)))
     (uuid "label-2")
-  )
-  (label "NET3" (at 150 60 0)
-    (effects (font (size 1.27 1.27)))
-    (uuid "label-3")
   )
   (label "NET4" (at 100 60.4 0)
     (effects (font (size 1.27 1.27)))
@@ -771,6 +770,194 @@ SCHEMATIC_WITH_SHORT_BRIDGE_AT_LABEL = """\
   (label "NET3" (at 200 50 0)
     (effects (font (size 1.27 1.27)))
     (uuid "label-3")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# ---------------------------------------------------------------------------
+# Regression fixtures for issue #2626 (strong-anchor veto)
+# ---------------------------------------------------------------------------
+
+# Perpendicular L-shape into a label.  Matches the J2.24 incident geometry
+# from issue #2626 exactly:
+#   W1: horizontal (130, 99.06) -> (138.43, 99.06)
+#   W2: vertical   (138.43, 99.06) -> (138.43, 100.33)   -- 1.27 mm "stub"
+#   Label "SPI_NSS" at (138.43, 100.33)
+#
+# W2's far endpoint is exactly on the label, so the strong-anchor veto
+# must keep W2 from being classified as a stub.
+SCHEMATIC_WITH_PERPENDICULAR_LABEL_ANCHORED_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000002626")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 130 99.06) (xy 138.43 99.06))
+    (stroke (width 0) (type default))
+    (uuid "w1-horiz")
+  )
+  (wire (pts (xy 138.43 99.06) (xy 138.43 100.33))
+    (stroke (width 0) (type default))
+    (uuid "w2-stub")
+  )
+  (label "SPI_NSS" (at 138.43 100.33 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "lbl-spi-nss")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# A short wire whose endpoint coincides with a label but with sub-um
+# float drift in the coordinates (138.43, 100.330001 vs label at
+# 138.43, 100.33).  The 1 um quantization bucket would miss this anchor;
+# the tolerance-aware veto (using _ANCHOR_EPS = 0.01 mm) must still
+# recognize the wire as anchored.
+SCHEMATIC_WITH_MICRON_DRIFT_LABEL = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000002628")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 130 99.06) (xy 138.43 99.06))
+    (stroke (width 0) (type default))
+    (uuid "w1-horiz")
+  )
+  (wire (pts (xy 138.43 99.06) (xy 138.43 100.330001))
+    (stroke (width 0) (type default))
+    (uuid "w2-stub-drifted")
+  )
+  (label "SPI_NSS" (at 138.43 100.33 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "lbl-spi-nss")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# A short wire from a symbol pin to a wire endpoint.  The pin-anchored
+# endpoint must never let the wire be classified as a stub, even though
+# the other end has no label.
+#
+# Resistor R1 placed at (100, 50) with no rotation.  Pin 1 is at
+# (100, 50 - 3.81) = (100, 46.19), pin 2 is at (100, 50 + 3.81) = (100, 53.81).
+# The candidate stub runs from pin 1 (100, 46.19) down 1.0 mm to a wire
+# endpoint at (100, 45.19) which is shared with a longer wire that ends
+# at a label.
+SCHEMATIC_WITH_PIN_ANCHORED_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000002629")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+      (symbol "Device:R_0_1"
+        (polyline (pts (xy -1.016 -2.54) (xy -1.016 2.54)) (stroke (width 0) (type default)) (fill (type none)))
+      )
+      (symbol "Device:R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "sym-r1-pin-stub")
+    (property "Reference" "R1" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 50 0) (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pin-r1-1"))
+    (pin "2" (uuid "pin-r1-2"))
+    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+  )
+  (wire (pts (xy 100 46.19) (xy 100 45.19))
+    (stroke (width 0) (type default))
+    (uuid "pin-anchored-stub")
+  )
+  (wire (pts (xy 100 45.19) (xy 100 30))
+    (stroke (width 0) (type default))
+    (uuid "long-trunk")
+  )
+  (label "GND" (at 100 30 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-gnd")
+  )
+  (label "VCC" (at 100 53.81 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-vcc")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)
+"""
+
+
+# A short wire whose free endpoint coincides with a hierarchical sheet
+# pin.  Sheet pins are NOT enumerated by Schematic.hierarchical_labels
+# (those live inside the child sheet), so before this fix the cleanup
+# detector treated them as un-anchored points.
+#
+# Layout:
+#   Sheet at (130, 90)..(170, 110)  with pin "CLK" at (170, 100)
+#   Wire trunk: (150, 100) -> (168.73, 100)   ~18.7 mm horizontal
+#   Stub:       (168.73, 100) -> (170, 100)   1.27 mm into the sheet pin
+SCHEMATIC_WITH_SHEET_PIN_ANCHORED_STUB = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000002630")
+  (paper "A4")
+  (lib_symbols)
+  (wire (pts (xy 150 100) (xy 168.73 100))
+    (stroke (width 0) (type default))
+    (uuid "trunk-wire")
+  )
+  (wire (pts (xy 168.73 100) (xy 170 100))
+    (stroke (width 0) (type default))
+    (uuid "sheet-pin-stub")
+  )
+  (label "CLK" (at 150 100 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "label-clk")
+  )
+  (sheet
+    (at 130 90)
+    (size 40 20)
+    (uuid "00000000-0000-0000-0000-000000002631")
+    (property "Sheetname" "child"
+      (at 130 89 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Sheetfile" "child.kicad_sch"
+      (at 130 110.5 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (pin "CLK" input
+      (at 170 100 0)
+      (effects (font (size 1.27 1.27)) (justify left))
+      (uuid "sheet-pin-clk")
+    )
   )
   (sheet_instances
     (path "/" (page "1"))
@@ -1371,6 +1558,132 @@ class TestCleanupWires:
         removed = remove_wires(sch, stubs)
         assert removed == 1
         assert len(list(sch.sexp.find_all("wire"))) == initial_wire_count - 1
+
+    # --- issue #2626 regression tests: strong-anchor veto ----------------
+
+    def test_perpendicular_short_wire_to_label_not_flagged(self, tmp_path):
+        """A perpendicular L-shape wire ending at a label is NOT a stub.
+
+        This is the exact J2.24 incident geometry that motivated #2626:
+        the vertical 1.27 mm wire is below the default stub threshold but
+        its far endpoint coincides with the SPI_NSS label, so the
+        strong-anchor veto must keep it from being classified as a stub.
+        """
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_PERPENDICULAR_LABEL_ANCHORED_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    def test_label_at_endpoint_with_micron_drift_not_flagged(self, tmp_path):
+        """A label whose position is within _ANCHOR_EPS of a wire endpoint
+        (sub-um float drift) still anchors the wire against stub removal.
+
+        Wire endpoint is at (138.43, 100.330001) and the label is at
+        (138.43, 100.33).  The drift is well under 0.01 mm so the
+        tolerance-aware veto recognizes them as the same anchor.
+        """
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_MICRON_DRIFT_LABEL)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    def test_short_wire_to_pin_not_flagged(self, tmp_path):
+        """A short wire whose endpoint sits on a symbol pin is NOT a stub.
+
+        The 1.0 mm wire below the default stub threshold has its pin-side
+        endpoint at R1 pin 1 (100, 46.19).  The pin veto must keep it from
+        being classified as a stub.
+        """
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_PIN_ANCHORED_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    def test_short_wire_to_sheet_pin_not_flagged(self, tmp_path):
+        """A short wire whose endpoint sits on a hierarchical sheet pin is
+        NOT classified as a stub.
+
+        Sheet pins live inside ``(sheet ...)`` blocks and are not exposed
+        through ``Schematic.hierarchical_labels``; the strong-anchor
+        enumeration must reach into the sheet block to find them.
+        """
+        from kicad_tools.cli.sch_cleanup_wires import find_cleanup_candidates
+
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_SHEET_PIN_ANCHORED_STUB)
+        sch = Schematic.load(path)
+        issues = find_cleanup_candidates(sch)
+
+        stubs = [i for i in issues if i.reason == "stub"]
+        assert len(stubs) == 0, (
+            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
+        )
+
+    def test_collect_strong_anchors_includes_all_kinds(self, tmp_path):
+        """The strong-anchor enumeration covers labels, no-connects, sheet
+        pins, and symbol pins -- not just the subset previously enumerated."""
+        from kicad_tools.cli.sch_cleanup_wires import _collect_strong_anchors
+
+        # Sheet-pin fixture exercises the sheet-pin enumeration
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_SHEET_PIN_ANCHORED_STUB)
+        sch = Schematic.load(path)
+        anchors = _collect_strong_anchors(sch)
+
+        # Sheet pin at (170, 100) must be in the list
+        assert any(
+            abs(x - 170.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors
+        ), f"sheet pin (170, 100) missing from anchors: {anchors}"
+        # Label at (150, 100) must be in the list
+        assert any(
+            abs(x - 150.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors
+        ), f"label (150, 100) missing from anchors: {anchors}"
+
+    def test_perpendicular_stub_removable_after_cleanup_preserves_label(
+        self, tmp_path
+    ):
+        """After running cleanup-wires on the J2.24 fixture, the label-
+        anchored wire and the label itself both remain in the schematic.
+
+        This is the integration-level post-cleanup invariant from issue
+        #2626: cleanup-wires must not introduce a new orphan-label or
+        dangling-endpoint condition.
+        """
+        from kicad_tools.cli.sch_cleanup_wires import (
+            find_cleanup_candidates,
+            remove_wires,
+        )
+
+        path = _write_sch(
+            tmp_path, SCHEMATIC_WITH_PERPENDICULAR_LABEL_ANCHORED_STUB
+        )
+        sch = Schematic.load(path)
+
+        initial_wires = len(list(sch.sexp.find_all("wire")))
+        initial_labels = len(list(sch.sexp.find_all("label")))
+
+        issues = find_cleanup_candidates(sch)
+        remove_wires(sch, issues)
+
+        # No wires or labels were removed -- fixture started clean.
+        assert len(list(sch.sexp.find_all("wire"))) == initial_wires
+        assert len(list(sch.sexp.find_all("label"))) == initial_labels
 
 
 # ---------------------------------------------------------------------------
