@@ -798,3 +798,229 @@ class TestPlacementDiffEntry:
 
         assert "PlacementDiffEntry" in router_pkg.__all__
         assert hasattr(router_pkg, "PlacementDiffEntry")
+
+
+# ---------------------------------------------------------------------------
+# Issue #2620: inner-parser registration of stagnation-patience and
+# outer-timeout flags.
+#
+# These tests guard against the regression where the top-level parser
+# in parser.py registered the two flags but the inner argparse in
+# route_cmd.py did not, causing kct route to fail with
+# "unrecognized arguments" whenever the forwarder in commands/routing.py
+# injected the flags into sub_argv.
+# ---------------------------------------------------------------------------
+
+
+class TestInnerParserPlacementFeedbackFlags:
+    """The inner argparse in ``route_cmd.main`` must accept both flags.
+
+    Three complementary checks:
+
+    1. ``--help`` text mentions both flags (parser-level registration).
+    2. End-to-end ``main([...])`` smoke tests don't exit with argparse
+       code 2 ("unrecognized arguments").
+    3. The parsed ``Namespace`` carries the values forward with the
+       correct types and defaults.
+    """
+
+    def test_inner_help_lists_outer_timeout(self):
+        """Issue #2620: inner --help advertises the outer-timeout flag."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        buf = StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            route_main(["--help"])
+        help_text = buf.getvalue()
+        assert "--placement-feedback-outer-timeout" in help_text, (
+            "inner parser help text is missing --placement-feedback-"
+            "outer-timeout (Issue #2620)"
+        )
+        # Help wording mirrors parser.py:2370-2375 (Issue #2606 tag).
+        assert "Issue #2606." in help_text
+
+    def test_inner_help_lists_stagnation_patience(self):
+        """Issue #2620: inner --help advertises the stagnation-patience flag."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        buf = StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            route_main(["--help"])
+        help_text = buf.getvalue()
+        assert "--placement-feedback-stagnation-patience" in help_text, (
+            "inner parser help text is missing --placement-feedback-"
+            "stagnation-patience (Issue #2620)"
+        )
+
+    def test_inner_parser_accepts_outer_timeout_no_exit_2(self, tmp_path):
+        """Regression: inner argparse must accept --placement-feedback-
+        outer-timeout (Issue #2620).  Prior to the fix this raised
+        SystemExit(2) with "unrecognized arguments".
+
+        We point at a non-existent pcb path so ``main`` returns 1
+        (file-not-found) instead of running the router.  Exit code 1
+        confirms argparse accepted the flag; the prior bug returned 2.
+        """
+        from kicad_tools.cli import route_cmd
+
+        # Path that does NOT exist on disk.
+        missing_pcb = str(tmp_path / "does_not_exist.kicad_pcb")
+
+        try:
+            rc = route_cmd.main(
+                [
+                    missing_pcb,
+                    "--dry-run",
+                    "--placement-feedback-outer-timeout",
+                    "1800",
+                ]
+            )
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+
+        assert rc != 2, (
+            "inner argparse rejected --placement-feedback-outer-timeout "
+            "(Issue #2620 regression)"
+        )
+        # File-not-found is the expected next failure mode (rc=1) once
+        # argparse accepts the flag.
+        assert rc == 1, (
+            f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
+        )
+
+    def test_inner_parser_accepts_stagnation_patience_no_exit_2(self, tmp_path):
+        """Regression: inner argparse must accept --placement-feedback-
+        stagnation-patience (Issue #2620)."""
+        from kicad_tools.cli import route_cmd
+
+        missing_pcb = str(tmp_path / "does_not_exist.kicad_pcb")
+
+        try:
+            rc = route_cmd.main(
+                [
+                    missing_pcb,
+                    "--dry-run",
+                    "--placement-feedback-stagnation-patience",
+                    "5",
+                ]
+            )
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+
+        assert rc != 2, (
+            "inner argparse rejected --placement-feedback-stagnation-patience "
+            "(Issue #2620 regression)"
+        )
+        assert rc == 1, (
+            f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
+        )
+
+    def test_inner_parser_outer_timeout_value_and_type(self):
+        """Issue #2620: parsed value is a float matching the input.
+
+        Mirrors the registration done in route_cmd.main and asserts
+        argparse type-conversion semantics for both flags.  The
+        registration in route_cmd.main is the production code path;
+        this test is a focused unit test that pins the type/default
+        contract.
+        """
+        import argparse
+
+        p = argparse.ArgumentParser()
+        p.add_argument(
+            "--placement-feedback-outer-timeout",
+            type=float,
+            default=None,
+            metavar="SECONDS",
+        )
+        p.add_argument(
+            "--placement-feedback-stagnation-patience",
+            type=int,
+            default=3,
+            metavar="N",
+        )
+
+        args = p.parse_args(["--placement-feedback-outer-timeout", "1800"])
+        assert args.placement_feedback_outer_timeout == 1800.0
+        assert isinstance(args.placement_feedback_outer_timeout, float)
+        assert args.placement_feedback_stagnation_patience == 3
+        assert isinstance(args.placement_feedback_stagnation_patience, int)
+
+        args = p.parse_args(["--placement-feedback-stagnation-patience", "5"])
+        assert args.placement_feedback_stagnation_patience == 5
+        assert isinstance(args.placement_feedback_stagnation_patience, int)
+        assert args.placement_feedback_outer_timeout is None
+
+        # Defaults preserved when neither flag is passed.
+        args = p.parse_args([])
+        assert args.placement_feedback_outer_timeout is None
+        assert args.placement_feedback_stagnation_patience == 3
+
+    def test_values_reach_route_with_placement_feedback(self):
+        """Issue #2620: values flow through to
+        ``router.route_with_placement_feedback`` via
+        ``_run_placement_feedback``.  This guards against future
+        plumbing regressions where the inner parser accepts the
+        flags but they get dropped before reaching the loop."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        # Build a stub args namespace with non-default values for both
+        # flags so we can assert they reach the router.
+        args = SimpleNamespace(
+            placement_feedback_budget=3,
+            placement_feedback_max_movement=5.0,
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor=None,
+            placement_feedback_stagnation_patience=7,
+            placement_feedback_outer_timeout=42.5,
+            strategy="negotiated",
+            timeout=None,
+            per_net_timeout=None,
+            output=None,
+        )
+
+        # Stub PCB + router.  PCB.load is patched so we don't need a
+        # real file; route_with_placement_feedback is mocked so we
+        # never actually run the loop -- just intercept the kwargs.
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        router = MagicMock()
+        router.get_failed_nets.return_value = []
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=0,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+
+        with (
+            patch(
+                "kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb
+            ),
+            patch(
+                "pathlib.Path.write_text", return_value=None
+            ),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Verify both values reached the router with correct types.
+        call_kwargs = router.route_with_placement_feedback.call_args.kwargs
+        assert call_kwargs["stagnation_patience"] == 7
+        assert isinstance(call_kwargs["stagnation_patience"], int)
+        assert call_kwargs["outer_timeout"] == 42.5
+        assert isinstance(call_kwargs["outer_timeout"], float)

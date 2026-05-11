@@ -3482,6 +3482,36 @@ def main(argv: list[str] | None = None) -> int:
             "connector). Example: --placement-feedback-no-anchor J3"
         ),
     )
+    # Issue #2606: stagnation + outer-timeout guards on the
+    # PlacementFeedbackLoop.  Mirror parser.py:2349-2376 so the
+    # top-level forwarder in commands/routing.py can pass these
+    # through without tripping argparse.  Defaults match parser.py.
+    # Issue #2620: previously missing on the inner parser, causing
+    # "unrecognized arguments" when the forwarder injected them.
+    parser.add_argument(
+        "--placement-feedback-stagnation-patience",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of consecutive outer placement-feedback iterations with "
+            "no fully-routed-net-count improvement before the loop exits "
+            "early with exit_reason=pf_stagnated. Default 3. Set to 0 to "
+            "disable stagnation detection. Issue #2606."
+        ),
+    )
+    parser.add_argument(
+        "--placement-feedback-outer-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Hard wall-clock budget for the entire outer placement-feedback "
+            "loop, in seconds. When exceeded between iterations the loop "
+            "exits with exit_reason=pf_timeout. Default: no outer cap "
+            "(only the per-iteration --timeout applies). Issue #2606."
+        ),
+    )
     parser.add_argument(
         "--no-optimize",
         action="store_true",
