@@ -614,3 +614,299 @@ class TestNoRegressionWhenMapEmpty:
         empty_run = er_empty.generate_escapes(info)
         assert len(empty_run) == len(baseline)
         assert er_empty.diff_pair_segment_calls == 0
+
+
+# =============================================================================
+# Issue #2677: Inner-layer continuation corridor reservation
+# =============================================================================
+# The five-gate chain mirrors #2639 but verifies that the partner-via
+# placement done by ``_escape_bga_rings`` and the other per-package
+# dispatchers does NOT colonise the inner-layer continuation channel a
+# paired escape needs.  This is the BGA partner-via escape blocker the
+# issue identifies as the binding gap.  See ``escape.py`` /
+# ``_reserve_pair_continuation_corridor`` for the implementation.
+
+
+from kicad_tools.router.layers import LayerStack as _LayerStack  # noqa: E402
+from kicad_tools.router.primitives import Via as _Via  # noqa: E402
+
+
+@pytest.fixture
+def grid_4layer(rules: DesignRules) -> RoutingGrid:
+    """4-layer JLCPCB tier-1-like grid for corridor tests.
+
+    SIG-GND-PWR-SIG with an inner SIGNAL slot is what board 06 uses; we
+    use the all-signal variant here so ``_select_inner_escape_layer``
+    returns an actual SIGNAL inner layer the corridor reservation can
+    target.  The corridor logic must also gracefully no-op on the
+    plain 2-layer ``grid`` fixture (covered by the gate-5 regression
+    below).
+    """
+    stack = _LayerStack.four_layer_all_signal()
+    return RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+
+
+class TestCorridorReservation:
+    """Five-gate verification chain for Issue #2677 corridor reservation."""
+
+    def _make_bga_pair_router(self, grid_obj, rules_obj):
+        """Helper: BGA with a single diff pair, HighSpeed net class.
+
+        Returns ``(escape_router, package_info)`` ready for
+        ``generate_escapes``.  Mirrors the BGA fixture used by gates 4/5
+        of the original #2639 chain.
+        """
+        pads = make_bga_with_pair("TX_P", "TX_N")
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        ncm = {"TX_P": NET_CLASS_HIGH_SPEED, "TX_N": NET_CLASS_HIGH_SPEED}
+        er = EscapeRouter(
+            grid_obj, rules_obj, net_class_map=ncm,
+            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+        )
+        return er, info
+
+    # ------------------------------------------------------------------
+    # Gate (a): inner-layer corridor reserved before partner-via placement
+    # ------------------------------------------------------------------
+
+    def test_gate_a_corridor_reserved_during_paired_escape(
+        self, grid_4layer, rules,
+    ):
+        """``_reserve_pair_continuation_corridor`` runs during the
+        paired pre-pass.
+
+        Asserts:
+            * ``pair_corridor_reservations`` is incremented to 1 (one
+              pair).
+            * ``pair_corridor_reserved_cells`` is non-zero (the corridor
+              actually covers at least one grid cell).
+            * The grid reports a matching reserved-cell count via
+              ``reserved_cell_count()``.
+        """
+        er, info = self._make_bga_pair_router(grid_4layer, rules)
+        assert er.pair_corridor_reservations == 0
+        assert er.pair_corridor_reserved_cells == 0
+        assert grid_4layer.reserved_cell_count() == 0
+
+        er.generate_escapes(info)
+
+        assert er.pair_corridor_reservations == 1, (
+            "Expected exactly one corridor reservation for one paired pair"
+        )
+        assert er.pair_corridor_reserved_cells >= 1
+        assert grid_4layer.reserved_cell_count() == er.pair_corridor_reserved_cells
+
+    # ------------------------------------------------------------------
+    # Gate (b): partner vias respect the reservation
+    # ------------------------------------------------------------------
+
+    def test_gate_b_partner_vias_do_not_consume_reserved_cells(
+        self, grid_4layer, rules,
+    ):
+        """A partner-net via placed on top of a reserved cell does NOT
+        block that cell.
+
+        We synthesise a via belonging to a NON-paired net (id=42) and
+        directly invoke ``_mark_via`` on the reserved layer at the
+        centroid of the reservation region.  The reserved cells must
+        remain unblocked after the call.
+        """
+        er, info = self._make_bga_pair_router(grid_4layer, rules)
+        er.generate_escapes(info)
+
+        # Snapshot the reserved cells map (private API access OK in
+        # this test -- the public API doesn't enumerate cells).
+        reserved_items = list(grid_4layer._reserved_for_nets.items())
+        assert reserved_items, "Expected non-empty reservation map"
+
+        # Pick a reserved cell roughly at the corridor centroid.
+        # Convert grid cell -> world coordinate -> via.
+        (layer_idx, gy, gx), owners = reserved_items[len(reserved_items) // 2]
+        # The owners set should be exactly {1, 2} (the BGA pair net IDs)
+        assert owners == frozenset({1, 2}), (
+            f"Corridor owner set should be the paired pair nets {{1,2}}, got {owners}"
+        )
+
+        wx, wy = grid_4layer.grid_to_world(gx, gy)
+
+        # Capture pre-state of the reserved cell.
+        pre_blocked = grid_4layer.grid[layer_idx][gy][gx].blocked
+
+        # Synthesise a partner-net via (net=42, not in {1, 2}).
+        from kicad_tools.router.layers import Layer as _Layer
+        partner_via = _Via(
+            x=wx, y=wy,
+            drill=rules.via_drill,
+            diameter=rules.via_diameter,
+            layers=(_Layer.F_CU, _Layer.B_CU),
+            net=42, net_name="PARTNER",
+        )
+        grid_4layer._mark_via(partner_via)
+
+        # The reserved cell must NOT have been blocked by this via.
+        # (It may have been blocked by something else pre-existing, but
+        # if it was unblocked before, it must remain unblocked.)
+        if not pre_blocked:
+            assert not grid_4layer.grid[layer_idx][gy][gx].blocked, (
+                "Partner-net via colonised a corridor-reserved cell"
+            )
+
+        # Conversely: an owner-net via DOES block the cell (sanity).
+        owner_via = _Via(
+            x=wx, y=wy,
+            drill=rules.via_drill,
+            diameter=rules.via_diameter,
+            layers=(_Layer.F_CU, _Layer.B_CU),
+            net=1, net_name="TX_P",  # in owner set
+        )
+        grid_4layer._mark_via(owner_via)
+        assert grid_4layer.grid[layer_idx][gy][gx].blocked, (
+            "Owner-net via should block its own corridor cell"
+        )
+
+    # ------------------------------------------------------------------
+    # Gate (c): reservation precedes via-marking in generate_escapes flow
+    # ------------------------------------------------------------------
+
+    def test_gate_c_reservation_precedes_partner_via_marking(
+        self, grid_4layer, rules,
+    ):
+        """The reservation count is non-zero AT the time the
+        non-paired dispatcher runs its via marking.
+
+        This is the timing gate: the paired pre-pass MUST reserve
+        BEFORE the per-package dispatcher creates vias.  We verify by
+        running the full ``generate_escapes`` flow and inspecting how
+        many vias the BGA dispatcher placed -- there should be more
+        non-paired vias than reserved cells in extreme cases, but the
+        reservation must already exist BEFORE the dispatcher starts.
+
+        We instrument the dispatcher by calling
+        ``generate_escapes`` then running the partner-via marking
+        manually via ``apply_escape_routes`` and verifying reservations
+        persisted.
+        """
+        er, info = self._make_bga_pair_router(grid_4layer, rules)
+        escapes = er.generate_escapes(info)
+
+        # The corridor was reserved during ``_generate_paired_escapes``,
+        # which runs first.  After ``generate_escapes`` returns, the
+        # reservations are still in place AND the BGA dispatcher has
+        # produced via-bearing escapes for non-paired pads.
+        assert er.pair_corridor_reservations == 1
+        reserved_before_apply = grid_4layer.reserved_cell_count()
+        assert reserved_before_apply > 0
+
+        # The combined escape list contains the paired pair + non-paired
+        # ring pads (14 non-paired in our 4x4 BGA).
+        paired_count = sum(1 for e in escapes if e.pad.net_name in ("TX_P", "TX_N"))
+        non_paired_count = len(escapes) - paired_count
+        assert paired_count == 2
+        assert non_paired_count >= 1, (
+            "Expected at least one non-paired escape (inner-ring partner vias)"
+        )
+
+        # Apply all escapes to the grid (marks segments + vias).  The
+        # reservation must SURVIVE this pass -- ``_mark_via`` only
+        # skips matching-owner-set cells, it does not clear them.
+        er.apply_escape_routes(escapes)
+        assert grid_4layer.reserved_cell_count() == reserved_before_apply, (
+            "Corridor reservation was lost during apply_escape_routes"
+        )
+
+    # ------------------------------------------------------------------
+    # Gate (d): match-group-aware API accepts list[EscapeRoute] (#2661 hook)
+    # ------------------------------------------------------------------
+
+    def test_gate_d_helper_accepts_n_member_list(self, grid_4layer, rules):
+        """``_reserve_pair_continuation_corridor`` accepts N>=2 members.
+
+        Epic #2661 will pass a 3+ member list; this gate locks in the
+        signature so #2661 inherits the primitive without a follow-up
+        API change.
+        """
+        from kicad_tools.router.escape import EscapeDirection, EscapeRoute
+        from kicad_tools.router.layers import Layer as _Layer
+        from kicad_tools.router.primitives import Pad as _Pad
+
+        er = EscapeRouter(grid_4layer, rules)
+
+        # Build 3 synthetic EscapeRoute objects launching EAST.
+        members = []
+        for i, net_id in enumerate((1, 2, 3)):
+            pad = _Pad(
+                x=0.0, y=float(i) * 0.2,
+                width=0.2, height=0.2,
+                net=net_id, net_name=f"NET_{net_id}",
+                layer=_Layer.F_CU,
+            )
+            members.append(EscapeRoute(
+                pad=pad,
+                direction=EscapeDirection.EAST,
+                escape_point=(1.0, float(i) * 0.2),
+                escape_layer=_Layer.F_CU,
+                via_pos=None,
+                segments=[],
+                via=None,
+                ring_index=0,
+            ))
+
+        count = er._reserve_pair_continuation_corridor(
+            members=members,
+            target_inner_layer=_Layer.IN1_CU,
+            intra_pair_clearance=0.1,
+        )
+        assert count >= 1, "3-member corridor reservation should cover >= 1 cell"
+        assert er.pair_corridor_reservations == 1
+        # Owner set should be {1, 2, 3}.
+        owners = next(iter(grid_4layer._reserved_for_nets.values()))
+        assert owners == frozenset({1, 2, 3}), (
+            f"3-member corridor owners {owners} != {{1,2,3}}"
+        )
+
+    # ------------------------------------------------------------------
+    # Gate (e): empty diff_pair_map -> NO reservation (regression)
+    # ------------------------------------------------------------------
+
+    def test_gate_e_empty_map_no_reservation(self, grid_4layer, rules):
+        """When ``diff_pair_map`` is empty, no corridor is reserved.
+
+        Mirrors the ``TestNoRegressionWhenMapEmpty`` pattern: byte-
+        identical pre-fix behaviour when the feature is dormant.
+        """
+        pads = make_bga_with_pair("TX_P", "TX_N")
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        er = EscapeRouter(grid_4layer, rules)  # empty map
+        er.generate_escapes(info)
+        assert er.pair_corridor_reservations == 0
+        assert er.pair_corridor_reserved_cells == 0
+        assert grid_4layer.reserved_cell_count() == 0
+
+    # ------------------------------------------------------------------
+    # 2-layer grid: no inner SIGNAL layer -> helper no-ops gracefully
+    # ------------------------------------------------------------------
+
+    def test_two_layer_grid_corridor_is_noop(self, grid, rules):
+        """A 2-layer grid has no inner copper layer.
+
+        Issue #2677 guard: ``_select_inner_escape_layer`` falls back to
+        ``Layer.B_CU`` on 2-layer stacks, but reserving on B.Cu would
+        BLOCK partner-net through-hole vias from completing their
+        footprint on B.Cu -- which is required for legitimate 2-layer
+        routing.  The helper must therefore SKIP reservation when the
+        target layer is an outer copper layer.
+
+        This protects boards 01-05 (which run on 2-layer stacks via
+        ``--auto-layers``) from regression.
+        """
+        er, info = self._make_bga_pair_router(grid, rules)
+        # ``generate_escapes`` should not raise and must produce zero
+        # corridor reservations (the 2-layer guard kicks in).
+        er.generate_escapes(info)
+        assert er.diff_pair_segment_calls == 1, (
+            "Paired escape segment generation must still run on 2-layer boards"
+        )
+        assert er.pair_corridor_reservations == 0, (
+            "Corridor reservation must be skipped on 2-layer boards"
+        )
+        assert grid.reserved_cell_count() == 0
