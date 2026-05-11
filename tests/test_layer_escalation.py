@@ -1126,6 +1126,139 @@ class TestEarlyTermination:
             f"stop preserved), got {call_count}"
         )
 
+    # Issue #2673: Completion-floor guard.  Both early-termination heuristics
+    # (zero-overflow at line 1733 and stagnation at line 1753) are calibrated
+    # for the case where the prior attempt already routed a substantial
+    # fraction of the board.  When best-so-far completion is < 50%, the
+    # failure mode is usually "router stuck on a few nets" rather than
+    # "design needs more layers", so escalation should continue.  Board 05
+    # on 2026-05-11 exhibited exactly this regression: 2L=0/35, overflow=0,
+    # and the negotiated zero-overflow heuristic fired immediately — never
+    # trying 4L.  See issue #2673 for the diagnostic numbers.
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_completion_floor_bypasses_zero_overflow_below_floor(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """Issue #2673: zero-overflow short-circuit must NOT fire when
+        best-so-far completion is below the 50% floor.
+
+        Board 05 fixture: negotiated strategy, 0/10 routed, overflow=0.
+        Without the floor guard, attempt 1 ends with "Escalation stopped:
+        failures are not congestion-related (overflow=0)" and the loop
+        exits after one attempt.  With the guard, escalation continues to
+        at least the next layer configuration.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # 0/10 routed, overflow=0 — completion 0% << 50% floor
+        router = self._make_mock_router(nets_routed=0, nets_to_route=10, overflow=0)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args(strategy="negotiated")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Must NOT stop at attempt 1 — completion 0% is below floor.
+        # Loop will continue until it stagnates with completion still below
+        # floor on a non-first attempt (where stagnation also gets bypassed),
+        # so all 4 layer configurations get tried.
+        assert call_count >= 2, (
+            f"Expected escalation past attempt 1 when completion=0% is below "
+            f"50% floor (issue #2673), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_completion_floor_bypasses_stagnation_below_floor(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """Issue #2673: stagnation short-circuit must NOT fire when
+        best-so-far completion is below the 50% floor.
+
+        Even if attempts 1 and 2 produce identical (low) results, we should
+        still try the remaining layer configurations — the failure mode at
+        low completion is usually router-internal (per-net timeouts) rather
+        than truly unrouteable congestion.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # 1/10 = 10% << 50% floor, overflow=5 (matches every time → stagnates)
+        router = self._make_mock_router(nets_routed=1, nets_to_route=10, overflow=5)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args(strategy="negotiated")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Stagnation would normally stop at attempt 2.  With the floor guard
+        # bypassing it (10% << 50%), all 4 configurations should be tried.
+        assert call_count >= 3, (
+            f"Expected escalation past stagnation when completion=10% is below "
+            f"50% floor (issue #2673), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_completion_floor_does_not_affect_high_completion(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """Issue #2673: above the 50% floor, both heuristics still fire normally.
+
+        Regression guard: the existing zero-overflow / stagnation behaviour
+        is preserved for boards that route most of their nets — the guard
+        only applies when completion is very low.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # 8/10 = 80% completion (well above floor), overflow=0
+        router = self._make_mock_router(nets_routed=8, nets_to_route=10, overflow=0)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args(strategy="negotiated")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Above floor: zero-overflow heuristic should still fire after attempt 1
+        assert call_count == 1, (
+            f"Expected 1 attempt at 80% completion (zero-overflow heuristic "
+            f"preserved above floor), got {call_count}"
+        )
+
 
 class TestPristineStatePerAttempt:
     """Tests for Issue #2396: pristine state per layer-escalation attempt.

@@ -1716,6 +1716,24 @@ def route_with_layer_escalation(
                     f"({best_result.completion:.0%})"
                 )
 
+        # Issue #2673: Completion-floor guard.  Both early-termination heuristics
+        # below (zero-overflow at #2412, stagnation at #2412) are calibrated for
+        # the case where the router already routed a substantial fraction of the
+        # board on the prior attempt.  When best-so-far completion is very low
+        # (e.g., < 50%), the failure mode is more likely "router got stuck on a
+        # handful of nets and timed out" than "the design is genuinely unrouteable
+        # with more layers", so we should keep trying additional layer
+        # configurations rather than short-circuit.  Board 05 on 2026-05-11
+        # exhibits exactly this regression: 2L=0/35, 4L sig-gnd-pwr-sig=0/35,
+        # stagnation check fires and 4L all-sig is never attempted.  The same
+        # board at commit a9790ad0 produced 2L=9/35 (26%) and tried all three
+        # 4L variants before stopping.  Floor of 50% is conservative — any
+        # board with >=50% completion has enough signal for the heuristics
+        # to be trustworthy; below that, escalation should run to completion.
+        best_completion_so_far = best_result.completion if best_result is not None else 0.0
+        completion_floor_for_early_stop = 0.5
+        below_completion_floor = best_completion_so_far < completion_floor_for_early_stop
+
         # Issue #2412: Early termination — zero overflow means failures
         # are placement/topology issues, not congestion.  Adding layers
         # cannot help when there is no congestion to relieve.
@@ -1734,6 +1752,7 @@ def route_with_layer_escalation(
             overflow == 0
             and nets_routed < nets_to_route
             and args.strategy not in strategies_without_overflow_signal
+            and not below_completion_floor
         ):
             if not quiet:
                 flush_print(
@@ -1746,6 +1765,19 @@ def route_with_layer_escalation(
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (zero overflow)")
             break
+        elif (
+            overflow == 0
+            and nets_routed < nets_to_route
+            and args.strategy not in strategies_without_overflow_signal
+            and below_completion_floor
+            and not quiet
+        ):
+            flush_print(
+                "  Note: overflow=0 but best completion "
+                f"{best_completion_so_far * 100:.0f}% < "
+                f"{completion_floor_for_early_stop * 100:.0f}% floor — "
+                "continuing escalation (issue #2673)"
+            )
 
         # Issue #2412: Early termination — stagnation detection.  If adding
         # layers did not improve nets_routed or reduce overflow, further
@@ -1754,6 +1786,7 @@ def route_with_layer_escalation(
             prev_nets_routed is not None
             and nets_routed <= prev_nets_routed
             and overflow >= prev_overflow
+            and not below_completion_floor
         ):
             if not quiet:
                 flush_print("  Escalation stopped: no improvement after adding layers")
@@ -1764,6 +1797,19 @@ def route_with_layer_escalation(
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (stagnation)")
             break
+        elif (
+            prev_nets_routed is not None
+            and nets_routed <= prev_nets_routed
+            and overflow >= prev_overflow
+            and below_completion_floor
+            and not quiet
+        ):
+            flush_print(
+                "  Note: stagnation detected but best completion "
+                f"{best_completion_so_far * 100:.0f}% < "
+                f"{completion_floor_for_early_stop * 100:.0f}% floor — "
+                "continuing escalation (issue #2673)"
+            )
 
         prev_nets_routed = nets_routed
         prev_overflow = overflow
