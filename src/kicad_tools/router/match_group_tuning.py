@@ -540,8 +540,7 @@ def tune_match_group_v2(
             if not serp_result.success:
                 per_member_result.reason = "no_suitable_segment"
                 per_member_result.message = (
-                    f"Trombone generation failed on net {net_id}: "
-                    f"{serp_result.message}"
+                    f"Trombone generation failed on net {net_id}: {serp_result.message}"
                 )
                 current_route = original_route
                 break
@@ -580,9 +579,7 @@ def tune_match_group_v2(
                 break
         else:
             # for/else: completed max_inserts_per_member without break.
-            per_member_result.reason = (
-                per_member_result.reason or "exceeded_max_inserts"
-            )
+            per_member_result.reason = per_member_result.reason or "exceeded_max_inserts"
 
         if per_member_result.reason in ("", "exceeded_max_inserts"):
             per_member_result.message = per_member_result.message or (
@@ -594,9 +591,7 @@ def tune_match_group_v2(
 
         # Final length.
         if per_member_result.inserts_applied > 0:
-            per_member_result.length_after_mm = LengthTracker.calculate_route_length(
-                current_route
-            )
+            per_member_result.length_after_mm = LengthTracker.calculate_route_length(current_route)
         else:
             per_member_result.length_after_mm = current_length
 
