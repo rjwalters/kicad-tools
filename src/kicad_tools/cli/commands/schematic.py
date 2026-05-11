@@ -162,6 +162,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--include-power")
         if args.include_dnp:
             sub_argv.append("--include-dnp")
+        if not getattr(args, "check_netlist_export", True):
+            sub_argv.append("--no-check-netlist-export")
         return unconnected_main(sub_argv) or 0
 
     elif args.sch_command == "set-footprint":

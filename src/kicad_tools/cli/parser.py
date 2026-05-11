@@ -529,6 +529,13 @@ def _add_sch_parser(subparsers) -> None:
         "--include-power", action="store_true", help="Include power symbols"
     )
     sch_unconnected.add_argument("--include-dnp", action="store_true", help="Include DNP symbols")
+    sch_unconnected.add_argument(
+        "--no-check-netlist-export",
+        dest="check_netlist_export",
+        action="store_false",
+        default=True,
+        help="Skip the netlist-export cross-check (default: enabled)",
+    )
 
     # sch replace
     sch_replace = sch_subparsers.add_parser("replace", help="Replace a symbol's library ID")
