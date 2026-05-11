@@ -755,6 +755,60 @@ class CppPathfinder:
         # } or ``None`` if no diagnostic was captured.
         self._last_failure_info: dict | None = None
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Reverse map for diff-pair
+        # partner resolution.  The autorouter populates this via
+        # :meth:`set_net_name_to_id` before routing begins so that
+        # ``NetClassRouting.diffpair_partner`` (a *name*) can be resolved to
+        # the partner *id* required by the C++ ``partner_net`` plumbing.
+        #
+        # When the map is empty (the default) or the source net has no
+        # ``diffpair_partner`` declaration, :meth:`_resolve_partner_net_id`
+        # returns ``None`` and the C++ search uses the wider inter-pair
+        # ``clearance`` for every other net (the pre-Phase-1C contract).
+        self._net_name_to_id: dict[str, int] = {}
+
+    # ------------------------------------------------------------------
+    # Diff-pair partner resolution (Issue #2587 / Epic #2556 Phase 1C-cont)
+    # ------------------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Inject a net-name -> net-id reverse map for partner resolution.
+
+        Mirrors :meth:`Pathfinder.set_net_name_to_id`.  Phase 1C threads
+        ``NetClassRouting.intra_pair_clearance`` through the C++ A* search
+        via the ``partner_net`` parameter on ``route_resumable()`` and
+        ``validate_route()``.  The clearance is configured per-source-net
+        but applies only when the *other* net is the named partner.
+        Resolving partner-name to partner-id requires this reverse map,
+        which the ``Autorouter`` builds from its ``net_names`` dict.
+
+        Idempotent and may be called multiple times.  Passing an empty
+        dict disables partner detection (the C++ search falls back to
+        ``clearance`` for every other net).
+        """
+        self._net_name_to_id = dict(mapping)
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        """Look up the integer net id of the diff-pair partner of *net_name*.
+
+        Reads :attr:`NetClassRouting.diffpair_partner` and resolves the
+        partner-name to a partner-id via :attr:`_net_name_to_id`.  Returns
+        ``None`` when:
+
+        * the source net has no net class (or the class has no
+          ``diffpair_partner`` set), or
+        * the partner-name is missing from :attr:`_net_name_to_id` (e.g.
+          the autorouter has not populated the reverse map yet).
+
+        ``None`` is the dormant signal for the C++ wiring sites: when
+        partner is unknown, the search uses the wider ``clearance`` for
+        every other net, matching pre-#2559 / pre-#2587 behavior.
+        """
+        net_class = self._net_class_map.get(net_name)
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        return self._net_name_to_id.get(net_class.diffpair_partner)
+
     def set_routable_layers(self, layers: list[int]) -> None:
         """Set which layers are routable (skip plane layers)."""
         self._impl.set_routable_layers(layers)
@@ -915,6 +969,29 @@ class CppPathfinder:
             math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Resolve the diff-pair partner
+        # net id and compute a tighter within-pair search radius.  When the
+        # source net's ``NetClassRouting`` declares a ``diffpair_partner`` AND
+        # the partner-id is known (via ``set_net_name_to_id`` populated by the
+        # autorouter), the C++ search uses ``intra_pair_radius_cells`` for
+        # cells belonging to the partner net only.  All other foreign nets
+        # continue to see the wider ``trace_radius_cells`` radius.  When
+        # ``partner_net == -1`` (the dormant default) the C++ side preserves
+        # pre-#2559 behavior identically.
+        partner_net_id = -1
+        intra_pair_radius_cells = 0
+        if net_class is not None and net_class.diffpair_partner is not None:
+            partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
+            if partner_id is not None:
+                partner_net_id = int(partner_id)
+                intra_pair_clearance = net_class.effective_intra_pair_clearance()
+                intra_pair_radius_cells = max(
+                    1,
+                    math.ceil(
+                        (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
+                    ),
+                )
+
         # Issue #2427: Compute pad metal bounds and approach zones.
         # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
         # so the C++ A* search can use expanded goal/start regions and
@@ -963,9 +1040,14 @@ class CppPathfinder:
                 via_radius_cells,
                 start_pad_bounds,
                 end_pad_bounds,
-                # Issue #2559 / Epic #2556 Phase 1C: defaults preserve pre-#2559 behavior.
-                -1,  # partner_net (diff-pair plumbing not used here)
-                0,   # intra_pair_radius_cells
+                # Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair
+                # clearance.  When ``partner_net == -1`` (the dormant default
+                # before #2587 wired in the partner map), the C++ search uses
+                # ``trace_radius_cells`` for every other net.  When set, cells
+                # belonging to ``partner_net`` are checked against
+                # ``intra_pair_radius_cells`` (the tighter within-pair radius).
+                partner_net_id,
+                intra_pair_radius_cells,
                 # Issue #2610: per-net wall-clock deadline + iteration override.
                 timeout_seconds,
                 self._max_search_iterations,
@@ -994,9 +1076,16 @@ class CppPathfinder:
                 route = self._convert_result_to_route(result, start, net_class)
 
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
-                # clearance validation via C++ validate_route().
+                # clearance validation via C++ validate_route().  Issue #2587
+                # threads the partner net id + intra-pair clearance so the
+                # validator does not reject diff-pair routes that legitimately
+                # sit at the tighter within-pair distance.
                 violation_location = self._validate_route_clearance(
-                    route, start, end, trace_radius_cells
+                    route,
+                    start,
+                    end,
+                    trace_radius_cells,
+                    net_class=net_class,
                 )
 
                 if violation_location is None:
@@ -1189,6 +1278,7 @@ class CppPathfinder:
         start: "Pad",
         end: "Pad",
         trace_radius_cells: int,
+        net_class: "NetClassRouting | None" = None,
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
@@ -1197,11 +1287,22 @@ class CppPathfinder:
         via-via, same-net drill spacing) in a single C++ call, eliminating
         Python callback overhead.
 
+        Issue #2587 / Epic #2556 Phase 1C-cont: When ``net_class`` declares a
+        ``diffpair_partner`` AND the partner-id is resolvable via the reverse
+        map populated by :meth:`set_net_name_to_id`, the C++ validator is
+        instructed to compare against ``intra_pair_clearance`` (instead of
+        ``trace_clearance``) for cells belonging to the partner net.  This is
+        the post-route geometric companion to the search-time
+        ``intra_pair_radius_cells`` plumbing in :meth:`route`.
+
         Args:
             route: Route to validate.
             start: Source pad (for component reference exclusion).
             end: Destination pad (for component reference exclusion).
             trace_radius_cells: Trace half-width in grid cells (for avoidance).
+            net_class: Optional net class for the source net.  When set with a
+                resolvable ``diffpair_partner``, supplies the tighter
+                within-pair clearance to the C++ validator.
 
         Returns:
             (x, y) world coordinates of violation, or None if route is valid.
@@ -1240,6 +1341,18 @@ class CppPathfinder:
             cv.net = via.net
             cpp_vias.append(cv)
 
+        # Issue #2587 / Phase 1C-cont: Resolve partner net id for the source
+        # net so the C++ validator does not reject within-pair edges of a
+        # legitimate diff pair.  Defaults preserve pre-#2559 behavior
+        # identically (partner_net == -1 -> no relaxation).
+        partner_net_id = -1
+        intra_pair_clearance = 0.0
+        if net_class is not None and net_class.diffpair_partner is not None:
+            partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
+            if partner_id is not None:
+                partner_net_id = int(partner_id)
+                intra_pair_clearance = float(net_class.effective_intra_pair_clearance())
+
         vresult = self._grid._impl.validate_route(
             cpp_segs,
             cpp_vias,
@@ -1248,6 +1361,8 @@ class CppPathfinder:
             self._rules.trace_clearance,
             self._rules.via_clearance,
             self._rules.min_drill_clearance,
+            partner_net_id,
+            intra_pair_clearance,
         )
 
         if not vresult.valid:
@@ -1445,6 +1560,15 @@ class CppPathfinder:
         then identifies which net IDs are blocking cells along that path.
         This is used for targeted rip-up in negotiated routing.
 
+        Issue #2587 / Epic #2556 Phase 1C-cont: When the source net has a
+        diff-pair partner (resolvable via :meth:`_resolve_partner_net_id`),
+        the partner net is excluded from the blocker set.  The partner's
+        copper is *expected* to sit close to this route at the within-pair
+        clearance; treating it as a blocker would trigger spurious rip-up
+        of the partner during negotiated routing.  Unlike the search-time
+        plumbing, this filter does not need a tighter radius -- the
+        partner is simply not a candidate for rip-up.
+
         Args:
             start: Source pad
             end: Destination pad
@@ -1452,10 +1576,16 @@ class CppPathfinder:
             net_class: Optional net class for per-net trace width (Issue #1692).
 
         Returns:
-            Set of net IDs that block the path (excluding net 0 and the source net)
+            Set of net IDs that block the path (excluding net 0, the source
+            net, and -- when configured -- the diff-pair partner net).
         """
         blocking_nets: set[int] = set()
         source_net = start.net
+
+        # Issue #2587 / Phase 1C-cont: Resolve the diff-pair partner net id
+        # (or -1 when no partner is configured).  Cells belonging to the
+        # partner are skipped below so they are not flagged for rip-up.
+        partner_net_id = self._resolve_partner_net_id(start.net_name) or -1
 
         # Convert to grid coordinates
         start_gx, start_gy = self._grid._impl.world_to_grid(start.x, start.y)
@@ -1493,7 +1623,12 @@ class CppPathfinder:
                     if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
                         if self._grid._impl.is_valid(cx, cy, layer):
                             cell = self._grid._impl.at(cx, cy, layer)
-                            if cell.blocked and cell.net != source_net and cell.net != 0:
+                            if (
+                                cell.blocked
+                                and cell.net != source_net
+                                and cell.net != 0
+                                and cell.net != partner_net_id
+                            ):
                                 # This cell is blocked by another net's route
                                 if cell.usage_count > 0:
                                     blocking_nets.add(cell.net)

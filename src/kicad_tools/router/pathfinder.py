@@ -2177,16 +2177,32 @@ class Router:
         then identifies which net IDs are blocking cells along that path.
         This is used for targeted rip-up in negotiated routing.
 
+        Issue #2587 / Epic #2556 Phase 1C-cont: When the source net has a
+        diff-pair partner (resolvable via :meth:`_resolve_partner_net_id`),
+        the partner net is excluded from the blocker set.  The partner's
+        copper legitimately sits close to this route at the within-pair
+        clearance; treating it as a blocker would trigger spurious rip-up
+        of the partner during negotiated routing.  Mirror of the C++
+        backend's filter at :meth:`CppPathfinder.find_blocking_nets`.
+
         Args:
             start: Source pad
             end: Destination pad
             layer: Optional layer index (uses pad layer if not specified)
 
         Returns:
-            Set of net IDs that block the path (excluding net 0 and the source net)
+            Set of net IDs that block the path (excluding net 0, the source
+            net, and -- when configured -- the diff-pair partner net).
         """
         blocking_nets: set[int] = set()
         source_net = start.net
+
+        # Issue #2587 / Phase 1C-cont: Resolve the diff-pair partner net id
+        # (or -1 when no partner is configured).  Cells belonging to the
+        # partner are skipped below so they are not flagged for rip-up.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is None:
+            partner_net_id = -1
 
         # Convert to grid coordinates
         start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
@@ -2216,7 +2232,12 @@ class Router:
                     cx, cy = gx + check_dx, gy + check_dy
                     if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
                         cell = self.grid.grid[layer][cy][cx]
-                        if cell.blocked and cell.net != source_net and cell.net != 0:
+                        if (
+                            cell.blocked
+                            and cell.net != source_net
+                            and cell.net != 0
+                            and cell.net != partner_net_id
+                        ):
                             # This cell is blocked by another net's route
                             # Check usage_count to ensure it's a routed cell, not a static obstacle
                             if cell.usage_count > 0:
