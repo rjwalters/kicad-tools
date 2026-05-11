@@ -1745,6 +1745,36 @@ class EscapeRouter:
         # reserve the alternating pattern for true fine-pitch QFP/QFN.
         use_perpendicular_only = package.pin_pitch >= 0.65
 
+        # Issue #2695: For fine-pitch QFP/LQFP/TQFP at 0.5mm pitch and finer,
+        # the alternating scheme still cannot fit a 0.2mm trace + 0.15mm
+        # clearance between adjacent pads.  Inner pins fail surface escape
+        # and have historically been deferred to the main router, where they
+        # remain unrouted because the package perimeter is fully blocked.
+        # When the manufacturer supports via-in-pad processing (e.g.
+        # jlcpcb-tier1, pcbway), we fall back to ``_try_in_pad_escape`` --
+        # the same strategy PR #2608 introduced for SSOP/TSSOP.  Plain
+        # ``jlcpcb`` and unknown manufacturers continue to defer (no silent
+        # surcharge for users who did not opt into via-in-pad).
+        try_in_pad_fallback = (
+            package.pin_pitch <= 0.55
+            and self.via_in_pad_supported
+        )
+
+        # Effective clearance and escape width for the in-pad rescue
+        # fallback.  We mirror the values used inside
+        # ``_create_fine_pitch_row_escapes`` so the in-pad routes are
+        # geometrically consistent regardless of which dispatcher created
+        # them.
+        ref = package.ref
+        effective_clearance = self.rules.get_clearance_for_component(
+            ref, pin_pitch=package.pin_pitch,
+        )
+        escape_width = (
+            self.rules.min_trace_width
+            if self.rules.min_trace_width is not None
+            else self._get_trace_width_for_net(package.pads[0].net_name if package.pads else "")
+        )
+
         # Generate escapes for each edge
         for pads, primary_dir, alt_dir_cw, alt_dir_ccw in [
             (north_pads, EscapeDirection.NORTH, EscapeDirection.EAST, EscapeDirection.WEST),
@@ -1763,6 +1793,29 @@ class EscapeRouter:
                     direction=direction,
                     package=package,
                 )
+
+                # Issue #2695: For fine-pitch QFP packages on capable
+                # manufacturers, replace the surface escape with an
+                # in-pad via escape when the surface segment violates
+                # clearance against neighbouring pads on the same edge.
+                # The alternating scheme alone cannot fit traces between
+                # 0.5mm-pitch pads, so without this rescue inner pins
+                # never reach the main router successfully.
+                if try_in_pad_fallback and escape.segments:
+                    surface_seg = escape.segments[0]
+                    if self._segment_violates_pad_clearance(
+                        surface_seg, i, pads, effective_clearance,
+                    ):
+                        in_pad_route = self._try_in_pad_escape(
+                            pad=pad,
+                            direction=direction,
+                            effective_clearance=effective_clearance,
+                            escape_width=escape_width,
+                        )
+                        if in_pad_route is not None:
+                            escapes.append(in_pad_route)
+                            continue
+
                 escapes.append(escape)
 
         return escapes
