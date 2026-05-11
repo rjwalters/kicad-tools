@@ -28,6 +28,7 @@ Example:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -223,14 +224,25 @@ class NetlistValidator:
         """Initialize the validator.
 
         Args:
-            schematic: Path to schematic file or Schematic object
+            schematic: Path to schematic file or Schematic object.
+                A path is strongly preferred -- it enables hierarchical
+                BOM extraction so sub-sheet symbols are included. Passing
+                a loaded :class:`Schematic` object falls back to root-sheet
+                enumeration and emits a runtime warning on hierarchical
+                projects (see :issue:`2625`).
             pcb: Path to PCB file or PCB object
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
         from kicad_tools.schema.schematic import Schematic as SchematicClass
 
+        # Track the schematic path so _check_components can use
+        # extract_bom(..., hierarchical=True). When the caller passes a
+        # Schematic object directly we cannot walk sub-sheets.
+        self._schematic_path: str | None = None
+
         # Load schematic if path provided
         if isinstance(schematic, (str, Path)):
+            self._schematic_path = str(schematic)
             self.schematic = SchematicClass.load(schematic)
         else:
             self.schematic = schematic
@@ -257,22 +269,76 @@ class NetlistValidator:
 
         return result
 
-    def _check_components(self, result: SyncResult) -> None:
-        """Check for missing and orphaned components.
+    def _collect_schematic_refs(self) -> dict[str, dict]:
+        """Build {reference: {value, lib_id, footprint}} for the schematic.
 
-        Args:
-            result: SyncResult to add issues to
+        Uses :func:`kicad_tools.schema.bom.extract_bom` with
+        ``hierarchical=True`` when a schematic path is known so that
+        symbols placed inside sub-sheets are included. When the validator
+        was constructed with a loaded :class:`Schematic` object (no path),
+        falls back to the legacy root-sheet-only enumeration and emits a
+        runtime warning so hierarchical bugs are surfaced rather than
+        silently producing false positives (see issue #2625).
         """
-        # Build reference sets
         sch_refs: dict[str, dict] = {}
+
+        if self._schematic_path:
+            from kicad_tools.schema.bom import extract_bom
+
+            bom = extract_bom(self._schematic_path, hierarchical=True)
+            for item in bom.items:
+                # Skip power symbols (their references start with "#").
+                if item.is_power_symbol:
+                    continue
+                # Skip components that are not placed on the PCB.
+                if not item.on_board:
+                    continue
+                if item.reference and not item.reference.startswith("#"):
+                    sch_refs[item.reference] = {
+                        "value": item.value,
+                        "lib_id": item.lib_id,
+                        "footprint": item.footprint,
+                    }
+            return sch_refs
+
+        # Fallback: no path available, can only enumerate the root sheet.
+        if self._schematic_has_sheets():
+            warnings.warn(
+                "NetlistValidator was constructed with a Schematic object "
+                "instead of a path; hierarchical sub-sheets will be skipped "
+                "and PCB footprints from those sheets will appear as "
+                "orphans. Pass a schematic path to enable hierarchical "
+                "traversal.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
         for sym in self.schematic.symbols:
-            # Skip power symbols and other non-component symbols
             if sym.reference and not sym.reference.startswith("#"):
                 sch_refs[sym.reference] = {
                     "value": sym.value,
                     "lib_id": sym.lib_id,
                     "footprint": getattr(sym, "footprint", ""),
                 }
+        return sch_refs
+
+    def _schematic_has_sheets(self) -> bool:
+        """Return True if the loaded schematic contains sub-sheet references."""
+        sheets = getattr(self.schematic, "sheets", None)
+        return bool(sheets)
+
+    def _check_components(self, result: SyncResult) -> None:
+        """Check for missing and orphaned components.
+
+        Args:
+            result: SyncResult to add issues to
+        """
+        # Build reference sets from the schematic. When we have a path,
+        # walk all sub-sheets via extract_bom() so hierarchical projects
+        # don't report every footprint as orphaned (issue #2625). When
+        # constructed with a Schematic object, fall back to root-sheet
+        # enumeration and warn the caller.
+        sch_refs: dict[str, dict] = self._collect_schematic_refs()
 
         pcb_refs: dict[str, dict] = {}
         for fp in self.pcb.footprints:
