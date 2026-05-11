@@ -49,6 +49,7 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
+from .match_group_length import MatchGroup, MatchGroupTracker
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
@@ -441,6 +442,18 @@ class Autorouter:
         # generic match-group / min/max constraints; this one is keyed on
         # detected diff pairs and exposes ``|L_p - L_n|`` for Phase 3I/J.
         self._diffpair_length_tracker: DiffPairLengthTracker = DiffPairLengthTracker()
+
+        # Per-group match-group skew tracking (Issue #2690, Epic #2661 Phase 1D).
+        # Sibling to ``_length_tracker`` and ``_diffpair_length_tracker`` -- the
+        # generic LengthTracker handles match-group min/max constraints (legacy
+        # v1 path), DiffPairLengthTracker handles N=2 pairs, and this one
+        # handles N>=3 match groups detected via the layered detector at
+        # router/match_group_detection.py.  Populated by
+        # :meth:`_finalize_routing` -> :meth:`update_match_group_skew` after
+        # every routing pass; exposes per-group skew via
+        # :meth:`MatchGroupTracker.get_all_skews` for Phase 2E (serpentine
+        # tuner) and Phase 2G (DRC rule) consumers.
+        self._match_group_tracker: MatchGroupTracker = MatchGroupTracker()
 
         # Sub-problem pattern cache (Issue #2336)
         # When set, enables cross-board reuse of routing solutions for
@@ -2509,12 +2522,21 @@ class Autorouter:
                 pass
 
     # ------------------------------------------------------------------
-    # Post-route diff-pair skew bookkeeping
-    # (Issue #2657 / Epic #2556 Phase 3H-cont)
+    # Post-route skew bookkeeping
+    # (Issue #2657 Phase 3H-cont -- diff pairs; Issue #2690 Phase 1D -- match groups)
     # ------------------------------------------------------------------
 
     def _finalize_routing(self) -> None:
-        """Post-route consolidation: populate the diff-pair skew tracker.
+        """Post-route consolidation: populate the skew trackers.
+
+        Populates two sibling trackers in sequence:
+
+        1. :attr:`_diffpair_length_tracker` (Issue #2657 / Epic #2556
+           Phase 3H-cont) -- N=2 differential-pair skew, consumed by
+           Phase 3I (serpentine insertion) and Phase 3J (length-skew DRC).
+        2. :attr:`_match_group_tracker` (Issue #2690 / Epic #2661
+           Phase 1D) -- N>=3 match-group skew, consumed by Phase 2E
+           (serpentine tuner) and Phase 2G (DRC rule).
 
         Issue #2657 / Epic #2556 Phase 3H-cont: PR #2654 (Phase 3H) added
         :meth:`update_diffpair_skew` and the sibling
@@ -2523,75 +2545,128 @@ class Autorouter:
         ``diffpair_length_tracker.get_all_skews()`` always returned ``{}``
         in real runs.  This helper closes the gap.
 
-        It must be invoked once at the tail of every ``route_all_*`` /
-        ``route_with_*`` entry point (after ``self.routes`` is in its
-        final state) so consumers like Phase 3I (serpentine insertion)
-        and Phase 3J (length-skew DRC) can read populated per-pair
-        skew data.
+        Issue #2690 / Epic #2661 Phase 1D extends the same gap-closing
+        pattern to the new :class:`MatchGroupTracker`: every
+        ``route_all_*`` entry point now also populates
+        ``match_group_tracker.get_all_skews()`` so the Phase 2 consumers
+        do not face a dormant signal.
 
-        Detection re-runs :func:`detect_diff_pairs` over the current
-        ``self.net_names`` and ``self.net_class_map`` to derive the
-        :class:`DetectedPair` list, mirroring the pattern used by
-        :meth:`_prepare_routing` (`core.py` start of every ``route_all_*``)
-        and :meth:`get_diff_pair_map` (Phase 2F).  Re-deriving (rather
-        than caching) avoids stale-state risk when callers add components
-        between passes and is consistent with PR #2653's
-        "consume on demand" approach for engaged_pairs.
+        Must be invoked once at the tail of every ``route_all_*`` /
+        ``route_with_*`` entry point (after ``self.routes`` is in its
+        final state) so consumers can read populated skew data.
+
+        Detection re-runs :func:`detect_diff_pairs` and
+        :func:`detect_match_groups` over the current ``self.net_names``
+        and ``self.net_class_map`` to derive the
+        :class:`DetectedPair` list and :class:`MatchGroup` list, mirroring
+        the pattern used by :meth:`_prepare_routing` (`core.py` start of
+        every ``route_all_*``) and :meth:`get_diff_pair_map` (Phase 2F).
+        Re-deriving (rather than caching) avoids stale-state risk when
+        callers add components between passes and is consistent with
+        PR #2653's "consume on demand" approach for engaged_pairs.
 
         ``board_thickness_mm`` is left as ``None`` -- the
-        ``DiffPairLengthTracker.record_routes`` contract documents this
-        as the zero-via-length default (vias contribute 0.0 mm).  See
-        the curator note on issue #2657 and the docstring at
+        ``DiffPairLengthTracker.record_routes`` and
+        ``MatchGroupTracker.record_routes`` contracts both document
+        this as the zero-via-length default (vias contribute 0.0 mm).
+        See the curator note on issue #2657 and the docstring at
         ``diffpair_length.py:172``: ``router.rules.DesignRules`` has no
         ``board_thickness_mm`` field (only ``manufacturers.base.DesignRules``
         does), so threading real thickness through is deferred to a
-        follow-up.  For the AC test target (USB D+/D- on board 03), both
-        halves are on F.Cu with no vias, so the via-length policy does
-        not affect the skew.
+        follow-up.
 
-        Safe to call when there are no diff pairs (no-op via
-        ``record_routes`` early-exit on empty ``detected_pairs``).  Safe
-        to call multiple times: ``record_routes`` overwrites
+        Safe to call when there are no diff pairs / match groups (no-op
+        via ``record_routes`` early-exit on empty detection results).
+        Safe to call multiple times: ``record_routes`` overwrites
         previously-recorded lengths for the same net ids.
-        """
-        # Detection: defensive imports keep this helper robust against
-        # circular-import scenarios on partial installs.
-        try:
-            from .diffpair_detection import detect_diff_pairs
-        except ImportError:
-            return
 
+        Block ordering: diff-pair block runs FIRST, match-group block
+        SECOND.  This ordering is load-bearing -- a hypothetical
+        Phase 1C ``detect_match_groups`` failure (e.g. ImportError on a
+        partial install, RuntimeError on malformed input) MUST NOT
+        bypass the working Phase 3H-cont diff-pair path.  The per-block
+        ``try/except`` scoping enforces this contract; see the inline
+        comments below.
+        """
         if not self.net_names:
             return
 
         # Build net_to_class for explicit-declaration consultation.
         # Identical construction to _prepare_routing / get_diff_pair_map.
+        # Built once here and reused by BOTH the diff-pair block below and
+        # the match-group block (Issue #2690, Epic #2661 Phase 1D) -- a
+        # single-source-of-truth idiom that avoids stale-state risk.
         net_to_class: dict[str, str] = {}
         for net_name, net_class in self.net_class_map.items():
             net_to_class[net_name] = net_class.name
 
+        # --- Diff-pair skew bookkeeping (Issue #2657 / Phase 3H-cont) ---
+        # Detection: defensive imports keep this helper robust against
+        # circular-import scenarios on partial installs.  Failures in the
+        # diff-pair block must NOT bypass the match-group block below --
+        # see Issue #2690 curator note: a Phase 1C detection failure
+        # cannot regress the working diff-pair path, but equally a missing
+        # diff-pair detector module must not silence the match-group
+        # tracker.  Hence the per-block try/except scoping.
         try:
-            detected_pairs = detect_diff_pairs(
+            from .diffpair_detection import detect_diff_pairs
+
+            try:
+                detected_pairs = detect_diff_pairs(
+                    self.net_names,
+                    net_class_routing=self.net_class_map,
+                    net_to_class=net_to_class,
+                    kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+                )
+            except Exception:
+                # Defensive: detection failure must not break routing.
+                detected_pairs = []
+
+            if detected_pairs:
+                # board_thickness_mm=None: zero-via-length default (see docstring).
+                # num_copper_layers=None: update_diffpair_skew defaults to
+                # len(self.layer_stack.layers) or 2 -- matches the per-call branch
+                # at the original ``update_diffpair_skew`` definition.
+                self.update_diffpair_skew(
+                    detected_pairs,
+                    board_thickness_mm=None,
+                    num_copper_layers=None,
+                )
+        except ImportError:
+            # diffpair_detection module unavailable -- silently skip the
+            # diff-pair block but continue to the match-group block.
+            pass
+
+        # --- Match-group skew bookkeeping (Issue #2690 / Phase 1D) ---
+        # Mirrors the diff-pair block above: defensive import + re-detect
+        # + unconditional tracker update.  Placed AFTER the diff-pair
+        # block so a Phase 1C detector failure cannot regress the
+        # working Phase 3H-cont diff-pair path.  Safe when no groups
+        # exist (record_routes is called only when detected_groups is
+        # non-empty).  The re-derivation idiom matches the diff-pair
+        # docstring rationale -- single source of truth, no stale cache.
+        try:
+            from .match_group_detection import detect_match_groups
+        except ImportError:
+            return
+
+        try:
+            detected_groups = detect_match_groups(
                 self.net_names,
                 net_class_routing=self.net_class_map,
                 net_to_class=net_to_class,
-                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+                length_tracker=self._length_tracker,
+                enable_suffix_inference=False,  # opt-in only; see Phase 1C
             )
         except Exception:
             # Defensive: detection failure must not break routing.
             return
 
-        if not detected_pairs:
-            # No pairs -> nothing to record.  Keep tracker untouched so
-            # repeated finalize calls remain idempotent.
+        if not detected_groups:
             return
 
-        # board_thickness_mm=None: zero-via-length default (see docstring).
-        # num_copper_layers=None: update_diffpair_skew defaults to
-        # len(self.layer_stack.layers) or 2 -- matches the per-call branch
-        # at the original ``update_diffpair_skew`` definition.
-        self.update_diffpair_skew(
-            detected_pairs,
+        self.update_match_group_skew(
+            detected_groups,
             board_thickness_mm=None,
             num_copper_layers=None,
         )
@@ -7271,6 +7346,72 @@ class Autorouter:
         (serpentine insertion) and Phase 3J (DRC rule) consumers.
         """
         return self._diffpair_length_tracker
+
+    def update_match_group_skew(
+        self,
+        detected_groups: list[MatchGroup],
+        board_thickness_mm: float | None = None,
+        num_copper_layers: int | None = None,
+    ) -> MatchGroupTracker:
+        """Populate the match-group length tracker with current route skews.
+
+        Sibling to :meth:`update_diffpair_skew` (Issue #2690, Epic #2661
+        Phase 1D).  Measures the routed length of every member of every
+        detected match group and exposes per-group skew (``max - min``)
+        via :attr:`_match_group_tracker`.
+
+        Mirrors :meth:`update_diffpair_skew` byte-for-byte modulo the
+        ``MatchGroup`` vs ``DetectedPair`` type rename and the underlying
+        tracker's ``record_routes`` keyword (``groups`` instead of
+        ``detected_pairs``).
+
+        Args:
+            detected_groups: List of
+                :class:`~kicad_tools.router.match_group_length.MatchGroup`
+                instances from
+                :func:`~kicad_tools.router.match_group_detection.detect_match_groups`.
+            board_thickness_mm: Total stackup thickness in mm.  When
+                ``None``, vias contribute ``0.0`` to the length
+                (documented zero-via-length default mirrored from
+                :mod:`diffpair_length`).
+            num_copper_layers: Number of copper layers in the stack.
+                Defaults to the layer-stack count when ``None`` (or 2
+                when no stack has been configured).  Identical default
+                policy to :meth:`update_diffpair_skew`.
+
+        Returns:
+            The internal :class:`MatchGroupTracker` instance (also
+            accessible via :attr:`match_group_tracker` for inspection).
+        """
+        if num_copper_layers is None:
+            # Best-effort default: pull the count from the configured
+            # layer stack when available; otherwise fall back to 2.
+            # Identical to :meth:`update_diffpair_skew` -- a future
+            # change must touch both places (see drift-prevention
+            # guidance in :mod:`match_group_length`).
+            if self.layer_stack is not None:
+                num_copper_layers = len(self.layer_stack.layers)
+            else:
+                num_copper_layers = 2
+
+        self._match_group_tracker.record_routes(
+            routes=self.routes,
+            groups=detected_groups,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+        )
+        return self._match_group_tracker
+
+    @property
+    def match_group_tracker(self) -> MatchGroupTracker:
+        """Per-group match-group skew tracker (Issue #2690, Epic #2661 Phase 1D).
+
+        Returns the :class:`MatchGroupTracker` instance populated by
+        :meth:`update_match_group_skew`.  The tracker exposes per-net
+        routed lengths and per-group ``max(L) - min(L)`` skew for
+        Phase 2E (serpentine tuner) and Phase 2G (DRC rule) consumers.
+        """
+        return self._match_group_tracker
 
     def apply_length_tuning(
         self,
