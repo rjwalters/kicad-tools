@@ -1,0 +1,229 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Differential Pair Regression Testbench
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Differential Pair Test Board"
+  revision: "A"
+  created: 2026-05-10
+  author: "kicad-tools"
+  description: |
+    Regression testbench for the differential-pair routing subsystem
+    introduced by Epic #2556 (Phases 1-3).  Demonstrates each protocol
+    family the epic was scoped against (USB 2.0, USB 3.0, PCIe Gen1,
+    MIPI D-PHY) by routing one or more diff pairs per protocol on a
+    4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR /
+    B.Cu).
+
+    Not a working device.  Source footprints (USB-C, mini-PCIe edge,
+    FFC) drive synthetic sink footprints (QFN, QFP, BGA simulator).
+    The board's purpose is to exercise every Phase 1-3 net-class
+    feature on at least one pair so future router/validate changes
+    have an end-to-end witness on disk.
+  artifacts:
+    schematic: "output/diffpair_test.kicad_sch"
+    pcb: "output/diffpair_test.kicad_pcb"
+    pcb_routed: "output/diffpair_test_routed.kicad_pcb"
+
+intent:
+  summary: |
+    Multi-protocol HSDI test board with 9 differential pairs across
+    4 protocol families.  Each net class declares the Phase 1-3
+    features it exercises: intra_pair_clearance (Phase 1A/1C),
+    coupled_routing (Phase 2E), coupled_continuity_threshold
+    (Phase 2G), target_diff_impedance (Phase 3K),
+    target_single_impedance (Phase 3K), skew_tolerance_mm (Phase 3H).
+
+  use_cases:
+    - "Regression testbench for diff-pair subsystem (Epic #2556 Phase 4L)"
+    - "End-to-end witness for Phase 1 intra clearance, Phase 2 coupled engagement, Phase 3 impedance + skew"
+    - "Validation target for the routed-DRC CI gate at .github/workflows/ci.yml:225"
+    - "Documentation anchor for the per-protocol NetClassRouting declarations (Phase 4M)"
+
+  interfaces:
+    - name: USB2_HOST
+      type: usb_device
+      description: "USB 2.0 high-speed pair (USB-C source -> QFN-32 sink)"
+      protocol: "USB 2.0 High Speed"
+      pins: ["USB2_D+", "USB2_D-"]
+
+    - name: USB3_HOST
+      type: usb_device
+      description: "USB 3.0 SuperSpeed pairs (4 pairs: TX1+/-, RX1+/-, TX2+/-, RX2+/-, USB-C source -> BGA-49 sink)"
+      protocol: "USB 3.0 SuperSpeed"
+      pins:
+        - "USB3_TX1+"
+        - "USB3_TX1-"
+        - "USB3_RX1+"
+        - "USB3_RX1-"
+        - "USB3_TX2+"
+        - "USB3_TX2-"
+        - "USB3_RX2+"
+        - "USB3_RX2-"
+
+    - name: PCIE_LANE
+      type: pcie
+      description: "PCIe Gen1 x1 (mini-PCIe edge source -> QFP-48 sink)"
+      protocol: "PCIe Gen1 2.5 GT/s"
+      pins: ["PCIE_TX+", "PCIE_TX-", "PCIE_RX+", "PCIE_RX-"]
+
+    - name: MIPI_CSI
+      type: mipi
+      description: "MIPI D-PHY clock + 1 data lane (FFC source -> QFN-24 sink)"
+      protocol: "MIPI D-PHY 1 Gbps/lane"
+      pins:
+        - "MIPI_CLK+"
+        - "MIPI_CLK-"
+        - "MIPI_D0+"
+        - "MIPI_D0-"
+
+  constraints:
+    - "USB 2.0 pair: ~90 Ohm differential, intra_pair_clearance 0.075mm (Phase 1C)"
+    - "USB 3.0 pairs: 90 Ohm differential at JLCPCB tier-1 stackup (Phase 3K)"
+    - "PCIe Gen1 pair: 100 Ohm differential, length-match skew <0.5mm (Phase 3H/3J)"
+    - "MIPI lanes: 100 Ohm differential, intra clearance 0.10mm, tight skew"
+    - "4-layer stackup: F.Cu (signal), In1.Cu (GND plane), In2.Cu (PWR), B.Cu (signal)"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+      current:
+        max: "500mA"
+    signals:
+      usb2:
+        impedance: "90ohm_differential"
+        intra_pair_clearance: "0.075mm"
+      usb3:
+        impedance: "90ohm_differential"
+        intra_pair_clearance: "0.10mm"
+        coupled_continuity_threshold: 0.9
+      pcie:
+        impedance: "100ohm_differential"
+        skew_tolerance: "0.5mm"
+      mipi:
+        impedance: "100ohm_differential"
+        intra_pair_clearance: "0.10mm"
+        skew_tolerance: "0.3mm"
+
+  mechanical:
+    dimensions:
+      width: "80mm"
+      height: "60mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 4
+      stackup:
+        - "F.Cu (signal, escape + outer routing)"
+        - "In1.Cu (GND plane, impedance reference)"
+        - "In2.Cu (PWR plane, +3V3 / +1V8 / +1V2 domains)"
+        - "B.Cu (signal, optional MCU bottom escape)"
+    min_trace: "0.15mm"
+    min_space: "0.15mm"
+    min_via: "0.3mm"
+    assembly: smt
+
+  compliance:
+    standards:
+      - USB_2.0
+      - USB_3.0
+      - PCIe_Gen1
+      - MIPI_D-PHY
+    rohs: true
+
+suggestions:
+  components:
+    usb_source_2: "USB-C 24-pin receptacle (USB 2.0 D+/D-)"
+    usb_sink_2: "QFN-32 0.5mm pitch (generic, no actual PHY)"
+    usb_source_3: "USB-C 24-pin receptacle (USB 3.0 SS lanes)"
+    usb_sink_3: "BGA-49 simulator (7x7 0.5mm pitch, pure pads)"
+    pcie_source: "Mini-PCIe card-edge connector (castellated pad row)"
+    pcie_sink: "QFP-48 0.5mm pitch"
+    mipi_source: "4-pin FFC connector (0.5mm pitch)"
+    mipi_sink: "QFN-24 0.5mm pitch"
+
+  layout:
+    - "Source connectors at board edges (USB-C top, PCIe right, FFC left)"
+    - "Sinks placed across board interior with adequate routing channel between source and sink"
+    - "GND/PWR planes on inner layers provide impedance reference"
+    - "Route diff pairs on F.Cu/B.Cu; planes on In1.Cu/In2.Cu"
+
+  bom:
+    preferred_vendors: ["LCSC"]
+    cost_target: "Not a working device; BOM is generic footprints only"
+
+bom_entries:
+  - ref: J1
+    part: "USB-C Receptacle (USB 2.0)"
+    lcsc: "C165948"
+  - ref: J2
+    part: "USB-C Receptacle (USB 3.0)"
+    lcsc: "C165948"
+  - ref: J3
+    part: "Mini-PCIe edge (synthetic)"
+    lcsc: "generic"
+  - ref: J4
+    part: "FFC 4-pin connector"
+    lcsc: "generic"
+  - ref: U1
+    part: "QFN-32 (synthetic USB 2.0 sink)"
+    lcsc: "generic"
+  - ref: U2
+    part: "BGA-49 simulator (synthetic USB 3.0 sink)"
+    lcsc: "generic"
+  - ref: U3
+    part: "QFP-48 (synthetic PCIe sink)"
+    lcsc: "generic"
+  - ref: U4
+    part: "QFN-24 (synthetic MIPI sink)"
+    lcsc: "generic"
+
+decisions:
+  - date: 2026-05-10
+    phase: concept
+    topic: "Scope"
+    choice: "Routing regression testbench, not working device"
+    rationale: "Epic #2556 Phase 4L explicitly scopes this as a regression bench (issue #2658). Synthetic sinks keep BOM minimal while exercising all Phase 1-3 features."
+    alternatives: ["Full reference designs (rejected: out of scope)", "Single-protocol board (rejected: insufficient feature coverage)"]
+  - date: 2026-05-10
+    phase: concept
+    topic: "Layer count"
+    choice: "4-layer"
+    rationale: "Phase 3K impedance formulas are calibrated against JLCPCB tier-1 4-layer stackup. 2-layer would prevent meaningful impedance validation."
+    alternatives: ["2-layer (rejected: insufficient impedance reference)"]
+  - date: 2026-05-10
+    phase: concept
+    topic: "File layout"
+    choice: "Split (generate_schematic.py + generate_pcb.py + generate_design.py)"
+    rationale: "Board 03's pattern. Board 05's monolithic design.py (1500+ lines) is what we're trying to avoid for a regression bench."
+    alternatives: ["Monolithic design.py (rejected: scaling concern)"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define protocol coverage (USB 2.0, USB 3.0, PCIe, MIPI)"
+        - "[x] Select footprint mix (USB-C, mini-PCIe edge, FFC, QFN/QFP/BGA)"
+        - "[x] Choose 4-layer JLCPCB tier-1 stackup"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] Source connectors (USB-C x2, mini-PCIe edge, FFC)"
+        - "[x] Sink ICs (QFN-32, BGA-49, QFP-48, QFN-24)"
+        - "[x] Differential pair nets declared with global labels"
+        - "[x] Power rails (+3V3, +1V8, +1V2, VBUS_USB, GND)"
+    layout:
+      status: in_progress
+      checklist:
+        - "[x] Component placement"
+        - "[x] Net-class declarations engaging Phase 1-3 features"
+        - "[x] PCB routing via kct route"
+        - "[ ] 0 DRC errors at JLCPCB tier-1 (waits on #2648 serpentine to land)"
