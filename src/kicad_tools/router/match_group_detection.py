@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.analysis.trace_length import CRITICAL_NET_PATTERNS
 
+from .diffpair import parse_differential_signal
 from .match_group_length import MatchGroup, MatchGroupSource
 
 if TYPE_CHECKING:
@@ -301,6 +302,19 @@ def detect_match_groups(
                 len(group.net_ids),
             )
 
+    # 4. Pair-aware reduction (Epic #2661 Phase 2F producer side).
+    # For every emitted group, look at its members and identify pairs
+    # of nets that form a differential pair by name (e.g. ``DAT0_P`` /
+    # ``DAT0_N``).  Move each such pair from ``net_ids`` into
+    # ``pair_ids`` so Phase 2F's tuner can dispatch to the pair-aware
+    # path.  Scalar members (unpaired) remain in ``net_ids``.
+    #
+    # This is the SOLE producer of ``MatchGroup.pair_ids`` -- before
+    # Phase 2F the field was reserved but never populated.  See
+    # :func:`_extract_pair_ids` for the matching algorithm.
+    for group in out:
+        _extract_pair_ids(group, net_names)
+
     return out
 
 
@@ -511,6 +525,78 @@ def _resolve_clock_sentinel(
             net_names.get(matches[0]),
         )
     return matches[0]
+
+
+# =============================================================================
+# Pair-aware reduction (Epic #2661 Phase 2F producer side)
+# =============================================================================
+
+
+def _extract_pair_ids(group: MatchGroup, net_names: dict[int, str]) -> None:
+    """Reduce a :class:`MatchGroup` by extracting paired members into ``pair_ids``.
+
+    Mutates ``group`` in place: for each member of ``group.net_ids``
+    whose name parses as a differential-pair half (via
+    :func:`kicad_tools.router.diffpair.parse_differential_signal`),
+    looks for the matching opposite-polarity half in the same group.
+    When BOTH halves are present, they are removed from ``net_ids`` and
+    added as a tuple to ``pair_ids``.  Unpaired members (no matching
+    opposite, or non-differential names) stay in ``net_ids``.
+
+    The pair tuple is always ``(p_net_id, n_net_id)`` -- positive half
+    first, negative half second -- matching the contract on
+    :attr:`MatchGroup.pair_ids`.
+
+    This function is the SOLE producer of ``MatchGroup.pair_ids`` --
+    before Phase 2F (Issue #2701) the field was reserved but never
+    populated.  Phase 2F's tuner is the SOLE consumer that dispatches
+    on the field.
+
+    Args:
+        group: The match group to reduce in place.  Both ``net_ids``
+            and ``pair_ids`` are mutated.
+        net_names: ``{net_id: net_name}`` lookup for resolving names.
+    """
+    # Build a {base_name: {polarity: net_id}} map across the group's
+    # current scalar members.  ``parse_differential_signal`` is the
+    # canonical name parser (reused from Epic #2556 Phase 1B / #2558).
+    by_key: dict[tuple[str, str], dict[str, int]] = {}
+    nonparseable: list[int] = []
+
+    for nid in group.net_ids:
+        name = net_names.get(nid)
+        if name is None:
+            nonparseable.append(nid)
+            continue
+        parsed = parse_differential_signal(name)
+        if parsed is None:
+            nonparseable.append(nid)
+            continue
+        base_name, polarity, notation = parsed
+        # Group key includes notation to avoid collapsing
+        # ``USB_D+/USB_D-`` and ``USB_DP/USB_DN`` into one pair when
+        # both share the base ``USB_D``.  Mirrors
+        # :func:`kicad_tools.router.diffpair.group_differential_pairs`.
+        key = (base_name, notation)
+        by_key.setdefault(key, {})[polarity] = nid
+
+    new_net_ids: list[int] = list(nonparseable)
+    new_pair_ids: list[tuple[int, int]] = list(group.pair_ids)
+
+    for (_base, _notation), polarity_map in by_key.items():
+        if "P" in polarity_map and "N" in polarity_map:
+            new_pair_ids.append((polarity_map["P"], polarity_map["N"]))
+        else:
+            # Unmatched half -- keep it as a scalar member.
+            for nid in polarity_map.values():
+                new_net_ids.append(nid)
+
+    # Deterministic ordering: scalars by net id, pairs by P-id then N-id.
+    new_net_ids.sort()
+    new_pair_ids.sort()
+
+    group.net_ids = new_net_ids
+    group.pair_ids = new_pair_ids
 
 
 # =============================================================================
