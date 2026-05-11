@@ -63,6 +63,7 @@ CHECK_CATEGORIES = [
     "diffpair_routing_continuity",
     "dimensions",
     "edge",
+    "impedance",
     "netlist",
     "pad_grid",
     "placement",
@@ -276,6 +277,7 @@ def run_selected_checks(
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
         "dimensions": checker.check_dimensions,
         "edge": checker.check_edge_clearances,
+        "impedance": checker.check_impedance,
         "netlist": checker.check_netlist,
         "pad_grid": checker.check_pad_grid_alignment,
         "placement": checker.check_footprint_placement,
@@ -527,18 +529,13 @@ def output_summary(
     print("-" * 60)
 
     for rule_id, counts in sorted(by_rule.items()):
-        print(
-            f"{rule_id:<30} {counts['errors']:<8} "
-            f"{counts['warnings']:<10} {counts['infos']:<8}"
-        )
+        print(f"{rule_id:<30} {counts['errors']:<8} {counts['warnings']:<10} {counts['infos']:<8}")
 
     print("-" * 60)
     total_errors = sum(c["errors"] for c in by_rule.values())
     total_warnings = sum(c["warnings"] for c in by_rule.values())
     total_infos = sum(c["infos"] for c in by_rule.values())
-    print(
-        f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8}"
-    )
+    print(f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8}")
 
 
 if __name__ == "__main__":
