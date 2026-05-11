@@ -1180,3 +1180,182 @@ class TestCleanupBeforeStatistics:
         assert stats1 == stats2, (
             f"cleanup_artifacts is not idempotent: first={stats1}, second={stats2}"
         )
+
+
+class TestPlacementFeedbackOnPartial:
+    """Issue #2621: placement-feedback engages after a PARTIAL layer escalation.
+
+    Before the fix, ``route_with_layer_escalation`` finished its layer
+    sweep and went directly to optimize/save without ever consulting
+    ``_run_placement_feedback`` — so ``--placement-feedback`` was a no-op
+    whenever ``--auto-layers`` was on (the default).  The chorus-test
+    repro routed 30/48 nets (62%) and exited PARTIAL with the feedback
+    flag set but the loop never invoked.
+    """
+
+    def _make_mock_router(self, nets_routed, nets_to_route, overflow):
+        """Reuse the mock router pattern from TestEarlyTermination."""
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
+        router.grid.width = 50.0
+        router.grid.height = 40.0
+        router.grid.get_total_overflow.return_value = overflow
+        router.get_statistics.return_value = {
+            "nets_routed": nets_routed,
+            "segments": 10,
+            "vias": 2,
+        }
+        router.routes = []  # truthy-list path: non-None but empty
+        router.get_failed_nets.return_value = list(range(1, nets_to_route - nets_routed + 1))
+        router.power_stall_abort = False
+        router._pour_nets_without_zones = set()
+        router.rules.via_diameter = 0.6
+        router.rules.min_drill_clearance = 0.0
+        router.rules.trace_width = 0.2
+        router.rules.trace_clearance = 0.15
+        return router
+
+    def _make_args(self, **overrides):
+        """Minimal args that exercise the placement-feedback branch."""
+        defaults = dict(
+            backend="python",
+            grid=0.25,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            fine_pitch_clearance=None,
+            skip_nets=None,
+            auto_pour=False,
+            max_layers=2,  # Single attempt — keeps the test fast.
+            min_completion=0.95,
+            strategy="negotiated",
+            verbose=False,
+            force=False,
+            timeout=60,
+            iterations=3,
+            per_net_timeout=None,
+            batch_routing=False,
+            high_performance=False,
+            hierarchical=False,
+            perturbation=True,
+            two_phase=False,
+            multi_resolution=False,
+            edge_clearance=0.25,
+            escape_routing=None,
+            no_optimize=True,
+            dry_run=True,
+            # placement-feedback flags (CLI defaults except where overridden)
+            placement_feedback=False,
+            placement_feedback_budget=3,
+            placement_feedback_max_movement=5.0,
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor=None,
+            placement_feedback_stagnation_patience=3,
+            placement_feedback_outer_timeout=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    @patch("kicad_tools.cli.route_cmd._run_placement_feedback")
+    def test_partial_invokes_feedback_when_flag_set(
+        self, mock_feedback, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """PARTIAL + --placement-feedback => loop is invoked exactly once."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # PARTIAL: 2/3 nets routed, some overflow.
+        router = self._make_mock_router(nets_routed=2, nets_to_route=3, overflow=5)
+
+        def mock_load(*args, **kwargs):
+            return router, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(
+                    pcb, out, self._make_args(placement_feedback=True), quiet=True
+                )
+
+        assert mock_feedback.call_count == 1, (
+            f"Expected placement-feedback to be invoked once on PARTIAL, got "
+            f"{mock_feedback.call_count}"
+        )
+        # And it must have been called with the final_result's router.
+        kwargs = mock_feedback.call_args.kwargs
+        assert kwargs["router"] is router
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    @patch("kicad_tools.cli.route_cmd._run_placement_feedback")
+    def test_partial_skips_feedback_when_flag_unset(
+        self, mock_feedback, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """PARTIAL without --placement-feedback => loop is not invoked."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        router = self._make_mock_router(nets_routed=2, nets_to_route=3, overflow=5)
+
+        def mock_load(*args, **kwargs):
+            return router, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(
+                    pcb, out, self._make_args(placement_feedback=False), quiet=True
+                )
+
+        assert mock_feedback.call_count == 0, (
+            f"Placement-feedback should be skipped without --placement-feedback, "
+            f"got {mock_feedback.call_count} invocations"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    @patch("kicad_tools.cli.route_cmd._run_placement_feedback")
+    def test_success_skips_feedback_even_with_flag(
+        self, mock_feedback, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """SUCCESS + --placement-feedback => loop is not invoked.
+
+        Placement-feedback is purely remedial — nothing to do when the
+        route already meets ``min_completion``.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # 3/3 nets routed — meets default min_completion=0.95.
+        router = self._make_mock_router(nets_routed=3, nets_to_route=3, overflow=0)
+        # No failed nets when fully routed.
+        router.get_failed_nets.return_value = []
+
+        def mock_load(*args, **kwargs):
+            return router, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(
+                    pcb, out, self._make_args(placement_feedback=True), quiet=True
+                )
+
+        assert mock_feedback.call_count == 0, (
+            f"Placement-feedback should not run on SUCCESS, got "
+            f"{mock_feedback.call_count} invocations"
+        )
