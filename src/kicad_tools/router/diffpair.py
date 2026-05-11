@@ -6,6 +6,7 @@ This module provides:
 - DifferentialPair: A pair of P/N signals with routing constraints
 - detect_differential_pairs: Parse net names to identify differential pairs
 - DifferentialPairConfig: Configuration for differential pair routing
+- should_engage_coupled: Engagement-layer gate for CoupledPathfinder (Phase 2E)
 
 Differential pairs are detected from common naming conventions:
 - Plus/minus notation: USB_D+/USB_D-, ETH_TX+/ETH_TX-
@@ -13,9 +14,15 @@ Differential pairs are detected from common naming conventions:
 - Positive/negative suffix: CLK_POS/CLK_NEG
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .rules import NetClassRouting
 
 
 class DifferentialPairType(Enum):
@@ -46,7 +53,7 @@ class DifferentialPairRules:
     impedance: float = 90.0
 
     @classmethod
-    def for_type(cls, pair_type: DifferentialPairType) -> "DifferentialPairRules":
+    def for_type(cls, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get predefined rules for a differential pair type."""
         rules_map = {
             DifferentialPairType.USB2: cls(
@@ -236,8 +243,123 @@ def is_single_ended_refused(net_name: str) -> bool:
     Refusal applies to suffix INFERENCE only -- explicit declarations
     (via ``NetClassRouting.diffpair_partner``) and KiCad group
     declarations bypass this check (designer override wins).
+
+    Note: a SEPARATE engagement-layer refusal in
+    :func:`should_engage_coupled` re-applies this pattern at the
+    CoupledPathfinder dispatch site so an explicit declaration cannot
+    force coupling on electrically-single-ended pins like USB-C CC1/CC2.
+    See Issue #2638 / Epic #2556 Phase 2E.
     """
     return bool(_SINGLE_ENDED_REFUSAL_PATTERN.match(net_name))
+
+
+# =============================================================================
+# ENGAGEMENT-LAYER GATE -- decides whether CoupledPathfinder runs for a pair
+# (Issue #2638, Epic #2556 Phase 2E).
+# =============================================================================
+
+
+def _lookup_net_class(
+    net_name: str,
+    net_class_routing: dict | None,
+    net_to_class: dict | None,
+) -> NetClassRouting | None:
+    """Resolve the :class:`NetClassRouting` for ``net_name``.
+
+    Supports two key conventions in ``net_class_routing``:
+
+    1. ``class_name -> NetClassRouting`` paired with a
+       ``net_to_class: {net_name: class_name}`` map -- the layered
+       detector's convention (see ``diffpair_detection.py``).
+    2. ``net_name -> NetClassRouting`` directly -- the autorouter's
+       ``net_class_map`` convention (see ``router/core.py``).
+
+    The function tries convention (1) first when ``net_to_class`` is
+    supplied, then falls back to convention (2).  Returns ``None`` if
+    neither lookup yields a match.
+    """
+    if not net_class_routing:
+        return None
+
+    # Convention 1: class_name-keyed lookup via net_to_class.
+    if net_to_class is not None:
+        class_name = net_to_class.get(net_name)
+        if class_name is not None:
+            nc = net_class_routing.get(class_name)
+            if nc is not None:
+                return nc
+
+    # Convention 2: net_name-keyed lookup (autorouter.net_class_map style).
+    return net_class_routing.get(net_name)
+
+
+def should_engage_coupled(
+    pair: DifferentialPair,
+    net_class_routing: dict | None,
+    net_to_class: dict | None = None,
+) -> tuple[bool, str]:
+    """Decide whether CoupledPathfinder should engage on ``pair``.
+
+    Phase 2E (Issue #2638, Epic #2556) refines diff-pair engagement from
+    "always run coupled when ``--differential-pairs`` is on" to "run
+    coupled only when the net class explicitly opts in AND the pair is
+    not single-ended-by-spec."  This is the engagement-layer counterpart
+    to suffix-time refusal in :func:`is_single_ended_refused`.
+
+    The single-ended refusal here fires regardless of detection source.
+    The #2527 case (designer accidentally declares
+    ``diffpair_partner="USB_CC2"`` on a USB_CC1 net class) is caught
+    here even though the explicit declaration bypassed the suffix-time
+    refusal: USB-C CC1/CC2 are orientation pins, not a coupled pair,
+    and routing them as a coupled pair would be electrically wrong.
+
+    Args:
+        pair: The detected :class:`DifferentialPair`.
+        net_class_routing: Map of either ``{class_name: NetClassRouting}``
+            or ``{net_name: NetClassRouting}`` (see
+            :func:`_lookup_net_class`).  When ``None`` or empty, no class
+            opted in -> ``(False, "no_class_match")``.
+        net_to_class: Optional ``{net_name: class_name}`` lookup used in
+            tandem with the class-name-keyed convention.
+
+    Returns:
+        ``(engaged, reason)`` where ``reason`` is one of:
+
+        * ``"engaged"`` -- proceed with coupled routing.
+        * ``"single_ended_refusal"`` -- both nets match
+          :func:`is_single_ended_refused`.  Coupling them would be
+          electrically wrong (USB-C CC1/CC2, SBU1/SBU2).  Fires even
+          when explicit declaration would otherwise bypass suffix-time
+          refusal.
+        * ``"opt_in_disabled"`` -- a class match exists but
+          ``coupled_routing`` is ``False`` on the matched class.
+        * ``"no_class_match"`` -- neither net resolves to a
+          :class:`NetClassRouting`.  Treated as disabled.
+    """
+    # 1. Engagement-layer single-ended refusal (#2527 lesson).  Fires
+    #    regardless of detection source -- explicit declarations cannot
+    #    force coupling on electrically-single-ended pins.
+    p_name = pair.positive.net_name
+    n_name = pair.negative.net_name
+    if is_single_ended_refused(p_name) and is_single_ended_refused(n_name):
+        return False, "single_ended_refusal"
+
+    # 2. Look up the net class for either half.  Either side opting in
+    #    is sufficient -- this mirrors the one-sided-declaration policy
+    #    in ``_gather_explicit_pairs`` (#2558).
+    p_class = _lookup_net_class(p_name, net_class_routing, net_to_class)
+    n_class = _lookup_net_class(n_name, net_class_routing, net_to_class)
+
+    if p_class is None and n_class is None:
+        return False, "no_class_match"
+
+    p_opt = bool(p_class is not None and getattr(p_class, "coupled_routing", False))
+    n_opt = bool(n_class is not None and getattr(n_class, "coupled_routing", False))
+
+    if p_opt or n_opt:
+        return True, "engaged"
+
+    return False, "opt_in_disabled"
 
 
 def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:

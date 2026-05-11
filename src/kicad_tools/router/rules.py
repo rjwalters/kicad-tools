@@ -447,6 +447,37 @@ class NetClassRouting:
     # Phase 1A (#2557).
     diffpair_partner: str | None = None
 
+    # Differential pair coupled-routing engagement (Issue #2638, Epic #2556 Phase 2E)
+    coupled_routing: bool = False
+    """Opt-in flag for routing this net class's diff pairs via CoupledPathfinder.
+
+    When ``False`` (default), differential pairs whose P or N net belongs to
+    this class fall through to the main routing strategy even when
+    ``--differential-pairs`` is enabled.  Phase 1's ``intra_pair_clearance``
+    still applies to within-pair edges at the pathfinder layer, so a tight
+    intra clearance can be honored without forcing coupled geometry.
+
+    When ``True``, the diff-pair pre-pass / ``route_all_with_diffpairs``
+    dispatch invokes :meth:`CoupledPathfinder` for pairs in this class,
+    subject to the engagement-layer single-ended refusal in
+    :func:`should_engage_coupled` (#2527 lesson — pin pairs that look
+    diff-pair-ish but are single-ended by spec, like USB-C CC1/CC2 and
+    SBU1/SBU2, are refused at engagement time even when explicitly
+    declared via :attr:`diffpair_partner`).
+
+    Default is ``False`` for backward compatibility with all pre-#2636
+    boards.  Predefined classes (e.g. ``NET_CLASS_HIGH_SPEED``) keep
+    ``coupled_routing=False`` until a follow-up issue flips them on with
+    empirical board coverage from Phase 4's board 06.
+
+    NOTE -- name collision with the ``use_coupled_routing`` function
+    parameter on :meth:`DiffPairRouter.route_differential_pair`.  The
+    parameter is a runtime dispatch toggle ("call coupled vs independent
+    for this single invocation"); this field is a class-level
+    configuration flag ("nets in this class opt into the coupled
+    engagement path").  Future refactors must not collapse the two.
+    """
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
