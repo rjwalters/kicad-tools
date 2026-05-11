@@ -1295,6 +1295,58 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     return output_path
 
 
+def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> list[Path]:
+    """Remove any stale ``<stem>_<N>layer.kicad_pcb`` siblings of *output_path*.
+
+    The auto-layers escalation paths rename the output to include the layer
+    count when escalation actually happens (e.g. ``board_routed_4layer.kicad_pcb``).
+    A previous failed-2L run leaves that ``_4layer`` file behind; the next
+    run that succeeds on 2 layers does NOT touch it.  The result is a
+    confusing pair of files where only the canonical one reflects the
+    current run (issue #2674).
+
+    This helper deletes the stale siblings before routing begins so a
+    clean run yields a clean output directory, deterministically reflecting
+    the current run's result regardless of any prior failed attempts.
+
+    Args:
+        output_path: The canonical (un-suffixed) output PCB path that
+            the route command was asked to write.  Stale ``_4layer`` and
+            ``_6layer`` siblings of this path's stem are removed.
+        quiet: Suppress informational output.
+
+    Returns:
+        List of paths that were actually removed.  Useful for tests
+        and verbose logging.
+    """
+    removed: list[Path] = []
+    # Accept str or Path -- the escalation entry points are sometimes
+    # passed string paths in tests.
+    output_path = Path(output_path)
+    parent = output_path.parent
+    stem = output_path.stem
+    # Layer counts that the escalation path can produce (matches the
+    # ``layer_configs`` table in ``route_with_layer_escalation`` and
+    # ``route_with_combined_escalation``).
+    for n in (4, 6):
+        for suffix in (".kicad_pcb", ".kicad_prl"):
+            stale = parent / f"{stem}_{n}layer{suffix}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                    removed.append(stale)
+                except OSError:
+                    # Best-effort cleanup; a permission error on a stale
+                    # artifact must not abort the route.
+                    continue
+    if removed and not quiet:
+        from kicad_tools.cli.progress import flush_print
+
+        for p in removed:
+            flush_print(f"  Removed stale artifact: {p.name}")
+    return removed
+
+
 def _auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
@@ -1442,6 +1494,12 @@ def route_with_layer_escalation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Issue #2674: remove stale ``<stem>_<N>layer.kicad_pcb`` siblings
+    # from a previous failed-2L run before routing begins.  Without this,
+    # a successful 2L run leaves the prior failed 4L/6L artifact behind
+    # and the output directory shows a confusing pair of routed PCBs.
+    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
@@ -2576,6 +2634,12 @@ def route_with_combined_escalation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Issue #2674: remove stale ``<stem>_<N>layer.kicad_pcb`` siblings
+    # from a previous failed-2L run before routing begins.  Without this,
+    # a successful 2L run leaves the prior failed 4L/6L artifact behind
+    # and the output directory shows a confusing pair of routed PCBs.
+    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
