@@ -69,6 +69,27 @@ output/
 
 Open the schematic in KiCad to view and continue the design.
 
+## Manufacturing readiness status
+
+As of the 2026-05-11 audit, board 04 routes **8/9 nets (89%)** with two residuals
+tracked as upstream issues — both with concrete, documented root causes:
+
+| Residual | Pads / nets affected | Tracking issue | Status |
+|---|---|---|---|
+| OSC_OUT 2/3 pad completion | Y1.2 + C11.1 route; U2.6 (LQFP-48 0.5mm-pitch pin) defers | [#2695](https://github.com/rjwalters/kicad-tools/issues/2695) | In-pad via escape for fine-pitch LQFP/QFP (extends the #2605/#2608 pattern from 0.65mm SSOP to 0.5mm QFP) |
+| 5 ImpedanceRule errors on SWCLK | 50Ω target on a 2-layer stackup requires ~2.812mm width on F.Cu | [#2696](https://github.com/rjwalters/kicad-tools/issues/2696) | Either upgrade board 04 to 4-layer (Option A) or suppress validator's default `*CLK*` 50Ω spec for 2-layer hobbyist boards (Option C) |
+
+Board 04's `generate_design.py` does **not** set `target_single_impedance` on
+any net class. The 5 ImpedanceRule errors come from
+`ImpedanceRule._get_default_specs()` matching `SWCLK` via the regex `.*CLK.*`
+and asserting a 50Ω default. Per PR #2680's caveat, that target is physically
+infeasible on the 2-layer JLCPCB default stackup.
+
+Both #2695 and #2696 must resolve before board 04 reaches 0 DRC + 0 ERC.
+Until then, board 04 is **partial-mfg-ready**: the routed PCB is structurally
+valid except for the OSC_OUT escape gap, and the impedance errors reflect a
+spec-vs-stackup mismatch rather than a wiring or sizing bug.
+
 ## Schematic Layout
 
 ```
