@@ -221,6 +221,10 @@ def run_check_command(args) -> int:
         sub_argv.append("--verbose")
     if getattr(args, "output", None):
         sub_argv.extend(["--output", args.output])
+    if getattr(args, "suppress_library", False):
+        sub_argv.append("--suppress-library")
+    if getattr(args, "net_class_map", None):
+        sub_argv.extend(["--net-class-map", args.net_class_map])
     return check_main(sub_argv)
 
 
@@ -257,9 +261,7 @@ def run_validate_command(args) -> int:
             "  --consistency    Check schematic-to-PCB consistency (components, nets, properties)"
         )
         print("  --placement      Check BOM components are placed on PCB")
-        print(
-            "  --lvs            Layout-vs-schematic check with hierarchical support"
-        )
+        print("  --lvs            Layout-vs-schematic check with hierarchical support")
         return 1
 
     from ..validate_sync_cmd import main as validate_sync_main
@@ -311,9 +313,7 @@ def run_validate_connectivity_command(args) -> int:
                 pro_path = Path(f)
                 resolved = pro_path.with_suffix(".kicad_pcb")
                 if not resolved.exists():
-                    print(
-                        f"Error: PCB file not found: {resolved}"
-                    )
+                    print(f"Error: PCB file not found: {resolved}")
                     return 1
                 pcb_path = str(resolved)
                 break
@@ -472,5 +472,7 @@ def run_audit_command(args) -> int:
         sub_argv.append("--strict")
     if getattr(args, "audit_verbose", False):
         sub_argv.append("--verbose")
+    if getattr(args, "audit_net_class_map", None):
+        sub_argv.extend(["--net-class-map", args.audit_net_class_map])
 
     return audit_main(sub_argv)

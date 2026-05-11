@@ -324,6 +324,7 @@ class ManufacturingAudit:
         skip_erc: bool = False,
         no_assembly: bool = False,
         pcb_override: Path | None = None,
+        net_class_map_path: str | Path | None = None,
     ):
         """Initialize the audit.
 
@@ -337,6 +338,12 @@ class ManufacturingAudit:
             no_assembly: Skip assembly cost calculation
             pcb_override: Explicit PCB path override (takes precedence over
                 all auto-detection including project.kct)
+            net_class_map_path: Optional path to a JSON sidecar mapping
+                net names to ``NetClassRouting`` dicts (see
+                :meth:`kicad_tools.router.rules.NetClassRouting.to_dict`).
+                When supplied, the diff-pair routing-continuity and
+                length-skew DRC rules can fire on routed boards.  Issue
+                #2684 -- mirrors the ``kct check --net-class-map`` flag.
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -345,6 +352,9 @@ class ManufacturingAudit:
         self.quantity = quantity
         self.skip_erc = skip_erc
         self.no_assembly = no_assembly
+        self.net_class_map_path = (
+            Path(net_class_map_path) if net_class_map_path is not None else None
+        )
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -631,13 +641,33 @@ class ManufacturingAudit:
         status = DRCStatus()
 
         try:
+            import json as _json
+
+            from kicad_tools.router.rules import net_class_map_from_dict
             from kicad_tools.validate import DRCChecker
+
+            # Load optional net-class-map sidecar (Issue #2684).  When
+            # supplied, enables the diff-pair routing-continuity and
+            # length-skew rules to re-derive engagement / skew state on
+            # routed boards.  When absent, rules degrade to no-ops.
+            net_class_map = None
+            if self.net_class_map_path is not None:
+                try:
+                    ncm_data = _json.loads(self.net_class_map_path.read_text())
+                    net_class_map = net_class_map_from_dict(ncm_data)
+                except (OSError, _json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.warning(
+                        "Failed to load net-class-map from %s: %s",
+                        self.net_class_map_path,
+                        e,
+                    )
 
             checker = DRCChecker(
                 pcb,
                 manufacturer=self.manufacturer,
                 layers=self.layers or 2,
                 copper_oz=self.copper_oz,
+                net_class_map=net_class_map,
             )
 
             results = checker.check_all()

@@ -151,6 +151,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress silkscreen warnings from standard KiCad library footprints",
     )
+    parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (see kicad_tools.router.rules.NetClassRouting.to_dict). "
+            "When supplied, enables the diff-pair routing_continuity and "
+            "length_skew rules to fire on routed boards; without it those "
+            "rules degrade to no-ops (Issue #2684)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -215,6 +227,29 @@ def main(argv: list[str] | None = None) -> int:
         detected = len(pcb.copper_layers)
         layers = detected if detected > 0 else 2
 
+    # Load optional net-class-map sidecar (Issue #2684).  When supplied,
+    # the diff-pair routing-continuity and length-skew rules can re-derive
+    # engagement / skew state from the routed PCB and fire.  When omitted,
+    # the rules degrade to no-ops (AC #3: graceful-degradation contract).
+    net_class_map = None
+    if args.net_class_map is not None:
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        ncm_path = Path(args.net_class_map).resolve()
+        if not ncm_path.exists():
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        try:
+            ncm_data = json.loads(ncm_path.read_text())
+        except json.JSONDecodeError as e:
+            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
+            return 1
+        try:
+            net_class_map = net_class_map_from_dict(ncm_data)
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
+            return 1
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -223,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             layers=layers,
             copper_oz=args.copper,
             suppress_library=args.suppress_library,
+            net_class_map=net_class_map,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

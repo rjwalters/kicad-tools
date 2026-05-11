@@ -7,6 +7,8 @@ This module provides:
 - Predefined net classes for common use cases
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 from .layers import Layer
@@ -394,6 +396,35 @@ class LengthConstraint:
         if self.match_tolerance < 0:
             raise ValueError(f"match_tolerance must be non-negative, got {self.match_tolerance}")
 
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-compatible dict.
+
+        Round-trip companion to :meth:`from_dict` -- used by the
+        ``kct check --net-class-map`` sidecar format (Issue #2684).
+        """
+        return {
+            "net_id": self.net_id,
+            "min_length": self.min_length,
+            "max_length": self.max_length,
+            "match_group": self.match_group,
+            "match_tolerance": self.match_tolerance,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> LengthConstraint:
+        """Deserialize from a dict produced by :meth:`to_dict`.
+
+        Unknown keys are ignored (forward compatibility); missing keys
+        fall back to dataclass defaults where applicable.
+        """
+        return cls(
+            net_id=data["net_id"],
+            min_length=data.get("min_length"),
+            max_length=data.get("max_length"),
+            match_group=data.get("match_group"),
+            match_tolerance=data.get("match_tolerance", 0.5),
+        )
+
 
 @dataclass
 class NetClassRouting:
@@ -739,6 +770,120 @@ class NetClassRouting:
             return self.length_match_tolerance_mm
         return default
 
+    def to_dict(self) -> dict:
+        """Serialize this :class:`NetClassRouting` to a JSON-compatible dict.
+
+        Issue #2684 / Epic #2556 Phase 2.5c-cli.  The round-trip wire
+        format for the ``kct check --net-class-map <path>`` sidecar.  All
+        fields the diff-pair validate rules consume are preserved:
+
+        - ``coupled_routing`` (Phase 2E / #2638 -- gates engagement)
+        - ``coupled_continuity_threshold`` (Phase 2G / #2640)
+        - ``skew_tolerance_mm`` (Phase 3H / #2647)
+        - ``diffpair_partner`` (Phase 1B / #2558)
+        - ``target_diff_impedance`` (Phase 3K / #2650)
+        - ``target_single_impedance`` (Phase 3K / #2650)
+        - ``intra_pair_clearance`` (Phase 1A / #2557)
+        - ``length_match_group`` / ``length_match_reference`` /
+          ``length_match_tolerance_mm`` (Phase 1A / #2687, Epic #2661)
+
+        Nested ``LengthConstraint`` is serialized via its own
+        :meth:`LengthConstraint.to_dict` (``None`` is preserved as ``None``).
+
+        Round-trip property (Issue #2684 AC: byte-equivalent round-trip):
+        for any ``nc: NetClassRouting``,
+        ``NetClassRouting.from_dict(nc.to_dict()) == nc`` holds.
+
+        Drift-prevention: the
+        :class:`tests.test_net_class_serialization.TestDriftPrevention`
+        suite asserts ``{f.name for f in fields(NetClassRouting)}`` equals
+        the literal key set returned here, so any future field addition
+        to the dataclass is forced to update this method (and
+        :meth:`from_dict`) in the same commit.
+        """
+        return {
+            "name": self.name,
+            "priority": self.priority,
+            "trace_width": self.trace_width,
+            "clearance": self.clearance,
+            "via_size": self.via_size,
+            "cost_multiplier": self.cost_multiplier,
+            "length_critical": self.length_critical,
+            "noise_sensitive": self.noise_sensitive,
+            "zone_priority": self.zone_priority,
+            "zone_connection": self.zone_connection,
+            "is_pour_net": self.is_pour_net,
+            "preferred_layers": (
+                list(self.preferred_layers) if self.preferred_layers is not None else None
+            ),
+            "avoid_layers": (list(self.avoid_layers) if self.avoid_layers is not None else None),
+            "layer_cost_multiplier": self.layer_cost_multiplier,
+            "length_constraint": (
+                self.length_constraint.to_dict() if self.length_constraint is not None else None
+            ),
+            "intra_pair_clearance": self.intra_pair_clearance,
+            "diffpair_partner": self.diffpair_partner,
+            "coupled_routing": self.coupled_routing,
+            "target_diff_impedance": self.target_diff_impedance,
+            "target_single_impedance": self.target_single_impedance,
+            "impedance_tolerance_percent": self.impedance_tolerance_percent,
+            "coupled_continuity_threshold": self.coupled_continuity_threshold,
+            "skew_tolerance_mm": self.skew_tolerance_mm,
+            "length_match_group": self.length_match_group,
+            "length_match_reference": self.length_match_reference,
+            "length_match_tolerance_mm": self.length_match_tolerance_mm,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> NetClassRouting:
+        """Deserialize from a dict produced by :meth:`to_dict`.
+
+        Tolerates missing optional keys (falls back to dataclass defaults)
+        and ignores unknown keys (forward compatibility).  The only
+        required field is ``name``.
+
+        Round-trip property: see :meth:`to_dict`.
+        """
+        if "name" not in data:
+            raise ValueError(
+                "NetClassRouting.from_dict requires a 'name' field; got keys: "
+                f"{sorted(data.keys())}"
+            )
+        length_constraint_data = data.get("length_constraint")
+        length_constraint = (
+            LengthConstraint.from_dict(length_constraint_data)
+            if length_constraint_data is not None
+            else None
+        )
+        return cls(
+            name=data["name"],
+            priority=data.get("priority", 5),
+            trace_width=data.get("trace_width", 0.2),
+            clearance=data.get("clearance", 0.2),
+            via_size=data.get("via_size", 0.6),
+            cost_multiplier=data.get("cost_multiplier", 1.0),
+            length_critical=data.get("length_critical", False),
+            noise_sensitive=data.get("noise_sensitive", False),
+            zone_priority=data.get("zone_priority", 0),
+            zone_connection=data.get("zone_connection", "thermal"),
+            is_pour_net=data.get("is_pour_net", False),
+            preferred_layers=data.get("preferred_layers"),
+            avoid_layers=data.get("avoid_layers"),
+            layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
+            length_constraint=length_constraint,
+            intra_pair_clearance=data.get("intra_pair_clearance"),
+            diffpair_partner=data.get("diffpair_partner"),
+            coupled_routing=data.get("coupled_routing", False),
+            target_diff_impedance=data.get("target_diff_impedance"),
+            target_single_impedance=data.get("target_single_impedance"),
+            impedance_tolerance_percent=data.get("impedance_tolerance_percent", 10.0),
+            coupled_continuity_threshold=data.get("coupled_continuity_threshold"),
+            skew_tolerance_mm=data.get("skew_tolerance_mm"),
+            length_match_group=data.get("length_match_group"),
+            length_match_reference=data.get("length_match_reference"),
+            length_match_tolerance_mm=data.get("length_match_tolerance_mm"),
+        )
+
 
 # =============================================================================
 # PREDEFINED NET CLASSES
@@ -873,6 +1018,45 @@ def create_net_class_map(
             net_class_map[net] = NET_CLASS_DEBUG
 
     return net_class_map
+
+
+def net_class_map_to_dict(
+    net_class_map: dict[str, NetClassRouting],
+) -> dict[str, dict]:
+    """Serialize a ``{net_name: NetClassRouting}`` map to a JSON-compatible dict.
+
+    Issue #2684.  The wire format for the ``kct check --net-class-map``
+    sidecar JSON.  Each entry is serialized via :meth:`NetClassRouting.to_dict`.
+    """
+    return {net: nc.to_dict() for net, nc in net_class_map.items()}
+
+
+def net_class_map_from_dict(
+    data: dict[str, dict],
+) -> dict[str, NetClassRouting]:
+    """Deserialize a ``{net_name: NetClassRouting}`` map from a JSON-shaped dict.
+
+    Round-trip companion to :func:`net_class_map_to_dict`.  Each entry
+    is deserialized via :meth:`NetClassRouting.from_dict`.
+
+    Args:
+        data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
+            dict-of-dicts.
+
+    Raises:
+        ValueError: If any entry is malformed (missing 'name' field).
+        TypeError: If ``data`` is not a dict-of-dicts.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"net_class_map_from_dict expects a dict, got {type(data).__name__}")
+    result: dict[str, NetClassRouting] = {}
+    for net_name, entry in data.items():
+        if not isinstance(entry, dict):
+            raise TypeError(
+                f"net_class_map entry for {net_name!r} must be a dict, got {type(entry).__name__}"
+            )
+        result[net_name] = NetClassRouting.from_dict(entry)
+    return result
 
 
 # Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).

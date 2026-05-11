@@ -410,6 +410,22 @@ def _add_check_parser(subparsers) -> None:
         default=None,
         help="Write JSON report to file (implies --format json for file output)",
     )
+    check_parser.add_argument(
+        "--suppress-library",
+        action="store_true",
+        help="Suppress silkscreen warnings from standard KiCad library footprints",
+    )
+    check_parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields.  When supplied, enables the diff-pair DRC rules "
+            "(routing_continuity, length_skew) to fire on routed boards "
+            "(Issue #2684)."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:
@@ -489,9 +505,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_pins.add_argument("--format", choices=["table", "json"], default="table")
 
     # sch pin-map
-    sch_pin_map = sch_subparsers.add_parser(
-        "pin-map", help="Show resolved pin-to-net assignments"
-    )
+    sch_pin_map = sch_subparsers.add_parser("pin-map", help="Show resolved pin-to-net assignments")
     sch_pin_map.add_argument("schematic", help="Path to .kicad_sch file")
     sch_pin_map.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
     sch_pin_map.add_argument(
@@ -604,18 +618,14 @@ def _add_sch_parser(subparsers) -> None:
         help="Set symbol-level boolean flags (on_board, in_bom, dnp, exclude_from_sim)",
     )
     sch_set_prop.add_argument("schematic", help="Path to .kicad_sch file")
-    sch_set_prop.add_argument(
-        "--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)"
-    )
+    sch_set_prop.add_argument("--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)")
     sch_set_prop.add_argument(
         "--property",
         dest="property_name",
         required=True,
         help="Flag to modify (on_board, in_bom, dnp, exclude_from_sim)",
     )
-    sch_set_prop.add_argument(
-        "--value", required=True, help="Value to set (yes/no/true/false/1/0)"
-    )
+    sch_set_prop.add_argument("--value", required=True, help="Value to set (yes/no/true/false/1/0)")
     sch_set_prop.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
@@ -771,9 +781,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_bypass.add_argument(
         "--pin", required=True, help="Target pin number on that IC (e.g., 4)"
     )
-    sch_add_bypass.add_argument(
-        "--value", default="100nF", help="Capacitor value (default: 100nF)"
-    )
+    sch_add_bypass.add_argument("--value", default="100nF", help="Capacitor value (default: 100nF)")
     sch_add_bypass.add_argument(
         "--ground-net",
         default="GND",
@@ -809,18 +817,14 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_pull.add_argument(
         "--ref", required=True, help="Symbol reference of target IC (e.g., U5)"
     )
-    sch_add_pull.add_argument(
-        "--pin", required=True, help="Pin number on target IC (e.g., 25)"
-    )
+    sch_add_pull.add_argument("--pin", required=True, help="Pin number on target IC (e.g., 25)")
     sch_add_pull.add_argument(
         "--direction",
         required=True,
         choices=["up", "down"],
         help="Pull-up (power) or pull-down (ground)",
     )
-    sch_add_pull.add_argument(
-        "--value", required=True, help="Resistor value (e.g., 10k)"
-    )
+    sch_add_pull.add_argument("--value", required=True, help="Resistor value (e.g., 10k)")
     sch_add_pull.add_argument(
         "--power-net",
         dest="power_net",
@@ -844,9 +848,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_pull.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Library search path"
     )
-    sch_add_pull.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
+    sch_add_pull.add_argument("--lib", action="append", dest="libs", help="Specific library file")
     sch_add_pull.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
     )
@@ -1046,18 +1048,19 @@ def _add_sch_parser(subparsers) -> None:
         metavar=("X", "Y"),
         help="Find target wire nearest to this point",
     )
-    sch_insert_inline.add_argument(
-        "--pin-a", default="1", help="Upstream pin number (default: 1)"
-    )
+    sch_insert_inline.add_argument("--pin-a", default="1", help="Upstream pin number (default: 1)")
     sch_insert_inline.add_argument(
         "--pin-b", default="2", help="Downstream pin number (default: 2)"
     )
     sch_insert_inline.add_argument(
-        "--rotation", type=float, default=None,
+        "--rotation",
+        type=float,
+        default=None,
         help="Symbol rotation in degrees (auto-detected if omitted)",
     )
     sch_insert_inline.add_argument(
-        "--expand-gap", action="store_true",
+        "--expand-gap",
+        action="store_true",
         help="Shift downstream geometry if wire is too short for the component",
     )
     sch_insert_inline.add_argument(
@@ -1097,15 +1100,9 @@ def _add_sch_parser(subparsers) -> None:
         "reconnect-pin", help="Reconnect a pin from one net to another"
     )
     sch_reconnect_pin.add_argument("schematic", help="Path to .kicad_sch file")
-    sch_reconnect_pin.add_argument(
-        "--ref", required=True, help="Symbol reference (e.g., C41)"
-    )
-    sch_reconnect_pin.add_argument(
-        "--pin", required=True, help="Pin number to reconnect"
-    )
-    sch_reconnect_pin.add_argument(
-        "--to-net", required=True, help="Target net name (e.g., GNDD)"
-    )
+    sch_reconnect_pin.add_argument("--ref", required=True, help="Symbol reference (e.g., C41)")
+    sch_reconnect_pin.add_argument("--pin", required=True, help="Pin number to reconnect")
+    sch_reconnect_pin.add_argument("--to-net", required=True, help="Target net name (e.g., GNDD)")
     sch_reconnect_pin.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Library search path"
     )
@@ -1215,15 +1212,20 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_repair_instances.add_argument("schematic", help="Path to .kicad_sch file")
     sch_repair_instances.add_argument(
-        "--dry-run", "-n", action="store_true",
+        "--dry-run",
+        "-n",
+        action="store_true",
         help="Preview changes without modifying files",
     )
     sch_repair_instances.add_argument(
-        "--backup", action="store_true",
+        "--backup",
+        action="store_true",
         help="Create backup before modifying",
     )
     sch_repair_instances.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
     )
 
 
@@ -1644,7 +1646,6 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Preview rotation changes without modifying the PCB file",
     )
-
 
     # pcb edit-outline
     pcb_edit_outline = pcb_subparsers.add_parser(
@@ -2915,8 +2916,7 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--verify",
         action="store_true",
         help=(
-            "Run pure-Python DRC before and after repair and report "
-            "a before/after violation delta."
+            "Run pure-Python DRC before and after repair and report a before/after violation delta."
         ),
     )
     fix_drc_parser.add_argument(
@@ -4023,6 +4023,16 @@ def _add_audit_parser(subparsers) -> None:
         dest="audit_verbose",
         action="store_true",
         help="Show detailed information",
+    )
+    audit_parser.add_argument(
+        "--net-class-map",
+        dest="audit_net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields.  When supplied, enables the diff-pair DRC rules to "
+            "fire on routed boards (Issue #2684)."
+        ),
     )
 
 

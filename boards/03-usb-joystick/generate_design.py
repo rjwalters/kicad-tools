@@ -857,6 +857,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         clock_nets=["XTAL1", "XTAL2"],
     )
 
+    # Annotate the diff-pair partners on the USB pair so the validate-side
+    # diff-pair rules (routing_continuity, length_skew) can engage from the
+    # routed-PCB sidecar (Issue #2684).  We mutate per-net (rather than the
+    # shared NET_CLASS_HIGH_SPEED singleton) by replacing those two entries
+    # with new dataclass instances carrying the partner field.
+    from dataclasses import replace as _dc_replace
+
+    if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
+        net_class_map["USB_D+"] = _dc_replace(net_class_map["USB_D+"], diffpair_partner="USB_D-")
+        net_class_map["USB_D-"] = _dc_replace(net_class_map["USB_D-"], diffpair_partner="USB_D+")
+
+    # Emit a JSON sidecar alongside the routed PCB so ``kct check
+    # --net-class-map <path>`` can re-derive the engagement / skew state
+    # (Issue #2684).  Without this sidecar, the diff-pair DRC rules
+    # degrade to no-ops on the routed board.
+    import json as _json
+
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    sidecar_path = output_path.parent / "net_class_map.json"
+    sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
+    print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
     skip_nets = ["VCC", "GND", "VBUS"]
 
     print(f"\n1. Loading PCB: {input_path}")
