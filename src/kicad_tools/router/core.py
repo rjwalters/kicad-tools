@@ -7887,6 +7887,9 @@ class Autorouter:
                     trial_pads = list(reversed(trial_pads))
                 elif trial == "shuffled":
                     trial_pads = list(trial_pads)
+                    # Issue #2589: uses the global ``random`` module; the
+                    # CLI seeds it via ``kct route --seed N`` for
+                    # reproducible MST trial ordering.
                     random.shuffle(trial_pads)
                 # "default" keeps original order
 
