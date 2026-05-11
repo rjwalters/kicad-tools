@@ -156,12 +156,19 @@ class PCBDesignRules:
     def to_design_rules(
         self,
         grid_resolution: float | None = None,
+        manufacturer: str | None = None,
     ) -> DesignRules:
         """Convert to DesignRules for the router.
 
         Args:
             grid_resolution: Override grid resolution. If None, uses
                             clearance / 2 for DRC compliance.
+            manufacturer: Optional manufacturer identifier (e.g.,
+                            ``"jlcpcb-tier1"``) used by capability-gated
+                            routing features such as via-in-pad escape.
+                            See Issue #2708 — when omitted, the returned
+                            rules behave as if no manufacturer-specific
+                            capabilities are available.
 
         Returns:
             DesignRules configured with these constraints.
@@ -178,6 +185,7 @@ class PCBDesignRules:
             via_clearance=self.min_clearance,
             min_drill_clearance=self.min_drill_clearance,
             grid_resolution=grid_resolution,
+            manufacturer=manufacturer,
         )
 
 
