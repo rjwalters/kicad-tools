@@ -167,18 +167,14 @@ def _emit_single_pad_net_warning(
         parts.append(f"{len(genuine_nc)} explicit NC")
     summary = ", ".join(parts)
     flush_print(
-        f"  WARNING: {len(signal_single_pad_names)} single-pad signal "
-        f"net(s) detected ({summary}):"
+        f"  WARNING: {len(signal_single_pad_names)} single-pad signal net(s) detected ({summary}):"
     )
     if defects:
         flush_print("    DEFECTS (likely missing footprint or schematic/PCB drift):")
         for name in defects:
             flush_print(f"      - {name}")
     if connector_nc:
-        flush_print(
-            "    INFO -- connector-pin NCs "
-            "(typically intentional GPIO no-connects):"
-        )
+        flush_print("    INFO -- connector-pin NCs (typically intentional GPIO no-connects):")
         for name in connector_nc:
             flush_print(f"      - {name}")
     if genuine_nc:
@@ -655,6 +651,7 @@ def run_post_route_drc(
     manufacturer: str,
     layers: int,
     quiet: bool = False,
+    net_class_map: dict | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -663,6 +660,12 @@ def run_post_route_drc(
         manufacturer: Manufacturer profile for DRC rules (e.g., "jlcpcb")
         layers: Number of PCB layers
         quiet: If True, suppress output
+        net_class_map: Optional ``{net_name: NetClassRouting}`` map from
+            the autorouter.  When provided, the differential-pair
+            routing-continuity rule (Phase 2.5b / Issue #2652) re-derives
+            its engagement state from this map + the routed PCB and
+            fires per Epic #2556 Phase 2G.  Without it, that rule is a
+            no-op (graceful degradation).
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -675,7 +678,12 @@ def run_post_route_drc(
         pcb = PCB.load(str(output_path))
 
         # Run DRC
-        checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
+        checker = DRCChecker(
+            pcb,
+            manufacturer=manufacturer,
+            layers=layers,
+            net_class_map=net_class_map,
+        )
         results = checker.check_all()
 
         error_count = results.error_count
@@ -856,9 +864,7 @@ def _placement_diff_path(args, pcb_path: Path) -> Path:
         output_path = Path(args.output)
     else:
         output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
-    return output_path.with_suffix("").with_name(
-        output_path.stem + "_placement_diff.json"
-    )
+    return output_path.with_suffix("").with_name(output_path.stem + "_placement_diff.json")
 
 
 def _run_placement_feedback(
@@ -907,9 +913,7 @@ def _run_placement_feedback(
         print(f"  Anchored refs ({len(anchored)}): {', '.join(sorted(anchored))}")
 
     budget = int(getattr(args, "placement_feedback_budget", 3) or 3)
-    max_movement = float(
-        getattr(args, "placement_feedback_max_movement", 5.0) or 5.0
-    )
+    max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
 
     timeout = getattr(args, "timeout", None)
@@ -917,13 +921,9 @@ def _run_placement_feedback(
 
     # Issue #2606: stagnation + outer-timeout guards.  Defaults match
     # the parser: patience=3, outer_timeout=None.
-    stagnation_patience = int(
-        getattr(args, "placement_feedback_stagnation_patience", 3) or 0
-    )
+    stagnation_patience = int(getattr(args, "placement_feedback_stagnation_patience", 3) or 0)
     outer_timeout_raw = getattr(args, "placement_feedback_outer_timeout", None)
-    outer_timeout = (
-        float(outer_timeout_raw) if outer_timeout_raw is not None else None
-    )
+    outer_timeout = float(outer_timeout_raw) if outer_timeout_raw is not None else None
 
     try:
         result = router.route_with_placement_feedback(
@@ -1810,9 +1810,7 @@ def route_with_layer_escalation(
         _refreshed_multi_pad_ids = {
             n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
         }
-        _refreshed = final_result.router.get_statistics(
-            nets_to_route_ids=_refreshed_multi_pad_ids
-        )
+        _refreshed = final_result.router.get_statistics(nets_to_route_ids=_refreshed_multi_pad_ids)
         final_result.nets_routed = _refreshed["nets_routed"]
         final_result.completion = (
             final_result.nets_routed / final_result.nets_to_route
@@ -1973,6 +1971,10 @@ def route_with_layer_escalation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
+            # net_class_map into the post-route DRC so the diff-pair
+            # routing-continuity rule can re-derive its engagement state.
+            net_class_map=getattr(final_result.router, "net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -2479,6 +2481,10 @@ def route_with_rule_relaxation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
+            # net_class_map into the post-route DRC so the diff-pair
+            # routing-continuity rule can re-derive its engagement state.
+            net_class_map=getattr(final_result.router, "net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -3025,6 +3031,10 @@ def route_with_combined_escalation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
+            # net_class_map into the post-route DRC so the diff-pair
+            # routing-continuity rule can re-derive its engagement state.
+            net_class_map=getattr(final_result.router, "net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -5303,6 +5313,8 @@ def main(argv: list[str] | None = None) -> int:
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
             quiet=quiet,
+            # Issue #2652, Epic #2556 Phase 2.5b: see other call sites.
+            net_class_map=getattr(router, "net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested

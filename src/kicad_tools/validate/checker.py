@@ -21,6 +21,7 @@ from .rules.zone_fill import ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
+    from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
 
@@ -59,6 +60,7 @@ class DRCChecker:
         layers: int = 4,
         copper_oz: float = 1.0,
         suppress_library: bool = False,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -69,6 +71,14 @@ class DRCChecker:
             copper_oz: Copper weight in oz
             suppress_library: If True, suppress silkscreen warnings for
                 footprints originating from standard KiCad libraries
+            net_class_map: Optional ``{net_name: NetClassRouting}`` map
+                (the autorouter convention).  When provided, the
+                differential-pair routing continuity rule (Phase 2.5b /
+                Issue #2652) re-derives the engagement state from the
+                PCB + map and runs the rule with the resulting
+                ``engaged_pairs`` set + per-pair threshold map.  When
+                omitted, the rule degrades to a no-op (graceful
+                standalone-``kct check`` behaviour).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -78,6 +88,7 @@ class DRCChecker:
         self.layers = layers
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
+        self.net_class_map = net_class_map
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
@@ -175,21 +186,34 @@ class DRCChecker:
         ``coupled_routing == True`` AND which passed the engagement-layer
         single-ended refusal check.
 
-        When invoked from the standalone ``kct check`` CLI (no router
-        context), no engaged-pairs set is available, so the rule is a
-        conservative no-op.  The intended invocation path is the
-        autorouter consumer, which has already computed the engagement
-        decision via :func:`should_engage_coupled` and threads the
-        resulting set + per-pair threshold map into the rule
-        constructor.
+        Phase 2.5b (Issue #2652) wires the producer side: when this
+        checker was constructed with a ``net_class_map``, the engagement
+        state is re-derived from the routed PCB by
+        :func:`~kicad_tools.validate.diffpair_engagement.derive_engagement_state`
+        and threaded into the rule.  Re-running
+        :func:`should_engage_coupled` on the routed PCB's detected pairs
+        is idempotent given the same net classes -- this avoids needing
+        to persist engagement metadata in the PCB schema.
 
-        See Issue #2640 / Epic #2556 Phase 2G.
+        When invoked from the standalone ``kct check`` CLI (no
+        ``net_class_map``), no engaged-pairs set is available, so the
+        rule is a conservative no-op (preserves the AC #4 graceful-
+        degradation contract).
+
+        See Issue #2640 / Epic #2556 Phase 2G (the rule itself); Issue
+        #2652 / Epic #2556 Phase 2.5b (this producer wiring).
 
         Returns:
             DRCResults containing routing-continuity violations.  Empty
             on standalone ``kct check`` invocations (no engaged set).
         """
-        rule = DiffPairRoutingContinuityRule()
+        from kicad_tools.validate.diffpair_engagement import derive_engagement_state
+
+        engaged_pairs, threshold_map = derive_engagement_state(self.pcb, self.net_class_map)
+        rule = DiffPairRoutingContinuityRule(
+            engaged_pairs=engaged_pairs,
+            threshold_map=threshold_map,
+        )
         return rule.check(self.pcb, self.design_rules)
 
     def check_dimensions(self) -> DRCResults:
