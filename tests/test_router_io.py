@@ -2303,7 +2303,7 @@ class TestMergeRoutesIntoPcb:
     def test_preserves_original_content(self):
         """Test that original PCB content is preserved."""
         pcb_content = """(kicad_pcb
-  (version 20240108)
+  (version 20260206)
   (generator "test")
   (net 1 "VCC")
   (footprint "Package_SO:SOIC-8")
@@ -2312,7 +2312,7 @@ class TestMergeRoutesIntoPcb:
 
         result = merge_routes_into_pcb(pcb_content, route_sexp)
 
-        assert "version 20240108" in result
+        assert "version 20260206" in result
         assert 'generator "test"' in result
         assert 'net 1 "VCC"' in result
         assert "Package_SO:SOIC-8" in result
@@ -3205,13 +3205,13 @@ class TestInsertSexpBeforeClosing:
     def test_removes_only_last_closing_paren(self):
         """Verify only the last ')' is removed, not all trailing ones."""
         # This PCB has nested structure with ')' at end of inner elements
-        pcb_content = '(kicad_pcb\n  (version 20240108)\n  (net 1 "VCC")\n)'
+        pcb_content = '(kicad_pcb\n  (version 20260206)\n  (net 1 "VCC")\n)'
         route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
 
         result = _insert_sexp_before_closing(pcb_content, route_sexp)
 
         # Should still contain the inner closing parens
-        assert "(version 20240108)" in result
+        assert "(version 20260206)" in result
         assert '(net 1 "VCC")' in result
         assert "(segment" in result
         assert result.strip().endswith(")")

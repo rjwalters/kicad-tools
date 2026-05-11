@@ -187,7 +187,7 @@ class Footprint:
         Example output::
 
             (footprint "C_0402_1005Metric"
-                (version 20240108)
+                (version 20260206)
                 (generator "kicad-tools")
                 (layer "F.Cu")
                 (descr "Capacitor SMD 0402")
@@ -206,7 +206,7 @@ class Footprint:
         footprint = SExp.list("footprint", self.name)
 
         # Version and generator
-        footprint.append(SExp.list("version", 20240108))
+        footprint.append(SExp.list("version", 20260206))
         footprint.append(SExp.list("generator", "kicad-tools"))
 
         # Layer
