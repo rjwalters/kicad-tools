@@ -2215,6 +2215,136 @@ class Autorouter:
         )
         return self._congestion_estimator
 
+    # ------------------------------------------------------------------
+    # Diff-pair partner activation (Issue #2587 / Epic #2556 Phase 1C-cont)
+    # ------------------------------------------------------------------
+
+    def _prepare_routing(self) -> None:
+        """Pre-route setup: populate the partner-name reverse map.
+
+        Issue #2587 / Epic #2556 Phase 1C-cont: Phase 1C threaded
+        ``NetClassRouting.intra_pair_clearance`` through the Python pathfinder
+        (#2559 / PR #2586) and the C++ bindings, but left the *activation*
+        path dormant: ``Pathfinder.set_net_name_to_id`` was never called from
+        any ``route_all_*`` entry point, so ``_net_name_to_id`` stayed empty
+        and ``_resolve_partner_net_id`` always returned ``None``.
+
+        This helper closes the gap.  It must be invoked once per
+        ``route_all_*`` call (before the first ``route_net``) so the
+        underlying pathfinder (Python or C++) can resolve partner-id from
+        partner-name at search time.
+
+        The helper is intentionally idempotent and cheap: it rebuilds the
+        reverse map from ``self.net_names`` every call, since the autorouter
+        may have added new pads (and therefore new nets) since the last
+        invocation.  Calling it on a router that doesn't yet implement
+        ``set_net_name_to_id`` (a backwards-compatibility scenario) is a
+        no-op via ``hasattr`` guard.
+
+        Diff-pair detection is also engaged here.  When
+        :func:`detect_diff_pairs` produces a non-empty result, this helper
+        propagates each pair onto a fresh per-net ``NetClassRouting``
+        instance via ``dataclasses.replace`` so the shared net-class
+        singletons (e.g. ``NET_CLASS_HIGH_SPEED`` is one object shared by
+        many nets) are NOT mutated cross-call.  The replaced instance is
+        then stored back in ``self.net_class_map`` for *this* router, so
+        the next ``route_net()`` reads the correct partner-name.
+
+        With this single helper, the dormant Phase 1C path activates from
+        every ``route_all_*`` entry point that calls it:
+
+        * The Python pathfinder's ``_resolve_partner_net_id`` starts
+          returning non-``None`` for paired nets.
+        * The C++ backend's ``route_resumable()`` is called with
+          ``partner_net != -1`` and the tighter ``intra_pair_radius_cells``.
+        * ``find_blocking_nets`` (both backends) excludes the partner from
+          the rip-up candidate set.
+
+        Safe to call when there are no diff pairs detected -- in that case
+        the reverse map is still populated but ``_resolve_partner_net_id``
+        returns ``None`` because no ``diffpair_partner`` is set anywhere,
+        which is bit-for-bit identical to pre-Phase-1C behavior.
+        """
+        # 1. Build name -> id reverse map from self.net_names.  First
+        #    occurrence wins (matches diffpair_detection._name_to_id_map
+        #    behavior).  Skip empty names to avoid collisions.
+        name_to_id: dict[str, int] = {}
+        for nid, name in self.net_names.items():
+            if name and name not in name_to_id:
+                name_to_id[name] = nid
+
+        # 2. Engage diff-pair detection (Issue #2587 second gate).  Without
+        #    this, NET_CLASS_HIGH_SPEED.diffpair_partner stays None for the
+        #    USB_D+/USB_D- pair on board 03 and the partner branch is
+        #    silently inert even though the reverse map is populated.
+        try:
+            from .diffpair_detection import detect_diff_pairs
+        except ImportError:
+            detect_diff_pairs = None  # type: ignore[assignment]
+
+        if detect_diff_pairs is not None and self.net_names:
+            # Build net_to_class map so explicit declarations can be
+            # consulted by detection.
+            net_to_class: dict[str, str] = {}
+            for net_name, net_class in self.net_class_map.items():
+                net_to_class[net_name] = net_class.name
+
+            try:
+                pairs = detect_diff_pairs(
+                    self.net_names,
+                    net_class_routing=self.net_class_map,
+                    net_to_class=net_to_class,
+                )
+            except Exception:
+                # Defensive: detection failure must not break routing.
+                pairs = []
+
+            if pairs:
+                # Avoid singleton mutation: clone the NetClassRouting for
+                # each paired net before setting ``diffpair_partner``.  This
+                # is the structural risk the curator note flagged: many
+                # nets share the same NET_CLASS_HIGH_SPEED instance, and
+                # an in-place set would cross-contaminate unrelated nets.
+                import dataclasses
+
+                for detected in pairs:
+                    pair = detected.pair
+                    p_name = pair.positive.net_name
+                    n_name = pair.negative.net_name
+
+                    # Positive side: partner is the negative net.
+                    p_class = self.net_class_map.get(p_name)
+                    if p_class is not None and p_class.diffpair_partner != n_name:
+                        self.net_class_map[p_name] = dataclasses.replace(
+                            p_class, diffpair_partner=n_name
+                        )
+                    # Negative side: partner is the positive net.
+                    n_class = self.net_class_map.get(n_name)
+                    if n_class is not None and n_class.diffpair_partner != p_name:
+                        self.net_class_map[n_name] = dataclasses.replace(
+                            n_class, diffpair_partner=p_name
+                        )
+
+        # 3. Push the reverse map down into the pathfinder.  Guard the call
+        #    with hasattr so older Pathfinder/CppPathfinder builds (or
+        #    third-party Router subclasses without the setter) still work.
+        if hasattr(self.router, "set_net_name_to_id"):
+            self.router.set_net_name_to_id(name_to_id)
+
+        # Also propagate the updated net_class_map down to any router that
+        # caches it locally (CppPathfinder and Pathfinder both store a
+        # reference at construction).  When the autorouter's net_class_map
+        # was mutated above via dataclasses.replace, the router's cached
+        # reference may still be the original dict; ensure they stay in
+        # sync by reassigning the attribute when present.
+        if hasattr(self.router, "_net_class_map"):
+            self.router._net_class_map = self.net_class_map
+        if hasattr(self.router, "net_class_map"):
+            try:
+                self.router.net_class_map = self.net_class_map
+            except AttributeError:
+                pass
+
     def _filter_pour_nets(self, net_order: list[int]) -> list[int]:
         """Remove pour nets from a net ordering and log a warning.
 
@@ -2708,6 +2838,11 @@ class Autorouter:
         if interleaved:
             return self.route_all_interleaved(progress_callback=progress_callback)
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
+        # threading by populating the reverse map + diff-pair detection on
+        # the underlying pathfinder.  No-op when there are no diff pairs.
+        self._prepare_routing()
+
         if net_order is None:
             net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
@@ -3174,6 +3309,10 @@ class Autorouter:
         """
         print("\n=== Interleaved Net Routing ===")
 
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
+        # threading before routing begins.
+        self._prepare_routing()
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
 
@@ -3399,6 +3538,10 @@ class Autorouter:
         """
         print("\n=== Parallel Net Routing ===")
         print(f"  Max workers: {max_workers}")
+
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
+        # threading before routing begins.
+        self._prepare_routing()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
@@ -3665,6 +3808,13 @@ class Autorouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
             )
+
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
+        # threading before negotiated routing begins.  This is the default
+        # path for ``kct route`` (negotiated strategy is enabled by default
+        # in the CLI), so wiring here is what actually fires Phase 1C on
+        # production boards.
+        self._prepare_routing()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
@@ -5630,6 +5780,10 @@ class Autorouter:
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
         """
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
+        # threading before two-phase routing begins.
+        self._prepare_routing()
+
         tp_router = self._create_two_phase_router()
         return tp_router.route_all(
             use_negotiated=use_negotiated,
