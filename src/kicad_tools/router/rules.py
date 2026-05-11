@@ -7,8 +7,6 @@ This module provides:
 - Predefined net classes for common use cases
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 from .layers import Layer
@@ -411,7 +409,7 @@ class LengthConstraint:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> LengthConstraint:
+    def from_dict(cls, data: dict) -> "LengthConstraint":
         """Deserialize from a dict produced by :meth:`to_dict`.
 
         Unknown keys are ignored (forward compatibility); missing keys
@@ -835,7 +833,7 @@ class NetClassRouting:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> NetClassRouting:
+    def from_dict(cls, data: dict) -> "NetClassRouting":
         """Deserialize from a dict produced by :meth:`to_dict`.
 
         Tolerates missing optional keys (falls back to dataclass defaults)
