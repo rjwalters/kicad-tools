@@ -581,6 +581,11 @@ def apply_net_class_rules(
             clearance=0.15,
             cost_multiplier=0.85,
             length_critical=True,
+            # Issue #2651 / Epic #2556 Phase 2.5a: auto-classifier path for
+            # nets recognized as DIFFERENTIAL must engage CoupledPathfinder
+            # for semantic consistency with the explicit ``high_speed_nets=``
+            # opt-in (which routes through ``NET_CLASS_HIGH_SPEED``).
+            coupled_routing=True,
         ),
         NetClass.ANALOG: NET_CLASS_AUDIO,
         NetClass.RF: NetClassRouting(

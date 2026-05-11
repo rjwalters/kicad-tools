@@ -470,15 +470,45 @@ class TestNPadRegression:
 
 
 # =============================================================================
-# 5. Predefined classes preserve pre-#2638 default (coupled_routing=False)
+# 5. Predefined-class opt-in policy
+#
+# After #2651 (Epic #2556 Phase 2.5a), ``NET_CLASS_HIGH_SPEED`` and the
+# auto-classifier's ``NetClass.DIFFERENTIAL``-mapped ad-hoc class are the
+# only predefined classes with ``coupled_routing=True``.  All other
+# predefined singletons must remain ``False`` because they carry
+# single-ended signals.  The bare-dataclass default is still ``False`` so
+# unrelated callers don't accidentally engage coupled routing.
 # =============================================================================
 
 
-class TestPredefinedClassesDefaultOff:
-    def test_high_speed_default_off(self):
-        # Phase 2E out-of-scope: predefined classes must NOT have
-        # coupled_routing flipped on.  That's a follow-up issue.
-        assert NET_CLASS_HIGH_SPEED.coupled_routing is False
+class TestPredefinedClassesOptIn:
+    def test_high_speed_default_on(self):
+        # Phase 2.5a / #2651: NET_CLASS_HIGH_SPEED is the canonical HSDI
+        # class and is the only predefined singleton consumers opt into
+        # via ``high_speed_nets=``.  The producer-side flip lives here.
+        assert NET_CLASS_HIGH_SPEED.coupled_routing is True
+
+    def test_other_predefined_classes_default_off(self):
+        # All other predefined classes carry single-ended signals.
+        # Flipping coupled_routing on them would be electrically wrong
+        # (e.g. motor phase outputs, single-ended clocks, generic digital).
+        from kicad_tools.router.rules import (
+            NET_CLASS_AUDIO,
+            NET_CLASS_CLOCK,
+            NET_CLASS_DEBUG,
+            NET_CLASS_DEFAULT,
+            NET_CLASS_DIGITAL,
+            NET_CLASS_HIGH_CURRENT_SIGNAL,
+            NET_CLASS_POWER,
+        )
+
+        assert NET_CLASS_POWER.coupled_routing is False
+        assert NET_CLASS_HIGH_CURRENT_SIGNAL.coupled_routing is False
+        assert NET_CLASS_CLOCK.coupled_routing is False
+        assert NET_CLASS_AUDIO.coupled_routing is False
+        assert NET_CLASS_DIGITAL.coupled_routing is False
+        assert NET_CLASS_DEBUG.coupled_routing is False
+        assert NET_CLASS_DEFAULT.coupled_routing is False
 
     def test_dataclass_default_is_false(self):
         nc = NetClassRouting(name="Bare")

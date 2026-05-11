@@ -252,9 +252,10 @@ def _diffpair_with_connector_sibling_router() -> Autorouter:
         grid_resolution=0.1,
     )
     # Issue #2638 / Epic #2556 Phase 2E: opt the USB diff-pair class into
-    # coupled routing.  Phase 2E does NOT flip ``coupled_routing`` on the
-    # predefined ``NET_CLASS_HIGH_SPEED`` (that's a follow-up issue), so
-    # tests that exercise the pre-pass must opt in explicitly.
+    # coupled routing.  After #2651 (Phase 2.5a), ``NET_CLASS_HIGH_SPEED``
+    # already has ``coupled_routing=True``; the explicit ``replace`` here
+    # is retained for clarity and to keep this test stable if a future
+    # issue flips the singleton back.
     hs_coupled = dataclasses.replace(NET_CLASS_HIGH_SPEED, coupled_routing=True)
     net_class_map = {
         "USB_D+": hs_coupled,
