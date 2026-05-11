@@ -384,15 +384,13 @@ class TestAliasResolution:
     def test_direct_enum_value_match(self):
         """Direct enum-value match path."""
         assert (
-            ViolationType.from_string("diffpair_length_skew")
-            is ViolationType.DIFFPAIR_LENGTH_SKEW
+            ViolationType.from_string("diffpair_length_skew") is ViolationType.DIFFPAIR_LENGTH_SKEW
         )
 
     def test_case_insensitive_match(self):
         """Case-insensitive variant should still resolve correctly."""
         assert (
-            ViolationType.from_string("Diffpair_Length_Skew")
-            is ViolationType.DIFFPAIR_LENGTH_SKEW
+            ViolationType.from_string("Diffpair_Length_Skew") is ViolationType.DIFFPAIR_LENGTH_SKEW
         )
 
     def test_whitespace_tolerant_match(self):
@@ -442,10 +440,7 @@ class TestCategoryMapIntegration:
         from kicad_tools.drc.violation import _TYPE_CATEGORY_MAP
 
         assert ViolationType.DIFFPAIR_LENGTH_SKEW in _TYPE_CATEGORY_MAP
-        assert (
-            _TYPE_CATEGORY_MAP[ViolationType.DIFFPAIR_LENGTH_SKEW]
-            is ViolationCategory.ROUTING
-        )
+        assert _TYPE_CATEGORY_MAP[ViolationType.DIFFPAIR_LENGTH_SKEW] is ViolationCategory.ROUTING
 
     @pytest.mark.parametrize(
         "vtype",
@@ -562,7 +557,6 @@ class TestCLIWiringIsAlive:
         from unittest.mock import patch
 
         from kicad_tools.validate.checker import DRCChecker
-        from kicad_tools.validate.violations import DRCResults
 
         # Build a minimal in-memory PCB via the stub.  The checker
         # requires a real PCB instance though -- so we mock it inside
@@ -579,11 +573,11 @@ class TestCLIWiringIsAlive:
         pcb_file = tmp_path / "min.kicad_pcb"
         pcb_file.write_text(
             "(kicad_pcb (version 20240108) (generator test) "
-            "(generator_version \"8.0\") "
+            '(generator_version "8.0") '
             "(general (thickness 1.6) (legacy_teardrops no)) (paper A4) "
             "(layers (0 F.Cu signal) (31 B.Cu signal) "
             "(44 Edge.Cuts user)) "
-            "(setup (pad_to_mask_clearance 0)) (net 0 \"\"))\n"
+            '(setup (pad_to_mask_clearance 0)) (net 0 ""))\n'
         )
         from kicad_tools.schema.pcb import PCB
 

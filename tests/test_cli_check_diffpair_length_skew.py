@@ -72,9 +72,7 @@ class TestDiffPairLengthSkewCLI:
 
         assert "diffpair_length_skew" in CHECK_CATEGORIES
 
-    def test_only_diffpair_length_skew_runs_clean(
-        self, minimal_diffpair_pcb: Path, capsys
-    ):
+    def test_only_diffpair_length_skew_runs_clean(self, minimal_diffpair_pcb: Path, capsys):
         """Standalone CLI with --only flag -> exit 0 (no router context).
 
         Today the CLI does not thread a ``skew_data`` dict into the
@@ -96,9 +94,7 @@ class TestDiffPairLengthSkewCLI:
         # 0 = passed (no violations reported because no skew_data).
         assert result == 0
 
-    def test_skip_diffpair_length_skew_runs_clean(
-        self, minimal_diffpair_pcb: Path, capsys
-    ):
+    def test_skip_diffpair_length_skew_runs_clean(self, minimal_diffpair_pcb: Path, capsys):
         """--skip diffpair_length_skew is accepted by the CLI.
 
         Verifies that ``--skip diffpair_length_skew`` is a recognized
