@@ -246,7 +246,9 @@ class TestSchListLabels:
         """Test that --filter pattern works across all sheets."""
         from kicad_tools.cli.sch_list_labels import main
 
-        main([str(hierarchical_schematic), "--type", "global", "--filter", "CLK", "--format", "json"])
+        main(
+            [str(hierarchical_schematic), "--type", "global", "--filter", "CLK", "--format", "json"]
+        )
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -1553,9 +1555,7 @@ class TestSchValidateNoConnectInput:
         from kicad_tools.cli.sch_validate import main
 
         sch_file = self._make_schematic(tmp_path, pin_type="input")
-        monkeypatch.setattr(
-            "sys.argv", ["sch-validate", str(sch_file), "--quiet"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-validate", str(sch_file), "--quiet"])
         with contextlib.suppress(SystemExit):
             main()
 
@@ -1569,9 +1569,7 @@ class TestSchValidateNoConnectInput:
         from kicad_tools.cli.sch_validate import main
 
         sch_file = self._make_schematic(tmp_path, pin_type="input")
-        monkeypatch.setattr(
-            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-validate", str(sch_file), "--format", "json"])
         with contextlib.suppress(SystemExit):
             main()
 
@@ -1769,9 +1767,7 @@ class TestSchValidateGlobalLabelDirections:
         sch_file = tmp_path / "top.kicad_sch"
         sch_file.write_text(sch)
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-validate", str(sch_file), "--format", "json"])
         import contextlib
 
         with contextlib.suppress(SystemExit):
@@ -1793,7 +1789,6 @@ class TestSchValidateGlobalLabelDirections:
 
         result = validate_schematic(str(sch_file))
         assert "global_label_directions" in result.checks_run
-
 
     def test_input_bidirectional_no_warning(self, tmp_path: Path):
         """input + bidirectional is a valid complementary pair -- no warning."""
@@ -1841,9 +1836,7 @@ class TestSchValidateGlobalLabelDirections:
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
         consistency_issues = [
-            i
-            for i in issues
-            if i.category == "global_label" and "inconsistent" in i.message
+            i for i in issues if i.category == "global_label" and "inconsistent" in i.message
         ]
         assert len(consistency_issues) == 0
 
@@ -1860,9 +1853,7 @@ class TestSchValidateGlobalLabelDirections:
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
         consistency_issues = [
-            i
-            for i in issues
-            if i.category == "global_label" and "inconsistent" in i.message
+            i for i in issues if i.category == "global_label" and "inconsistent" in i.message
         ]
         assert len(consistency_issues) == 0
 
@@ -1921,9 +1912,7 @@ class TestSchValidateGlobalLabelDirections:
 
         issues = check_global_label_directions(str(tmp_path / "top.kicad_sch"))
         conflict_issues = [
-            i
-            for i in issues
-            if i.category == "global_label" and "conflicting" in i.message
+            i for i in issues if i.category == "global_label" and "conflicting" in i.message
         ]
 
         assert len(conflict_issues) == 1
@@ -2074,7 +2063,8 @@ class TestSchValidateSheetParseFailure:
         # The parent sheet itself may also fail to parse, so we check for at least 2
         # broken sub-sheet issues (sub1 and sub2)
         info_issues = [
-            i for i in issues
+            i
+            for i in issues
             if i.severity == "info" and i.category == "footprint" and "Skipped sheet" in i.message
         ]
         assert len(info_issues) >= 2
@@ -2230,9 +2220,7 @@ class TestSchCheckConnections:
             assert "pins" in data
             assert "summary" in data
 
-    def test_argv_parameter(
-        self, minimal_schematic: Path, minimal_symbol_library: Path, capsys
-    ):
+    def test_argv_parameter(self, minimal_schematic: Path, minimal_symbol_library: Path, capsys):
         """Test calling main() with an explicit argv list (CLI runner path)."""
         from kicad_tools.cli.sch_check_connections import main
 
@@ -2259,9 +2247,7 @@ class TestSchCheckConnections:
             data = json.loads(captured.out)
             assert "pins" in data
             # Should report LIBRARY_NOT_FOUND for symbols without embedded definitions
-            found_not_found = any(
-                p["pin_name"] == "LIBRARY_NOT_FOUND" for p in data["pins"]
-            )
+            found_not_found = any(p["pin_name"] == "LIBRARY_NOT_FOUND" for p in data["pins"])
             assert found_not_found, "Expected LIBRARY_NOT_FOUND for symbol without embedded lib"
 
     def test_embedded_symbols_no_lib_path(self, capsys, tmp_path):
@@ -2678,6 +2664,229 @@ class TestSchFindUnconnected:
             data = json.loads(captured.out)
             assert isinstance(data, dict)
             assert "unconnected_pins" in data
+
+    # ---- Regression tests for issue #2665 (netlist cross-check + hierarchy walk) ----
+
+    # Hierarchical schematic: root sheet that references a child sheet
+    # via (sheet ... (property "Sheetfile" "child.kicad_sch" ...)).
+    # The child sheet contains an isolated symbol whose pin has no wire,
+    # so wire-graph analysis on the root would miss it -- only the
+    # hierarchy walk will surface it.
+    _HIERARCHY_ROOT = """\
+(kicad_sch
+  (version 20231120) (generator "test") (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")
+  (lib_symbols)
+  (sheet (at 50 50) (size 30 20)
+    (uuid "00000000-0000-0000-0000-0000000000aa")
+    (property "Sheetname" "Child" (at 50 49 0))
+    (property "Sheetfile" "child.kicad_sch" (at 50 71 0))
+  )
+)
+"""
+
+    _HIERARCHY_CHILD = """\
+(kicad_sch
+  (version 20231120) (generator "test") (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000002") (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+      (symbol "Device:R_0_1"
+        (pin passive line (at 0 -3.81 90) (length 2.54) (name "1") (number "1"))
+        (pin passive line (at 0 3.81 270) (length 2.54) (name "2") (number "2"))
+      )
+    )
+  )
+  (symbol (lib_id "Device:R") (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "R99" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (instances (project "test" (path "/00000000-0000-0000-0000-000000000002" (reference "R99") (unit 1))))
+  )
+)
+"""
+
+    def test_unconnected_json_schema_includes_new_keys(self, tmp_path: Path, capsys):
+        """sch unconnected JSON output exposes missing_from_netlist + summary count.
+
+        Even when the cross-check is skipped (kicad-cli unavailable), the
+        JSON structure must include the new keys so downstream consumers
+        can rely on them.
+        """
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        sch_file = tmp_path / "minimal.kicad_sch"
+        sch_file.write_text(TestConnectionsSubGridTolerance._SCH_UNCONNECTED)
+
+        # Skip the cross-check entirely so the test does not depend on kicad-cli.
+        main([str(sch_file), "--format", "json", "--no-check-netlist-export"])
+        data = json.loads(capsys.readouterr().out)
+        assert "missing_from_netlist" in data, "JSON output must include missing_from_netlist list"
+        assert isinstance(data["missing_from_netlist"], list)
+        assert "missing_from_netlist_count" in data["summary"], (
+            "summary must include missing_from_netlist_count"
+        )
+        # With --no-check-netlist-export, no findings should be produced.
+        assert data["summary"]["missing_from_netlist_count"] == 0
+        # The existing schema must still work.
+        assert data["summary"]["unconnected_pin_count"] >= 1
+
+    def test_unconnected_no_check_netlist_export_skip(self, tmp_path: Path, capsys, monkeypatch):
+        """--no-check-netlist-export disables the cross-check (no kicad-cli call)."""
+        from kicad_tools.cli import sch_find_unconnected as mod
+
+        sch_file = tmp_path / "minimal.kicad_sch"
+        sch_file.write_text(TestConnectionsSubGridTolerance._SCH_UNCONNECTED)
+
+        # Patch export_netlist to raise if it is unexpectedly invoked.
+        def _boom(*args, **kwargs):  # pragma: no cover - assertion path
+            raise AssertionError(
+                "export_netlist should not be called when --no-check-netlist-export is passed"
+            )
+
+        # Import the source module to patch it as referenced from the CLI module.
+        import kicad_tools.operations.netlist as netlist_mod
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        mod.main([str(sch_file), "--format", "json", "--no-check-netlist-export"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["missing_from_netlist_count"] == 0
+        assert data["missing_from_netlist"] == []
+
+    def test_unconnected_netlist_export_unavailable_skips_gracefully(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """If kicad-cli is unavailable, the cross-check is skipped with a stderr warning.
+
+        Important: the command MUST still produce its normal output -- a
+        silent pass would defeat the purpose of the check.
+        """
+        from kicad_tools.cli import sch_find_unconnected as mod
+
+        sch_file = tmp_path / "minimal.kicad_sch"
+        sch_file.write_text(TestConnectionsSubGridTolerance._SCH_UNCONNECTED)
+
+        # Simulate kicad-cli being unavailable.
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _missing(*args, **kwargs):
+            raise FileNotFoundError("kicad-cli not found")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _missing)
+
+        mod.main([str(sch_file), "--format", "json"])
+        out = capsys.readouterr()
+        # JSON output is still produced with the schematic-graph findings.
+        data = json.loads(out.out)
+        assert data["summary"]["unconnected_pin_count"] == 2  # R1 pins 1 + 2
+        assert data["summary"]["missing_from_netlist_count"] == 0
+        # And a warning is printed to stderr -- not a silent pass.
+        assert "skipped" in out.err.lower() or "warning" in out.err.lower()
+
+    def test_unconnected_detects_dropped_pin_via_netlist(self, tmp_path: Path, capsys, monkeypatch):
+        """If kicad-cli drops a symbol from the netlist, the pin is reported.
+
+        This is the core regression test for #2665: a pin that exists in
+        the schematic but is missing from the kicad-cli netlist export
+        MUST be surfaced as missing_from_netlist (not silently classified
+        as "connected" because a wire happens to touch its coordinates).
+        """
+        from kicad_tools.cli import sch_find_unconnected as mod
+
+        sch_file = tmp_path / "dropped.kicad_sch"
+        # Use the existing connected-pins schematic where R1 has wires on
+        # both pins; the wire-graph analysis will report 0 unconnected.
+        sch_file.write_text(TestConnectionsSubGridTolerance._SCH_EXACT)
+
+        # Fake an empty netlist: kicad-cli "ran" but dropped every symbol.
+        import kicad_tools.operations.netlist as netlist_mod
+        from kicad_tools.operations.netlist import Netlist
+
+        def _empty_netlist(*args, **kwargs):
+            return Netlist()  # no components, no nets
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _empty_netlist)
+
+        mod.main([str(sch_file), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+
+        # Wire-graph still reports zero unconnected (the wires exist).
+        assert data["summary"]["unconnected_pin_count"] == 0
+        # But the netlist cross-check surfaces both of R1's pins.
+        assert data["summary"]["missing_from_netlist_count"] >= 2
+        refs = {(p["reference"], p["pin_number"]) for p in data["missing_from_netlist"]}
+        assert ("R1", "1") in refs
+        assert ("R1", "2") in refs
+        # Each finding includes a remediation hint pointing at repair-instances.
+        for finding in data["missing_from_netlist"]:
+            assert "repair-instances" in finding["remediation"]
+
+    def test_unconnected_no_false_positives_when_netlist_matches(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """When the netlist contains every schematic pin, no findings are emitted."""
+        import kicad_tools.operations.netlist as netlist_mod
+        from kicad_tools.cli import sch_find_unconnected as mod
+        from kicad_tools.operations.netlist import (
+            Netlist,
+            NetlistNet,
+            NetNode,
+        )
+
+        sch_file = tmp_path / "good.kicad_sch"
+        sch_file.write_text(TestConnectionsSubGridTolerance._SCH_EXACT)
+
+        # Synthesize a netlist that contains both R1.1 and R1.2.
+        def _matching_netlist(*args, **kwargs):
+            return Netlist(
+                nets=[
+                    NetlistNet(
+                        code=1,
+                        name="N1",
+                        nodes=[NetNode(reference="R1", pin="1"), NetNode(reference="R1", pin="2")],
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _matching_netlist)
+
+        mod.main([str(sch_file), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["missing_from_netlist_count"] == 0
+
+    def test_unconnected_hierarchy_walk_includes_subsheet_pins(self, tmp_path: Path, capsys):
+        """sch unconnected walks the hierarchy and analyses sub-sheets.
+
+        Previously only the root sheet was analysed; symbols on sub-sheets
+        were silently ignored.  This test sets up a root sheet with no
+        symbols and a child sheet with an unwired resistor.  After the
+        fix, both pins of the child's resistor should be reported.
+        """
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        root = tmp_path / "root.kicad_sch"
+        child = tmp_path / "child.kicad_sch"
+        root.write_text(self._HIERARCHY_ROOT)
+        child.write_text(self._HIERARCHY_CHILD)
+
+        # Skip the netlist cross-check -- this test is specifically about
+        # the wire-graph hierarchy walk, not kicad-cli availability.
+        main([str(root), "--format", "json", "--no-check-netlist-export"])
+        data = json.loads(capsys.readouterr().out)
+        # R99 lives on the child sheet and has two unwired pins.
+        refs = {(p["reference"], p["pin_number"]) for p in data["unconnected_pins"]}
+        assert ("R99", "1") in refs, f"expected R99.1 in unconnected pins, got {refs}"
+        assert ("R99", "2") in refs, f"expected R99.2 in unconnected pins, got {refs}"
+        # And the sheet name is propagated in the JSON output for clarity.
+        sheets = {p["sheet"] for p in data["unconnected_pins"]}
+        assert "child.kicad_sch" in sheets
 
 
 class TestSchRenameSignal:
@@ -3114,16 +3323,12 @@ class TestSchValidateMissingProjectInstances:
         pi_issues = [i for i in result.issues if i.category == "project_instances"]
         assert len(pi_issues) == 1
 
-    def test_json_output_includes_project_instances(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
+    def test_json_output_includes_project_instances(self, tmp_path: Path, capsys, monkeypatch):
         """JSON output should include the project_instances category."""
         from kicad_tools.cli.sch_validate import main
 
         sch_file = self._make_schematic(tmp_path, include_instances=False)
-        monkeypatch.setattr(
-            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-validate", str(sch_file), "--format", "json"])
         with contextlib.suppress(SystemExit):
             main()
 
