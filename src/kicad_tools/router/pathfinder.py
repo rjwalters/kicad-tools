@@ -870,6 +870,7 @@ class Router:
         radius: int | None = None,
         partner_net: int | None = None,
         partner_radius: int | None = None,
+        partner_active: bool | None = None,
     ) -> bool:
         """Check if placing a trace at this position would conflict.
 
@@ -896,6 +897,14 @@ class Router:
                             to ``cell.net == partner_net``.  When ``None``
                             but ``partner_net`` is set, the partner branch
                             falls back to ``radius`` (no tightening).
+            partner_active: Issue #2715 -- pre-computed dormant/active state
+                            for the partner branch.  Callers in the A* hot
+                            path resolve this once per route and pass the
+                            cached bool here so the per-call 4-condition
+                            tuple evaluation is skipped.  When ``None``
+                            (legacy callers), the boolean is derived from
+                            ``partner_net``/``partner_radius`` for backward
+                            compatibility.
         """
         if radius is None:
             radius = self._trace_half_width_cells
@@ -927,12 +936,18 @@ class Router:
         # We OR the blocking mask with a "is partner cell outside the tight
         # radius" suppressor so partner-blocked cells in the slack ring
         # (>partner_radius && <=radius from gx,gy) are treated as passable.
-        partner_active = (
-            partner_net is not None
-            and partner_net >= 0
-            and partner_radius is not None
-            and partner_radius < radius
-        )
+        #
+        # Issue #2715: When the caller provides a cached ``partner_active``
+        # bool, use it directly to skip the per-call 4-condition tuple
+        # evaluation.  This is the hot-path optimization for dormant-partner
+        # routes (the common case for non-diff-pair nets).
+        if partner_active is None:
+            partner_active = (
+                partner_net is not None
+                and partner_net >= 0
+                and partner_radius is not None
+                and partner_radius < radius
+            )
         partner_relax_mask = None
         if partner_active:
             # Compute Chebyshev distance from (gx, gy) to each cell in the
@@ -1607,6 +1622,16 @@ class Router:
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
 
+        # Issue #2715: Pre-compute the partner-active flag ONCE per route.
+        # This is forwarded into ``compute_expanded_blocked`` so the dormant
+        # path (the common case for non-diff-pair nets) skips the 4-condition
+        # tuple evaluation in the grid hot path.
+        partner_active_flag = (
+            partner_net_id is not None
+            and partner_net_id >= 0
+            and net_partner_half_width_cells < net_trace_half_width_cells
+        )
+
         # Issue #1692: Compute per-net via clearance radius.  Net classes
         # may specify larger via_size which requires a wider blocking check.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
@@ -1695,6 +1720,7 @@ class Router:
             allow_sharing,
             partner_net=partner_net_id,
             partner_radius=net_partner_half_width_cells,
+            partner_active=partner_active_flag,
         )
 
         # Issue #2430: Build crossing grid index if routed segments exist.
@@ -2849,6 +2875,16 @@ class Router:
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
 
+        # Issue #2715: Pre-compute the partner-active flag ONCE per route so
+        # the hot-path ``_is_trace_blocked`` call (per A* neighbor) skips
+        # the 4-condition tuple evaluation.  Mirrors the same expression
+        # that lives in ``_is_trace_blocked`` and ``compute_expanded_blocked``.
+        partner_active_flag = (
+            partner_net_id is not None
+            and partner_net_id >= 0
+            and net_partner_half_width_cells < net_trace_half_width_cells
+        )
+
         # Issue #1692: Compute per-net via clearance radius.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
         net_via_half_cells = max(
@@ -3018,6 +3054,7 @@ class Router:
                         via_radius=net_via_half_cells,
                         partner_net=partner_net_id,
                         partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
                     )
 
             # Process backward step
@@ -3056,6 +3093,7 @@ class Router:
                         via_radius=net_via_half_cells,
                         partner_net=partner_net_id,
                         partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
                     )
 
             # Early termination: if we have a meeting point and both queues
@@ -3098,6 +3136,7 @@ class Router:
         via_radius: int | None = None,
         partner_net: int | None = None,
         partner_radius: int | None = None,
+        partner_active: bool | None = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -3116,6 +3155,10 @@ class Router:
                 ``partner_radius`` so the partner cells are treated as
                 blockers only within the tighter intra-pair radius.
             partner_radius: Tighter half-width for partner cells.
+            partner_active: Issue #2715 -- pre-computed dormant/active flag
+                for the partner branch.  Forwarded to ``_is_trace_blocked``
+                so the per-call 4-condition tuple evaluation is skipped on
+                the hot path.
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
@@ -3185,7 +3228,8 @@ class Router:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
                                               radius=trace_radius,
                                               partner_net=partner_net,
-                                              partner_radius=partner_radius):
+                                              partner_radius=partner_radius,
+                                              partner_active=partner_active):
                         continue
                 else:
                     # Different net's blocked cell
@@ -3212,7 +3256,8 @@ class Router:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
                                               radius=trace_radius,
                                               partner_net=partner_net,
-                                              partner_radius=partner_radius):
+                                              partner_radius=partner_radius,
+                                              partner_active=partner_active):
                         continue
 
             # Check zone blocking

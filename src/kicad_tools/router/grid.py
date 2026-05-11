@@ -2432,6 +2432,7 @@ class RoutingGrid:
         allow_sharing: bool = False,
         partner_net: int | None = None,
         partner_radius: int | None = None,
+        partner_active: bool | None = None,
     ) -> np.ndarray:
         """Pre-compute an expanded blocked bitmap for trace-width clearance.
 
@@ -2464,6 +2465,13 @@ class RoutingGrid:
             partner_radius: Tighter half-width (in grid cells) for partner
                             cells.  Ignored when ``partner_net`` is ``None``
                             or ``partner_radius >= radius``.
+            partner_active: Issue #2715 -- pre-computed dormant/active flag.
+                            Callers that already know whether the partner
+                            branch is dormant can pass the cached bool here
+                            so the per-call 4-condition tuple evaluation is
+                            skipped.  When ``None`` (legacy callers), the
+                            boolean is derived from ``partner_net``/
+                            ``partner_radius`` for backward compatibility.
 
         Returns:
             Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
@@ -2482,12 +2490,13 @@ class RoutingGrid:
             # Standard mode: block cells that are blocked AND different net
             base_blocked = self._blocked & (self._net != net)
 
-        partner_active = (
-            partner_net is not None
-            and partner_net >= 0
-            and partner_radius is not None
-            and partner_radius < radius
-        )
+        if partner_active is None:
+            partner_active = (
+                partner_net is not None
+                and partner_net >= 0
+                and partner_radius is not None
+                and partner_radius < radius
+            )
 
         if partner_active:
             # Split base_blocked into "partner cells" and "non-partner cells".
