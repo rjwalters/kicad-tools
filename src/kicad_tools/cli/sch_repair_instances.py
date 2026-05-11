@@ -43,6 +43,116 @@ _BARE_REF_PREFIX_MAP: dict[str, str] = {
 }
 
 
+def _find_sub_block_span(block: str, start: int) -> int:
+    """Walk forward from ``start`` (an opening ``(``) and return the position
+    just past the matching closing ``)``.
+
+    Skips over quoted strings so quoted parens don't confuse the depth count.
+    Returns ``len(block)`` if no balanced close is found.
+    """
+    depth = 0
+    i = start
+    while i < len(block):
+        ch = block[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif ch == '"':
+            i += 1
+            while i < len(block) and block[i] != '"':
+                if block[i] == '\\':
+                    i += 1
+                i += 1
+        i += 1
+    return len(block)
+
+
+def _scan_symbol_children(
+    block: str,
+) -> tuple[tuple[int, int] | None, list[dict]]:
+    """Scan the direct children of a ``(symbol ...)`` block.
+
+    *block* is the full ``(symbol ...)`` source text starting at the opening
+    ``(``.  Returns a tuple ``(instances_span, project_children)`` where:
+
+    - ``instances_span`` is ``(start, end)`` (relative to *block*) of the
+      direct-child ``(instances ...)`` form, or ``None`` if absent.
+    - ``project_children`` is a list of dicts describing each direct-child
+      ``(project "..." ...)`` form (the malformed case — these are siblings
+      of ``(instances)`` rather than children of it).  Each dict has keys
+      ``name`` (project name string), ``span`` (``(start, end)`` relative
+      to *block*), and ``reference`` (the first ``(reference "...")`` value
+      found inside the project block, or empty string).
+
+    Direct children of ``(symbol)`` open at depth-1 within the block (since
+    the ``(symbol`` opening sets depth to 1).
+    """
+    if not block.startswith("(symbol"):
+        return None, []
+
+    instances_span: tuple[int, int] | None = None
+    project_children: list[dict] = []
+
+    # We've consumed the opening "(" of (symbol, so start at depth=1.
+    # A direct child opens when depth goes 1 -> 2, i.e. when we see "(" at
+    # current depth == 1.
+    depth = 1
+    i = len("(")  # advance past the leading "("
+    while i < len(block):
+        ch = block[i]
+        if ch == '"':
+            # skip over quoted strings
+            i += 1
+            while i < len(block) and block[i] != '"':
+                if block[i] == '\\':
+                    i += 1
+                i += 1
+            i += 1
+            continue
+        if ch == '(':
+            if depth == 1:
+                # Direct child: peek at the form head
+                child_start = i
+                child_end = _find_sub_block_span(block, child_start)
+                child_text = block[child_start:child_end]
+                # Identify form by leading token (e.g. "(instances",
+                # "(project \"name\"")
+                m_inst = re.match(r"\(instances\b", child_text)
+                m_proj = re.match(
+                    r'\(project\s+"([^"]+)"', child_text
+                )
+                if m_inst:
+                    instances_span = (child_start, child_end)
+                elif m_proj:
+                    proj_name = m_proj.group(1)
+                    ref_m = re.search(
+                        r'\(reference "([^"]+)"', child_text
+                    )
+                    project_children.append({
+                        "name": proj_name,
+                        "span": (child_start, child_end),
+                        "reference": ref_m.group(1) if ref_m else "",
+                    })
+                # Jump past this child entirely
+                i = child_end
+                continue
+            depth += 1
+            i += 1
+            continue
+        if ch == ')':
+            depth -= 1
+            if depth == 0:
+                break
+            i += 1
+            continue
+        i += 1
+
+    return instances_span, project_children
+
+
 def _extract_symbols_with_instance_info(
     text: str, project_name: str
 ) -> list[dict]:
@@ -52,7 +162,21 @@ def _extract_symbols_with_instance_info(
     more robust than the regex-only approach used in ``sch_re_annotate``.
 
     Returns list of dicts with keys: reference, prefix, number, unit_suffix,
-    lib_id, uuid, has_project_instance.
+    lib_id, uuid, has_project_instance, has_wrong_project,
+    has_loose_project_blocks, loose_project_blocks, symbol_abs_start.
+
+    ``has_loose_project_blocks`` is True when one or more ``(project "..." ...)``
+    forms appear at symbol-child indent (i.e. as siblings of, not children of,
+    ``(instances)``).  This is the malformed shape that ``kicad-cli`` silently
+    drops from the netlist.
+
+    ``loose_project_blocks`` carries the per-form details (name, absolute
+    text span, and the reference value it holds) so the repair phase can
+    splice them out without re-parsing.
+
+    ``symbol_abs_start`` is the absolute offset (in *text*) of the ``(symbol``
+    opening paren for this symbol — the loose-project spans are relative to
+    that offset.
     """
     symbols = []
     ref_pattern = re.compile(r'\(property "Reference" "([^"]+)"')
@@ -71,26 +195,7 @@ def _extract_symbols_with_instance_info(
         # Find the end of this symbol block by tracking parenthesis depth
         # Start from the opening '(' of '(symbol'
         paren_start = text.index("(symbol", block_start)
-        depth = 0
-        i = paren_start
-        block_end = len(text)
-        while i < len(text):
-            ch = text[i]
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    block_end = i + 1
-                    break
-            elif ch == '"':
-                # Skip over quoted strings to avoid counting parens inside
-                i += 1
-                while i < len(text) and text[i] != '"':
-                    if text[i] == '\\':
-                        i += 1  # skip escaped char
-                    i += 1
-            i += 1
+        block_end = _find_sub_block_span(text, paren_start)
 
         block = text[paren_start:block_end]
 
@@ -100,18 +205,31 @@ def _extract_symbols_with_instance_info(
 
         ref = ref_match.group(1)
 
-        # Check if this symbol has an instances block with our project
-        has_instances_block = '(instances' in block
-        has_project = (
-            has_instances_block
-            and f'(project "{project_name}"' in block
-        )
+        # Structural scan: locate the direct-child (instances ...) form and
+        # any direct-child (project ...) forms (the malformed shape).
+        instances_span, loose_projects = _scan_symbol_children(block)
+
+        has_instances_block = instances_span is not None
+        if has_instances_block:
+            inst_start, inst_end = instances_span
+            instances_text = block[inst_start:inst_end]
+            has_project = (
+                f'(project "{project_name}"' in instances_text
+            )
+        else:
+            has_project = False
+
+        has_loose_project_blocks = bool(loose_projects)
 
         # Skip power symbols only when they have no instances block at all
-        # (legacy behavior).  Power symbols with an instances block
-        # referencing the *wrong* project still need repair.
+        # (legacy behavior) AND no loose project blocks to repair.  Power
+        # symbols with an instances block referencing the *wrong* project
+        # or with stray loose project blocks still need repair.
         if lib_id.startswith("power:"):
-            if not has_instances_block or has_project:
+            if (
+                (not has_instances_block and not has_loose_project_blocks)
+                or (has_project and not has_loose_project_blocks)
+            ):
                 continue
 
         # Find the symbol-level uuid (the last uuid in the block, or the
@@ -147,6 +265,15 @@ def _extract_symbols_with_instance_info(
 
         prefix, number, unit_suffix = _parse_reference(ref)
 
+        # has_wrong_project means: instances block exists, names the wrong
+        # project, AND there are no loose project blocks to take precedence.
+        # Loose-project repair is handled separately.
+        has_wrong_project = (
+            has_instances_block
+            and not has_project
+            and not has_loose_project_blocks
+        )
+
         symbols.append({
             "reference": ref,
             "prefix": prefix,
@@ -155,7 +282,10 @@ def _extract_symbols_with_instance_info(
             "lib_id": lib_id,
             "uuid": sym_uuid,
             "has_project_instance": has_project,
-            "has_wrong_project": has_instances_block and not has_project,
+            "has_wrong_project": has_wrong_project,
+            "has_loose_project_blocks": has_loose_project_blocks,
+            "loose_project_blocks": loose_projects,
+            "symbol_abs_start": paren_start,
         })
 
     return symbols
@@ -214,6 +344,7 @@ def _insert_project_instance(
     unit: int = 1,
     *,
     replace_wrong_project: bool = False,
+    repair_loose_blocks: bool = False,
 ) -> str:
     """Insert or replace a project instance entry in a symbol's block.
 
@@ -227,6 +358,12 @@ def _insert_project_instance(
 
     If the symbol has no ``(instances)`` block, one is created before the
     symbol's closing parenthesis.
+
+    If *repair_loose_blocks* is ``True``, any ``(project ...)`` forms at
+    symbol-child indent (siblings of ``(instances)`` rather than children
+    of it) are removed before the canonical project entry is inserted
+    inside ``(instances)``.  This handles the malformed shape that
+    ``kicad-cli`` silently drops from the netlist.
 
     Uses bracket-depth parsing for robustness with varying file layouts.
     """
@@ -252,11 +389,80 @@ def _insert_project_instance(
         f'{i3})\n'
     )
 
+    # Repair loose project blocks first (if requested).  This rewrites the
+    # symbol block in place to remove any direct-child (project ...) forms,
+    # so subsequent logic sees a clean structure.  We also normalise any
+    # collapsed/empty (instances) form (e.g. ``(instances)`` on a single
+    # line) into a multi-line shape so the downstream insertion logic — which
+    # assumes the closing ``)`` of (instances) sits on its own line — can
+    # operate uniformly.
+    if repair_loose_blocks:
+        instances_span_pre, loose_projects = _scan_symbol_children(block)
+        if loose_projects:
+            # Delete loose blocks from last to first so earlier spans stay
+            # valid.  Each span is relative to *block*.  We also strip the
+            # surrounding indentation and trailing newline so we don't leave
+            # blank lines behind.
+            new_block = block
+            for proj in sorted(
+                loose_projects, key=lambda p: p["span"][0], reverse=True
+            ):
+                p_start, p_end = proj["span"]
+                # Extend deletion to the start of the line containing
+                # p_start (consumes the leading indent) and to the end of
+                # the line containing p_end (consumes the trailing newline).
+                line_start = new_block.rfind("\n", 0, p_start) + 1
+                line_end = new_block.find("\n", p_end)
+                if line_end == -1:
+                    line_end = len(new_block)
+                else:
+                    line_end += 1  # include the newline
+                new_block = new_block[:line_start] + new_block[line_end:]
+            # Splice the cleaned block back into the full text.
+            text = text[:start] + new_block + text[end:]
+            # Re-derive bounds and refresh block view.
+            bounds = _find_symbol_block(text, sym_uuid)
+            if bounds is None:
+                return text
+            start, end = bounds
+            block = text[start:end]
+
+        # Normalise a collapsed/empty (instances) form.  The downstream
+        # insertion code expects (instances)'s closing ``)`` to be on its
+        # own line; rewrite ``(instances)`` to a multi-line form so the
+        # generic insertion path works.
+        post_instances_span, _ = _scan_symbol_children(block)
+        if post_instances_span is not None:
+            inst_start, inst_end = post_instances_span
+            inst_text = block[inst_start:inst_end]
+            if "\n" not in inst_text:
+                # Collapsed form like ``(instances)`` — expand it.
+                replacement = f"(instances\n{i2})"
+                new_block = (
+                    block[:inst_start] + replacement + block[inst_end:]
+                )
+                text = text[:start] + new_block + text[end:]
+                # Re-derive bounds and refresh block view.
+                bounds = _find_symbol_block(text, sym_uuid)
+                if bounds is None:
+                    return text
+                start, end = bounds
+                block = text[start:end]
+
     # Check if block already has (instances
     instances_pos = block.find('(instances')
     if instances_pos != -1:
-        # Check if this project already exists
-        if f'(project "{project_name}"' in block:
+        # Check if this project already exists *inside* (instances).
+        # Re-scan structurally so a stray loose (project) (which we should
+        # have removed above, but defensively check) doesn't fool us.
+        instances_span, _ = _scan_symbol_children(block)
+        already_has_project = False
+        if instances_span is not None:
+            inst_start, inst_end = instances_span
+            already_has_project = (
+                f'(project "{project_name}"' in block[inst_start:inst_end]
+            )
+        if already_has_project:
             return text
 
         # If the instances block has a wrong project name, replace it
@@ -412,11 +618,18 @@ def run_repair_instances(
             text, project_name
         )
 
-    # Phase 2: Find symbols missing project instances
+    # Phase 2: Find symbols needing repair — either missing project
+    # instances or carrying loose ``(project ...)`` blocks at symbol-child
+    # indent (the malformed shape from issue #2624).  A symbol with a
+    # well-formed instance AND a stray loose sibling still needs the
+    # sibling cleaned up.
     missing: list[dict] = []  # [{file, sym}, ...]
     for sch_file in all_files:
         for sym in file_symbols[sch_file]:
-            if not sym["has_project_instance"]:
+            if (
+                not sym["has_project_instance"]
+                or sym.get("has_loose_project_blocks")
+            ):
                 missing.append({"file": sch_file, "sym": sym})
 
     if not missing:
@@ -456,9 +669,36 @@ def run_repair_instances(
         sym = entry["sym"]
         sch_file = entry["file"]
 
-        if sym["number"] is not None:
+        # Determine repair_type.  Loose-project repair takes precedence:
+        # the loose blocks already carry a valid annotated reference that
+        # must be preserved (no rename), so we extract it directly rather
+        # than assigning a new number.
+        if sym.get("has_loose_project_blocks"):
+            repair_type = "loose_project_blocks"
+        elif sym.get("has_wrong_project"):
+            repair_type = "wrong_project"
+        else:
+            repair_type = "missing_instances"
+
+        if repair_type == "loose_project_blocks":
+            # Prefer the loose block whose name matches the current project;
+            # fall back to any loose block that carries a non-empty reference.
+            preferred_ref = ""
+            for proj in sym.get("loose_project_blocks") or []:
+                if proj["name"] == project_name and proj["reference"]:
+                    preferred_ref = proj["reference"]
+                    break
+            if not preferred_ref:
+                for proj in sym.get("loose_project_blocks") or []:
+                    if proj["reference"]:
+                        preferred_ref = proj["reference"]
+                        break
+            new_ref = preferred_ref or sym["reference"]
+            needs_rename = False
+        elif sym["number"] is not None:
             # Already annotated, just needs instances block
             new_ref = sym["reference"]
+            needs_rename = False
         else:
             # Unannotated (R?, C?, etc.) - assign next available.
             # Map bare symbol-name prefixes (e.g. #PWR_FLAG -> #FLG)
@@ -468,12 +708,9 @@ def run_repair_instances(
             new_ref = _format_reference(
                 prefix, new_number, sym["unit_suffix"]
             )
+            needs_rename = True
 
         instance_path = file_instance_paths.get(sch_file, "")
-
-        repair_type = (
-            "wrong_project" if sym.get("has_wrong_project") else "missing_instances"
-        )
 
         repairs.append({
             "file": sch_file,
@@ -482,7 +719,7 @@ def run_repair_instances(
             "old_ref": sym["reference"],
             "new_ref": new_ref,
             "instance_path": instance_path,
-            "needs_rename": sym["number"] is None,
+            "needs_rename": needs_rename,
             "repair_type": repair_type,
         })
 
@@ -508,12 +745,17 @@ def run_repair_instances(
         print(json.dumps(output, indent=2))
     else:
         n_wrong = sum(1 for r in repairs if r["repair_type"] == "wrong_project")
-        n_missing = len(repairs) - n_wrong
+        n_loose = sum(
+            1 for r in repairs if r["repair_type"] == "loose_project_blocks"
+        )
+        n_missing = len(repairs) - n_wrong - n_loose
         parts = []
         if n_missing:
             parts.append(f"{n_missing} missing instances")
         if n_wrong:
             parts.append(f"{n_wrong} wrong project")
+        if n_loose:
+            parts.append(f"{n_loose} loose project blocks")
         print(f"Found {len(repairs)} symbol(s) needing repair ({', '.join(parts)}):")
         print()
         # Group by file for display
@@ -524,11 +766,12 @@ def run_repair_instances(
         for sch_file, file_repairs in by_file.items():
             print(f"  {sch_file.name}:")
             for r in file_repairs:
-                tag = (
-                    "[wrong project]"
-                    if r["repair_type"] == "wrong_project"
-                    else "[add instances block]"
-                )
+                if r["repair_type"] == "wrong_project":
+                    tag = "[wrong project]"
+                elif r["repair_type"] == "loose_project_blocks":
+                    tag = "[loose project blocks]"
+                else:
+                    tag = "[add instances block]"
                 if r["needs_rename"]:
                     print(
                         f"    {r['old_ref']} -> {r['new_ref']}"
@@ -568,6 +811,7 @@ def run_repair_instances(
                 r["instance_path"],
                 r["new_ref"],
                 replace_wrong_project=r["repair_type"] == "wrong_project",
+                repair_loose_blocks=r["repair_type"] == "loose_project_blocks",
             )
 
         modified_files[sch_file] = text
