@@ -446,6 +446,18 @@ class RoutingGrid:
         # rebuilds the index when rules change.
         self._rtree_clearance_inflation: float = self.rules.max_clearance
 
+        # Issue #2677: Hard corridor reservations.
+        # Sparse mapping of (layer_idx, y, x) -> {set of net IDs that "own" this cell}.
+        # Used by ``_mark_via`` to skip blocking cells that have been reserved for
+        # a specific diff-pair continuation corridor on an inner layer.  An empty
+        # dict (the default) preserves pre-#2677 behaviour exactly.  The net-ID
+        # set semantics are: "this cell is reserved for ONE OF these net IDs;
+        # any via belonging to a net NOT in the set must not consume the cell".
+        # Diff pairs need a 2-element set (P and N nets); match groups (#2661)
+        # need a larger set.  Use ``int`` keys for net IDs (not net names) to
+        # match the rest of the grid's Via.net / Segment.net typing.
+        self._reserved_for_nets: dict[tuple[int, int, int], frozenset[int]] = {}
+
     def _select_backend(self) -> tuple[BackendType, Any]:
         """Select the appropriate backend based on config and grid size.
 
@@ -1825,6 +1837,15 @@ class RoutingGrid:
     def _mark_via(self, via: Via, max_trace_width: float | None = None) -> None:
         """Mark cells around a via as blocked on ALL layers (through-hole via).
 
+        Issue #2677: Cells reserved via ``reserve_corridor_cells`` are
+        skipped for vias whose ``via.net`` is not in the cell's reservation
+        set.  This protects inner-layer continuation corridors for paired
+        escapes from being colonised by partner-net through-hole vias.
+        Reservations are advisory for matching-net vias (the cell is still
+        blocked, with the via's net taking ownership).  Vias from
+        non-matching nets are blocked as normal on layers WHERE the cell
+        is not reserved, and skipped on layers where it IS reserved.
+
         Args:
             via: The via to mark.
             max_trace_width: Maximum trace width across all net classes.
@@ -1843,16 +1864,113 @@ class RoutingGrid:
         # applied in mark_route() for segments, see Issue #1666).
         radius += 1
 
+        # Issue #2677: Fast-path when no reservations exist (preserves
+        # byte-identical behaviour to pre-fix).
+        has_reservations = bool(self._reserved_for_nets)
+        via_net = int(via.net) if via.net is not None else 0
+
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        # Issue #2677: Skip cells reserved for a different
+                        # net (or net set that excludes via.net).
+                        if has_reservations:
+                            owners = self._reserved_for_nets.get((layer_idx, ny, nx))
+                            if owners is not None and via_net not in owners:
+                                continue
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
                             self._update_congestion(nx, ny, layer_idx)
                             cell.net = via.net
                         cell.blocked = True
+
+    # ------------------------------------------------------------------
+    # Issue #2677: Corridor reservation API
+    # ------------------------------------------------------------------
+
+    def reserve_corridor_cells(
+        self,
+        layer_idx: int,
+        cells: list[tuple[int, int]] | set[tuple[int, int]],
+        net_ids: frozenset[int] | set[int] | list[int] | tuple[int, ...],
+    ) -> int:
+        """Reserve a set of grid cells on a layer for one or more nets.
+
+        Used by ``EscapeRouter._reserve_pair_continuation_corridor`` to
+        carve out a hard keep-out region for diff-pair (or match-group)
+        continuation through the inner-layer routing channels.  Cells
+        marked here cause ``_mark_via`` to skip cells whose ``via.net`` is
+        NOT in ``net_ids`` -- so partner-net through-hole vias cannot
+        colonise the corridor.
+
+        Cells that are already reserved for a different net set are NOT
+        merged: the new reservation replaces the existing one.  This
+        keeps the API predictable when multiple paired pre-passes claim
+        overlapping cells (the latest claim wins).
+
+        Args:
+            layer_idx: Layer index (must be in ``range(self.num_layers)``).
+            cells: Iterable of (x, y) grid coordinates to reserve.
+            net_ids: One or more net IDs (int) that may consume the
+                reserved cells.  For a diff pair this is exactly two IDs
+                (P-net and N-net).  For a match group (#2661) this can be
+                three or more.  Must not be empty.
+
+        Returns:
+            Number of cells newly reserved (existing reservations
+            overwritten are counted as new for instrumentation purposes).
+        """
+        if not (0 <= layer_idx < self.num_layers):
+            raise ValueError(
+                f"reserve_corridor_cells: layer_idx {layer_idx} out of range "
+                f"[0, {self.num_layers})"
+            )
+        owners = frozenset(int(n) for n in net_ids)
+        if not owners:
+            raise ValueError("reserve_corridor_cells: net_ids must not be empty")
+
+        count = 0
+        for x, y in cells:
+            if 0 <= x < self.cols and 0 <= y < self.rows:
+                self._reserved_for_nets[(layer_idx, y, x)] = owners
+                count += 1
+        return count
+
+    def clear_corridor_reservations(self) -> None:
+        """Clear all corridor reservations made via ``reserve_corridor_cells``.
+
+        Intended for test setup / teardown when reusing a grid across
+        scenarios.  Production code should not need to call this -- the
+        reservations only affect via placement and are harmless once the
+        escape pass has completed.
+        """
+        self._reserved_for_nets.clear()
+
+    def reserved_cell_count(self) -> int:
+        """Return the number of currently reserved cells (instrumentation).
+
+        Used by tests to verify that ``EscapeRouter`` made the expected
+        corridor reservations before the partner-via marking pass.
+        """
+        return len(self._reserved_for_nets)
+
+    def is_reserved_for(self, layer_idx: int, x: int, y: int, net_id: int) -> bool:
+        """Check whether a cell is reserved for the given net.
+
+        Args:
+            layer_idx: Layer index.
+            x, y: Grid coordinates.
+            net_id: Net ID to check ownership for.
+
+        Returns:
+            True if the cell is reserved AND ``net_id`` is in the
+            reservation set.  False if the cell is not reserved OR is
+            reserved for a different net set.
+        """
+        owners = self._reserved_for_nets.get((layer_idx, y, x))
+        return owners is not None and int(net_id) in owners
 
     def unmark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Unmark a route's cells (rip-up). Reverses mark_route().
