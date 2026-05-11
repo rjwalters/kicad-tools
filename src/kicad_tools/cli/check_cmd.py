@@ -60,6 +60,7 @@ def _find_pcb_file(directory: Path) -> Path | None:
 CHECK_CATEGORIES = [
     "clearance",
     "diffpair_clearance_intra",
+    "diffpair_length_skew",
     "diffpair_routing_continuity",
     "dimensions",
     "edge",
@@ -274,6 +275,7 @@ def run_selected_checks(
     check_methods = {
         "clearance": checker.check_clearances,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
+        "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
         "dimensions": checker.check_dimensions,
         "edge": checker.check_edge_clearances,

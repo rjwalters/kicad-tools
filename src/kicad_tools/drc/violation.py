@@ -52,6 +52,11 @@ def _init_type_category_map() -> None:
             # Fixable by adjusting the route so the two halves stay coupled
             # for a larger share of their length -- pure routing concern.
             ViolationType.DIFFPAIR_ROUTING_CONTINUITY: ViolationCategory.ROUTING,
+            # Differential-pair length-skew (Issue #2649, Epic #2556 Phase 3J).
+            # Fixable by routing-side length tuning (serpentine insertion in
+            # Phase 3I or manual touch-up) -- the skew is a function of the
+            # routed geometry of the two halves, not their footprints.
+            ViolationType.DIFFPAIR_LENGTH_SKEW: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -126,6 +131,15 @@ class ViolationType(Enum):
     # *intra-pair* gap (allowed to be tighter than the manufacturer's inter-pair
     # ``min_clearance_mm``) against the per-class ``intra_pair_clearance``.
     DIFFPAIR_CLEARANCE_INTRA = "diffpair_clearance_intra"
+    # Differential-pair length-skew (Issue #2649, Epic #2556 Phase 3J).
+    # Fires when an *engaged* differential pair's routed length skew
+    # (``|L_p - L_n|``) exceeds the per-class
+    # ``skew_tolerance_mm`` (default 0.5 mm).  Distinct from
+    # DIFFPAIR_ROUTING_CONTINUITY (which checks parallel-coupling
+    # fraction): this rule cares about *total* length parity, not the
+    # geometric topology of the route.  Distinct from CLEARANCE because
+    # it checks a length-matching property, not edge-to-edge spacing.
+    DIFFPAIR_LENGTH_SKEW = "diffpair_length_skew"
     # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
     # Fires when an *engaged* differential pair's coupled fraction (the
     # share of P's routed length whose nearest point on N is within the
@@ -247,6 +261,15 @@ class ViolationType(Enum):
             # generic CLEARANCE type, masking the new violation type from
             # downstream consumers that filter by exact ``type`` value.
             "diffpair_clearance_intra": cls.DIFFPAIR_CLEARANCE_INTRA,
+            # Differential-pair length-skew (Issue #2649, Epic #2556 Phase 3J).
+            # MUST be aliased explicitly even though the rule_id string
+            # ``"diffpair_length_skew"`` does NOT contain the substring
+            # ``"clearance"`` -- the fuzzy fallback at the bottom of
+            # from_string() would otherwise drop through to ``UNKNOWN``,
+            # which silently corrupts the violation type field for any
+            # downstream filter that compares by exact type value.  This
+            # entry is the only defense; do NOT delete it as "redundant".
+            "diffpair_length_skew": cls.DIFFPAIR_LENGTH_SKEW,
             # Differential-pair routing continuity (Issue #2640, Epic #2556
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"diffpair_routing_continuity"`` does NOT

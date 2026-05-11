@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
+from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
@@ -115,6 +116,7 @@ class DRCChecker:
         # Run each category of checks
         results.merge(self.check_clearances())
         results.merge(self.check_diffpair_clearance_intra())
+        results.merge(self.check_diffpair_length_skew())
         results.merge(self.check_diffpair_routing_continuity())
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
@@ -176,6 +178,45 @@ class DRCChecker:
         """
 
         rule = DiffPairClearanceIntraRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_diffpair_length_skew(self) -> DRCResults:
+        """Check routed-length skew for engaged differential pairs.
+
+        Validates that engaged pairs (per Epic #2556 Phase 2E, #2638)
+        have a length skew ``|L_p - L_n|`` within their per-class
+        ``skew_tolerance_mm`` (default 0.5 mm).  An "engaged" pair is
+        one whose net class has ``coupled_routing == True`` AND which
+        passed the engagement-layer single-ended refusal check.
+
+        This rule is a **conservative no-op when invoked from the
+        standalone** ``kct check`` **CLI** -- there is no router context
+        on disk to supply the per-pair skew data, so the rule's
+        ``skew_data`` injection is empty and the rule returns 0
+        violations / 0 ``rules_checked``.  The intended call site is
+        the autorouter consumer (after
+        :meth:`~kicad_tools.router.diffpair_length.DiffPairLengthTracker.record_routes`
+        has run); that consumer constructs
+        :class:`DiffPairLengthSkewRule` directly with the
+        ``skew_data`` from
+        :meth:`~kicad_tools.router.diffpair_length.DiffPairLengthTracker.get_all_skews`
+        and the producer-side ``engaged_pairs`` set.
+
+        Phase 3J is **independent of Phase 3I** (serpentine insertion):
+        the rule fires on routed-as-found geometry regardless of
+        whether the tuner ran.  This is the
+        "validator-for-externally-routed-boards" use case (Freerouting,
+        KiCad's own router, manual layout) where the kicad-tools tuner
+        never runs but the board still needs its skew validated.
+
+        See Issue #2649 / Epic #2556 Phase 3J.
+
+        Returns:
+            :class:`DRCResults` containing length-skew violations.
+            Empty on standalone ``kct check`` invocations (no router
+            context to supply ``skew_data``).
+        """
+        rule = DiffPairLengthSkewRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_diffpair_routing_continuity(self) -> DRCResults:
