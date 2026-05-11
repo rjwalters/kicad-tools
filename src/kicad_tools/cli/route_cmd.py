@@ -1760,6 +1760,57 @@ def route_with_layer_escalation(
                 )
         return 1
 
+    # Issue #2621: placement-routing feedback for partial layer-escalation
+    # results.  The main single-pass entry point hooks ``_run_placement_feedback``
+    # at the end of routing (route_cmd.py around line 4802), but the
+    # auto-layers escalation path never reached that hook -- so
+    # ``--placement-feedback`` on a board that exhausts layer escalation
+    # with PARTIAL completion silently did nothing.  Engage the feedback
+    # loop here, mirroring the main-path trigger:
+    #   * only when escalation didn't already succeed,
+    #   * only when --placement-feedback is set,
+    #   * only when there are still failed nets to address.
+    # The loop mutates ``final_result.router.routes`` in place, so we
+    # refresh ``final_result``'s stats afterwards before optimize/save.
+    if (
+        successful_result is None
+        and getattr(args, "placement_feedback", False)
+        and final_result.router.routes is not None
+        and final_result.router.get_failed_nets()
+    ):
+        if not quiet:
+            print(
+                f"\n--- Engaging placement-routing feedback "
+                f"(escalation stalled at {final_result.completion * 100:.0f}%) ---"
+            )
+        _run_placement_feedback(
+            router=final_result.router,
+            pcb_path=pcb_path,
+            args=args,
+            quiet=quiet,
+        )
+        # Refresh completion stats from the post-feedback router state so
+        # optimize/save/summary all see the correct numbers.
+        _refreshed_multi_pad_ids = {
+            n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
+        }
+        _refreshed = final_result.router.get_statistics(
+            nets_to_route_ids=_refreshed_multi_pad_ids
+        )
+        final_result.nets_routed = _refreshed["nets_routed"]
+        final_result.completion = (
+            final_result.nets_routed / final_result.nets_to_route
+            if final_result.nets_to_route > 0
+            else 1.0
+        )
+        final_result.success = final_result.completion >= args.min_completion
+        if not quiet:
+            print(
+                f"  Post-feedback: {final_result.nets_routed}/"
+                f"{final_result.nets_to_route} "
+                f"({final_result.completion * 100:.0f}%)"
+            )
+
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
