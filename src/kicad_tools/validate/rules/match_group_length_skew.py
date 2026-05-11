@@ -161,7 +161,7 @@ class MatchGroupLengthSkewRule(DRCRule):
     def __init__(
         self,
         group_skew_data: dict[str, float] | None = None,
-        tracker_match_groups: list["MatchGroup"] | None = None,
+        tracker_match_groups: list[MatchGroup] | None = None,
         threshold_map: dict[str, float] | None = None,
         default_tolerance_mm: float = DEFAULT_MATCH_GROUP_TOLERANCE_MM,
     ) -> None:
@@ -190,7 +190,7 @@ class MatchGroupLengthSkewRule(DRCRule):
         # Keep a name-keyed lookup of declared groups so check() can
         # iterate ``group_skew_data`` (the upstream "what's measured"
         # view) and resolve each entry back to its declaration in O(1).
-        self._tracker_groups_by_name: dict[str, "MatchGroup"] = {}
+        self._tracker_groups_by_name: dict[str, MatchGroup] = {}
         if tracker_match_groups:
             for grp in tracker_match_groups:
                 self._tracker_groups_by_name[grp.name] = grp
@@ -269,7 +269,7 @@ class MatchGroupLengthSkewRule(DRCRule):
 
     def _make_violation(
         self,
-        group: "MatchGroup",
+        group: MatchGroup,
         skew_mm: float,
         tolerance_mm: float,
     ) -> DRCViolation:

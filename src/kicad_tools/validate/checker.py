@@ -14,9 +14,9 @@ from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
-from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
+from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule

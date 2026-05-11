@@ -299,8 +299,7 @@ class TestAliasResolution:
     def test_round_trip_identity(self):
         """``from_string(value).value == value`` (the #2521 round-trip guard)."""
         assert (
-            ViolationType.from_string("match_group_length_skew").value
-            == "match_group_length_skew"
+            ViolationType.from_string("match_group_length_skew").value == "match_group_length_skew"
         )
 
     def test_case_insensitive_match(self):
@@ -342,8 +341,7 @@ class TestCategoryMapIntegration:
 
         assert ViolationType.MATCH_GROUP_LENGTH_SKEW in _TYPE_CATEGORY_MAP
         assert (
-            _TYPE_CATEGORY_MAP[ViolationType.MATCH_GROUP_LENGTH_SKEW]
-            is ViolationCategory.ROUTING
+            _TYPE_CATEGORY_MAP[ViolationType.MATCH_GROUP_LENGTH_SKEW] is ViolationCategory.ROUTING
         )
 
     @pytest.mark.parametrize(
