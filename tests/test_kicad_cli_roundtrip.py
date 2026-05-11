@@ -119,7 +119,7 @@ class TestPCBSaveRoundtrip:
     """``PCB.create()`` + ``PCB.save()`` must produce a kicad-cli-loadable file.
 
     Targets the ``generator_version`` quoting regression: ``PCB.create()``
-    writes ``(generator_version "9.0")`` via the library writer, and
+    writes ``(generator_version "10.0")`` via the library writer, and
     ``PCB.save()`` round-trips through the SExp serializer.
     """
 
@@ -137,8 +137,8 @@ class TestPCBSaveRoundtrip:
         # Sanity: the writer must emit the field that triggered the regression
         # in quoted form. If this fails, the rest of the test is meaningless.
         contents = pcb_path.read_text()
-        assert '(generator_version "9.0")' in contents, (
-            'Regression guard: PCB.save() must emit (generator_version "9.0") '
+        assert '(generator_version "10.0")' in contents, (
+            'Regression guard: PCB.save() must emit (generator_version "10.0") '
             "with the value quoted. Bare numeric form is rejected by kicad-cli "
             "with 'Failed to load board' (exit 3). See "
             "src/kicad_tools/sexp/parser.py:_FORCE_QUOTED_STRING_VALUE."
