@@ -286,6 +286,9 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--diffpair-spacing", str(args.diffpair_spacing)])
     if getattr(args, "diffpair_max_delta", None) is not None:
         sub_argv.extend(["--diffpair-max-delta", str(args.diffpair_max_delta)])
+    # Issue #2648 (Epic #2556 Phase 3I): forward the length-match-diffpairs flag
+    if getattr(args, "length_match_diffpairs", False):
+        sub_argv.append("--length-match-diffpairs")
     return route_main(sub_argv)
 
 

@@ -2462,6 +2462,17 @@ def _add_route_parser(subparsers) -> None:
             "Default: auto based on detected pair type."
         ),
     )
+    route_parser.add_argument(
+        "--length-match-diffpairs",
+        action="store_true",
+        help=(
+            "Enable per-pair differential length-match (skew) tuning (Epic "
+            "#2556 Phase 3I). Inserts serpentines on the shorter half of "
+            "each length-critical diff pair until skew is within the "
+            "per-class tolerance. Requires --differential-pairs (otherwise "
+            "warns and short-circuits)."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
