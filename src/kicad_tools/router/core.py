@@ -49,8 +49,8 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
-from .match_group_length import MatchGroup, MatchGroupTracker
 from .diffpair_routing import DiffPairRouter
+from .match_group_length import MatchGroup, MatchGroupTracker
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
 from .subgrid import SubGridResult, SubGridRouter
