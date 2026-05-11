@@ -225,8 +225,7 @@ class TestDriftPrevention:
             f"corresponding data.get(...) in NetClassRouting.from_dict()."
         )
         assert not extra, (
-            f"NetClassRouting.to_dict() has keys not backed by dataclass fields: "
-            f"{sorted(extra)}."
+            f"NetClassRouting.to_dict() has keys not backed by dataclass fields: {sorted(extra)}."
         )
 
     def test_to_dict_covers_all_lengthconstraint_fields(self):
@@ -235,12 +234,9 @@ class TestDriftPrevention:
         to_dict_keys = set(LengthConstraint(net_id=0).to_dict().keys())
         missing = all_field_names - to_dict_keys
         extra = to_dict_keys - all_field_names
-        assert not missing, (
-            f"LengthConstraint fields missing from to_dict(): {sorted(missing)}."
-        )
+        assert not missing, f"LengthConstraint fields missing from to_dict(): {sorted(missing)}."
         assert not extra, (
-            f"LengthConstraint.to_dict() has keys not backed by dataclass fields: "
-            f"{sorted(extra)}."
+            f"LengthConstraint.to_dict() has keys not backed by dataclass fields: {sorted(extra)}."
         )
 
     def test_roundtrip_with_non_default_for_every_field(self):
