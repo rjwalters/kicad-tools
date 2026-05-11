@@ -34,6 +34,7 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 | 02 | [Charlieplex LED](02-charlieplex-led/) | ⚠️ Needs optimization | 14 | 8 | Dense topology, may need trace optimization ([#659]) |
 | 03 | [USB Joystick](03-usb-joystick/) | ⚠️ Complex routing | ~20 | 13 | Mixed signals, may not complete all routes on 2-layer |
 | 04 | [STM32 Dev Board](04-stm32-devboard/) | 🚧 Schematic only | ~30 | - | Layout pending, demonstrates programmatic schematic generation |
+| 06 | [Diff-Pair Test](06-diffpair-test/) | ⚠️ Scaffold | 7 | 26 | Epic [#2556] Phase 4L regression bench --- USB 2.0/3.0, PCIe, MIPI on 4-layer; exercises Phase 1-3 features (intra_pair_clearance, coupled_routing, coupled_continuity_threshold, target_diff_impedance, skew_tolerance_mm) |
 
 **Status Legend:**
 - ✅ Working - Generates manufacturable output
@@ -160,6 +161,22 @@ STM32F103 "Blue Pill" style development board:
 - User LED
 
 **Demonstrates**: Programmatic schematic generation with circuit blocks
+
+### 06 - Differential Pair Test (Routing Testbench)
+
+Multi-protocol HSDI regression testbench:
+- USB 2.0 D+/D- pair (USB-C → QFN-32)
+- USB 3.0 SuperSpeed (4 pairs: USB-C → BGA-49 simulator)
+- PCIe Gen1 (2 pairs: mini-PCIe edge → QFP-48)
+- MIPI D-PHY (2 lanes: FFC → QFN-24)
+- 4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu)
+
+**Demonstrates**: Epic [#2556] Phase 1-3 differential-pair subsystem (per-class
+`intra_pair_clearance`, `coupled_routing`, `coupled_continuity_threshold`,
+`target_diff_impedance`, `target_single_impedance`, `skew_tolerance_mm`).
+Not a working device --- synthetic sinks drive routing exercise only.
+
+[#2556]: https://github.com/rjwalters/kicad-tools/issues/2556
 
 ## See Also
 

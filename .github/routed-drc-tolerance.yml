@@ -45,3 +45,8 @@ tolerances:
   # 1x clearance_segment_segment at JLCPCB rules. Pre-existing at the time the
   # CI gate landed (issue #2546). Should be driven to 0 in a follow-up.
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 1
+
+  # Tracked: #2672 (impedance-width selection — 25x errors), #2677 (BGA USB3
+  # partner-via escape — 3x diffpair_clearance_intra), Epic #2556 Phase 4N
+  # (#2660) will tighten this floor once those land.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 28
