@@ -25,6 +25,24 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via
 
 
+# Floating-point tolerance for detecting segment-endpoint / via-center
+# co-location (0.1 micron).  The router's in-pad escape places the inner-
+# layer segment endpoint at *exactly* the via center (router invariant --
+# see ``_try_in_pad_escape`` in ``src/kicad_tools/router/escape.py``).
+# However, when a different net's escape segment happens to terminate at
+# the same coordinates (e.g. a neighboring pad's escape segment landing on
+# top of a fine-pitch in-pad via center after pitch-aware placement), the
+# clearance check sees a "segment endpoint at via center on a different
+# net" pair and reports a false-positive ``clearance_segment_via``
+# violation -- the segment endpoint is conceptually the via, not a piece
+# of trace copper at that exact point.  An epsilon of 1e-4 mm (matching
+# ``_CLEARANCE_EPSILON_MM`` in ``edge.py``) is far below any real-world
+# manufacturing precision but well above IEEE-754 representation error
+# for the router's coordinate space, so it suppresses the modeling
+# artifact without masking real near-misses.  See Issue #2706.
+_COLOCATION_EPSILON_MM = 1e-4
+
+
 @dataclass
 class CopperElement:
     """A copper element for clearance checking.
@@ -481,6 +499,28 @@ class ClearanceRule(DRCRule):
                         else (elem2.net_number, elem1.net_number)
                     )
                     if key in diff_pair_set:
+                        continue
+
+                # Skip segment/via pairs where the segment endpoint
+                # coincides with the via center.  The router's in-pad
+                # escape places segment endpoints exactly at via centers
+                # (router invariant); when a neighboring net's escape
+                # segment terminates at the same coordinates as a
+                # cross-net in-pad via, the geometric distance is zero
+                # and the rule reports a spurious "negative clearance"
+                # violation at the via center.  The Via schema has no
+                # ``in_pad`` flag (dropped at serialization), so the
+                # detection is geometric.  See Issue #2706 and the
+                # ``_COLOCATION_EPSILON_MM`` constant above.
+                if {elem1.element_type, elem2.element_type} == {"segment", "via"}:
+                    seg = elem1 if elem1.element_type == "segment" else elem2
+                    via = elem2 if elem1.element_type == "segment" else elem1
+                    sx1, sy1, sx2, sy2, _ = seg.geometry
+                    vx, vy, _, _ = via.geometry
+                    if (
+                        math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+                        or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+                    ):
                         continue
 
                 # Calculate clearance
