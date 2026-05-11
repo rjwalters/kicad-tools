@@ -254,7 +254,7 @@ class TestFootprint:
 
         assert "(footprint" in sexp
         assert '"test"' in sexp
-        assert "(version 20240108)" in sexp
+        assert "(version 20260206)" in sexp
         assert '(generator "kicad-tools")' in sexp
         assert '(layer "F.Cu")' in sexp
         assert "(attr smd)" in sexp
@@ -636,7 +636,7 @@ class TestFootprintToSexpIntegration:
 
         # Check structure
         assert parsed.name == "footprint"
-        assert parsed["version"].get_first_atom() == 20240108
+        assert parsed["version"].get_first_atom() == 20260206
         assert parsed["generator"].get_first_atom() == "kicad-tools"
         assert parsed["layer"].get_first_atom() == "F.Cu"
         assert parsed["descr"].get_first_atom() == "Test description"

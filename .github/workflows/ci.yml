@@ -160,23 +160,28 @@ jobs:
     # broke every demo board's manufacturing export — this gate prevents
     # that class of regression from re-landing.
     #
-    # Uses the official kicad/kicad:9.0 Docker image rather than installing
+    # Uses the official kicad/kicad:10.0 Docker image rather than installing
     # KiCad via apt+PPA. Earlier attempts to install from
     # ppa:kicad/kicad-9.0-releases on ubuntu-latest were unreliable: both
     # api.launchpad.net and ppa.launchpadcontent.net failed back-to-back from
     # the Azure GitHub runner, and apt then silently fell back to KiCad 7
     # from noble/universe — producing confusing "DRC produced no output"
     # errors instead of an attributable infrastructure failure. The official
-    # container ships kicad-cli 9 already and is immune to Launchpad outages.
+    # container ships kicad-cli 10 already and is immune to Launchpad outages.
+    #
+    # The image was bumped from kicad/kicad:9.0 to kicad/kicad:10.0 alongside
+    # the source-side PCB format upgrade (version 20240108 → 20260206,
+    # generator_version 9.0 → 10.0) in PR #2716. KiCad 9 cannot load files
+    # in the new format, so the smoke gate has to track the writer.
     container:
-      image: kicad/kicad:9.0
+      image: kicad/kicad:10.0
       # Run as root so uv/pip installs go to the system site-packages and
       # actions/checkout can write into $GITHUB_WORKSPACE without permission
       # juggling.
       options: --user 0:0
     defaults:
       run:
-        # The kicad/kicad:9.0 image links /bin/sh to dash, which does not
+        # The kicad/kicad:10.0 image links /bin/sh to dash, which does not
         # support `set -o pipefail`. GitHub Actions invokes each step with
         # `sh -e {0}` by default, so our `set -euo pipefail` headers fail
         # immediately with `set: Illegal option -o pipefail` and exit code 2
@@ -193,14 +198,14 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git
-          # Sanity: the container should have kicad-cli 9 already.
+          # Sanity: the container should have kicad-cli 10 already.
           # Use a permissive regex anchored to either the start of the line
           # or whitespace so we still match if `kicad-cli --version` prefixes
-          # its output (e.g., `KiCad 9.0.x`) instead of emitting the bare
+          # its output (e.g., `KiCad 10.0.x`) instead of emitting the bare
           # version string.
           kicad-cli --version | tee /tmp/kicad-cli-version
-          grep -qE '(^|[[:space:]])9\.' /tmp/kicad-cli-version || {
-            echo "::error::kicad/kicad:9.0 container does not provide kicad-cli 9.x"
+          grep -qE '(^|[[:space:]])10\.' /tmp/kicad-cli-version || {
+            echo "::error::kicad/kicad:10.0 container does not provide kicad-cli 10.x"
             exit 1
           }
 

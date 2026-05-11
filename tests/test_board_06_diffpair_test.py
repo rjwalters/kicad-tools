@@ -102,11 +102,11 @@ class TestRoutedPcbArtifact:
         )
         return routed.read_text()
 
-    def test_routed_pcb_is_kicad9_format(self, routed_pcb_text: str) -> None:
-        """AC#1: routed PCB is valid KiCad 9 format."""
-        # KiCad 9 PCBs start with ``(kicad_pcb`` and declare the version.
+    def test_routed_pcb_is_kicad10_format(self, routed_pcb_text: str) -> None:
+        """AC#1: routed PCB is valid KiCad 10 format."""
+        # KiCad 10 PCBs start with ``(kicad_pcb`` and declare the version.
         assert routed_pcb_text.startswith("(kicad_pcb")
-        assert "(version 20240108)" in routed_pcb_text
+        assert "(version 20260206)" in routed_pcb_text
 
     def test_routed_pcb_declares_4layer_stackup(self, routed_pcb_text: str) -> None:
         """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout

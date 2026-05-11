@@ -587,7 +587,7 @@ class TestRoundTrip:
     def test_roundtrip_preserves_structure(self):
         """Parse → serialize → parse preserves structure."""
         original = """(kicad_pcb
-            (version 20240108)
+            (version 20260206)
             (generator "test")
             (layers
                 (0 "F.Cu" signal)
@@ -599,7 +599,7 @@ class TestRoundTrip:
         reparsed = parse_string(serialized)
 
         assert reparsed.name == "kicad_pcb"
-        assert reparsed["version"].get_first_atom() == 20240108
+        assert reparsed["version"].get_first_atom() == 20260206
         assert reparsed["generator"].get_first_atom() == "test"
         layers = reparsed["layers"]
         assert len(layers.children) == 2
@@ -751,7 +751,7 @@ class TestRoundTrip:
     def test_roundtrip_pcb_file(self, tmp_path):
         """Round-trip a sample PCB structure."""
         pcb_content = """(kicad_pcb
-            (version 20240108)
+            (version 20260206)
             (generator "test")
             (general
                 (thickness 1.6)
@@ -781,7 +781,7 @@ class TestRoundTrip:
         # Reload and verify
         reparsed = parse_file(output_path)
         assert reparsed.name == "kicad_pcb"
-        assert reparsed["version"].get_first_atom() == 20240108
+        assert reparsed["version"].get_first_atom() == 20260206
 
         # Verify footprint structure
         footprint = reparsed.find("footprint")
