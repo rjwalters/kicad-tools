@@ -167,6 +167,11 @@ from .length import (
     ViolationType,
     create_match_group,
 )
+from .match_group_length import (
+    MatchGroup,
+    MatchGroupSource,
+    MatchGroupTracker,
+)
 from .mfr_limits import (
     MFR_JLCPCB,
     MFR_LIMITS,
@@ -403,6 +408,10 @@ __all__ = [
     "LengthViolation",
     "ViolationType",
     "create_match_group",
+    # Match-group length tracking (Epic #2661 Phase 1B / Issue #2688)
+    "MatchGroup",
+    "MatchGroupSource",
+    "MatchGroupTracker",
     # I/O
     "route_pcb",
     "load_pcb_for_routing",
