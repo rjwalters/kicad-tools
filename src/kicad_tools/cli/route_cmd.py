@@ -1488,6 +1488,10 @@ def route_with_layer_escalation(
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
+        # Issue #2695: forward manufacturer so the escape router can opt in
+        # to in-pad escape for fine-pitch LQFP/QFP (and SSOP/TSSOP) when the
+        # manufacturer supports via-in-pad processing.
+        manufacturer=getattr(args, "manufacturer", None),
     )
 
     # Parse skip nets
@@ -2254,6 +2258,10 @@ def route_with_rule_relaxation(
             via_drill=tier.via_drill,
             via_diameter=tier.via_diameter,
             fine_pitch_clearance=fine_pitch_cl,
+            # Issue #2695: forward manufacturer so the escape router can opt
+            # in to in-pad escape for fine-pitch LQFP/QFP/SSOP/TSSOP when
+            # the manufacturer supports via-in-pad processing.
+            manufacturer=getattr(args, "manufacturer", None),
         )
 
         # Load PCB
@@ -2779,6 +2787,10 @@ def route_with_combined_escalation(
                 via_drill=tier.via_drill,
                 via_diameter=tier.via_diameter,
                 fine_pitch_clearance=fine_pitch_cl,
+                # Issue #2695: forward manufacturer so the escape router
+                # can opt in to in-pad escape for fine-pitch LQFP/QFP/SSOP/
+                # TSSOP when the manufacturer supports via-in-pad processing.
+                manufacturer=getattr(args, "manufacturer", None),
             )
 
             # Load PCB
