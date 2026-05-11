@@ -48,12 +48,15 @@ Design notes
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .length import LengthTracker
 
 if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+
     from .diffpair_detection import DetectedPair
     from .primitives import Route, Via
 
@@ -296,6 +299,101 @@ class DiffPairLengthTracker:
         # normal call shape).  To make this method usable in isolation
         # we cache the pair name mapping when record_routes runs.
         return dict(sorted(self._skew_map.items(), key=lambda kv: kv[0][0]))
+
+    # =========================================================================
+    # PCB-side measurement primitive (Phase 2.5c / Issue #2675)
+    # =========================================================================
+
+    @staticmethod
+    def measure_net_from_pcb(
+        pcb: PCB,
+        net_id: int,
+        board_thickness_mm: float | None = None,
+        num_copper_layers: int = 2,
+    ) -> float:
+        """Return the geometric routed length of a net in mm, read from a routed PCB.
+
+        Sister primitive to :meth:`_measure_route` -- the latter consumes the
+        router-internal :class:`~kicad_tools.router.primitives.Route` shape
+        (``segments[i].x1/y1/x2/y2``), while this method consumes the PCB
+        schema shape exposed by :meth:`~kicad_tools.schema.pcb.PCB.segments_in_net`
+        and :meth:`~kicad_tools.schema.pcb.PCB.vias_in_net` (segments use
+        ``start: tuple[float, float]`` / ``end: tuple[float, float]``, vias
+        use ``layers: list[str]`` of KiCad layer name strings).
+
+        Used by :func:`kicad_tools.validate.diffpair_skew.derive_skew_data`
+        (Phase 2.5c, Epic #2556) to re-derive per-pair skew from a routed
+        PCB without round-tripping through the router-internal Route form.
+        Keeping the formula here (rather than duplicating it in the
+        validate package) preserves single source of truth for diff-pair
+        length-with-vias computation -- if a future change touches one
+        primitive, the byte-for-byte drift-prevention test in
+        ``tests/test_validate_diffpair_skew.py`` fires.
+
+        Args:
+            pcb: The routed PCB to measure.
+            net_id: The net number whose segments + vias to sum.
+            board_thickness_mm: Total stackup thickness in mm.  When
+                ``None`` (the default), vias contribute ``0.0`` to the
+                length (documented behavior -- mirrors
+                :meth:`record_routes`).
+            num_copper_layers: Number of copper layers in the stack (used
+                to compute per-via drilled length when
+                ``board_thickness_mm`` is supplied).  Defaults to ``2``.
+
+        Returns:
+            Total geometric length (segments + vias) in mm.
+
+        Notes:
+            * Segment length is computed via the same
+              ``sqrt(dx*dx + dy*dy)`` formula used by
+              :meth:`~kicad_tools.router.length.LengthTracker.calculate_route_length`
+              (router-internal Route form).  The drift-prevention test
+              in ``tests/test_validate_diffpair_skew.py`` confirms the
+              two paths produce identical results for the same physical
+              routing.
+            * Via length uses the same stack-position formula as
+              :meth:`_via_length` -- the via's ``layers: list[str]`` is
+              mapped to :class:`~kicad_tools.core.types.CopperLayer`
+              enums via :meth:`CopperLayer.from_kicad_name` before the
+              delta is computed.
+            * Vias with malformed layer names (not a known KiCad copper
+              layer) contribute ``0.0`` to the length rather than
+              crashing -- defensive against legacy / hand-edited PCBs.
+        """
+        from kicad_tools.core.types import CopperLayer
+
+        # Segment portion: identical formula to LengthTracker.calculate_route_length
+        # (length.py:139) and DiffPairLengthTracker._measure_route (above).
+        total = 0.0
+        for seg in pcb.segments_in_net(net_id):
+            dx = seg.end[0] - seg.start[0]
+            dy = seg.end[1] - seg.start[1]
+            total += math.sqrt(dx * dx + dy * dy)
+
+        # Via portion: identical formula to _via_length (above) but the
+        # input shape differs (PCB-side Via.layers is list[str] of KiCad
+        # layer name strings, not a tuple of CopperLayer enums).
+        if board_thickness_mm is None or num_copper_layers <= 1:
+            return total
+
+        for via in pcb.vias_in_net(net_id):
+            layers = via.layers
+            if not layers or len(layers) < 2:
+                # Malformed via (no layer span) -- skip rather than crash.
+                continue
+            try:
+                layer_start = CopperLayer.from_kicad_name(layers[0])
+                layer_end = CopperLayer.from_kicad_name(layers[-1])
+            except ValueError:
+                # Unknown layer name -- conservative skip.
+                continue
+            idx_start = DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
+            idx_end = DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
+            delta = abs(idx_start - idx_end)
+            total += board_thickness_mm * delta / (num_copper_layers - 1)
+
+        return total
 
     # =========================================================================
     # Internal name cache (populated by record_routes; used by get_all_skews)
