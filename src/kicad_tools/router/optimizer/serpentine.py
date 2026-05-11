@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ..primitives import Route, Segment
 from .geometry import segment_length
@@ -44,6 +44,20 @@ class SerpentineConfig:
         min_segment_length: Minimum segment length for serpentine insertion in mm
         gap_factor: Multiplier for spacing (gap = min_spacing * gap_factor)
         max_iterations: Maximum loops to add per segment
+        side: Side selector for trombone bulge orientation.
+            ``"auto"`` (default) alternates direction loop-by-loop, matching
+            the legacy DDR/bus tuner behavior.  ``"outer"`` constrains every
+            loop to a single side, the one pointed to by ``outer_normal_hint``
+            (a unit vector roughly perpendicular to the segment).  This is
+            required for differential-pair length tuning (Epic #2556 Phase 3I,
+            Issue #2648) where bulging the shorter half toward the partner
+            would violate intra-pair clearance.  ``"inner"`` is the
+            symmetric opposite -- provided for completeness but rarely used.
+        outer_normal_hint: Unit vector (rx, ry) supplied when ``side`` is
+            ``"outer"`` or ``"inner"``.  The trombone projects the segment's
+            geometric perpendicular onto this vector and picks the matching
+            half-plane; loops do NOT alternate.  When ``side`` is ``"auto"``
+            this field is ignored.
     """
 
     style: SerpentineStyle = SerpentineStyle.TROMBONE
@@ -52,6 +66,9 @@ class SerpentineConfig:
     min_segment_length: float = 2.0  # mm
     gap_factor: float = 2.0
     max_iterations: int = 20
+    # Issue #2648 (Epic #2556 Phase 3I): diff-pair-aware side selector.
+    side: Literal["auto", "outer", "inner"] = "auto"
+    outer_normal_hint: tuple[float, float] | None = None
 
 
 @dataclass
@@ -180,6 +197,32 @@ class SerpentineGenerator:
         ux, uy = dx / length, dy / length  # Along segment
         px, py = -uy, ux  # Perpendicular (90 degrees CCW)
 
+        # Issue #2648: when the caller asks for a single-sided trombone
+        # (``side="outer"`` or ``"inner"``), pick the half-plane defined
+        # by ``outer_normal_hint`` and disable per-loop alternation.
+        # ``initial_direction`` becomes +1 if the perpendicular (px, py)
+        # aligns with the hint, -1 otherwise; ``alternate_direction``
+        # gates the per-loop sign flip.
+        side = self.config.side
+        hint = self.config.outer_normal_hint
+        if side in ("outer", "inner") and hint is not None:
+            hx, hy = hint
+            # Normalize the hint (tolerate non-unit input).
+            hint_mag = math.sqrt(hx * hx + hy * hy)
+            if hint_mag > 0.0:
+                hx /= hint_mag
+                hy /= hint_mag
+            dot = px * hx + py * hy
+            # "outer" -> bulge toward the hint; "inner" -> bulge away.
+            if side == "outer":
+                initial_direction = 1 if dot >= 0.0 else -1
+            else:  # "inner"
+                initial_direction = -1 if dot >= 0.0 else 1
+            alternate_direction = False
+        else:
+            initial_direction = 1
+            alternate_direction = True
+
         # Calculate number of loops needed
         amplitude = self.config.amplitude
         gap = self.config.min_spacing * self.config.gap_factor
@@ -236,8 +279,8 @@ class SerpentineGenerator:
         )
         current_x, current_y = next_x, next_y
 
-        # Alternate direction for each loop
-        direction = 1  # Start going "up" (positive perpendicular)
+        # Alternate direction for each loop (gated by config -- Issue #2648).
+        direction = initial_direction  # Start sign (chosen per config.side)
 
         for loop in range(num_loops):
             # 1. Go perpendicular (up or down)
@@ -309,8 +352,11 @@ class SerpentineGenerator:
                 )
                 current_x, current_y = next_x, next_y
 
-            # Alternate direction
-            direction *= -1
+            # Alternate direction (gated -- Issue #2648 single-side mode
+            # keeps the same direction for every loop so the bulges all
+            # land on the same side of the original segment).
+            if alternate_direction:
+                direction *= -1
 
         # Exit: connect to original segment end
         new_segments.append(
