@@ -722,6 +722,7 @@ class EscapeRouter:
         edge_clearance: float | None = None,
         board_bounds: tuple[float, float, float, float] | None = None,
         manufacturer: str | None = None,
+        diff_pair_map: dict[str, str] | None = None,
     ):
         """Initialize the escape router.
 
@@ -742,6 +743,14 @@ class EscapeRouter:
                 ``mfr_limits.get_mfr_limits()`` and used to enable in-pad
                 escape on fine-pitch SSOP/TSSOP packages (Issue #2605).
                 Falls back to ``rules.manufacturer`` when not supplied.
+            diff_pair_map: Optional bidirectional net-name to partner-net-name
+                map for differential pairs (Issue #2639 / Epic #2556 Phase 2F).
+                When provided and BOTH halves of a pair land on the same
+                package, the escape router emits paired escape segments that
+                leave the package already at the target intra-pair spacing.
+                Pads whose partner is on a different package fall through to
+                the standard per-package escape pattern.  Defaults to ``None``
+                which preserves pre-#2639 single-ended behaviour exactly.
         """
         self.grid = grid
         self.rules = rules
@@ -750,6 +759,20 @@ class EscapeRouter:
         self.net_class_map = net_class_map or {}
         self.edge_clearance = edge_clearance
         self.board_bounds = board_bounds
+        # Issue #2639 / Epic #2556 Phase 2F: diff-pair-aware escape coupling.
+        # The map is consulted by ``generate_escapes`` to find pads that
+        # belong to a detected differential pair AND whose partner pad lives
+        # on the same package.  Such pads are routed via
+        # ``_escape_diff_pair_segment`` instead of the per-package
+        # dispatcher.  An empty / None map disables the feature.
+        self.diff_pair_map: dict[str, str] = diff_pair_map or {}
+        # Instrumentation counter (Gate 3/4 of the #2587-style verification
+        # chain): bumped every time ``_escape_diff_pair_segment`` is
+        # invoked.  Tests assert this is non-zero on board 03 and zero
+        # when no diff_pair_map is supplied.  This is intentionally a
+        # public attribute so test code does not need to monkey-patch
+        # internals to observe the call path.
+        self.diff_pair_segment_calls: int = 0
 
         # Issue #2605: Resolve manufacturer capability flags.  Caller-supplied
         # arg wins; otherwise fall back to ``rules.manufacturer``.  If the
@@ -834,29 +857,82 @@ class EscapeRouter:
         and segment endpoints are clamped to stay within the edge clearance
         zone so the escape router does not produce board-edge violations.
 
+        Issue #2639 / Epic #2556 Phase 2F: when ``self.diff_pair_map`` is
+        non-empty AND any pad on this package has a partner pad on the
+        SAME package, those pads are escaped first via
+        ``_escape_diff_pair_segment``.  The paired escape produces two
+        EscapeRoutes whose endpoints are at the target intra-pair
+        spacing in the launch direction.  Remaining pads (single-ended
+        or pairs whose partner is off-package) fall through to the
+        existing per-package dispatcher.  The pair-aware path is only
+        active for the BGA, QFP/QFN/TQFP, and MULTI_ROW_CONNECTOR
+        dispatchers (the three priority dispatchers identified by the
+        curator in #2639); SSOP/TSSOP / SOP / radial fall through
+        single-ended for v1.
+
         Args:
             package: Package info from analyze_package()
 
         Returns:
             List of EscapeRoute objects for each pin
         """
-        if package.package_type == PackageType.BGA:
-            escapes = self._escape_bga_rings(package)
-        elif package.package_type in (
+        # ------------------------------------------------------------------
+        # Phase 2F pre-pass: paired escape coupling at launch.
+        # ------------------------------------------------------------------
+        paired_escapes: list[EscapeRoute] = []
+        paired_pad_keys: set[tuple[float, float]] = set()
+        pair_aware_dispatchers = (
+            PackageType.BGA,
             PackageType.QFP,
             PackageType.QFN,
             PackageType.TQFP,
+            PackageType.MULTI_ROW_CONNECTOR,
+        )
+        if (
+            self.diff_pair_map
+            and package.package_type in pair_aware_dispatchers
         ):
-            escapes = self._escape_qfp_alternating(package)
-        elif package.package_type in (PackageType.SSOP, PackageType.TSSOP):
-            # Fine-pitch SSOP/TSSOP needs alternating layer escape for adjacent pins
-            escapes = self._escape_fine_pitch_dual_row(package)
-        elif package.package_type == PackageType.SOP:
-            escapes = self._escape_sop_staggered(package)
-        elif package.package_type == PackageType.MULTI_ROW_CONNECTOR:
-            escapes = self._escape_multi_row_connector(package)
+            paired_escapes, paired_pad_keys = self._generate_paired_escapes(package)
+
+        # Reduce the package's pad list to the un-paired pads for the
+        # per-package dispatcher.  We rebuild a shallow PackageInfo with
+        # the filtered pad list rather than mutating the input.
+        if paired_pad_keys:
+            remaining_pads = [
+                p for p in package.pads if (p.x, p.y) not in paired_pad_keys
+            ]
+            from dataclasses import replace as _replace
+
+            remaining_package = _replace(package, pads=remaining_pads)
         else:
-            escapes = self._escape_radial(package)
+            remaining_package = package
+
+        if remaining_package.pads:
+            if package.package_type == PackageType.BGA:
+                escapes = self._escape_bga_rings(remaining_package)
+            elif package.package_type in (
+                PackageType.QFP,
+                PackageType.QFN,
+                PackageType.TQFP,
+            ):
+                escapes = self._escape_qfp_alternating(remaining_package)
+            elif package.package_type in (PackageType.SSOP, PackageType.TSSOP):
+                # Fine-pitch SSOP/TSSOP needs alternating layer escape for adjacent pins
+                escapes = self._escape_fine_pitch_dual_row(remaining_package)
+            elif package.package_type == PackageType.SOP:
+                escapes = self._escape_sop_staggered(remaining_package)
+            elif package.package_type == PackageType.MULTI_ROW_CONNECTOR:
+                escapes = self._escape_multi_row_connector(remaining_package)
+            else:
+                escapes = self._escape_radial(remaining_package)
+        else:
+            escapes = []
+
+        # Paired escapes come first so callers (and the grid reservation
+        # pass) see them adjacent in the output list -- this matches the
+        # convention in `_escape_bga_rings` where outer-ring pads precede
+        # inner-ring pads.
+        escapes = paired_escapes + escapes
 
         # Apply edge clearance clamping when configured
         if self.edge_clearance is not None and self.board_bounds is not None:
@@ -933,6 +1009,241 @@ class EscapeRouter:
                     )
 
         return escapes
+
+    # ------------------------------------------------------------------
+    # Diff-pair-aware escape coupling (Issue #2639 / Epic #2556 Phase 2F)
+    # ------------------------------------------------------------------
+
+    def _generate_paired_escapes(
+        self,
+        package: PackageInfo,
+    ) -> tuple[list[EscapeRoute], set[tuple[float, float]]]:
+        """Generate paired escapes for diff-pair pads on this package.
+
+        Scans ``package.pads`` for pads whose net is listed in
+        ``self.diff_pair_map`` AND whose partner pad is also on this
+        package.  Each such pair is escaped via
+        ``_escape_diff_pair_segment`` so the two traces leave the
+        package already at the target intra-pair spacing.
+
+        Pads whose partner is on a DIFFERENT package (cross-package
+        pair coupling) are skipped here -- those cases fall through to
+        the single-ended dispatcher and are coupled by the main
+        pathfinder later.  This matches the issue scope note: "Coupling
+        escapes across different packages ... is out of scope (Phase 2F
+        handles intra-package only)."
+
+        Args:
+            package: Package info, expected to be one of the three
+                pair-aware dispatcher types (BGA / QFP-family /
+                MULTI_ROW_CONNECTOR).
+
+        Returns:
+            Tuple of (paired_escapes, paired_pad_keys).
+            ``paired_pad_keys`` is the set of ``(pad.x, pad.y)`` keys
+            for pads that received a paired escape -- the caller uses
+            this set to filter out paired pads from the per-package
+            dispatcher's input so they are not double-escaped.  Pad
+            coordinates are used as the key because pad equality
+            depends on net assignment which we are intentionally
+            cross-referencing here.
+        """
+        paired_escapes: list[EscapeRoute] = []
+        paired_pad_keys: set[tuple[float, float]] = set()
+
+        # Build a lookup from net_name to pad for this package only.
+        # When two pads on the same package share a net (rare but
+        # possible for thermal / ground pads on a QFN), the first
+        # occurrence wins.  Diff-pair signal pads are by definition
+        # unique-per-net so this is the correct degenerate behaviour.
+        net_to_pad: dict[str, Pad] = {}
+        for pad in package.pads:
+            if pad.net_name and pad.net_name not in net_to_pad:
+                net_to_pad[pad.net_name] = pad
+
+        # Track already-paired net names so we don't emit two paired
+        # escapes for the same (P, N) pair.
+        already_paired: set[str] = set()
+
+        # Resolve the intra-pair spacing once.  Prefer a per-net-class
+        # value (``effective_intra_pair_clearance``); fall back to a
+        # conservative default of ``trace_clearance``.  ``net_class_map``
+        # is the same map the rest of the escape router uses.
+        def _resolve_intra_pair_clearance(p_net: str) -> float:
+            nc = self.net_class_map.get(p_net) if self.net_class_map else None
+            if nc is not None and hasattr(nc, "effective_intra_pair_clearance"):
+                try:
+                    return float(nc.effective_intra_pair_clearance())
+                except Exception:
+                    pass
+            return self.rules.trace_clearance
+
+        for pad in package.pads:
+            if pad.net_name in already_paired:
+                continue
+            partner_name = self.diff_pair_map.get(pad.net_name)
+            if not partner_name:
+                continue
+            partner_pad = net_to_pad.get(partner_name)
+            if partner_pad is None:
+                # Partner net does not appear on this package -- defer
+                # to the per-package dispatcher (cross-package coupling
+                # is handled by the main pathfinder).
+                continue
+            if partner_pad is pad:
+                # Self-pair shouldn't happen but be defensive.
+                continue
+
+            intra = _resolve_intra_pair_clearance(pad.net_name)
+            esc_p, esc_n = self._escape_diff_pair_segment(
+                pad_p=pad,
+                pad_n=partner_pad,
+                package=package,
+                intra_pair_clearance=intra,
+            )
+            paired_escapes.append(esc_p)
+            paired_escapes.append(esc_n)
+            paired_pad_keys.add((pad.x, pad.y))
+            paired_pad_keys.add((partner_pad.x, partner_pad.y))
+            already_paired.add(pad.net_name)
+            already_paired.add(partner_name)
+            logger.debug(
+                "Phase 2F: paired escape for %s/%s on %s",
+                pad.net_name,
+                partner_name,
+                package.ref,
+            )
+
+        return paired_escapes, paired_pad_keys
+
+    def _escape_diff_pair_segment(
+        self,
+        pad_p: Pad,
+        pad_n: Pad,
+        package: PackageInfo,
+        intra_pair_clearance: float,
+    ) -> tuple[EscapeRoute, EscapeRoute]:
+        """Emit two coupled escape segments for a diff-pair pin pair.
+
+        Both escapes leave the package in the SAME direction (chosen
+        from the midpoint of the two pads using the same quadrant rule
+        the single-ended escape uses).  The end-points are placed at
+        ``intra_pair_clearance + trace_width`` apart in the lateral
+        (cross-launch) axis so that downstream routing inherits the
+        coupled spacing instead of having to re-converge.
+
+        The launch direction is perpendicular to the pair axis when the
+        pair axis is well-aligned with one of the package edges; in the
+        degenerate diagonal case we fall back to whichever axis (NSEW)
+        the midpoint quadrant suggests.
+
+        Args:
+            pad_p: Positive-half pad
+            pad_n: Negative-half pad
+            package: Package info for bounds and center
+            intra_pair_clearance: Target inner-edge-to-inner-edge
+                clearance between the two paired escape segments
+
+        Returns:
+            ``(escape_p, escape_n)`` -- two EscapeRoute objects, each
+            with a single straight segment from its pad to its escape
+            point.  Both escapes are on ``pad.layer`` (surface escape;
+            via-down coupling is left to the per-package dispatcher
+            since it is not the failure mode this phase targets).
+        """
+        # Bump the instrumentation counter (Gate 3/4 verification).
+        self.diff_pair_segment_calls += 1
+
+        # Midpoint of the two pads -- used to pick the launch direction
+        # so both escapes leave together.
+        mid_x = (pad_p.x + pad_n.x) / 2.0
+        mid_y = (pad_p.y + pad_n.y) / 2.0
+        center_x, center_y = package.center
+
+        direction = self._get_quadrant_direction(mid_x, mid_y, center_x, center_y)
+        dx, dy = self._direction_to_vector(direction)
+
+        # Trace widths come from per-net config.  Use the wider of the
+        # two so the coupled-spacing math leaves room for both traces.
+        trace_w_p = self._get_trace_width_for_net(pad_p.net_name)
+        trace_w_n = self._get_trace_width_for_net(pad_n.net_name)
+        trace_w = max(trace_w_p, trace_w_n)
+
+        # Launch distance: same heuristic the per-package alternating
+        # escape uses (clearance + 2 * trace_width).  This puts the
+        # escape point clearly outside the pad clearance zone.
+        escape_dist = self.escape_clearance + trace_w * 2
+
+        # Pair axis (between the two pads) -- the perpendicular to the
+        # launch direction.  We project the pair vector onto the lateral
+        # axis to figure out which pad is "left" of the launch direction
+        # so the two escape segments don't cross.
+        pair_dx = pad_n.x - pad_p.x
+        pair_dy = pad_n.y - pad_p.y
+
+        # Lateral (perpendicular-to-launch) unit vector.  For a launch
+        # direction (dx, dy) the right-hand-rule perpendicular is
+        # (-dy, dx).
+        lat_dx, lat_dy = -dy, dx
+
+        # Project the pad-to-pad vector onto the lateral axis: positive
+        # means pad_n is "right" of pad_p along the launch direction.
+        proj = pair_dx * lat_dx + pair_dy * lat_dy
+
+        # Target half-offset: each escape point sits ``half_offset``
+        # away from the pair midpoint along the lateral axis.  The
+        # outer-edge-to-outer-edge spacing of the two parallel traces
+        # then equals ``intra_pair_clearance + trace_w``.  We keep the
+        # symmetric placement so the geometry is verifiable by tests
+        # without sub-mm float jitter.
+        half_offset = (intra_pair_clearance + trace_w) / 2.0
+
+        # Sign chosen so pad_p escape ends up on the "left" side
+        # (negative projection) and pad_n on the "right" (positive).
+        sign_p = -1.0 if proj >= 0 else 1.0
+        sign_n = +1.0 if proj >= 0 else -1.0
+
+        # Escape points: launch from the midpoint along the launch
+        # direction, then step laterally by half_offset for each pad.
+        launch_x = mid_x + dx * escape_dist
+        launch_y = mid_y + dy * escape_dist
+        ep_p = (launch_x + sign_p * half_offset * lat_dx,
+                launch_y + sign_p * half_offset * lat_dy)
+        ep_n = (launch_x + sign_n * half_offset * lat_dx,
+                launch_y + sign_n * half_offset * lat_dy)
+
+        seg_p = Segment(
+            x1=pad_p.x, y1=pad_p.y, x2=ep_p[0], y2=ep_p[1],
+            width=trace_w_p, layer=pad_p.layer,
+            net=pad_p.net, net_name=pad_p.net_name,
+        )
+        seg_n = Segment(
+            x1=pad_n.x, y1=pad_n.y, x2=ep_n[0], y2=ep_n[1],
+            width=trace_w_n, layer=pad_n.layer,
+            net=pad_n.net, net_name=pad_n.net_name,
+        )
+
+        escape_p = EscapeRoute(
+            pad=pad_p,
+            direction=direction,
+            escape_point=ep_p,
+            escape_layer=pad_p.layer,
+            via_pos=None,
+            segments=[seg_p],
+            via=None,
+            ring_index=0,
+        )
+        escape_n = EscapeRoute(
+            pad=pad_n,
+            direction=direction,
+            escape_point=ep_n,
+            escape_layer=pad_n.layer,
+            via_pos=None,
+            segments=[seg_n],
+            via=None,
+            ring_index=0,
+        )
+        return escape_p, escape_n
 
     def _escape_bga_rings(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate ring-based escape routes for BGA packages.

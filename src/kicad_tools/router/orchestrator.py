@@ -156,6 +156,68 @@ class RoutingOrchestrator:
             return self.net_class_map[net]
         return None
 
+    def _get_diff_pair_map(self) -> dict[str, str]:
+        """Build a bidirectional net-name to partner-net-name map.
+
+        Issue #2639 / Epic #2556 Phase 2F: feeds the EscapeRouter's
+        ``diff_pair_map`` parameter so paired pads on dense packages
+        get coupled-at-launch escape routes.
+
+        Prefers an existing autorouter-style hook
+        (``self.pcb.get_diff_pair_map`` -- present on the
+        :class:`Autorouter`) and falls back to layered detection on
+        ``self.pcb.net_names`` when the PCB-like object exposes one.
+        When neither is available the map is empty and the escape
+        router falls back to pre-#2639 single-ended behavior.
+
+        Returns:
+            ``{p: n, n: p}`` for every detected diff pair.  Empty when
+            no pairs are detected or the PCB-like object lacks the
+            necessary attributes.
+        """
+        # Prefer a pre-built map on the PCB-like object (the Autorouter
+        # exposes ``get_diff_pair_map`` from #2639).
+        getter = getattr(self.pcb, "get_diff_pair_map", None)
+        if callable(getter):
+            try:
+                result = getter()
+                if isinstance(result, dict):
+                    return dict(result)
+            except Exception:
+                pass
+
+        # Fall back to direct layered detection on the PCB-like object.
+        net_names = getattr(self.pcb, "net_names", None)
+        if not net_names:
+            return {}
+        try:
+            from .diffpair_detection import detect_diff_pairs
+        except ImportError:
+            return {}
+
+        net_to_class: dict[str, str] = {}
+        for net_name, nc in self.net_class_map.items():
+            net_to_class[net_name] = nc.name
+
+        try:
+            detected = detect_diff_pairs(
+                net_names,
+                net_class_routing=self.net_class_map,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self.pcb, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            return {}
+
+        out: dict[str, str] = {}
+        for d in detected:
+            p = d.pair.positive.net_name
+            n = d.pair.negative.net_name
+            if p and n:
+                out[p] = n
+                out[n] = p
+        return out
+
     def route_net(
         self,
         net: str | int,
@@ -565,6 +627,12 @@ class RoutingOrchestrator:
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
                     manufacturer=getattr(self.rules, "manufacturer", None),
+                    # Issue #2639 / Epic #2556 Phase 2F: thread the
+                    # diff-pair partner map into the escape router for
+                    # coupled-at-launch escape routes.  ``_get_diff_pair_map``
+                    # returns {} when no pairs are detected, preserving
+                    # pre-#2639 single-ended behavior.
+                    diff_pair_map=self._get_diff_pair_map(),
                 )
 
         if self._escape is not None:
@@ -1185,6 +1253,9 @@ class RoutingOrchestrator:
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
                     manufacturer=getattr(self.rules, "manufacturer", None),
+                    # Issue #2639 / Epic #2556 Phase 2F: same threading
+                    # as the escape_then_global ctor site above.
+                    diff_pair_map=self._get_diff_pair_map(),
                 )
         return self._escape
 
