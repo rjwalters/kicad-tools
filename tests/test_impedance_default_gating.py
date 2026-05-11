@@ -101,8 +101,7 @@ class TestImpedanceDefaultGating:
             w for w in results.warnings if "physics module not available" not in w.message
         ]
         assert non_physics_warnings == [], (
-            f"Expected no non-physics warnings, got: "
-            f"{[w.message for w in non_physics_warnings]}"
+            f"Expected no non-physics warnings, got: {[w.message for w in non_physics_warnings]}"
         )
 
     def test_user_specs_evaluated_on_two_layer(self, two_layer_swclk_pcb: Path):
