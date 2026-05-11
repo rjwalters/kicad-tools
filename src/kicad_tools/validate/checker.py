@@ -354,34 +354,47 @@ class DRCChecker:
         own router / manual layout) where ``kicad_tools.router`` never
         runs but the board still needs its match-group skew validated.
 
-        Producer-side wiring is **deferred** to a separate Phase 2.5G
-        follow-up issue (mirroring PR #2685's ``derive_skew_data`` for
-        the diff-pair sibling).  Until that lands, this method is a
-        conservative no-op: it instantiates the rule with all defaults
-        (``group_skew_data=None``, ``tracker_match_groups=None``) which
-        yields ``rules_checked == 0`` and zero violations.  This
-        preserves the AC #1 graceful-degradation contract -- a board
-        with no router context (no ``--net-class-map`` sidecar) MUST
-        NOT report spurious skew violations because the caller had no
-        way to compute the skew.
+        Phase 2.5G (Issue #2710) wires the producer side: when this
+        checker was constructed with a ``net_class_map``, the per-group
+        skew is re-derived from the routed PCB by
+        :func:`~kicad_tools.validate.match_group_skew.derive_group_skew_data`
+        (sister of
+        :func:`~kicad_tools.validate.diffpair_skew.derive_skew_data`)
+        and threaded into the rule along with the detected groups list
+        and the per-group threshold map.  Re-running detection + length-
+        from-PCB-segments on the routed PCB is idempotent given the
+        same net classes and physical routing -- this avoids needing to
+        persist length / skew metadata in the PCB schema.
 
-        See Issue #2702 / Epic #2661 Phase 2G (the rule itself).
+        When invoked from the standalone ``kct check`` CLI (no
+        ``net_class_map``), no skew data is available, so the rule is
+        a conservative no-op (preserves the AC #1 graceful-degradation
+        contract -- mirrors the
+        :meth:`check_diffpair_length_skew` behaviour).
+
+        See Issue #2702 / Epic #2661 Phase 2G (the rule itself); Issue
+        #2710 / Epic #2661 Phase 2.5G (this producer wiring).
 
         Returns:
             :class:`DRCResults` containing match-group length-skew
             violations.  Empty on standalone ``kct check`` invocations
-            until the Phase 2.5G producer-side wiring lands.
+            (no router context to supply ``group_skew_data``).
         """
-        # Graceful-no-op: until the Phase 2.5G producer
-        # (derive_group_skew_data) is wired, this method instantiates
-        # the rule with no caller context, which yields zero violations
-        # and zero rules_checked.  The rule itself is fully tested via
-        # direct construction in tests/test_validate_match_group_length_skew.py
-        # -- this method's job is to be a future-ready dispatch seam
-        # that the upcoming follow-up issue can extend by threading
-        # derived data through, exactly like check_diffpair_length_skew
-        # was extended via PR #2685.
-        rule = MatchGroupLengthSkewRule()
+        if self.net_class_map is None:
+            # Graceful-no-op: no router context -> no skew data to
+            # validate.  Matches the standalone-``kct check`` contract.
+            rule = MatchGroupLengthSkewRule()
+        else:
+            from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+            group_skew_data, tracker_match_groups, threshold_map = derive_group_skew_data(
+                self.pcb, self.net_class_map
+            )
+            rule = MatchGroupLengthSkewRule(
+                group_skew_data=group_skew_data,
+                tracker_match_groups=tracker_match_groups,
+                threshold_map=threshold_map,
+            )
         return rule.check(self.pcb, self.design_rules)
 
     def check_silkscreen(self) -> DRCResults:
