@@ -127,7 +127,15 @@ class ImpedanceRule(DRCRule):
 
         Args:
             specs: Impedance specifications to check. If not provided,
-                uses default specs for common signal types.
+                uses default specs for common signal types.  The defaults
+                are auto-applied via net-name regex (``.*CLK.*`` -> 50Ω,
+                ``USB.*D[PM]?`` -> 90Ω differential, etc.). On boards
+                without a controlled-impedance stackup, these defaults
+                are suppressed (see :meth:`check`) — this prevents the
+                rule from demanding ~2.8mm-wide SWCLK traces on a generic
+                hobbyist 2-layer board (Issue #2696). Pass an explicit
+                ``specs`` list to force the rule to evaluate them
+                regardless of stackup.
             stackup: PCB stackup for impedance calculations. If not provided,
                 will try to extract from PCB during check.
             detected_pairs: Optional list of detected differential pairs
@@ -140,6 +148,11 @@ class ImpedanceRule(DRCRule):
                 3K single-ended-only behavior, which preserves backward
                 compatibility for standalone ``kct check`` invocations.
         """
+        # Remember whether the caller passed explicit specs.  When True,
+        # the rule unconditionally evaluates them.  When False, the rule
+        # uses its built-in defaults but suppresses them on boards that
+        # don't opt into controlled-impedance routing (see check()).
+        self._using_default_specs = specs is None
         self.specs = specs if specs is not None else self._get_default_specs()
         self._stackup = stackup
         self._tl: TransmissionLine | None = None
@@ -182,6 +195,45 @@ class ImpedanceRule(DRCRule):
         except Exception:
             return False
 
+    def _board_has_controlled_impedance(self) -> bool:
+        """Decide whether the current board "opts in" to controlled impedance.
+
+        A board opts in when either:
+
+        - The PCB file has an explicit ``(setup (stackup ...))`` block —
+          the designer took the trouble to declare dielectric thicknesses
+          and Er values, which is the standard signal of impedance-control
+          intent (``Stackup.has_explicit_data``); or
+        - The board has 4 or more copper layers — multi-layer boards have
+          reference planes close to signal layers, so 50Ω widths are
+          physically feasible at the geometric scales the autorouter
+          produces (~0.20 - 0.40 mm), and applying defaults does not
+          impose unrealistic constraints.
+
+        2-layer boards without an explicit stackup do NOT opt in.  On
+        such boards, 50Ω on a generic FR4 1.6mm core requires ~2.8 mm
+        wide traces — infeasible for typical 0.5 mm pad pitch — so
+        auto-applying the default ``.*CLK.*`` -> 50Ω rule produces
+        spurious DRC errors that the board can never satisfy (see
+        Issue #2696 for the board-04 SWCLK case).
+
+        Returns:
+            True when defaults should be applied; False when the board
+            looks like a generic hobbyist 2-layer and defaults should
+            be suppressed.
+        """
+        if self._stackup is None:
+            # Without a stackup we have no signal at all — preserve the
+            # original "apply defaults" behavior for backward compat.
+            return True
+        if getattr(self._stackup, "has_explicit_data", False):
+            return True
+        # No explicit stackup: opt in iff 4+ copper layers.
+        try:
+            return self._stackup.num_copper_layers >= 4
+        except AttributeError:
+            return True
+
     def check(
         self,
         pcb: PCB,
@@ -209,6 +261,16 @@ class ImpedanceRule(DRCRule):
                     location=None,
                 )
             )
+            return results
+
+        # Gate auto-applied defaults on a controlled-impedance opt-in.
+        # When the caller did not pass explicit ``specs``, only apply
+        # built-in name-pattern defaults (``.*CLK.*`` -> 50Ω, etc.) if
+        # the board's stackup declares controlled-impedance intent.
+        # Otherwise return empty results — a hobbyist 2-layer board
+        # never claimed to be impedance-controlled and should not fail
+        # DRC over a target it didn't set (Issue #2696).
+        if self._using_default_specs and not self._board_has_controlled_impedance():
             return results
 
         # Collect all traces from PCB

@@ -100,11 +100,22 @@ class Stackup:
         layers: Ordered list of layers from top to bottom
         board_thickness_mm: Total board thickness in mm
         copper_finish: Surface finish (e.g., "ENIG", "HASL")
+        has_explicit_data: True when the stackup was parsed from an actual
+            KiCad ``(setup (stackup ...))`` block. False when it was
+            constructed from a default (no stackup info in the PCB, generic
+            preset). Consumers (e.g.
+            :class:`~kicad_tools.validate.rules.impedance.ImpedanceRule`)
+            use this signal as a "controlled-impedance opt-in": a board
+            with an explicit stackup is presumed to care about impedance
+            and gets the validator's default impedance specs applied to
+            it; a board without one (hobbyist-grade 2-layer) does not.
+            See Issue #2696.
     """
 
     layers: list[StackupLayer] = field(default_factory=list)
     board_thickness_mm: float = 1.6
     copper_finish: str = ""
+    has_explicit_data: bool = False
 
     @classmethod
     def from_pcb(cls, pcb: PCB) -> Stackup:
@@ -152,6 +163,7 @@ class Stackup:
             layers=layers,
             board_thickness_mm=total_thickness if total_thickness > 0 else 1.6,
             copper_finish=setup.copper_finish if hasattr(setup, "copper_finish") else "",
+            has_explicit_data=True,
         )
 
     @classmethod
