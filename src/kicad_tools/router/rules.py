@@ -569,6 +569,75 @@ class NetClassRouting:
     measured).
     """
 
+    # Match-group declaration (Issue #2687, Epic #2661 Phase 1A)
+    length_match_group: str | None = None
+    """Group name for nets in this class that must arrive length-matched.
+
+    When set, declares this net class's nets are members of the named
+    match group (e.g. ``"DDR_DATA"``, ``"MIPI_CSI_LANE0"``).  Multiple
+    net classes may declare the same group name -- e.g. the lanes of a
+    MIPI bus may live in different per-pair classes that all share a
+    ``length_match_group="MIPI_CSI"``.
+
+    AUTHORITATIVE.  Overrides suffix inference at Phase 1C (#2661).
+
+    Cross-reference: a pre-existing field of the same name lives on a
+    *different* dataclass at
+    :attr:`kicad_tools.reasoning.vocabulary.RoutingPriority.length_match_group`
+    (the reasoning-layer intermediate).  These are NOT in conflict -- they
+    sit on different classes (router-layer vs reasoning-layer).  The
+    reasoning-layer field, where used, maps INTO this router-layer field;
+    it does not duplicate the semantic.  This router-layer field is the
+    AUTHORITATIVE source for downstream routing/measurement consumers.
+
+    Drift-prevention test asserts both fields share type annotation
+    (``str | None``) and default (``None``).  See
+    :class:`tests.test_match_group_declaration.TestDriftPrevention`.
+
+    Phase 1A scope (#2687) is types only; accessor returns the field
+    unchanged.  Phase 1B (#2688) consumes it via ``MatchGroupTracker``;
+    Phase 1C (#2689) integrates with detection; Phase 1D (#2690) wires
+    the producer side.
+    """
+
+    length_match_reference: str | None = None
+    """Reference-selection policy for length-matching within the group.
+
+    Semantics:
+
+    - ``None`` (default) -- use the **longest trace in the group** as the
+      reference (matches the legacy ``tune_match_group`` behavior at
+      ``router/optimizer/serpentine.py:438``).
+    - An **explicit net name** (e.g. ``"DQS_P"``) -- that net is the
+      reference; every other group member is meandered to match its
+      length.  Use this when one trace is hard to perturb (e.g. a DDR
+      strobe whose timing budget can't absorb serpentines).
+    - The **sentinel string** ``"clock"`` -- protocol-aware lookup,
+      deferred to Phase 2/3 (MIPI/HDMI clock-relative case).  Phase 1A
+      accepts the sentinel for forward-compat but does NOT implement
+      protocol resolution.
+
+    Phase 1A scope (#2687) is types only; accessor returns the field
+    unchanged.  Phase 1B (#2688) consumes it via
+    ``MatchGroupTracker.get_reference_length``.
+    """
+
+    length_match_tolerance_mm: float | None = None
+    """Maximum allowed length skew (mm) across members of a match group.
+
+    Mirrors the :attr:`skew_tolerance_mm` pattern (Issue #2647 / Phase 3H)
+    but applies at the match-group level rather than the pair level.
+
+    ``None`` (the default) means "use the rule's module-level default of
+    0.5 mm" -- the same conservative default as :attr:`skew_tolerance_mm`.
+    Setting ``0.1`` is appropriate for tight DDR data-byte groups; setting
+    ``0.5`` accommodates MIPI lane-to-lane skew.
+
+    Phase 1A (#2687) declares the field; Phase 1B (#2688) consumes it via
+    :meth:`MatchGroupTracker.is_within_tolerance`; Phase 2G (#2661 issue G)
+    consumes it via the future ``match_group_length_skew`` DRC rule.
+    """
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
@@ -623,6 +692,51 @@ class NetClassRouting:
         """
         if self.skew_tolerance_mm is not None:
             return self.skew_tolerance_mm
+        return default
+
+    def effective_length_match_group(self) -> str | None:
+        """Return the match-group name for this net class.
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns :attr:`length_match_group` directly.  Provided for API
+        uniformity with :meth:`effective_intra_pair_clearance` /
+        :meth:`effective_skew_tolerance`; no fallback chain is needed
+        because ``None`` already means "no group".
+        """
+        return self.length_match_group
+
+    def effective_length_match_reference(self) -> str | None:
+        """Return the reference-selection policy for length-matching.
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns :attr:`length_match_reference` directly.  ``None`` means
+        "use longest in group"; an explicit net name means "use this net
+        as the reference"; the sentinel ``"clock"`` is reserved for
+        Phase 2/3 protocol-aware resolution.
+        """
+        return self.length_match_reference
+
+    def effective_length_match_tolerance(self, default: float = 0.5) -> float:
+        """Return the match-group length-skew tolerance (mm).
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns ``default`` when :attr:`length_match_tolerance_mm` is
+        unset (``None``).  Mirrors the :meth:`effective_skew_tolerance`
+        pattern so the future ``match_group_length_skew`` DRC rule
+        (Phase 2G) can override the floor consistently.
+
+        Args:
+            default: Fallback value (in mm) when no per-class tolerance
+                is set.  Defaults to ``0.5`` to mirror the diff-pair
+                :meth:`effective_skew_tolerance` default; the future
+                Phase 2G rule's ``DEFAULT_MATCH_GROUP_TOLERANCE_MM``
+                constant should equal this byte-for-byte.
+
+        Returns:
+            The per-class tolerance in mm if set, else ``default``.
+        """
+        if self.length_match_tolerance_mm is not None:
+            return self.length_match_tolerance_mm
         return default
 
 
