@@ -14,6 +14,7 @@ from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .rules.edge import EdgeClearanceRule
+from .rules.impedance import ImpedanceRule, NetImpedanceSpec
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
@@ -106,6 +107,7 @@ class DRCChecker:
         results.merge(self.check_diffpair_routing_continuity())
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
+        results.merge(self.check_impedance())
         results.merge(self.check_silkscreen())
         results.merge(self.check_solder_mask_pads())
         results.merge(self.check_footprint_placement())
@@ -221,6 +223,34 @@ class DRCChecker:
             DRCResults containing edge clearance violations
         """
         rule = EdgeClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_impedance(self) -> DRCResults:
+        """Check trace widths against target impedance specifications.
+
+        Wires the dormant :class:`ImpedanceRule` (already implemented in
+        ``validate/rules/impedance.py``) into the standalone DRC pipeline
+        per Issue #2650 (Epic #2556 Phase 3K).  The rule was previously
+        registered in :class:`~kicad_tools.drc.violation.ViolationType`
+        (``IMPEDANCE = "impedance"``) and exported from
+        ``validate.rules.__init__`` but was never reachable from
+        ``kct check`` because no ``DRCChecker`` method invoked it.
+
+        When invoked from the standalone CLI (no per-class
+        ``target_*_impedance`` context), the rule uses its built-in
+        default specs (USB ~90Ω, clocks ~50Ω, LVDS ~100Ω) keyed off net
+        name patterns.  The router-side consumer
+        (``router/diffpair_impedance.py``) provides the impedance-driven
+        sizing that feeds back into the same rule via the per-class
+        ``target_diff_impedance`` / ``target_single_impedance`` fields
+        when those are set.
+
+        Returns:
+            DRCResults containing impedance violations.  Empty when no
+            traces match any spec (the standalone-CLI common case for
+            boards without high-speed nets).
+        """
+        rule = ImpedanceRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_silkscreen(self) -> DRCResults:
