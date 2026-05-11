@@ -23,17 +23,35 @@ from kicad_tools.router.diffpair_routing import (
     DiffPairRouter,
 )
 from kicad_tools.router.primitives import Pad
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 # ---------------------------------------------------------------------------
 # Test 1: Regression — 2-pad pair still routes
 # ---------------------------------------------------------------------------
 
 
+def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRouting]:
+    """Build a per-net-name class map with ``coupled_routing=True``.
+
+    Issue #2638 / Epic #2556 Phase 2E: engagement is now opt-in per net
+    class.  Tests that exercise the dispatcher path
+    (``route_diffpair_prepass`` / ``route_all_with_diffpairs``) must
+    provide net classes whose ``coupled_routing`` flag is ``True``,
+    otherwise the pair falls through to the main strategy.
+    """
+    nc = NetClassRouting(name="HighSpeedOptIn", coupled_routing=True)
+    return {name: nc for name in net_names}
+
+
 def _two_pad_router(spacing: float = 0.8) -> Autorouter:
     """Two-pad regression fixture (mirrors test_diffpair_routing_integration)."""
     rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
-    router = Autorouter(width=30.0, height=10.0, rules=rules)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=_opt_in_diffpair_class_map(["USB_D+", "USB_D-"]),
+    )
 
     p_y = 5.0 - spacing / 2
     n_y = 5.0 + spacing / 2

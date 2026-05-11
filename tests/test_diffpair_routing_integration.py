@@ -14,7 +14,19 @@ Verifies that:
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+
+def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRouting]:
+    """Build a per-net-name class map with ``coupled_routing=True``.
+
+    Issue #2638 / Epic #2556 Phase 2E: engagement is now opt-in per net
+    class.  Tests that exercise the dispatcher path must provide net
+    classes whose ``coupled_routing`` flag is ``True``, otherwise the
+    pair falls through to the main strategy.
+    """
+    nc = NetClassRouting(name="HighSpeedOptIn", coupled_routing=True)
+    return {name: nc for name in net_names}
 
 
 def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
@@ -34,7 +46,12 @@ def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
         trace_clearance=0.15,
         grid_resolution=0.1,
     )
-    router = Autorouter(width=30.0, height=10.0, rules=rules)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=_opt_in_diffpair_class_map(["USB_D+", "USB_D-"]),
+    )
 
     p_y = 5.0 - diffpair_spacing / 2
     n_y = 5.0 + diffpair_spacing / 2
@@ -225,6 +242,8 @@ def _diffpair_with_connector_sibling_router() -> Autorouter:
     ordering bump (Issue #2482) must place USB_CC1 before any other
     same-tier non-sibling net.
     """
+    import dataclasses
+
     from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
 
     rules = DesignRules(
@@ -232,10 +251,15 @@ def _diffpair_with_connector_sibling_router() -> Autorouter:
         trace_clearance=0.15,
         grid_resolution=0.1,
     )
+    # Issue #2638 / Epic #2556 Phase 2E: opt the USB diff-pair class into
+    # coupled routing.  Phase 2E does NOT flip ``coupled_routing`` on the
+    # predefined ``NET_CLASS_HIGH_SPEED`` (that's a follow-up issue), so
+    # tests that exercise the pre-pass must opt in explicitly.
+    hs_coupled = dataclasses.replace(NET_CLASS_HIGH_SPEED, coupled_routing=True)
     net_class_map = {
-        "USB_D+": NET_CLASS_HIGH_SPEED,
-        "USB_D-": NET_CLASS_HIGH_SPEED,
-        "USB_CC1": NET_CLASS_HIGH_SPEED,
+        "USB_D+": hs_coupled,
+        "USB_D-": hs_coupled,
+        "USB_CC1": hs_coupled,
     }
     router = Autorouter(width=30.0, height=10.0, rules=rules,
                        net_class_map=net_class_map)

@@ -28,6 +28,7 @@ from .diffpair import (
     DifferentialPairConfig,
     LengthMismatchWarning,
     analyze_differential_pairs,
+    should_engage_coupled,
 )
 from .diffpair_detection import (
     detect_diff_pairs as _layered_detect_diff_pairs,
@@ -1023,6 +1024,34 @@ class DiffPairRouter:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
 
+    def _resolve_engagement(
+        self, pair: DifferentialPair
+    ) -> tuple[bool, str]:
+        """Resolve whether ``pair`` should engage CoupledPathfinder.
+
+        Issue #2638, Epic #2556 Phase 2E: thin wrapper that pulls
+        net-class context off the autorouter and defers to
+        :func:`should_engage_coupled`.
+
+        The autorouter exposes one of two attribute shapes:
+
+        * ``net_class_routing`` + ``net_to_class`` -- the layered
+          detector's convention.
+        * ``net_class_map`` -- the autorouter's per-net-name map.
+          We surface this as ``net_class_routing`` for the helper,
+          which handles the net-name-keyed convention via its
+          :func:`_lookup_net_class` fallback.
+
+        Returns:
+            ``(engaged, reason)`` from :func:`should_engage_coupled`.
+        """
+        net_class_routing = getattr(self.autorouter, "net_class_routing", None)
+        net_to_class = getattr(self.autorouter, "net_to_class", None)
+        if net_class_routing is None:
+            # Fall back to the autorouter's per-net-name map.
+            net_class_routing = getattr(self.autorouter, "net_class_map", None)
+        return should_engage_coupled(pair, net_class_routing, net_to_class)
+
     def _get_pair_pads(self, pair: DifferentialPair) -> tuple[list[Pad], list[Pad]] | None:
         """Get pads for P and N nets of a differential pair.
 
@@ -1635,6 +1664,17 @@ class DiffPairRouter:
 
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
+            # Issue #2638, Epic #2556 Phase 2E: engagement gate.  When the
+            # pair's net class has not opted in via ``coupled_routing=True``,
+            # or when the pair is single-ended-by-spec (USB-C CC1/CC2,
+            # SBU1/SBU2 — the #2527 lesson), refuse coupled routing and
+            # let the pair fall through to the main strategy.
+            engaged, reason = self._resolve_engagement(pair)
+            if not engaged:
+                msg = f"[diffpair-engage] refused {pair}: {reason}"
+                print(f"  {msg}")
+                logger.info(msg)
+                continue
             # Issue #2464: Use coupled_only=True so that the pre-pass is a
             # no-op for pairs that the CoupledPathfinder cannot handle.
             # Those pairs are left for the main strategy (negotiated/MC/GA)
@@ -1732,8 +1772,24 @@ class DiffPairRouter:
         # caller can decide which nets to leave for the main strategy.
         coupled_routed_nets: set[int] = set()
 
+        refused_diff_nets: set[int] = set()
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
+            # Issue #2638, Epic #2556 Phase 2E: engagement gate.  Refuse
+            # coupled routing when the pair's net class has not opted in
+            # (default ``coupled_routing=False``) or when the pair is
+            # single-ended-by-spec (#2527 lesson).  Refused pairs fall
+            # through to the main strategy (their net IDs are removed
+            # from ``diff_net_ids`` below so the main strategy picks
+            # them up normally).
+            engaged, reason = self._resolve_engagement(pair)
+            if not engaged:
+                msg = f"[diffpair-engage] refused {pair}: {reason}"
+                print(f"  {msg}")
+                logger.info(msg)
+                refused_diff_nets.add(p_id)
+                refused_diff_nets.add(n_id)
+                continue
             if coupled_only:
                 pair_routes, warning = self.route_differential_pair_coupled(
                     pair,
@@ -1763,6 +1819,14 @@ class DiffPairRouter:
         # main strategy can pick them up.
         if coupled_only:
             diff_net_ids = coupled_routed_nets
+        elif refused_diff_nets:
+            # Issue #2638 Phase 2E: engagement-refused pairs produced no
+            # routes here; drop their nets from ``diff_net_ids`` so the
+            # main strategy routes them normally.  Non-refused pairs
+            # remain in ``diff_net_ids`` to preserve the pre-2638 behavior
+            # of treating coupled-routing fallbacks (independent routing
+            # inside route_differential_pair) as "handled".
+            diff_net_ids = diff_net_ids - refused_diff_nets
 
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
