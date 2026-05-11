@@ -311,8 +311,7 @@ def apply_impedance_driven_sizing(
         from kicad_tools.physics import CoupledLines, TransmissionLine
     except ImportError:
         log.warning(
-            "skipped impedance-driven sizing: physics module unavailable "
-            "(net_class=%r)",
+            "skipped impedance-driven sizing: physics module unavailable (net_class=%r)",
             net_class.name,
         )
         return ImpedanceSizingResult(
@@ -362,8 +361,7 @@ def apply_impedance_driven_sizing(
             )
         except (ValueError, AttributeError) as exc:
             log.warning(
-                "impedance-driven sizing: gap solver failed for diff target "
-                "%.1fΩ on layer %r: %s",
+                "impedance-driven sizing: gap solver failed for diff target %.1fΩ on layer %r: %s",
                 target_diff,
                 layer,
                 exc,
@@ -463,3 +461,74 @@ def apply_impedance_driven_sizing(
         clamp_errors=clamp_errors or None,
         used_target=True,
     )
+
+
+def resolve_impedance_for_net_classes(
+    net_class_map: dict[str, NetClassRouting],
+    stackup: Stackup | None,
+    design_rules: DesignRules,
+    layer: str = "F.Cu",
+    min_grid_mm: float = DEFAULT_MIN_GRID_MM,
+) -> tuple[dict[str, NetClassRouting], list[StackupMismatchWarning], list[ImpedanceClampError]]:
+    """Resolve impedance-driven sizing for every net class in the map.
+
+    For each :class:`NetClassRouting` with a ``target_diff_impedance`` or
+    ``target_single_impedance`` field set, calls
+    :func:`apply_impedance_driven_sizing` and replaces the net class with a
+    copy whose ``trace_width`` / ``intra_pair_clearance`` reflect the
+    computed values.  Net classes without any target are passed through
+    unchanged (byte-for-byte equality).
+
+    This is the **single integration point** for the impedance-driven
+    sizing flow.  The autorouter calls this once at setup; downstream
+    routing components (pathfinder, cpp_backend, escape router) continue
+    to read ``net_class.trace_width`` and
+    :meth:`NetClassRouting.effective_intra_pair_clearance` unchanged --
+    they automatically pick up the impedance-driven values when those
+    fields were overwritten.  See acceptance criteria for Issue #2650.
+
+    Args:
+        net_class_map: ``{net_name: NetClassRouting}`` mapping (the
+            autorouter's primary net-class structure).  Not mutated.
+        stackup: PCB stackup, or ``None`` for graceful degradation.
+        design_rules: Manufacturer design rules used for clamping.
+        layer: Layer name used for impedance calculation.
+        min_grid_mm: Manufacturer minimum grid for rounding.
+
+    Returns:
+        ``(resolved_map, mismatch_warnings, clamp_errors)`` triple:
+        ``resolved_map`` has the same keys but new
+        :class:`NetClassRouting` values where sizing was resolved;
+        ``mismatch_warnings`` and ``clamp_errors`` aggregate the diagnostic
+        events from all calls (deduplicated by net-class name + kind).
+    """
+    import dataclasses
+
+    resolved: dict[str, NetClassRouting] = {}
+    mismatch_warnings: list[StackupMismatchWarning] = []
+    clamp_errors_out: list[ImpedanceClampError] = []
+    seen_mismatch: set[str] = set()
+
+    for net_name, nc in net_class_map.items():
+        result = apply_impedance_driven_sizing(
+            nc, stackup, design_rules, layer=layer, min_grid_mm=min_grid_mm
+        )
+        if not result.used_target:
+            resolved[net_name] = nc
+            continue
+
+        # Build a new NetClassRouting with the resolved sizing.
+        new_nc = dataclasses.replace(
+            nc,
+            trace_width=result.width_mm,
+            intra_pair_clearance=result.gap_mm,
+        )
+        resolved[net_name] = new_nc
+
+        if result.stackup_mismatch is not None and nc.name not in seen_mismatch:
+            mismatch_warnings.append(result.stackup_mismatch)
+            seen_mismatch.add(nc.name)
+        if result.clamp_errors:
+            clamp_errors_out.extend(result.clamp_errors)
+
+    return resolved, mismatch_warnings, clamp_errors_out

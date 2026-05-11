@@ -301,9 +301,7 @@ class ImpedanceRule(DRCRule):
         net_name = trace.get("net_name", "unknown")
 
         is_diff_pair = (
-            net_name in self._partner_map
-            and spec.target_zdiff is not None
-            and self._cl is not None
+            net_name in self._partner_map and spec.target_zdiff is not None and self._cl is not None
         )
 
         if is_diff_pair:
@@ -320,13 +318,9 @@ class ImpedanceRule(DRCRule):
                 # the spec's tolerance window for compliance check only.
                 gap_mm = trace.get("intra_pair_clearance_mm", 0.15)
                 if self._stackup.is_outer_layer(layer):
-                    result = self._cl.edge_coupled_microstrip(
-                        width_mm, gap_mm, layer
-                    )
+                    result = self._cl.edge_coupled_microstrip(width_mm, gap_mm, layer)
                 else:
-                    result = self._cl.edge_coupled_stripline(
-                        width_mm, gap_mm, layer
-                    )
+                    result = self._cl.edge_coupled_stripline(width_mm, gap_mm, layer)
                 calculated_z = result.zdiff
                 target_z = spec.target_zdiff
             except (ValueError, AttributeError):

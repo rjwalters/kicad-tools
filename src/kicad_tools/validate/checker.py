@@ -14,7 +14,7 @@ from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .rules.edge import EdgeClearanceRule
-from .rules.impedance import ImpedanceRule, NetImpedanceSpec
+from .rules.impedance import ImpedanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
