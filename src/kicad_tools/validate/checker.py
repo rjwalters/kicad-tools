@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
+from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .rules.edge import EdgeClearanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
@@ -102,6 +103,7 @@ class DRCChecker:
         # Run each category of checks
         results.merge(self.check_clearances())
         results.merge(self.check_diffpair_clearance_intra())
+        results.merge(self.check_diffpair_routing_continuity())
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
         results.merge(self.check_silkscreen())
@@ -161,6 +163,33 @@ class DRCChecker:
         """
 
         rule = DiffPairClearanceIntraRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_diffpair_routing_continuity(self) -> DRCResults:
+        """Check routing continuity for engaged differential pairs.
+
+        Validates that engaged pairs (per Epic #2556 Phase 2E, #2638)
+        stay coupled (parallel and within the coupling window) for the
+        per-class ``coupled_continuity_threshold`` fraction of their
+        routed length.  An "engaged" pair is one whose net class has
+        ``coupled_routing == True`` AND which passed the engagement-layer
+        single-ended refusal check.
+
+        When invoked from the standalone ``kct check`` CLI (no router
+        context), no engaged-pairs set is available, so the rule is a
+        conservative no-op.  The intended invocation path is the
+        autorouter consumer, which has already computed the engagement
+        decision via :func:`should_engage_coupled` and threads the
+        resulting set + per-pair threshold map into the rule
+        constructor.
+
+        See Issue #2640 / Epic #2556 Phase 2G.
+
+        Returns:
+            DRCResults containing routing-continuity violations.  Empty
+            on standalone ``kct check`` invocations (no engaged set).
+        """
+        rule = DiffPairRoutingContinuityRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_dimensions(self) -> DRCResults:

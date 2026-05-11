@@ -7,6 +7,7 @@ implementations for the pure Python DRC checker.
 from .base import DRC_TOLERANCE, DRCRule
 from .clearance import ClearanceRule
 from .diffpair_clearance_intra import DiffPairClearanceIntraRule
+from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
 from .impedance import ImpedanceRule, NetImpedanceSpec
@@ -26,6 +27,7 @@ __all__ = [
     "DRCRule",
     "ClearanceRule",
     "DiffPairClearanceIntraRule",
+    "DiffPairRoutingContinuityRule",
     "DimensionRules",
     "EdgeClearanceRule",
     "ImpedanceRule",

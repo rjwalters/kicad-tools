@@ -460,7 +460,7 @@ class NetClassRouting:
     When ``True``, the diff-pair pre-pass / ``route_all_with_diffpairs``
     dispatch invokes :meth:`CoupledPathfinder` for pairs in this class,
     subject to the engagement-layer single-ended refusal in
-    :func:`should_engage_coupled` (#2527 lesson — pin pairs that look
+    :func:`should_engage_coupled` (#2527 lesson -- pin pairs that look
     diff-pair-ish but are single-ended by spec, like USB-C CC1/CC2 and
     SBU1/SBU2, are refused at engagement time even when explicitly
     declared via :attr:`diffpair_partner`).
@@ -478,6 +478,30 @@ class NetClassRouting:
     engagement path").  Future refactors must not collapse the two.
     """
 
+    # Differential pair routing-continuity threshold (Issue #2640, Epic #2556 Phase 2G)
+    coupled_continuity_threshold: float | None = None
+    """Minimum coupled-fraction (0.0..1.0) required by the
+    ``diffpair_routing_continuity`` DRC rule for engaged pairs in this class.
+
+    The rule fires when a routed pair's coupled fraction (the share of P's
+    routed length whose nearest point on N is within the coupling window
+    AND parallel within +/-15 degrees) falls below this threshold.
+
+    ``None`` (the default) means "use the rule's module-level default of
+    0.7" -- empirically calibrated against board 03's USB pair, which
+    couples ~60-80% in practice (curator note on #2640).  Setting
+    ``0.9`` is appropriate for high-speed-differential-interface (HSDI)
+    boards demanding tight coupling; setting ``0.5`` accommodates hobby
+    boards with loose coupling expectations.
+
+    Orthogonal to :attr:`diffpair_partner` and to the (Phase 2E)
+    :attr:`coupled_routing` opt-in flag from #2638 -- this is a DRC-side
+    knob that the autorouter consumer reads via
+    :meth:`effective_coupled_continuity_threshold` and passes into
+    :class:`~kicad_tools.validate.rules.diffpair_routing_continuity.DiffPairRoutingContinuityRule`
+    via the ``threshold_map`` constructor argument.
+    """
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
@@ -488,6 +512,27 @@ class NetClassRouting:
         if self.intra_pair_clearance is not None:
             return self.intra_pair_clearance
         return self.clearance
+
+    def effective_coupled_continuity_threshold(self, default: float = 0.7) -> float:
+        """Return the coupled-continuity threshold for the DRC rule.
+
+        Backward-compatible accessor (Issue #2640 / Epic #2556 Phase 2G):
+        returns ``default`` when :attr:`coupled_continuity_threshold` is
+        unset (``None``).  ``default`` mirrors the rule's module-level
+        ``DEFAULT_COUPLED_CONTINUITY_THRESHOLD`` so callers can override
+        the floor consistently without re-importing it.
+
+        Args:
+            default: Fallback value when no per-class threshold is set.
+                Defaults to ``0.7`` (the rule's empirically-calibrated
+                default for the USB_D+/D- pair on board 03).
+
+        Returns:
+            The per-class threshold (in [0.0, 1.0]) if set, else ``default``.
+        """
+        if self.coupled_continuity_threshold is not None:
+            return self.coupled_continuity_threshold
+        return default
 
 
 # =============================================================================
