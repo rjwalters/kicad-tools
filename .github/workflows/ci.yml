@@ -311,3 +311,90 @@ jobs:
             [ -n "$f" ] && args+=("$f")
           done
           uv run python scripts/ci/check_routed_drc.py "${args[@]}"
+
+  diffpair-routing-regression:
+    # Issue #2660 / Epic #2556 Phase 4N: re-route board 06 (the diff-pair
+    # testbench) from scratch on every PR and verify that
+    #   (a) the resulting DRC error count is within the allowlist baseline
+    #       in .github/routed-drc-tolerance.yml; AND
+    #   (b) each of the three diff-pair DRC rules
+    #       (diffpair_clearance_intra, diffpair_routing_continuity,
+    #       diffpair_length_skew) was actually exercised against an engaged
+    #       pair -- i.e., the per-rule counter in the DRC summary is
+    #       non-zero for each rule_id.
+    #
+    # This job is the algorithmic-regression counterpart to the
+    # `routed-pcb-drc-check` job above.  That job is diff-driven (only fires
+    # when a PR touches a committed *_routed.kicad_pcb file), which catches
+    # regressions in *committed* PCB files but does NOT catch regressions in
+    # the routing algorithm itself -- e.g., if Phase 2E's coupled engagement
+    # accidentally flips `coupled_routing=False`, the diff-driven gate stays
+    # green because no committed PCB was touched.  This from-scratch job
+    # re-routes board 06 every run so the gate catches algorithmic
+    # regressions even when no committed PCB is modified.
+    #
+    # PR #2552 (merged) introduced the diff-driven precedent this job
+    # extends; this is the "always-run" counterpart for diff-pair coverage.
+    #
+    # Determinism: the gate uses `--seed 42` (Issue #2589 / Phase 3X.2)
+    # forwarded into `generate_design.py --seed` so the re-route is
+    # reproducible.  Without `--seed` the router uses os.urandom-derived
+    # entropy and produces different output run-to-run, which would
+    # generate false-positive failures on a loaded CI runner.
+    #
+    # Parametric over board name (matrix.board): board 03 can be added
+    # cheaply once #2589's non-determinism work fully closes and #2513
+    # (USB-C blockers) clears.  Today board 03 is omitted because its
+    # NetClassRouting declarations do not yet exercise coupled_routing.
+    #
+    # Allowlist:
+    #   .github/routed-drc-tolerance.yml currently has
+    #   boards/06-diffpair-test/.../diffpair_test_routed.kicad_pcb: 28
+    #   (25x ImpedanceRule per #2672 + 3x diffpair_clearance_intra per
+    #   #2677).  The gate respects the allowlist so it doesn't fail
+    #   immediately; when #2672 + #2677 land, the allowlist should be
+    #   tightened in a separate PR.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on `main` is a separate repo-admin action.
+    # The PR landing this job calls that out explicitly so the human
+    # approver can flip the GitHub setting after merge.  Until then the
+    # job runs on every PR but is advisory -- its failure does not block
+    # the merge button.
+    name: Diff-Pair Routing Regression
+    runs-on: ubuntu-latest
+    # Issue #2660 acceptance criterion #5: wall-clock <= 5 min on
+    # ubuntu-latest.  The 10-minute limit here is a safety net for slow
+    # runners; if the typical run creeps above 5 minutes, move to a
+    # nightly schedule per the epic's runtime guidance.
+    timeout-minutes: 10
+    strategy:
+      # Don't abort the matrix on a single board failure -- each board
+      # is independent and reviewers want all annotations at once.
+      fail-fast: false
+      matrix:
+        board:
+          - boards/06-diffpair-test
+        # Future: add boards/03-usb-joystick here once #2589 stabilises
+        # its router determinism and #2513 (USB-C blockers) clears.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Re-route board + check diff-pair coverage
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_diffpair_coverage.py \
+            "${{ matrix.board }}" \
+            --seed 42
+

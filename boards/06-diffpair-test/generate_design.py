@@ -476,44 +476,145 @@ def run_drc(pcb_path: Path) -> bool:
 
 
 def main() -> int:
-    """Entry point."""
-    if len(sys.argv) > 1:
-        output_dir = Path(sys.argv[1])
+    """Entry point.
+
+    Supports the following invocations:
+
+    .. code-block:: bash
+
+        # Default: run all steps (schematic + PCB + route + DRC) into ./output/
+        python generate_design.py
+
+        # Custom output dir (positional, backwards compatible)
+        python generate_design.py /tmp/my-output
+
+        # Phase 4N (#2660): re-route only for the CI regression gate.
+        # ``--step route`` skips schematic + PCB regeneration and re-routes
+        # the existing committed unrouted PCB into a new ``*_routed.kicad_pcb``.
+        # ``--seed`` is forwarded to ``random.seed()`` before routing for
+        # deterministic CI runs (Issue #2589 / Phase 3X.2).
+        python generate_design.py --step route --seed 42
+    """
+    import argparse
+    import random
+
+    parser = argparse.ArgumentParser(
+        prog="generate_design",
+        description="Board 06 (diffpair-test) design generator + Phase 4N CI re-route hook.",
+    )
+    parser.add_argument(
+        "output_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Output directory (default: ./output relative to this script).  "
+            "Positional for backwards compatibility with pre-#2660 callers."
+        ),
+    )
+    parser.add_argument(
+        "--step",
+        choices=["all", "schematic", "pcb", "route"],
+        default="all",
+        help=(
+            "Run only the specified step.  ``route`` re-routes the existing "
+            "committed unrouted PCB into ``output/diffpair_test_routed.kicad_pcb``  "
+            "without regenerating the schematic or unrouted PCB; used by the "
+            "Phase 4N (#2660) CI gate to detect routing-algorithm regressions."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Seed the global ``random`` module with N before routing for "
+            "reproducible output (Issue #2589 / Phase 3X.2).  Required by "
+            "the Phase 4N CI gate so re-routes are deterministic across "
+            "PRs."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
     else:
         output_dir = Path(__file__).parent / "output"
 
     output_dir = output_dir.resolve()
 
+    # Apply seed before any router call so all downstream ``random.shuffle``
+    # / ``random.sample`` consumers (escape strategies, MST trial ordering)
+    # are deterministic.  See ``kct route --seed`` (#2589) for the same
+    # pattern.
+    if args.seed is not None:
+        random.seed(args.seed)
+        print(f"[seed] Seeded global random with --seed {args.seed}")
+
     try:
-        project_path = create_project(output_dir, "diffpair_test")
-        sch_path = create_schematic(output_dir)
-        pcb_path = create_pcb(output_dir)
+        if args.step == "all":
+            project_path = create_project(output_dir, "diffpair_test")
+            sch_path = create_schematic(output_dir)
+            pcb_path = create_pcb(output_dir)
+            routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
+            route_success = route_pcb(pcb_path, routed_path)
+            drc_ok = run_drc(routed_path)
 
-        routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
-        route_success = route_pcb(pcb_path, routed_path)
+            print("\n" + "=" * 60)
+            print("SUMMARY")
+            print("=" * 60)
+            print(f"\nOutput dir: {output_dir}")
+            print(f"  Project:   {project_path.name}")
+            print(f"  Schematic: {sch_path.name}")
+            print(f"  PCB:       {pcb_path.name}")
+            print(f"  Routed:    {routed_path.name}")
+            print("\nResults:")
+            print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
+            print(f"  DRC:     {'PASS' if drc_ok else 'FAIL (see above)'}")
 
-        drc_ok = run_drc(routed_path)
+            return 0 if route_success else 1
 
-        # Summary
-        print("\n" + "=" * 60)
-        print("SUMMARY")
-        print("=" * 60)
-        print(f"\nOutput dir: {output_dir}")
-        print(f"  Project:   {project_path.name}")
-        print(f"  Schematic: {sch_path.name}")
-        print(f"  PCB:       {pcb_path.name}")
-        print(f"  Routed:    {routed_path.name}")
-        print("\nResults:")
-        print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-        print(f"  DRC:     {'PASS' if drc_ok else 'FAIL (see above)'}")
+        if args.step == "schematic":
+            create_schematic(output_dir)
+            return 0
 
-        # AC#2 (0 DRC errors) is the goal but the curator notes it is
-        # acceptable to land the scaffold with DRC tolerated until
-        # Phase 3I serpentine insertion (#2648) is fully wired into
-        # the router pipeline.  We return success on the scaffold
-        # itself (route step) and let the routed-DRC CI gate enforce
-        # the 0-error invariant once the scaffold is in place.
-        return 0 if route_success else 1
+        if args.step == "pcb":
+            create_pcb(output_dir)
+            return 0
+
+        if args.step == "route":
+            # Phase 4N (#2660): the CI gate calls this path to re-route the
+            # *committed* unrouted PCB.  Do NOT regenerate the unrouted PCB
+            # here -- if the unrouted PCB has drifted from the committed
+            # one, that's a separate issue (board scaffolding bug, caught
+            # by tests/test_board_06_diffpair_test.py).
+            pcb_path = output_dir / "diffpair_test.kicad_pcb"
+            if not pcb_path.exists():
+                print(
+                    f"Error: unrouted PCB not found at {pcb_path}.  Run "
+                    "``python generate_design.py --step pcb`` first or "
+                    "use ``--step all``.",
+                    file=sys.stderr,
+                )
+                return 1
+            routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
+            # PARTIAL is the expected outcome today (USB3_TX1+/- blocked by
+            # the BGA partner-via escape, tracked in #2677).  As long as the
+            # routed PCB was written, the CI gate's DRC check determines
+            # pass/fail -- not the route_pcb() "all-or-nothing" boolean.
+            # Verify routed_path exists to confirm route_pcb() didn't crash.
+            route_pcb(pcb_path, routed_path)
+            if not routed_path.exists():
+                print(
+                    f"Error: routed PCB not written to {routed_path}.",
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
+
+        # argparse choices already constrains this, but be explicit.
+        print(f"Error: unknown step {args.step!r}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback

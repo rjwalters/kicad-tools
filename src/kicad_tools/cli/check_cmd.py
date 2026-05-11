@@ -446,6 +446,16 @@ def output_json(
         "warnings": warning_count,
         "infos": info_count,
         "rules_checked": results.rules_checked,
+        # Issue #2660 / Epic #2556 Phase 4N: per-rule check counter.
+        # The single ``rules_checked`` integer cannot tell a CI consumer
+        # WHICH rules ran -- only the aggregate.  Without this map, a
+        # diff-pair CI gate cannot distinguish "rule X ran and reported
+        # 0 violations" from "rule X did not run at all" (e.g., the rule
+        # short-circuited because no engaged pairs were detected, which
+        # would be a silent regression in detection).  Always emitted
+        # (even when empty) so downstream consumers can rely on the
+        # field being present.
+        "rules_checked_by_rule": dict(results.rules_checked_by_rule),
         "passed": error_count == 0,
     }
     if results.suppressed_count > 0:
@@ -479,6 +489,10 @@ def write_json_report(
         "warnings": warning_count,
         "infos": info_count,
         "rules_checked": results.rules_checked,
+        # See ``output_json`` for the rationale on emitting this field
+        # alongside the aggregate ``rules_checked`` integer.  Issue
+        # #2660 / Epic #2556 Phase 4N.
+        "rules_checked_by_rule": dict(results.rules_checked_by_rule),
         "passed": error_count == 0,
     }
     if results.suppressed_count > 0:
