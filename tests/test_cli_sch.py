@@ -3021,7 +3021,11 @@ class TestSchValidateMissingProjectInstances:
 {sym}
 {extra_symbols}
 )"""
-        sch_file = tmp_path / "test_inst.kicad_sch"
+        # Filename stem MUST equal the (project "test"...) name embedded
+        # in _INSTANCES_BLOCK above — _detect_project_info uses the root
+        # schematic's filename stem as the canonical project name.  See
+        # sch_re_annotate._detect_project_info and issue #2664.
+        sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(sch_text)
         return sch_file
 

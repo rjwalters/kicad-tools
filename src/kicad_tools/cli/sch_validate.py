@@ -772,91 +772,168 @@ def check_connector_pinout(schematic_path: str) -> list[ValidationIssue]:
 
 
 def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue]:
-    """Check for symbols missing the ``instances`` block.
+    """Check for symbols with missing or malformed ``(instances ...)`` blocks.
 
     In KiCad 8+, every placed symbol must have an ``(instances ...)`` child
-    node that registers it to a project path.  Without this block the
-    component is invisible to the netlist exporter and BOM generator despite
-    being visually present on the schematic.
+    node that registers it to the **current project**.  Three failure modes
+    are possible, and ``kicad-cli sch export netlist`` silently drops the
+    symbol from the netlist in all three:
+
+    1. **Missing** — no ``(instances ...)`` block at all.  Reported as a
+       ``warning`` (legacy behaviour; affects hand-built fixtures most).
+    2. **Wrong project** — ``(instances ...)`` exists but only names a
+       different project (e.g. the sub-sheet's old standalone-project name,
+       not the current root project).  Reported as an ``error``.
+    3. **Loose project blocks** — ``(project ...)`` forms appear at
+       symbol-child indent (siblings of ``(instances)`` rather than children
+       of it).  Reported as an ``error``.
+
+    All three are mechanically fixable via ``kct sch repair-instances``.
 
     The check skips:
-    - Power symbols (``lib_id`` starting with ``power:``)
-    - Symbols with both ``in_bom=no`` and ``on_board=no`` (graphical-only)
+    - Power symbols (``lib_id`` starting with ``power:``) **for the
+      missing-instances case only** — power symbols with wrong-project or
+      loose-project blocks are still flagged because they too need repair.
+    - Symbols with both ``in_bom=no`` and ``on_board=no`` (graphical-only).
 
-    Multi-unit symbols are deduplicated by (reference, lib_id) so that a missing
-    ``instances`` block on a two-unit IC produces a single warning, not one
-    per unit.
+    Detection reuses :func:`_extract_symbols_with_instance_info` from
+    ``sch_repair_instances`` so the validator and the repair tool share a
+    single structural-scan implementation (see issue #2664).
     """
+    # Imports are local to avoid a top-level cycle: sch_repair_instances
+    # transitively imports from this file's package on some test paths.
+    from kicad_tools.cli.sch_re_annotate import _detect_project_info
+    from kicad_tools.cli.sch_repair_instances import (
+        _extract_symbols_with_instance_info,
+    )
+    from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+
     issues: list[ValidationIssue] = []
 
     try:
-        hierarchy = build_hierarchy(schematic_path)
+        root = Path(schematic_path)
+        all_files = _collect_schematic_files(root)
+        project_name, _root_uuid, _paths = _detect_project_info(
+            root, all_files
+        )
 
-        for node in hierarchy.all_nodes():
+        # Deduplicate multi-unit ICs per-sheet, mirroring the legacy
+        # implementation's (reference, lib_id) dedup.
+        # ``_extract_symbols_with_instance_info`` returns one entry per
+        # ``(symbol ...)`` block, i.e. one entry per *unit*, so a two-unit
+        # IC produces two entries that share (reference, lib_id) — we want
+        # one issue per logical component.
+        for sch_file in all_files:
             try:
-                sch = Schematic.load(node.path)
-                # Track UUIDs already flagged to deduplicate multi-unit ICs.
-                # Multi-unit symbols share the same base UUID (only the first
-                # unit carries the instances block in the raw file, but after
-                # parsing each unit becomes a separate SymbolInstance sharing
-                # the same lib_id + reference).  Deduplicate by reference +
-                # lib_id so we report once per logical component.
-                seen: set[tuple[str, str]] = set()
+                text = sch_file.read_text(encoding="utf-8")
+            except OSError as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="project_instances",
+                        message=(
+                            f"Skipped sheet {sch_file.name}: {e}"
+                        ),
+                        location=sch_file.name,
+                    )
+                )
+                continue
 
-                for sym in sch.symbols:
-                    # Skip power symbols
-                    if sym.lib_id.startswith("power:"):
-                        continue
-
-                    # Skip graphical-only symbols (not in BOM and not on board)
-                    if not sym.in_bom and not sym.on_board:
-                        continue
-
-                    # Deduplicate multi-unit symbols
-                    dedup_key = (sym.reference, sym.lib_id)
-                    if dedup_key in seen:
-                        continue
-
-                    # Check for instances block in raw S-expression
-                    has_instances = False
-                    if sym._sexp is not None:
-                        if sym._sexp.find("instances") is not None:
-                            has_instances = True
-                    else:
-                        # Programmatically-created symbol without _sexp:
-                        # skip with info if desired, but don't flag as missing
-                        continue
-
-                    if not has_instances:
-                        seen.add(dedup_key)
-                        ref = sym.reference or "?"
-                        val = sym.value or "?"
-                        issues.append(
-                            ValidationIssue(
-                                severity="warning",
-                                category="project_instances",
-                                message=(
-                                    f"Missing project instances block: "
-                                    f"{ref} ({val}) - will be absent from "
-                                    f"netlist and BOM"
-                                ),
-                                location=node.get_path_string(),
-                            )
-                        )
-                    else:
-                        # Mark as seen even when instances are present, so
-                        # other units of the same IC don't get flagged.
-                        seen.add(dedup_key)
-
+            try:
+                syms = _extract_symbols_with_instance_info(
+                    text, project_name
+                )
             except Exception as e:
                 issues.append(
                     ValidationIssue(
                         severity="info",
                         category="project_instances",
-                        message=f"Skipped sheet {node.get_path_string()}: {e}",
-                        location=node.get_path_string(),
+                        message=(
+                            f"Skipped sheet {sch_file.name}: {e}"
+                        ),
+                        location=sch_file.name,
                     )
                 )
+                continue
+
+            try:
+                loc = str(sch_file.relative_to(root.parent))
+            except ValueError:
+                loc = sch_file.name
+
+            seen: set[tuple[str, str]] = set()
+            for sym in syms:
+                ref = sym["reference"] or "?"
+                lib_id = sym["lib_id"]
+                value = sym.get("value") or "?"
+
+                # Skip graphical-only symbols (in_bom=no AND on_board=no).
+                # Note: _extract_symbols_with_instance_info already skips
+                # power symbols for the missing-instances case, but does
+                # *not* apply the graphical-only filter — we do it here so
+                # the filter is consistent across all three variants.
+                if not sym.get("in_bom", True) and not sym.get(
+                    "on_board", True
+                ):
+                    continue
+
+                dedup_key = (ref, lib_id)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                fix_hint = (
+                    f"Fix with: kct sch repair-instances {root.name}"
+                )
+
+                if sym.get("has_loose_project_blocks"):
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="project_instances",
+                            message=(
+                                f"Loose (project) blocks outside "
+                                f"(instances): {ref} ({value}) - netlist "
+                                f"export will silently drop this symbol. "
+                                f"{fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
+                elif sym.get("has_wrong_project"):
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="project_instances",
+                            message=(
+                                f"Wrong project name in (instances): "
+                                f"{ref} ({value}) - this entry names a "
+                                f"different project; netlist export will "
+                                f"drop pins. {fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
+                elif not sym.get("has_project_instance"):
+                    # Missing-instances case: preserve legacy behaviour by
+                    # skipping power symbols entirely.  (Power symbols with
+                    # wrong_project / loose_project_blocks are already
+                    # surfaced by _extract_symbols_with_instance_info and
+                    # handled by the branches above.)
+                    if lib_id.startswith("power:"):
+                        continue
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            category="project_instances",
+                            message=(
+                                f"Missing project instances block: "
+                                f"{ref} ({value}) - will be absent from "
+                                f"netlist and BOM. {fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
 
     except Exception as e:
         issues.append(
