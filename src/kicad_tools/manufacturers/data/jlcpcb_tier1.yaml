@@ -4,10 +4,10 @@
 # additional capabilities such as via-in-pad (epoxy-filled, plated-over),
 # typically at a per-order surcharge. The scalar DRC limits (trace width,
 # clearance, via drill, annular ring, edge clearance) for Capability Plus
-# match the standard JLCPCB advanced PCB process; the practical difference
-# is the additional via-in-pad capability, which is currently not modelled
-# as a scalar field in DesignRules. See router/mfr_limits.py
-# (MFR_JLCPCB_TIER1.via_in_pad_supported=True) for that capability.
+# match the standard JLCPCB advanced PCB process; the practical
+# differentiator is the additional via-in-pad capability, modelled here
+# by ``via_in_pad_supported: true`` (mirrors the router's
+# MFR_JLCPCB_TIER1.via_in_pad_supported in router/mfr_limits.py).
 #
 # Source: https://jlcpcb.com/capabilities/pcb-capabilities
 #         https://jlcpcb.com/capabilities/Capabilities (Capability Plus tier)
@@ -40,6 +40,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0            # No inner layers
+    via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
 
   2layer_2oz:
     min_trace_width_mm: 0.1524      # 6 mil (per JLCPCB published specs for 2oz copper)
@@ -59,6 +60,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
+    via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
 
   4layer_1oz:
     min_trace_width_mm: 0.1016      # 4 mil
@@ -78,6 +80,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
+    via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
 
   4layer_2oz:
     min_trace_width_mm: 0.1524      # 6 mil outer (per JLCPCB published specs for 2oz copper)
@@ -97,6 +100,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.5
+    via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -116,3 +120,4 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
+    via_in_pad_supported: true      # Capability Plus tier offers via-in-pad

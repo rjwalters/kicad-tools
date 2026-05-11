@@ -66,6 +66,10 @@ def _init_type_category_map() -> None:
             ViolationType.VIA_HOLE_LARGER_THAN_PAD: ViolationCategory.MANUFACTURING,
             ViolationType.VIA_ANNULAR_WIDTH: ViolationCategory.MANUFACTURING,
             ViolationType.MICRO_VIA_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
+            # Via-in-pad is a manufacturer-capability question (filled and
+            # plated-over via processing) -- categorize with the other
+            # via/fab capabilities.
+            ViolationType.VIA_IN_PAD: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_CLEARANCE: ViolationCategory.MANUFACTURING,
             ViolationType.NPTH_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
@@ -134,6 +138,10 @@ class ViolationType(Enum):
     VIA_HOLE_LARGER_THAN_PAD = "via_hole_larger_than_pad"
     VIA_ANNULAR_WIDTH = "via_annular_width"
     MICRO_VIA_HOLE_TOO_SMALL = "micro_via_hole_too_small"
+    # Via placed inside SMD pad on a manufacturer profile that does not
+    # support via-in-pad processing.  See issue #2635 and
+    # ``validate/rules/via_in_pad.py``.
+    VIA_IN_PAD = "via_in_pad"
 
     # Track/trace dimension issues
     TRACK_WIDTH = "track_width"
@@ -258,6 +266,10 @@ class ViolationType(Enum):
             "zone_unfilled": cls.ZONE_UNFILLED,
             "zone_fill_disabled": cls.ZONE_FILL_DISABLED,
             "zone_no_net": cls.ZONE_NO_NET,
+            # via-in-pad rule from validate via_in_pad checker (issue #2635).
+            # MUST be aliased explicitly -- the fuzzy fallback below would
+            # otherwise match "via" and miscategorize this rule_id.
+            "via_in_pad": cls.VIA_IN_PAD,
         }
 
         alias_match = _ALIASES.get(s_lower)

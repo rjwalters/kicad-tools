@@ -147,6 +147,22 @@ class DesignRules:
     max_board_width_mm: float = 400.0
     max_board_height_mm: float = 500.0
 
+    # Capability flags
+    #
+    # ``via_in_pad_supported`` mirrors the router's
+    # ``MfrLimits.via_in_pad_supported`` (see
+    # ``src/kicad_tools/router/mfr_limits.py``).  When ``False``, the
+    # validate-side ``via_in_pad`` DRC rule flags any via whose drill
+    # circle is fully contained within an SMD pad on the same net.
+    # When ``True``, the manufacturer offers epoxy-filled and plated-over
+    # via-in-pad processing (e.g., JLCPCB Capability Plus / Tier 1,
+    # PCBWay), so the rule is suppressed.
+    #
+    # NOTE: KiCad's ``.kicad_dru`` format has no native via-in-pad rule,
+    # so ``dru_generator.py`` does NOT translate this field.  Enforcement
+    # lives entirely in the pure-Python ``DRCChecker.check_via_in_pad``.
+    via_in_pad_supported: bool = False
+
     @property
     def min_trace_width_mil(self) -> float:
         """Trace width in mils (thousandths of an inch)."""
@@ -179,6 +195,7 @@ class DesignRules:
             "inner_copper_oz": self.inner_copper_oz,
             "max_board_width_mm": self.max_board_width_mm,
             "max_board_height_mm": self.max_board_height_mm,
+            "via_in_pad_supported": self.via_in_pad_supported,
         }
 
 

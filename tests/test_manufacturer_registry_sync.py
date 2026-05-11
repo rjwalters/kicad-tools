@@ -106,6 +106,47 @@ class TestRouterDRCRegistrySync:
             f"  DRC:    {sorted(jlcpcb_tier1_drc_aliases)}"
         )
 
+    def test_via_in_pad_supported_parity(self):
+        """``via_in_pad_supported`` parity between router and DRC (issue #2635).
+
+        For every manufacturer name known to BOTH the router's
+        ``MFR_LIMITS`` table and the DRC profile registry, the
+        ``via_in_pad_supported`` flag must agree across all stackup
+        layer counts (2L, 4L, 6L).  If a future contributor flips this
+        flag on one side but not the other, the router would refuse to
+        place in-pad vias while DRC would silently accept them (or vice
+        versa) -- this test catches that drift.
+
+        Layer counts that the DRC profile doesn't model fall back to
+        the closest available stackup (see ``ManufacturerProfile.get_design_rules``).
+        We still assert parity per-layer to surface stackup-level
+        regressions where the capability flag is missing on a specific
+        block.
+        """
+        # Iterate the intersection: only names that exist in both
+        # registries.  Aliases on one side that resolve to a canonical
+        # name on the other are already covered by the resolver tests
+        # above; here we focus on the capability-flag value itself.
+        shared_names = set(MFR_LIMITS.keys()) & (set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys()))
+        assert shared_names, "No shared manufacturer names between router and DRC"
+
+        mismatches: list[str] = []
+        for name in sorted(shared_names):
+            router_flag = MFR_LIMITS[name].via_in_pad_supported
+            drc_profile = get_profile(name)
+            for layers in (2, 4, 6):
+                drc_rules = drc_profile.get_design_rules(layers=layers, copper_oz=1.0)
+                drc_flag = drc_rules.via_in_pad_supported
+                if router_flag != drc_flag:
+                    mismatches.append(f"{name} ({layers}L): router={router_flag}, DRC={drc_flag}")
+
+        assert not mismatches, (
+            "Router and DRC disagree on via_in_pad_supported for some "
+            "manufacturer/layer combinations. Update the corresponding "
+            "YAML stackup block (manufacturers/data/<mfr>.yaml) or the "
+            "router's MfrLimits entry to restore parity:\n  " + "\n  ".join(mismatches)
+        )
+
 
 class TestJLCPCBTier1DRCProfile:
     """Regression tests for the jlcpcb-tier1 DRC profile (issue #2622)."""

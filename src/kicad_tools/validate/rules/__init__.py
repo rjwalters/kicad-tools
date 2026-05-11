@@ -18,6 +18,7 @@ from .silkscreen import (
 )
 from .single_pad_net import SinglePadNetRule
 from .solder_mask import SolderMaskPadRules
+from .via_in_pad import ViaInPadRule
 from .zone_fill import ZoneFillRule
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "NetImpedanceSpec",
     "SinglePadNetRule",
     "SolderMaskPadRules",
+    "ViaInPadRule",
     "check_all_silkscreen",
     "check_silkscreen_line_width",
     "check_silkscreen_over_pads",

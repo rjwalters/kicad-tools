@@ -15,6 +15,7 @@ from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.edge import EdgeClearanceRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
+from .rules.via_in_pad import ViaInPadRule
 from .rules.zone_fill import ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
@@ -108,6 +109,7 @@ class DRCChecker:
         results.merge(self.check_footprint_placement())
         results.merge(self.check_netlist())
         results.merge(self.check_single_pad_nets())
+        results.merge(self.check_via_in_pad())
         results.merge(self.check_zones())
 
         # Apply filters if provided
@@ -265,6 +267,24 @@ class DRCChecker:
         from .rules.single_pad_net import SinglePadNetRule
 
         rule = SinglePadNetRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_via_in_pad(self) -> DRCResults:
+        """Check for vias placed inside SMD pads on unsupported profiles.
+
+        Fires only when the active manufacturer profile has
+        ``via_in_pad_supported=False`` (the default for ``jlcpcb``,
+        ``oshpark``, ``seeed``, ``flashpcb``).  The router refuses to
+        place in-pad vias for those profiles, but a hand-edited or
+        third-party-routed board could still contain them -- this rule
+        verifies the resulting board independently.
+
+        Returns:
+            DRCResults containing via_in_pad violations (one per
+            offending via/pad pair).  Empty on profiles that support
+            via-in-pad (e.g., jlcpcb-tier1, pcbway).
+        """
+        rule = ViaInPadRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_zones(self) -> DRCResults:
