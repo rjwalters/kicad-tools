@@ -478,6 +478,46 @@ class NetClassRouting:
     engagement path").  Future refactors must not collapse the two.
     """
 
+    # Target impedance for impedance-driven sizing (Issue #2650, Epic #2556 Phase 3K)
+    target_diff_impedance: float | None = None
+    """Target differential impedance in ohms (e.g. 90 for USB 2.0, 100 for USB
+    3.0 / PCIe / MIPI).
+
+    When set, the router consumes this field via
+    :func:`kicad_tools.router.diffpair_impedance.apply_impedance_driven_sizing`
+    to compute a ``(trace_width, intra_pair_clearance)`` pair from the PCB
+    stackup using :class:`kicad_tools.physics.CoupledLines`.  When ``None``
+    (the default), the per-class ``trace_width`` / ``intra_pair_clearance``
+    literals are used unchanged, preserving pre-Phase-3K behavior.
+
+    Independent of :attr:`target_single_impedance` -- a class may set one,
+    both, or neither.  When both are set, diff-pair nets (those whose
+    :attr:`diffpair_partner` is set OR whose name matches the suffix
+    inference) consume :attr:`target_diff_impedance`; single-ended nets in
+    the same class consume :attr:`target_single_impedance`.
+    """
+
+    target_single_impedance: float | None = None
+    """Target single-ended (characteristic) impedance in ohms.
+
+    Common values: 50 for clocks and most single-ended high-speed signals,
+    75 for video / coaxial-style signals.  When set, the router computes
+    the required ``trace_width`` from the stackup via
+    :func:`kicad_tools.physics.TransmissionLine.width_for_impedance` and
+    overrides :attr:`trace_width`.  When ``None`` (default), the per-class
+    literal is used.
+    """
+
+    impedance_tolerance_percent: float = 10.0
+    """Allowed deviation (in percent) from the target impedance that the
+    DRC :class:`~kicad_tools.validate.rules.impedance.ImpedanceRule` fires
+    on.
+
+    Mirrors :attr:`kicad_tools.validate.rules.impedance.NetImpedanceSpec.tolerance_percent`
+    (currently 10.0%).  Setting this leaves existing users at no-behavior-change
+    because the rule's default tolerance is also 10.0%.
+    """
+
     # Differential pair routing-continuity threshold (Issue #2640, Epic #2556 Phase 2G)
     coupled_continuity_threshold: float | None = None
     """Minimum coupled-fraction (0.0..1.0) required by the
