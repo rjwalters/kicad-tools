@@ -14,6 +14,7 @@ from .rules.clearance import ClearanceRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
+from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
 from .rules.placement import FootprintOutsideBoardRule
@@ -121,6 +122,7 @@ class DRCChecker:
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
         results.merge(self.check_impedance())
+        results.merge(self.check_match_group_length_skew())
         results.merge(self.check_silkscreen())
         results.merge(self.check_solder_mask_pads())
         results.merge(self.check_footprint_placement())
@@ -331,6 +333,55 @@ class DRCChecker:
             boards without high-speed nets).
         """
         rule = ImpedanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_match_group_length_skew(self) -> DRCResults:
+        """Check routed-length skew for declared N-trace match groups.
+
+        Validates that declared / detected
+        :class:`~kicad_tools.router.match_group_length.MatchGroup`
+        instances have a per-group length skew (``max(L) - min(L)``
+        across the group's members) within their per-class
+        :attr:`~kicad_tools.router.rules.NetClassRouting.length_match_tolerance_mm`
+        (default 0.5 mm).  N>=3 generalization of
+        :meth:`check_diffpair_length_skew` for bus-style groups (DDR
+        DQ-strobe, MIPI CSI lanes, TMDS).
+
+        **Independent of Phase 2E** (the N-trace tuner, Issue #2700):
+        the rule fires on routed-as-found geometry regardless of
+        whether the v2 tuner ran.  This is the explicit "validator-
+        for-externally-routed-boards" use case (Freerouting / KiCad's
+        own router / manual layout) where ``kicad_tools.router`` never
+        runs but the board still needs its match-group skew validated.
+
+        Producer-side wiring is **deferred** to a separate Phase 2.5G
+        follow-up issue (mirroring PR #2685's ``derive_skew_data`` for
+        the diff-pair sibling).  Until that lands, this method is a
+        conservative no-op: it instantiates the rule with all defaults
+        (``group_skew_data=None``, ``tracker_match_groups=None``) which
+        yields ``rules_checked == 0`` and zero violations.  This
+        preserves the AC #1 graceful-degradation contract -- a board
+        with no router context (no ``--net-class-map`` sidecar) MUST
+        NOT report spurious skew violations because the caller had no
+        way to compute the skew.
+
+        See Issue #2702 / Epic #2661 Phase 2G (the rule itself).
+
+        Returns:
+            :class:`DRCResults` containing match-group length-skew
+            violations.  Empty on standalone ``kct check`` invocations
+            until the Phase 2.5G producer-side wiring lands.
+        """
+        # Graceful-no-op: until the Phase 2.5G producer
+        # (derive_group_skew_data) is wired, this method instantiates
+        # the rule with no caller context, which yields zero violations
+        # and zero rules_checked.  The rule itself is fully tested via
+        # direct construction in tests/test_validate_match_group_length_skew.py
+        # -- this method's job is to be a future-ready dispatch seam
+        # that the upcoming follow-up issue can extend by threading
+        # derived data through, exactly like check_diffpair_length_skew
+        # was extended via PR #2685.
+        rule = MatchGroupLengthSkewRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_silkscreen(self) -> DRCResults:
