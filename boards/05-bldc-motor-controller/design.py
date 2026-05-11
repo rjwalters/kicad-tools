@@ -1000,12 +1000,27 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # 11/12/13 (x=138.8/139.6/140.4, y=154.175) have room to fan out without
     # stacking three parallel traces against the MCU pad row.  J3 pads at
     # x=164.15..165.85 leave the rightmost cap (x=161) ~3mm clearance.
-    R30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 54)  # HALL_A pull-up
-    C30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 58)  # HALL_A filter
-    R31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 54)  # HALL_B pull-up
-    C31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 58)  # HALL_B filter
-    R32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 54)  # HALL_C pull-up
-    C32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 58)  # HALL_C filter
+    #
+    # Iteration 3 (#2682): shift the cluster SOUTH by 3mm (54/58 -> 57/61)
+    # to clear the horizontal lane that HALL_A/B/C use to exit U10's bottom
+    # edge.  At y=54 (abs 154) the R30-R32 0805 body (1.3mm tall, x=148-150)
+    # sat in the same y=154 corridor that MCU bottom pins 11/12/13 launch
+    # into (y=154.175).  The router had no clean east-west lane between
+    # U10 and R30 -- traces had to thread between R30/C30 (4mm gap, but
+    # blocked once R30 is placed).  Moving R30-R32 to y=57 (abs 157) leaves
+    # body north edge at y=156.35 with 1.4mm clearance from U10's south
+    # pad edge (y=154.925), opening a clean y=154-156 east-west corridor
+    # for HALL_A/B/C and the SWDIO/SWCLK return traces.  C30-C32 follow at
+    # y=61 (abs 161); body south edge at y=161.65 stays 1.4mm north of
+    # J3's south pad (pin 5 GND at y=163.08).  The R30->C30 vertical
+    # distance is preserved at 4mm so the existing HALL_A/B/C star-point
+    # (pull-up + filter cap on the same column) keeps its compact layout.
+    R30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 57)  # HALL_A pull-up
+    C30_POS = (BOARD_ORIGIN_X + 49, BOARD_ORIGIN_Y + 61)  # HALL_A filter
+    R31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 57)  # HALL_B pull-up
+    C31_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 61)  # HALL_B filter
+    R32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 57)  # HALL_C pull-up
+    C32_POS = (BOARD_ORIGIN_X + 61, BOARD_ORIGIN_Y + 61)  # HALL_C filter
 
     # =========================================================================
     # Footprint generators
