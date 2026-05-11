@@ -57,6 +57,11 @@ def _init_type_category_map() -> None:
             # Phase 3I or manual touch-up) -- the skew is a function of the
             # routed geometry of the two halves, not their footprints.
             ViolationType.DIFFPAIR_LENGTH_SKEW: ViolationCategory.ROUTING,
+            # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
+            # N>=3 generalization of DIFFPAIR_LENGTH_SKEW: same routing-
+            # fixable nature (serpentine tuning of the shorter members up
+            # to the longest, Phase 2E's domain), categorized identically.
+            ViolationType.MATCH_GROUP_LENGTH_SKEW: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -140,6 +145,16 @@ class ViolationType(Enum):
     # geometric topology of the route.  Distinct from CLEARANCE because
     # it checks a length-matching property, not edge-to-edge spacing.
     DIFFPAIR_LENGTH_SKEW = "diffpair_length_skew"
+    # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
+    # Fires when a declared match group's per-member routed-length skew
+    # (``max(L) - min(L)`` across the group) exceeds the per-class
+    # ``length_match_tolerance_mm`` (default 0.5 mm).  N>=3 generalization
+    # of DIFFPAIR_LENGTH_SKEW: the diff-pair rule is the N=2 special
+    # case, this rule is the bus-group case (DDR DQ-strobe, MIPI CSI
+    # lanes, TMDS).  Distinct from DIFFPAIR_LENGTH_SKEW because group
+    # identity is the group's *name* (Phase 1B convention), not a P/N
+    # name tuple.
+    MATCH_GROUP_LENGTH_SKEW = "match_group_length_skew"
     # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
     # Fires when an *engaged* differential pair's coupled fraction (the
     # share of P's routed length whose nearest point on N is within the
@@ -270,6 +285,18 @@ class ViolationType(Enum):
             # downstream filter that compares by exact type value.  This
             # entry is the only defense; do NOT delete it as "redundant".
             "diffpair_length_skew": cls.DIFFPAIR_LENGTH_SKEW,
+            # Match-group (N-trace) length-skew (Issue #2702, Epic #2661
+            # Phase 2G).  MUST be aliased explicitly even though the
+            # rule_id string ``"match_group_length_skew"`` does NOT
+            # contain the substring ``"clearance"`` -- the fuzzy fallback
+            # at the bottom of from_string() would otherwise drop through
+            # to ``UNKNOWN``, which silently corrupts the violation type
+            # field for any downstream filter that compares by exact
+            # type value.  This is the #2521 critical-gotcha precedent
+            # carried forward (mirrors the diffpair_length_skew entry
+            # above).  This entry is the only defense; do NOT delete it
+            # as "redundant".
+            "match_group_length_skew": cls.MATCH_GROUP_LENGTH_SKEW,
             # Differential-pair routing continuity (Issue #2640, Epic #2556
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"diffpair_routing_continuity"`` does NOT

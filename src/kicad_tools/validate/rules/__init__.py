@@ -12,6 +12,7 @@ from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
 from .impedance import ImpedanceRule, NetImpedanceSpec
+from .match_group_length_skew import MatchGroupLengthSkewRule
 from .silkscreen import (
     check_all_silkscreen,
     check_silkscreen_line_width,
@@ -33,6 +34,7 @@ __all__ = [
     "DimensionRules",
     "EdgeClearanceRule",
     "ImpedanceRule",
+    "MatchGroupLengthSkewRule",
     "NetImpedanceSpec",
     "SinglePadNetRule",
     "SolderMaskPadRules",
