@@ -21,8 +21,6 @@ Post-#2695 behavior (when via_in_pad_supported=True):
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.router.escape import EscapeRouter, PackageType
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
