@@ -32,7 +32,6 @@ from kicad_tools.router.rules import (
     NetClassRouting,
 )
 
-
 # =============================================================================
 # Test helpers
 # =============================================================================
@@ -83,18 +82,14 @@ class TestShouldEngageCoupled:
         pair = _make_pair("USB_D+", "USB_D-")
         nc = NetClassRouting(name="HighSpeed")  # coupled_routing=False
         # net_name-keyed convention (autorouter.net_class_map style).
-        engaged, reason = should_engage_coupled(
-            pair, {"USB_D+": nc, "USB_D-": nc}, None
-        )
+        engaged, reason = should_engage_coupled(pair, {"USB_D+": nc, "USB_D-": nc}, None)
         assert engaged is False
         assert reason == "opt_in_disabled"
 
     def test_opt_in_enabled_engages(self):
         pair = _make_pair("USB_D+", "USB_D-")
         nc = NetClassRouting(name="HighSpeed", coupled_routing=True)
-        engaged, reason = should_engage_coupled(
-            pair, {"USB_D+": nc, "USB_D-": nc}, None
-        )
+        engaged, reason = should_engage_coupled(pair, {"USB_D+": nc, "USB_D-": nc}, None)
         assert engaged is True
         assert reason == "engaged"
 
@@ -104,9 +99,7 @@ class TestShouldEngageCoupled:
         pair = _make_pair("USB_D+", "USB_D-")
         nc_opt = NetClassRouting(name="HighSpeed", coupled_routing=True)
         nc_off = NetClassRouting(name="Other", coupled_routing=False)
-        engaged, _ = should_engage_coupled(
-            pair, {"USB_D+": nc_opt, "USB_D-": nc_off}, None
-        )
+        engaged, _ = should_engage_coupled(pair, {"USB_D+": nc_opt, "USB_D-": nc_off}, None)
         assert engaged is True
 
     def test_class_name_keyed_with_net_to_class(self):
@@ -131,9 +124,7 @@ class TestShouldEngageCoupled:
             diffpair_partner="USB_CC2",
             coupled_routing=True,  # designer explicitly opted in
         )
-        engaged, reason = should_engage_coupled(
-            pair, {"USB_CC1": nc, "USB_CC2": nc}, None
-        )
+        engaged, reason = should_engage_coupled(pair, {"USB_CC1": nc, "USB_CC2": nc}, None)
         assert engaged is False
         assert reason == "single_ended_refusal"
 
@@ -144,9 +135,7 @@ class TestShouldEngageCoupled:
             diffpair_partner="SBU2",
             coupled_routing=True,
         )
-        engaged, reason = should_engage_coupled(
-            pair, {"SBU1": nc, "SBU2": nc}, None
-        )
+        engaged, reason = should_engage_coupled(pair, {"SBU1": nc, "SBU2": nc}, None)
         assert engaged is False
         assert reason == "single_ended_refusal"
 
@@ -157,9 +146,7 @@ class TestShouldEngageCoupled:
             diffpair_partner="FOO_CC2",
             coupled_routing=True,
         )
-        engaged, reason = should_engage_coupled(
-            pair, {"FOO_CC1": nc, "FOO_CC2": nc}, None
-        )
+        engaged, reason = should_engage_coupled(pair, {"FOO_CC1": nc, "FOO_CC2": nc}, None)
         assert engaged is False
         assert reason == "single_ended_refusal"
 
@@ -173,9 +160,7 @@ class TestShouldEngageCoupled:
             name="Mixed",
             coupled_routing=True,
         )
-        engaged, _ = should_engage_coupled(
-            pair, {"USB_CC1": nc, "USB_D-": nc}, None
-        )
+        engaged, _ = should_engage_coupled(pair, {"USB_CC1": nc, "USB_D-": nc}, None)
         # Engagement proceeds (single-ended refusal needs both halves);
         # the suffix/explicit-detection layer is responsible for
         # rejecting malformed pairs before reaching this point.
@@ -194,7 +179,7 @@ def _two_pad_router(
 ) -> Autorouter:
     """Two-pad USB_D+/USB_D- fixture parameterized by opt-in state."""
     rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
-    nc_kwargs = dict(name="HighSpeed", coupled_routing=coupled_routing)
+    nc_kwargs: dict = {"name": "HighSpeed", "coupled_routing": coupled_routing}
     if extra_class_kwargs:
         nc_kwargs.update(extra_class_kwargs)
     nc = NetClassRouting(**nc_kwargs)
@@ -212,19 +197,47 @@ def _two_pad_router(
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     router.add_component(
         "J1",
         [
-            {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     return router
@@ -239,12 +252,8 @@ class TestPrepassEngagementGate:
 
         routes, _warnings, routed = router.route_diffpair_prepass(config)
 
-        assert routed == set(), (
-            f"Expected pre-pass to skip non-opted-in pair; got routed={routed}"
-        )
-        assert routes == [], (
-            f"Expected no coupled routes from refused pair; got {len(routes)}"
-        )
+        assert routed == set(), f"Expected pre-pass to skip non-opted-in pair; got routed={routed}"
+        assert routes == [], f"Expected no coupled routes from refused pair; got {len(routes)}"
 
     def test_opt_in_enabled_engages_coupled(self):
         router = _two_pad_router(coupled_routing=True)
@@ -252,9 +261,7 @@ class TestPrepassEngagementGate:
 
         routes, _warnings, routed = router.route_diffpair_prepass(config)
 
-        assert 1 in routed and 2 in routed, (
-            f"Expected both diff-pair nets to route; got {routed}"
-        )
+        assert 1 in routed and 2 in routed, f"Expected both diff-pair nets to route; got {routed}"
         assert routes, "Opt-in pair must produce coupled routes"
 
     def test_master_switch_off_short_circuits(self):
@@ -297,19 +304,47 @@ def _usb_cc_router(coupled_routing: bool = True) -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 5.0, "y": 4.5, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_CC1"},
-            {"number": "2", "x": 5.0, "y": 5.5, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_CC2"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 4.5,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_CC1",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": 5.5,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_CC2",
+            },
         ],
     )
     router.add_component(
         "J1",
         [
-            {"number": "1", "x": 25.0, "y": 4.5, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_CC1"},
-            {"number": "2", "x": 25.0, "y": 5.5, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_CC2"},
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": 4.5,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_CC1",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": 5.5,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_CC2",
+            },
         ],
     )
     return router
@@ -337,9 +372,7 @@ class TestSingleEndedRefusalAtEngagement:
             "USB_CC1/USB_CC2 must NOT be coupled-routed (single-ended refusal); "
             f"got routed={routed}"
         )
-        assert routes == [], (
-            "Expected zero coupled routes for refused USB_CC1/USB_CC2 pair"
-        )
+        assert routes == [], "Expected zero coupled routes for refused USB_CC1/USB_CC2 pair"
 
     def test_engagement_helper_directly_refuses_cc_pair(self):
         """Direct helper test mirroring the engagement-time guard."""
@@ -380,10 +413,24 @@ def _three_pad_usb_router(coupled_routing: bool = True) -> Autorouter:
         router.add_component(
             ref,
             [
-                {"number": "1", "x": x, "y": 9.0, "width": 0.4, "height": 0.4,
-                 "net": 1, "net_name": "USB_D+"},
-                {"number": "2", "x": x, "y": 11.0, "width": 0.4, "height": 0.4,
-                 "net": 2, "net_name": "USB_D-"},
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": 9.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": 11.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
             ],
         )
     return router

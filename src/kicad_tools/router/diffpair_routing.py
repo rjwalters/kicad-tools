@@ -1074,9 +1074,7 @@ class DiffPairRouter:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
 
-    def _resolve_engagement(
-        self, pair: DifferentialPair
-    ) -> tuple[bool, str]:
+    def _resolve_engagement(self, pair: DifferentialPair) -> tuple[bool, str]:
         """Resolve whether ``pair`` should engage CoupledPathfinder.
 
         Issue #2638, Epic #2556 Phase 2E: thin wrapper that pulls

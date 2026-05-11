@@ -40,7 +40,7 @@ def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRoutin
     otherwise the pair falls through to the main strategy.
     """
     nc = NetClassRouting(name="HighSpeedOptIn", coupled_routing=True)
-    return {name: nc for name in net_names}
+    return dict.fromkeys(net_names, nc)
 
 
 def _two_pad_router(spacing: float = 0.8) -> Autorouter:

@@ -53,7 +53,7 @@ class DifferentialPairRules:
     impedance: float = 90.0
 
     @classmethod
-    def for_type(cls, pair_type: DifferentialPairType) -> "DifferentialPairRules":
+    def for_type(cls, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get predefined rules for a differential pair type."""
         rules_map = {
             DifferentialPairType.USB2: cls(
@@ -263,7 +263,7 @@ def _lookup_net_class(
     net_name: str,
     net_class_routing: dict | None,
     net_to_class: dict | None,
-) -> "NetClassRouting | None":
+) -> NetClassRouting | None:
     """Resolve the :class:`NetClassRouting` for ``net_name``.
 
     Supports two key conventions in ``net_class_routing``:
@@ -294,7 +294,7 @@ def _lookup_net_class(
 
 
 def should_engage_coupled(
-    pair: "DifferentialPair",
+    pair: DifferentialPair,
     net_class_routing: dict | None,
     net_to_class: dict | None = None,
 ) -> tuple[bool, str]:
