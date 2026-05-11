@@ -36,7 +36,6 @@ from kicad_tools.router.evaluators import (
     compute_hybrid_completion_rate,
 )
 
-
 # ---------------------------------------------------------------------------
 # Lightweight fakes for routes / segments / pads
 # ---------------------------------------------------------------------------

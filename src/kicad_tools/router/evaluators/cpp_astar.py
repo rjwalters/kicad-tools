@@ -212,8 +212,8 @@ class RoutingEvaluatorConfig:
 
 
 def compute_hybrid_completion_rate(
-    router: "Autorouter",
-    routes: "list[Route]",
+    router: Autorouter,
+    routes: list[Route],
     *,
     coord_tol: float = 0.05,
 ) -> float:
@@ -294,7 +294,7 @@ def compute_hybrid_completion_rate(
 
 def _count_connected_pad_pairs(
     pad_objs: list,
-    routes: "list[Route]",
+    routes: list[Route],
     coord_tol: float,
 ) -> int:
     """Count pad-pair connectivity for a single net via union-find.
@@ -502,9 +502,9 @@ class CppAstarRoutingEvaluator:
 
     def _run_inner_ga(
         self,
-        router: "Autorouter",
+        router: Autorouter,
         cfg: RoutingEvaluatorConfig,
-    ) -> "list[Route]":
+    ) -> list[Route]:
         """Invoke the inner evolutionary routing GA on a prepared router.
 
         Imports are local to avoid a hard dependency at module-load time
