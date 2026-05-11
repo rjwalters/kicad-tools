@@ -18,10 +18,11 @@ class TestManufacturerProfiles:
     def test_list_manufacturers(self):
         """Test listing all manufacturers."""
         manufacturers = list_manufacturers()
-        assert len(manufacturers) == 5
+        assert len(manufacturers) == 6
 
         names = {m.name for m in manufacturers}
         assert "JLCPCB" in names
+        assert "JLCPCB Capability Plus" in names
         assert "Seeed Fusion" in names
         assert "PCBWay" in names
         assert "OSHPark" in names

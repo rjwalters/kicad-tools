@@ -6,6 +6,7 @@ and parts library information for various PCB fabrication houses.
 
 Supported manufacturers:
 - JLCPCB (jlcpcb) - Chinese fab with LCSC parts library
+- JLCPCB Capability Plus (jlcpcb-tier1) - JLCPCB advanced tier with via-in-pad
 - Seeed Fusion (seeed) - Chinese fab with OPL parts library
 - PCBWay (pcbway) - Chinese fab with global sourcing
 - OSHPark (oshpark) - US fab, PCB only, per-sq-inch pricing
@@ -36,6 +37,7 @@ from .base import (
 from .dru_generator import generate_dru
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
+from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
 from .oshpark import OSHPARK_PROFILE
 from .pcbway import PCBWAY_PROFILE
 from .seeed import SEEED_PROFILE
@@ -58,6 +60,7 @@ __all__ = [
     # Profiles (for direct access)
     "FLASHPCB_PROFILE",
     "JLCPCB_PROFILE",
+    "JLCPCB_TIER1_PROFILE",
     "SEEED_PROFILE",
     "PCBWAY_PROFILE",
     "OSHPARK_PROFILE",
@@ -67,20 +70,33 @@ __all__ = [
 _PROFILES: dict[str, ManufacturerProfile] = {
     "flashpcb": FLASHPCB_PROFILE,
     "jlcpcb": JLCPCB_PROFILE,
+    "jlcpcb-tier1": JLCPCB_TIER1_PROFILE,
     "seeed": SEEED_PROFILE,
     "pcbway": PCBWAY_PROFILE,
     "oshpark": OSHPARK_PROFILE,
 }
 
 # Aliases for convenience
+#
+# The jlcpcb-tier1 aliases below mirror the router's
+# ``src/kicad_tools/router/mfr_limits.py:_MFR_ALIASES`` table verbatim
+# so the router and DRC registries cannot drift. See
+# ``tests/test_manufacturer_registry_sync.py`` for the invariant check.
 _ALIASES: dict[str, str] = {
     "flash": "flashpcb",
     "jlc": "jlcpcb",
     "lcsc": "jlcpcb",
     "seeed_fusion": "seeed",
+    "seeed-fusion": "seeed",  # mirror router/mfr_limits.MFR_LIMITS canonical key
+    "seeedfusion": "seeed",  # mirror router/mfr_limits._MFR_ALIASES
     "seeedstudio": "seeed",
     "osh": "oshpark",
     "osh_park": "oshpark",
+    # JLCPCB Capability Plus (tier 1) - mirror router's _MFR_ALIASES
+    "jlcpcb_tier1": "jlcpcb-tier1",
+    "jlcpcb-capabilityplus": "jlcpcb-tier1",
+    "jlcpcb_capabilityplus": "jlcpcb-tier1",
+    "jlcpcb-capability-plus": "jlcpcb-tier1",
 }
 
 
