@@ -1,0 +1,796 @@
+"""Match-group length / skew measurement tests (Issue #2688, Epic #2661 Phase 1B).
+
+This module tests:
+
+* :class:`kicad_tools.router.match_group_length.MatchGroupTracker` for the
+  per-group recording + query API on synthetic N-trace (DDR-style) groups.
+* Reference-policy semantics (``None`` -> longest, explicit net id ->
+  "pace-car").
+* Via-length policy (mirrors PR #2654 / PR #2685 -- the same drift-prevention
+  test pattern applied here gates segment summation against duplication).
+* Static :meth:`measure_net_from_pcb` delegation to
+  :class:`DiffPairLengthTracker.measure_net_from_pcb` (the Phase 2.5c sister
+  primitive); a drift-prevention test asserts the two helpers stay byte-for-
+  byte aligned.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from unittest.mock import patch
+
+from kicad_tools.core.types import CopperLayer
+from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.length import LengthTracker
+from kicad_tools.router.match_group_length import (
+    MatchGroup,
+    MatchGroupSource,
+    MatchGroupTracker,
+)
+from kicad_tools.router.primitives import Route, Segment, Via
+
+# =============================================================================
+# Test helpers
+# =============================================================================
+
+
+def _make_straight_route(
+    net_id: int,
+    net_name: str,
+    length_mm: float,
+    layer: Layer = Layer.F_CU,
+) -> Route:
+    """Construct a single-segment horizontal route of the given length."""
+    return Route(
+        net=net_id,
+        net_name=net_name,
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.0,
+                x2=length_mm,
+                y2=0.0,
+                width=0.2,
+                layer=layer,
+                net=net_id,
+                net_name=net_name,
+            )
+        ],
+    )
+
+
+def _make_ddr_group(
+    name: str = "DDR_DATA",
+    net_ids: list[int] | None = None,
+    tolerance: float = 0.5,
+    reference_net_id: int | None = None,
+    source: MatchGroupSource = MatchGroupSource.LEGACY_API,
+) -> MatchGroup:
+    """Construct a :class:`MatchGroup` with sensible DDR-style defaults."""
+    if net_ids is None:
+        net_ids = [100, 101, 102, 103]
+    return MatchGroup(
+        name=name,
+        net_ids=net_ids,
+        tolerance=tolerance,
+        reference_net_id=reference_net_id,
+        source=source,
+    )
+
+
+# =============================================================================
+# 1. MatchGroupTracker -- basic record / query
+# =============================================================================
+
+
+class TestMatchGroupTrackerBasic:
+    """Per-group length / skew measurement on synthetic N-trace groups."""
+
+    def test_synthetic_4_net_ddr_byte_skew(self):
+        """4-net DDR-style group with deliberately mismatched lengths.
+
+        Lengths: ``DQ0=10.0, DQ1=12.0, DQ2=11.5, DQ3=10.5``.
+        Expected skew = ``12.0 - 10.0 = 2.0`` mm.
+        """
+        routes = [
+            _make_straight_route(100, "DQ0", 10.0),
+            _make_straight_route(101, "DQ1", 12.0),
+            _make_straight_route(102, "DQ2", 11.5),
+            _make_straight_route(103, "DQ3", 10.5),
+        ]
+        group = _make_ddr_group()
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group])
+
+        assert tracker.get_group_lengths(group) == {
+            100: 10.0,
+            101: 12.0,
+            102: 11.5,
+            103: 10.5,
+        }
+        assert tracker.get_group_skew(group) == 2.0
+        # Default reference policy: longest in group.
+        assert tracker.get_reference_length(group) == 12.0
+        # Name-keyed cache populated.
+        assert tracker.get_all_skews() == {"DDR_DATA": 2.0}
+
+    def test_symmetric_group_zero_skew(self):
+        """All members equal length -> skew == 0.0."""
+        routes = [
+            _make_straight_route(100, "DQ0", 10.0),
+            _make_straight_route(101, "DQ1", 10.0),
+            _make_straight_route(102, "DQ2", 10.0),
+            _make_straight_route(103, "DQ3", 10.0),
+        ]
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group])
+
+        assert tracker.get_group_skew(group) == 0.0
+        assert tracker.get_reference_length(group) == 10.0
+
+    def test_non_member_routes_ignored(self):
+        """A net that is not a member of any group must not appear in lengths."""
+        unrelated = _make_straight_route(999, "VCC", 100.0)
+        routes = [
+            unrelated,
+            _make_straight_route(100, "DQ0", 5.0),
+            _make_straight_route(101, "DQ1", 5.0),
+        ]
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group])
+
+        assert 999 not in tracker.lengths
+        assert tracker.get_group_skew(group) == 0.0
+
+    def test_record_routes_overwrites_previous_lengths(self):
+        """A second record_routes call refreshes lengths and the skew cache."""
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 10.0),
+                _make_straight_route(101, "DQ1", 11.0),
+            ],
+            [group],
+        )
+        assert tracker.get_group_skew(group) == 1.0
+
+        # Second call with different lengths -> updated skew + cache.
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 5.0),
+                _make_straight_route(101, "DQ1", 7.0),
+            ],
+            [group],
+        )
+        assert tracker.get_group_skew(group) == 2.0
+        assert tracker.get_all_skews() == {"DDR_DATA": 2.0}
+
+
+# =============================================================================
+# 2. Unrouted-member behavior
+# =============================================================================
+
+
+class TestUnroutedMembers:
+    """``get_group_skew`` returns ``None`` when fewer than 2 members routed."""
+
+    def test_fully_unrouted_group_returns_none_skew(self):
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes([], [group])
+
+        assert tracker.get_group_skew(group) is None
+        assert tracker.get_group_lengths(group) == {}
+        assert tracker.get_reference_length(group) is None
+        assert tracker.get_all_skews() == {}
+
+    def test_single_member_routed_returns_none_skew(self):
+        """1 of 4 members routed -> skew is undefined (need >=2 for max-min)."""
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [_make_straight_route(100, "DQ0", 10.0)],
+            [group],
+        )
+
+        assert tracker.get_group_skew(group) is None
+        # Partial-routing group excluded from the bulk cache.
+        assert tracker.get_all_skews() == {}
+
+    def test_partial_routing_two_of_four_returns_skew_but_omits_from_bulk(self):
+        """2 of 4 members routed -> per-group skew is defined, bulk cache excludes."""
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 10.0),
+                _make_straight_route(101, "DQ1", 11.0),
+            ],
+            [group],
+        )
+
+        # Per-group accessor still computes a skew over routed members.
+        assert tracker.get_group_skew(group) == 1.0
+        # Bulk get_all_skews omits the partially-routed group (mirrors
+        # DiffPairLengthTracker.get_all_skews "all halves required" policy).
+        assert tracker.get_all_skews() == {}
+
+
+# =============================================================================
+# 3. Reference-selection policy (Phase 1A length_match_reference)
+# =============================================================================
+
+
+class TestReferencePolicy:
+    """``get_reference_length`` implements longest-default + pace-car override."""
+
+    def test_default_policy_returns_longest(self):
+        """``reference_net_id is None`` -> longest routed length."""
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 10.0),
+                _make_straight_route(101, "DQ1", 12.0),
+                _make_straight_route(102, "DQ2", 11.0),
+                _make_straight_route(103, "DQ3", 10.5),
+            ],
+            [group],
+        )
+
+        assert tracker.get_reference_length(group) == 12.0
+
+    def test_explicit_reference_returns_that_nets_length(self):
+        """An explicit ``reference_net_id`` returns the pace-car's length."""
+        # Pace-car is DQ2 (net 102), which is NOT the longest.
+        group = _make_ddr_group(reference_net_id=102)
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 10.0),
+                _make_straight_route(101, "DQ1", 12.0),  # longest
+                _make_straight_route(102, "DQ2", 11.0),  # pace-car
+                _make_straight_route(103, "DQ3", 10.5),
+            ],
+            [group],
+        )
+
+        # The longest is 12.0 but the pace-car overrides to 11.0.
+        assert tracker.get_reference_length(group) == 11.0
+
+    def test_explicit_reference_unrouted_returns_none(self):
+        """An unrouted explicit reference yields ``None`` regardless of other routes."""
+        # Reference = net 102; we route 100 and 101 but not 102.
+        group = _make_ddr_group(reference_net_id=102)
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 10.0),
+                _make_straight_route(101, "DQ1", 12.0),
+            ],
+            [group],
+        )
+
+        assert tracker.get_reference_length(group) is None
+
+    def test_longest_policy_with_partial_routing(self):
+        """Default policy returns longest of the *routed* subset."""
+        group = _make_ddr_group()
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "DQ0", 7.0),
+                _make_straight_route(101, "DQ1", 9.0),
+                # 102 and 103 unrouted.
+            ],
+            [group],
+        )
+
+        assert tracker.get_reference_length(group) == 9.0
+
+
+# =============================================================================
+# 4. Via-length policy (mirrors PR #2654 Phase 3H semantics)
+# =============================================================================
+
+
+class TestViaLengthPolicy:
+    """Vias contribute to length only when board_thickness_mm is supplied."""
+
+    def test_via_traversal_includes_drilled_length_when_thickness_supplied(self):
+        """2-layer 1.6 mm board: F.Cu -> B.Cu via adds 1.6 mm."""
+        # One member of a 2-net group traverses a via.  Segments total 10 mm,
+        # via adds 1.6 mm -> measured length 11.6 mm.
+        via_route = Route(
+            net=100,
+            net_name="DQ0",
+            segments=[
+                Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=100, net_name="DQ0"),
+                Segment(5.0, 0.0, 10.0, 0.0, 0.2, Layer.B_CU, net=100, net_name="DQ0"),
+            ],
+            vias=[
+                Via(
+                    x=5.0,
+                    y=0.0,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(CopperLayer.F_CU, CopperLayer.B_CU),
+                    net=100,
+                    net_name="DQ0",
+                )
+            ],
+        )
+        plain_route = _make_straight_route(101, "DQ1", 11.6)
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [via_route, plain_route], [group], board_thickness_mm=1.6, num_copper_layers=2
+        )
+
+        lengths = tracker.get_group_lengths(group)
+        assert abs(lengths[100] - 11.6) < 1e-9
+        assert abs(lengths[101] - 11.6) < 1e-9
+        # Skew = 0 because we sized the plain route to match.
+        assert tracker.get_group_skew(group) < 1e-9
+
+    def test_via_returns_zero_length_when_thickness_is_none(self):
+        """When ``board_thickness_mm=None``, vias contribute 0.0 mm (documented)."""
+        via_route = Route(
+            net=100,
+            net_name="DQ0",
+            segments=[
+                Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=100, net_name="DQ0"),
+                Segment(5.0, 0.0, 10.0, 0.0, 0.2, Layer.B_CU, net=100, net_name="DQ0"),
+            ],
+            vias=[
+                Via(
+                    x=5.0,
+                    y=0.0,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(CopperLayer.F_CU, CopperLayer.B_CU),
+                    net=100,
+                    net_name="DQ0",
+                )
+            ],
+        )
+        plain_route = _make_straight_route(101, "DQ1", 10.0)
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        # board_thickness_mm defaults to None.
+        tracker.record_routes([via_route, plain_route], [group])
+
+        lengths = tracker.get_group_lengths(group)
+        # Via contributes 0.0 mm -> measured = 10.0 mm (segments only).
+        assert abs(lengths[100] - 10.0) < 1e-9
+        assert abs(lengths[101] - 10.0) < 1e-9
+        assert tracker.get_group_skew(group) == 0.0
+
+    def test_blind_via_partial_thickness_on_four_layer_stack(self):
+        """4-layer 1.6 mm board: F.Cu -> In1.Cu blind via adds ~0.5333 mm."""
+        via_route = Route(
+            net=100,
+            net_name="DQ0",
+            segments=[
+                Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=100, net_name="DQ0"),
+                Segment(5.0, 0.0, 10.0, 0.0, 0.2, Layer.IN1_CU, net=100, net_name="DQ0"),
+            ],
+            vias=[
+                Via(
+                    x=5.0,
+                    y=0.0,
+                    drill=0.2,
+                    diameter=0.45,
+                    layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+                    net=100,
+                    net_name="DQ0",
+                )
+            ],
+        )
+        expected_via_mm = 1.6 * 1 / 3
+        plain_route = _make_straight_route(101, "DQ1", 10.0 + expected_via_mm)
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [via_route, plain_route],
+            [group],
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        lengths = tracker.get_group_lengths(group)
+        assert abs(lengths[100] - (10.0 + expected_via_mm)) < 1e-9
+        assert abs(lengths[101] - (10.0 + expected_via_mm)) < 1e-9
+        assert tracker.get_group_skew(group) < 1e-9
+
+
+# =============================================================================
+# 5. get_all_skews -- ordering + omission of partial groups
+# =============================================================================
+
+
+class TestGetAllSkews:
+    """Bulk skew query returns deterministic ordering and skips partial groups."""
+
+    def test_returns_skew_for_all_fully_routed_groups(self):
+        group_a = MatchGroup(name="DDR_LO", net_ids=[100, 101], tolerance=0.5)
+        group_b = MatchGroup(name="DDR_HI", net_ids=[200, 201], tolerance=0.5)
+        routes = [
+            _make_straight_route(100, "DQ0", 10.0),
+            _make_straight_route(101, "DQ1", 11.0),
+            _make_straight_route(200, "DQ8", 5.0),
+            _make_straight_route(201, "DQ9", 5.5),
+        ]
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group_a, group_b])
+
+        skews = tracker.get_all_skews()
+        assert skews["DDR_LO"] == 1.0
+        assert abs(skews["DDR_HI"] - 0.5) < 1e-9
+
+    def test_omits_partially_routed_groups(self):
+        group_full = MatchGroup(name="DDR_LO", net_ids=[100, 101], tolerance=0.5)
+        group_partial = MatchGroup(name="DDR_HI", net_ids=[200, 201], tolerance=0.5)
+        routes = [
+            _make_straight_route(100, "DQ0", 10.0),
+            _make_straight_route(101, "DQ1", 11.0),
+            # group_partial only has DQ8 routed; DQ9 missing.
+            _make_straight_route(200, "DQ8", 5.0),
+        ]
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group_full, group_partial])
+
+        skews = tracker.get_all_skews()
+        assert "DDR_LO" in skews
+        assert "DDR_HI" not in skews
+
+    def test_ordering_is_deterministic_alphabetic_by_group_name(self):
+        # Built in non-alphabetic order; get_all_skews must sort by name.
+        group_z = MatchGroup(name="ZZ_BUS", net_ids=[200, 201], tolerance=0.5)
+        group_a = MatchGroup(name="AA_BUS", net_ids=[100, 101], tolerance=0.5)
+        routes = [
+            _make_straight_route(100, "A0", 10.0),
+            _make_straight_route(101, "A1", 10.0),
+            _make_straight_route(200, "Z0", 10.0),
+            _make_straight_route(201, "Z1", 10.0),
+        ]
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group_z, group_a])
+
+        keys = list(tracker.get_all_skews().keys())
+        assert keys == ["AA_BUS", "ZZ_BUS"]
+
+    def test_record_routes_resets_skew_map(self):
+        """A second record_routes call with different groups drops the previous cache."""
+        group1 = MatchGroup(name="G1", net_ids=[100, 101], tolerance=0.5)
+        group2 = MatchGroup(name="G2", net_ids=[200, 201], tolerance=0.5)
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [
+                _make_straight_route(100, "A0", 10.0),
+                _make_straight_route(101, "A1", 11.0),
+            ],
+            [group1],
+        )
+        assert "G1" in tracker.get_all_skews()
+
+        # Second call with a different group set -- previous cache must clear.
+        tracker.record_routes(
+            [
+                _make_straight_route(200, "B0", 5.0),
+                _make_straight_route(201, "B1", 6.0),
+            ],
+            [group2],
+        )
+        skews = tracker.get_all_skews()
+        assert "G2" in skews
+        assert "G1" not in skews
+
+
+# =============================================================================
+# 6. Drift-prevention: segment summation MUST delegate to LengthTracker
+# =============================================================================
+
+
+class TestDriftPreventionSegmentSummation:
+    """``record_routes`` MUST NOT reimplement segment summation -- it delegates.
+
+    The single source of truth for segment summation is
+    :meth:`LengthTracker.calculate_route_length` at ``length.py:138-153``.
+    If a future contributor inlines a dx/dy/sqrt loop in
+    ``match_group_length.py``, this test fails and points to the drift.
+
+    Mirrors the drift-prevention scaffolding in PR #2654 / PR #2685.
+    """
+
+    def test_record_routes_delegates_to_calculate_route_length(self):
+        """``MatchGroupTracker.record_routes`` calls ``LengthTracker.calculate_route_length``."""
+        routes = [
+            _make_straight_route(100, "DQ0", 10.0),
+            _make_straight_route(101, "DQ1", 11.0),
+        ]
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        # Wrap the staticmethod with a side-effect-preserving spy.  If a
+        # future change reimplements segment summation locally, call_count
+        # stays 0 and the assertion fails fast.
+        real_fn = LengthTracker.calculate_route_length
+        with patch.object(
+            LengthTracker,
+            "calculate_route_length",
+            wraps=real_fn,
+        ) as spy:
+            MatchGroupTracker().record_routes(routes, [group])
+
+        # At least one delegation per measured route.
+        assert spy.call_count >= len(routes)
+
+
+# =============================================================================
+# 7. Drift-prevention: measure_net_from_pcb MUST delegate to DiffPairLengthTracker
+# =============================================================================
+
+
+@dataclass
+class _StubSegment:
+    """PCB-schema-shape segment stub.
+
+    Mirrors :class:`kicad_tools.schema.pcb.Segment`: ``start`` / ``end`` are
+    ``tuple[float, float]`` (NOT the router-internal ``x1/y1/x2/y2``).
+    """
+
+    start: tuple[float, float] = (0.0, 0.0)
+    end: tuple[float, float] = (0.0, 0.0)
+    width: float = 0.2
+    layer: str = "F.Cu"
+    net_number: int = 0
+    net_name: str = ""
+    uuid: str = ""
+
+
+@dataclass
+class _StubVia:
+    """PCB-schema-shape via stub (``layers: list[str]``)."""
+
+    position: tuple[float, float] = (0.0, 0.0)
+    size: float = 0.6
+    drill: float = 0.3
+    layers: list[str] = field(default_factory=lambda: ["F.Cu", "B.Cu"])
+    net_number: int = 0
+    net_name: str = ""
+    uuid: str = ""
+
+
+@dataclass
+class _StubPCB:
+    """Minimal PCB stub implementing ``segments_in_net`` + ``vias_in_net``."""
+
+    _segments: list[_StubSegment] = field(default_factory=list)
+    _vias: list[_StubVia] = field(default_factory=list)
+
+    def segments_in_net(self, net_number: int):
+        for seg in self._segments:
+            if seg.net_number == net_number:
+                yield seg
+
+    def vias_in_net(self, net_number: int):
+        for via in self._vias:
+            if via.net_number == net_number:
+                yield via
+
+
+class TestMeasureNetFromPcbDelegation:
+    """``MatchGroupTracker.measure_net_from_pcb`` is a one-line forwarder.
+
+    The drift-prevention contract: Phase 1B must NOT duplicate the body of
+    :meth:`DiffPairLengthTracker.measure_net_from_pcb` (which would re-
+    introduce the exact drift risk that PR #2685 wrote its own drift-
+    prevention test to prevent).  This test asserts:
+
+    1. The forwarder calls the diff-pair primitive (spy assertion).
+    2. The forwarder returns the same value the diff-pair primitive does
+       for the same input (round-trip equivalence).
+    """
+
+    def test_forwarder_delegates_to_diffpair_primitive(self):
+        """``measure_net_from_pcb`` invokes ``DiffPairLengthTracker.measure_net_from_pcb``."""
+        pcb = _StubPCB(
+            _segments=[
+                _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
+            ]
+        )
+
+        real_fn = DiffPairLengthTracker.measure_net_from_pcb
+        with patch.object(
+            DiffPairLengthTracker,
+            "measure_net_from_pcb",
+            wraps=real_fn,
+        ) as spy:
+            MatchGroupTracker.measure_net_from_pcb(pcb, 100)
+
+        assert spy.call_count == 1
+        # The forwarder must pass through all four positional/kw args.
+        spy.assert_called_with(pcb, 100, board_thickness_mm=None, num_copper_layers=2)
+
+    def test_forwarder_returns_same_value_as_diffpair_primitive(self):
+        """For the same input, both helpers produce byte-for-byte identical results.
+
+        This is the contract that lets a Phase 2G DRC producer import either
+        primitive without surprise; if the two ever diverge this test fires.
+        """
+        pcb = _StubPCB(
+            _segments=[
+                _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
+                _StubSegment(start=(10.0, 0.0), end=(10.0, 5.0), net_number=100),
+            ],
+            _vias=[
+                _StubVia(
+                    position=(10.0, 5.0),
+                    layers=["F.Cu", "B.Cu"],
+                    net_number=100,
+                )
+            ],
+        )
+
+        diffpair_result = DiffPairLengthTracker.measure_net_from_pcb(
+            pcb, 100, board_thickness_mm=1.6, num_copper_layers=2
+        )
+        match_group_result = MatchGroupTracker.measure_net_from_pcb(
+            pcb, 100, board_thickness_mm=1.6, num_copper_layers=2
+        )
+
+        assert diffpair_result == match_group_result
+        # Sanity: segments are 10 + 5 = 15 mm, via is 1.6 mm -> 16.6 mm total.
+        assert abs(match_group_result - 16.6) < 1e-9
+
+    def test_forwarder_zero_via_length_when_thickness_none(self):
+        """Without ``board_thickness_mm``, vias contribute 0.0 (mirrors policy)."""
+        pcb = _StubPCB(
+            _segments=[
+                _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
+            ],
+            _vias=[
+                _StubVia(
+                    position=(10.0, 0.0),
+                    layers=["F.Cu", "B.Cu"],
+                    net_number=100,
+                )
+            ],
+        )
+
+        result = MatchGroupTracker.measure_net_from_pcb(pcb, 100)
+        # 10 mm segments + 0 mm via = 10 mm.
+        assert abs(result - 10.0) < 1e-9
+
+
+# =============================================================================
+# 8. MatchGroupSource enum -- members + cross-detector consistency
+# =============================================================================
+
+
+class TestMatchGroupSourceEnum:
+    """The enum members match the Phase 1C detector contract."""
+
+    def test_members_match_curator_spec(self):
+        # Mirrors DetectionSource at diffpair_detection.py:49-54 plus
+        # LEGACY_API for the pre-Epic-#2661 entry point.
+        assert MatchGroupSource.EXPLICIT.value == "explicit"
+        assert MatchGroupSource.KICAD_GROUP.value == "kicad_group"
+        assert MatchGroupSource.SUFFIX.value == "suffix"
+        assert MatchGroupSource.LEGACY_API.value == "legacy_api"
+        # Exactly four members -- no extras snuck in.
+        assert len(MatchGroupSource) == 4
+
+    def test_suffix_member_byte_for_byte_matches_diffpair_detection_source(self):
+        """``MatchGroupSource.SUFFIX`` is byte-for-byte aligned with ``DetectionSource.SUFFIX``.
+
+        Cross-detector consistency -- if either side ever renames the
+        member, this test fires.
+        """
+        from kicad_tools.router.diffpair_detection import DetectionSource
+
+        assert MatchGroupSource.SUFFIX.value == DetectionSource.SUFFIX.value
+
+
+# =============================================================================
+# 9. MatchGroup dataclass -- field defaults + Phase 2F reservation
+# =============================================================================
+
+
+class TestMatchGroupDataclass:
+    """Field defaults match the curator spec; pair_ids reserved for Phase 2F."""
+
+    def test_default_tolerance_matches_phase_1a_accessor_default(self):
+        """``MatchGroup.tolerance`` defaults align with ``effective_length_match_tolerance``.
+
+        The literal ``0.5`` must appear in exactly two places: the
+        dataclass default (here) and
+        :meth:`NetClassRouting.effective_length_match_tolerance`'s
+        ``default=`` arg (Phase 1A).  Any third copy is drift.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+
+        group = MatchGroup(name="G", net_ids=[1, 2])
+        assert group.tolerance == 0.5
+
+        nc = NetClassRouting(name="Default")
+        # If Phase 1A's accessor default drifts away from 0.5 we want
+        # to be loud about it -- the constraint is "must equal".
+        assert nc.effective_length_match_tolerance() == group.tolerance
+
+    def test_pair_ids_defaults_empty(self):
+        """``pair_ids`` is Phase-2F reserved; default is an empty list."""
+        group = MatchGroup(name="G", net_ids=[1, 2])
+        assert group.pair_ids == []
+
+    def test_source_default_is_legacy_api(self):
+        """Constructor-shaped use without a kwarg attributes to LEGACY_API."""
+        group = MatchGroup(name="G", net_ids=[1, 2])
+        assert group.source is MatchGroupSource.LEGACY_API
+
+    def test_pair_ids_members_measured_in_record_routes(self):
+        """``pair_ids`` net halves are measured the same as singles (Phase 1B).
+
+        Phase 2F-facing forward compat: the tracker measures BOTH halves of
+        each pair member, populating ``lengths`` for both net ids.  The
+        pair-aware reduction (which pair-length to use for skew) is left
+        to Phase 2F's tuner.
+        """
+        group = MatchGroup(
+            name="MIPI_LANE",
+            net_ids=[],
+            pair_ids=[(100, 101), (102, 103)],
+        )
+        routes = [
+            _make_straight_route(100, "P0_P", 10.0),
+            _make_straight_route(101, "P0_N", 10.0),
+            _make_straight_route(102, "P1_P", 11.0),
+            _make_straight_route(103, "P1_N", 11.0),
+        ]
+        tracker = MatchGroupTracker()
+        tracker.record_routes(routes, [group])
+
+        # All four halves measured.
+        assert tracker.lengths[100] == 10.0
+        assert tracker.lengths[101] == 10.0
+        assert tracker.lengths[102] == 11.0
+        assert tracker.lengths[103] == 11.0
+        # Skew across all four members = 11 - 10 = 1.0.
+        assert tracker.get_group_skew(group) == 1.0
+
+
+# =============================================================================
+# 10. Exports -- public surface is reachable from kicad_tools.router
+# =============================================================================
+
+
+class TestPublicExports:
+    """The acceptance criterion requires the trio to be importable from the package."""
+
+    def test_match_group_tracker_exported(self):
+        from kicad_tools.router import MatchGroupTracker as Exported
+
+        assert Exported is MatchGroupTracker
+
+    def test_match_group_exported(self):
+        from kicad_tools.router import MatchGroup as Exported
+
+        assert Exported is MatchGroup
+
+    def test_match_group_source_exported(self):
+        from kicad_tools.router import MatchGroupSource as Exported
+
+        assert Exported is MatchGroupSource
