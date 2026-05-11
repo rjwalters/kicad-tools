@@ -12,6 +12,8 @@ This module tests:
 
 from __future__ import annotations
 
+import pytest
+
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.router.diffpair import (
     DifferentialPair,
@@ -579,3 +581,161 @@ class TestUpdateDiffpairSkewProductionPath:
         # P = 10 mm segments + 1.6 mm via = 11.6 mm; N = 10 mm.
         # Skew = 1.6 mm.
         assert abs(tracker.get_skew(dp) - 1.6) < 1e-9
+
+
+# =============================================================================
+# 8. Drift-prevention gate -- _finalize_routing wired into route_all_* strategies
+#    (Issue #2657 / Epic #2556 Phase 3H-cont)
+# =============================================================================
+
+
+def _build_synthetic_usb_pair_autorouter():
+    """Build a minimal Autorouter with a USB_D+/USB_D- pair routable end-to-end.
+
+    Two components (``J1`` and ``U1``) sit on opposite sides of a small
+    20x20 mm board, with matching ``USB_D+`` / ``USB_D-`` nets.  Suffix
+    detection (``diffpair_detection.detect_diff_pairs``) picks them up
+    as a pair, so any strategy that wires ``_finalize_routing``
+    correctly will populate ``diffpair_length_tracker.get_all_skews()``.
+    """
+    from kicad_tools.router.core import Autorouter
+
+    ar = Autorouter(width=20.0, height=20.0)
+    ar.add_component(
+        "J1",
+        [
+            {
+                "number": "1", "x": 2.0, "y": 10.0,
+                "width": 0.5, "height": 0.5,
+                "net": 1, "net_name": "USB_D+",
+            },
+            {
+                "number": "2", "x": 2.0, "y": 12.0,
+                "width": 0.5, "height": 0.5,
+                "net": 2, "net_name": "USB_D-",
+            },
+        ],
+    )
+    ar.add_component(
+        "U1",
+        [
+            {
+                "number": "1", "x": 18.0, "y": 10.0,
+                "width": 0.5, "height": 0.5,
+                "net": 1, "net_name": "USB_D+",
+            },
+            {
+                "number": "2", "x": 18.0, "y": 12.0,
+                "width": 0.5, "height": 0.5,
+                "net": 2, "net_name": "USB_D-",
+            },
+        ],
+    )
+    return ar
+
+
+class TestFinalizeRoutingDriftPrevention:
+    """Drift-prevention gate -- ``_finalize_routing`` wired into every strategy.
+
+    Without this, an added strategy that bypasses ``_finalize_routing``
+    would silently regress: its routes would land on ``self.routes`` but
+    ``diffpair_length_tracker.get_all_skews()`` would stay empty.  The
+    parametrized cases below pin the contract for each ``route_all_*``
+    entry point so a missed wiring fails the suite immediately.
+
+    See also: Issue #2587 (Phase 1C-cont) dormant-signal precedent and
+    PR #2654's docstring guidance on the zero-via-length default.
+    """
+
+    @pytest.mark.parametrize(
+        "strategy_name",
+        [
+            "route_all",
+            "route_all_negotiated",
+            "route_all_interleaved",
+        ],
+    )
+    def test_strategy_populates_skew_tracker(self, strategy_name):
+        ar = _build_synthetic_usb_pair_autorouter()
+
+        # Each strategy is a top-level entry point on Autorouter that
+        # must end with a _finalize_routing call.  We invoke through
+        # getattr so the parametrize-id reflects which strategy regressed.
+        strategy = getattr(ar, strategy_name)
+        if strategy_name == "route_all_negotiated":
+            # max_iterations=2 keeps the test fast; the contract is
+            # invocation-shape, not convergence.
+            strategy(max_iterations=2)
+        else:
+            strategy()
+
+        # Acceptance criterion 1: get_all_skews() returns a non-empty
+        # dict for a board with at least one diff pair routed.
+        skews = ar.diffpair_length_tracker.get_all_skews()
+        assert skews, (
+            f"{strategy_name}: diffpair_length_tracker.get_all_skews() is empty -- "
+            f"_finalize_routing is not being invoked on this strategy's return path"
+        )
+
+        # Acceptance criterion 2: the USB pair skew is a real float
+        # (not None).  For these symmetric synthetic routes, the
+        # measured skew is small; the contract is "non-None float",
+        # not a specific value.
+        assert ("USB_D+", "USB_D-") in skews
+        skew_mm = skews[("USB_D+", "USB_D-")]
+        assert isinstance(skew_mm, float)
+        assert skew_mm >= 0.0  # |L_p - L_n| is always non-negative
+
+    def test_finalize_routing_idempotent(self):
+        """``_finalize_routing`` can be called multiple times safely.
+
+        ``record_routes`` overwrites previously-recorded lengths, and
+        ``update_diffpair_skew`` re-derives ``detected_pairs`` each call
+        so repeated invocations leave the tracker in the same state as
+        a single invocation (modulo non-determinism in detection, which
+        is deterministic for these synthetic inputs).
+        """
+        ar = _build_synthetic_usb_pair_autorouter()
+        ar.route_all()
+        first_skew = dict(ar.diffpair_length_tracker.get_all_skews())
+
+        # Direct second invocation must not corrupt the tracker.
+        ar._finalize_routing()
+        second_skew = dict(ar.diffpair_length_tracker.get_all_skews())
+
+        assert first_skew == second_skew
+        assert first_skew  # non-empty
+
+    def test_finalize_routing_noop_when_no_pairs(self):
+        """When no diff pairs are present, ``_finalize_routing`` is a no-op.
+
+        Documents the contract that ``_finalize_routing`` does NOT
+        spuriously populate the tracker for boards without diff pairs.
+        """
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=20.0, height=20.0)
+        ar.add_component(
+            "J1",
+            [
+                {
+                    "number": "1", "x": 2.0, "y": 10.0,
+                    "width": 0.5, "height": 0.5,
+                    "net": 1, "net_name": "SIG_A",
+                },
+            ],
+        )
+        ar.add_component(
+            "U1",
+            [
+                {
+                    "number": "1", "x": 18.0, "y": 10.0,
+                    "width": 0.5, "height": 0.5,
+                    "net": 1, "net_name": "SIG_A",
+                },
+            ],
+        )
+        ar.route_all()
+
+        # No pairs -> no skews recorded.  Tracker stays empty.
+        assert ar.diffpair_length_tracker.get_all_skews() == {}
