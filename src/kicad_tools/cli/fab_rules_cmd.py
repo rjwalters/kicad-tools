@@ -226,6 +226,9 @@ def cmd_show(args):
     print(f"  Min via drill:      {fmt.format(rules.min_via_drill_mm)}")
     print(f"  Min via diameter:   {fmt.format(rules.min_via_diameter_mm)}")
     print(f"  Min annular ring:   {fmt.format(rules.min_annular_ring_mm)}")
+    # Capability flag: surface via-in-pad support so users see the
+    # tier-1 vs base difference at a glance (issue #2635).
+    print(f"  Via-in-pad support: {'yes' if rules.via_in_pad_supported else 'no'}")
 
     print(f"\n{'Holes':─^40}")
     print(f"  Min hole diameter:  {fmt.format(rules.min_hole_diameter_mm)}")

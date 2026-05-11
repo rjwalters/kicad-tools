@@ -1,8 +1,14 @@
 # PCBWay Design Rules Configuration
 # Source: https://www.pcbway.com/capabilities.html
-# Last verified: 2026-01-16
+# Last verified: 2026-05-10
 #
 # All measurements in millimeters unless otherwise noted.
+#
+# PCBWay offers via-in-pad (epoxy-filled, plated-over) as a standard
+# option, so ``via_in_pad_supported: true`` on every stackup block.
+# Mirrors the router's MFR_PCBWAY.via_in_pad_supported in
+# router/mfr_limits.py (drift-prevention test in
+# tests/test_manufacturer_registry_sync.py enforces parity).
 
 design_rules:
   2layer_1oz:
@@ -23,6 +29,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
 
   2layer_2oz:
     min_trace_width_mm: 0.2         # 8 mil for 2oz
@@ -42,6 +49,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
 
   4layer_1oz:
     min_trace_width_mm: 0.1016      # 4 mil
@@ -61,6 +69,7 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -80,3 +89,4 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
