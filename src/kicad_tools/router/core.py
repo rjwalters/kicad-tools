@@ -2224,6 +2224,146 @@ class Autorouter:
         return self._congestion_estimator
 
     # ------------------------------------------------------------------
+    # Impedance-driven sizing activation
+    # (Issue #2672 / Epic #2556 Phase 3K-cont)
+    # ------------------------------------------------------------------
+
+    def _resolve_impedance_for_net_classes(self) -> None:
+        """Apply impedance-driven sizing to ``self.net_class_map`` in place.
+
+        Issue #2672 / Epic #2556 Phase 3K-cont: PR #2655 (Phase 3K /
+        Issue #2650) landed :func:`~router.diffpair_impedance.resolve_impedance_for_net_classes`,
+        but no production call site invoked it -- the same dormant-signal
+        pattern as #2587 (Phase 1C-cont), #2652 (Phase 2.5b), and #2657
+        (Phase 3H-cont).  This helper closes the gap.
+
+        When any :class:`~router.rules.NetClassRouting` in
+        :attr:`net_class_map` has ``target_diff_impedance`` or
+        ``target_single_impedance`` set, the resolver is invoked to
+        replace those classes with copies whose ``trace_width`` /
+        ``intra_pair_clearance`` reflect the physics-computed values.
+        Downstream routing components (pathfinder, cpp_backend, escape
+        router, sparse, diffpair_routing) continue to read
+        ``net_class.trace_width`` and
+        :meth:`~router.rules.NetClassRouting.effective_intra_pair_clearance`
+        unchanged -- they automatically pick up the resolved values
+        because the resolver writes through the same fields.
+
+        Pre-conditions for the resolver to engage:
+
+        * ``self._stackup`` is not ``None`` -- the resolver needs a real
+          stackup to drive the physics solver.  Without one the call is
+          skipped (logged at debug level) and the per-class literals
+          pass through unchanged.
+        * At least one net class has ``target_*_impedance`` set.  When
+          no class has a target, the resolver short-circuits each entry
+          back to its literal sizing; this method's net effect is a
+          byte-for-byte no-op (modulo the dict identity which the helper
+          preserves for non-target classes).
+
+        Diagnostics (stackup-mismatch warnings, clamp errors) are
+        surfaced through ``logger`` -- the same channel
+        ``_prepare_routing`` already uses for its detection-failure /
+        backwards-compatibility paths.
+
+        Idempotent: re-running the helper on a map whose targets have
+        already been resolved produces the same widths (the resolver is
+        deterministic for a fixed stackup + targets), so multi-pass
+        routing strategies that call ``_prepare_routing`` repeatedly
+        remain safe.
+
+        See ``_prepare_routing`` for the integration point (step 0,
+        before the partner-name ``dataclasses.replace`` loop).
+        """
+        if self._stackup is None:
+            # No stackup -> resolver would short-circuit anyway.  Skip
+            # entirely to avoid the import cost on the hot routing path
+            # for non-impedance-controlled boards.
+            return
+
+        try:
+            from .diffpair_impedance import resolve_impedance_for_net_classes
+        except ImportError:
+            return
+
+        # Build a manufacturer-shaped DesignRules for the resolver's
+        # min-width / min-clearance clamping.  Prefer the canonical
+        # manufacturer profile when ``self.rules.manufacturer`` is set,
+        # so JLCPCB / OSH Park / Seeed users get the real fab minimums.
+        # Otherwise synthesize a minimal adapter from the router's own
+        # trace_width / trace_clearance as the safe clamp floor.
+        mfr_rules = self._build_manufacturer_design_rules()
+        if mfr_rules is None:
+            return
+
+        try:
+            resolved, mismatch_warnings, clamp_errors = resolve_impedance_for_net_classes(
+                self.net_class_map,
+                self._stackup,
+                mfr_rules,
+                layer="F.Cu",
+            )
+        except Exception:  # pragma: no cover - defensive
+            # Resolver failure must not break routing -- mirrors the
+            # detect_diff_pairs Exception path immediately below.
+            logger.exception("impedance-driven sizing failed; using per-class literals")
+            return
+
+        self.net_class_map = resolved
+
+        # Surface diagnostics through logger.  Mirrors the existing
+        # warning channel used by _prepare_routing / _finalize_routing
+        # for non-fatal events.
+        for warn in mismatch_warnings:
+            logger.warning("impedance-driven sizing: %s", warn.message)
+        for err in clamp_errors:
+            logger.error("impedance-driven sizing clamp: %s", err.message)
+
+    def _build_manufacturer_design_rules(self):
+        """Construct a manufacturer ``DesignRules`` for the impedance
+        resolver, prioritizing the canonical profile when available.
+
+        The resolver only reads ``min_trace_width_mm`` and
+        ``min_clearance_mm``, but a real ``DesignRules`` instance
+        requires several other fields; this helper picks reasonable
+        defaults from ``self.rules`` so callers without an explicit
+        ``manufacturer`` setting still get a usable adapter.
+
+        Returns:
+            A :class:`kicad_tools.manufacturers.DesignRules` instance,
+            or ``None`` when the manufacturers module is unavailable.
+        """
+        try:
+            from kicad_tools.manufacturers import get_profile
+            from kicad_tools.manufacturers.base import DesignRules as MfrDesignRules
+        except ImportError:
+            return None
+
+        mfr_id = getattr(self.rules, "manufacturer", None)
+        if mfr_id:
+            try:
+                num_layers = len(self.layer_stack.layers) if self.layer_stack is not None else 2
+                return get_profile(mfr_id).get_design_rules(layers=num_layers)
+            except (ValueError, KeyError, AttributeError):
+                # Unknown manufacturer or missing rules -> fall through
+                # to the synthesized adapter below.
+                pass
+
+        # Synthesize a minimal adapter using the router's own design
+        # rules as the safe clamp floor.  The resolver clamps the
+        # computed width / gap to these minimums.
+        try:
+            return MfrDesignRules(
+                min_trace_width_mm=self.rules.trace_width,
+                min_clearance_mm=self.rules.trace_clearance,
+                min_via_drill_mm=self.rules.via_drill,
+                min_via_diameter_mm=self.rules.via_diameter,
+                min_annular_ring_mm=0.1,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    # ------------------------------------------------------------------
     # Diff-pair partner activation (Issue #2587 / Epic #2556 Phase 1C-cont)
     # ------------------------------------------------------------------
 
@@ -2273,6 +2413,21 @@ class Autorouter:
         returns ``None`` because no ``diffpair_partner`` is set anywhere,
         which is bit-for-bit identical to pre-Phase-1C behavior.
         """
+        # 0. Engage impedance-driven sizing (Issue #2672 / Epic #2556
+        #    Phase 3K-cont).  When any net class declares
+        #    ``target_diff_impedance`` or ``target_single_impedance``,
+        #    resolve the impedance-driven trace width / intra-pair gap
+        #    from physics and replace those classes in ``self.net_class_map``
+        #    with copies carrying the resolved sizing.  This is a no-op
+        #    when no class has a target set, when no stackup is available,
+        #    or when the physics solver cannot reach a solution -- in all
+        #    those cases the per-class literals pass through unchanged.
+        #
+        #    MUST run before the partner-wiring loop below so the partner
+        #    ``dataclasses.replace`` builds on the impedance-resolved
+        #    class instead of clobbering the resolver's output.
+        self._resolve_impedance_for_net_classes()
+
         # 1. Build name -> id reverse map from self.net_names.  First
         #    occurrence wins (matches diffpair_detection._name_to_id_map
         #    behavior).  Skip empty names to avoid collisions.
