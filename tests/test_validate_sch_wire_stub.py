@@ -20,7 +20,6 @@ from kicad_tools.validate.sch_wire_stub import (
     find_wire_stubs,
 )
 
-
 # ---------------------------------------------------------------------------
 # Synthetic schematic helpers (parallel to the orphan-label tests)
 # ---------------------------------------------------------------------------
@@ -316,6 +315,73 @@ class TestWireStubDetection:
         )
         assert len(findings_fine) == 1
         assert findings_fine[0].grid_steps_short == 1
+
+
+class TestWireStubSharedCorners:
+    """Regression: two wires meeting at a corner share an endpoint.
+
+    The original implementation filtered the "other wires' endpoints"
+    set by position, which accidentally dropped legitimate corner
+    connections from other wires.  An L-shaped path consisting of two
+    perpendicular wires meeting at the corner was therefore reported
+    as a wire stub for both endpoints of both wires.  The fix tracks
+    owning-wire identity by index instead of by position.
+    """
+
+    def test_l_shaped_path_to_pin_not_flagged(self):
+        """Two wires forming a corner: horizontal segment reaches the
+        pin, vertical segment connects elsewhere.  The shared corner
+        endpoint is connected via the vertical wire, so neither wire
+        should be flagged.
+        """
+        lib = _FakeLibSymbol({"1": (101.6, 119.38)})
+        flg = _symbol("#FLG03", "power:PWR_FLAG")
+        horiz = _wire(93.98, 119.38, 101.6, 119.38)  # reaches pin
+        vert = _wire(93.98, 107.95, 93.98, 119.38)   # joins corner
+        # The (93.98, 107.95) endpoint needs an anchor so it doesn't
+        # fire the rule on its own — give it a label.
+        lbl = _label_at(93.98, 107.95)
+        sheet = _sheet(
+            symbols=[flg], wires=[horiz, vert], global_labels=[lbl]
+        )
+
+        findings = find_wire_stubs(
+            sheets=[("power.kicad_sch", sheet)],
+            lib_symbols={"power:PWR_FLAG": lib},
+        )
+
+        assert findings == []
+
+    def test_three_wires_at_shared_corner_not_flagged(self):
+        """T-junction of three wires meeting at the corner pin.  Two
+        approach from perpendicular directions; the third reaches the
+        pin.  None should fire.
+        """
+        lib = _FakeLibSymbol({"1": (50.0, 50.0)})
+        u = _symbol("U1", "Device:Test")
+        # All three wires share the (50.0, 50.0) corner = pin position.
+        horiz = _wire(40.0, 50.0, 50.0, 50.0)  # endpoint at pin
+        vert_up = _wire(50.0, 50.0, 50.0, 60.0)  # endpoint at pin
+        # vert_down ends 1 grid short — should fire normally
+        vert_down = _wire(50.0, 50.0, 50.0, 47.46)
+        # Anchor the dangling ends with labels so they don't fire
+        lbl_left = _label_at(40.0, 50.0)
+        lbl_up = _label_at(50.0, 60.0)
+        sheet = _sheet(
+            symbols=[u],
+            wires=[horiz, vert_up, vert_down],
+            global_labels=[lbl_left, lbl_up],
+        )
+
+        findings = find_wire_stubs(
+            sheets=[("test.kicad_sch", sheet)],
+            lib_symbols={"Device:Test": lib},
+        )
+
+        # vert_down (50.0, 47.46) is 1 grid short — flagged.
+        # horiz and vert_up both reach pin (50.0, 50.0) — not flagged.
+        assert len(findings) == 1
+        assert findings[0].dangling_endpoint == (50.0, 47.46)
 
 
 class TestWireStubDefaults:
