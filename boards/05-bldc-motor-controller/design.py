@@ -926,11 +926,17 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #
     # Note on routing density: the DCA package places half-bridge pins
     # (BST/GH/GL/SH/SL for A,B,C, pins 34-48) along the lower-right of the
-    # device, while the H-bridge MOSFETs sit south at y=68/76.  The router
-    # achieves ~58-77% on this geometry with the C++ negotiated backend at
-    # the requested ``--timeout 240 --layers 2`` budget; runs are
-    # deterministic but the saved-partial heuristic can vary 2-3 nets
-    # between iterations (issue #2532 follow-up).
+    # device, while the H-bridge MOSFETs sit south at y=68/76.  Historically
+    # (as of #2532 follow-up) the router achieved ~58-77% on this geometry
+    # with the C++ negotiated backend at ``--timeout 240 --layers 2``; the
+    # 2026-05-08 net-count growth (26 -> 35 after the block-refactor wave
+    # added PWM_AH/AL/BH/BL/CH/CL + GATE_DRV_AH/BH/CH + R20-R22/R30-R32/
+    # C30-C32) plus the per-net A* regression tracked in #2681 currently
+    # reduce that completion to 6% under the same default flags.  Placement
+    # has been re-tuned in issue #2682 (R20-R22 nudged north 2mm, Hall
+    # filter R30-R32/C30-C32 shifted south 3mm) to clear known component-
+    # courtyard overlaps and open fan-out corridors; the router-side fix
+    # is tracked separately in #2681.
     U3_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 50)  # DRV8301 HTSSOP-56
     C12_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 47)  # Bootstrap A
     C13_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 53)  # Bootstrap B
