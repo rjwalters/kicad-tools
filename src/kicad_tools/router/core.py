@@ -7,7 +7,7 @@ import math
 import os
 import random
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,6 +48,7 @@ from .bus_routing import BusRouter
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
+from .diffpair_length_tuning import DiffPairTuneResult
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
@@ -7013,6 +7014,135 @@ class Autorouter:
             net_names=self.net_names,
             verbose=verbose,
         )
+
+    def apply_diffpair_length_tuning(
+        self,
+        detected_pairs: list,
+        verbose: bool = True,
+    ) -> dict[tuple[str, str], DiffPairTuneResult]:
+        """Apply per-pair length-match (skew) tuning to detected diff pairs.
+
+        Sibling to :meth:`apply_length_tuning` (Issue #2648, Epic #2556
+        Phase 3I).  For each detected pair whose net class is flagged
+        ``length_critical=True`` AND whose measured skew exceeds the
+        per-class ``effective_skew_tolerance``, attempt up to N=3
+        serpentine insertions on the shorter half until the skew is
+        within tolerance.  Outer-normal-only bulges; per-insertion DRC
+        self-check with byte-for-byte rollback.
+
+        Args:
+            detected_pairs: List of
+                :class:`~kicad_tools.router.diffpair_detection.DetectedPair`
+                objects from
+                :func:`~kicad_tools.router.diffpair_detection.detect_diff_pairs`.
+                Pairs whose net class is not length-critical are skipped
+                in-place via the engagement gate.
+            verbose: Whether to print progress information.
+
+        Returns:
+            ``{(p_net_name, n_net_name): DiffPairTuneResult}`` for each
+            pair processed (including those skipped by the engagement
+            gate -- the result's ``reason`` discriminates).
+        """
+        from .diffpair_length_tuning import tune_diff_pair_skew
+
+        results: dict[tuple[str, str], DiffPairTuneResult] = {}
+
+        # Build routes_by_net lookup from the autorouter's current state.
+        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+
+        # Update the skew tracker so the post-tuning results are queryable.
+        # Use the layer-stack count when available, else default to 2.
+        if self.layer_stack is not None:
+            num_layers = len(self.layer_stack.layers)
+        else:
+            num_layers = 2
+        self._diffpair_length_tracker.record_routes(
+            routes=self.routes,
+            detected_pairs=detected_pairs,
+            num_copper_layers=num_layers,
+        )
+
+        for dp in detected_pairs:
+            # Default per-class info.  When a net class is not configured for
+            # this pair (the common synthetic-test case) the tuner is
+            # invoked with the module-level default tolerance and the
+            # tolerance is matched against the manufacturer minimum
+            # clearance.
+            tolerance_mm = 0.5
+            intra_pair_clearance_mm = self.rules.trace_clearance
+            length_critical = True
+
+            p_name = dp.pair.positive.net_name
+            n_name = dp.pair.negative.net_name
+            net_class = self._resolve_net_class_for_pair(dp)
+            if net_class is not None:
+                tolerance_mm = net_class.effective_skew_tolerance(0.5)
+                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                length_critical = net_class.length_critical
+
+            p_route, n_route, result = tune_diff_pair_skew(
+                dp,
+                routes_by_net,
+                tolerance_mm=tolerance_mm,
+                intra_pair_clearance_mm=intra_pair_clearance_mm,
+                length_critical=length_critical,
+            )
+
+            # Commit any new Route references back into self.routes and the
+            # working ``routes_by_net`` map so the next pair's neighbor
+            # self-check sees the updated geometry.
+            if p_route is not None and dp.pair.positive.net_id in routes_by_net:
+                if p_route is not routes_by_net[dp.pair.positive.net_id]:
+                    routes_by_net[dp.pair.positive.net_id] = p_route
+                    for i, r in enumerate(self.routes):
+                        if r.net == dp.pair.positive.net_id:
+                            self.routes[i] = p_route
+                            break
+            if n_route is not None and dp.pair.negative.net_id in routes_by_net:
+                if n_route is not routes_by_net[dp.pair.negative.net_id]:
+                    routes_by_net[dp.pair.negative.net_id] = n_route
+                    for i, r in enumerate(self.routes):
+                        if r.net == dp.pair.negative.net_id:
+                            self.routes[i] = n_route
+                            break
+
+            results[(p_name, n_name)] = result
+
+            if verbose:
+                summary = f"  {p_name}/{n_name}: {result.reason}"
+                if result.inserts_applied:
+                    summary += (
+                        f" ({result.inserts_applied} inserts, "
+                        f"skew {result.skew_before_mm:.3f}mm -> "
+                        f"{result.skew_after_mm:.3f}mm)"
+                    )
+                print(summary)
+
+        # Refresh the skew tracker after tuning so downstream consumers
+        # (e.g. the Phase 3J DRC rule) see the updated lengths.
+        self._diffpair_length_tracker.record_routes(
+            routes=self.routes,
+            detected_pairs=detected_pairs,
+            num_copper_layers=num_layers,
+        )
+        return results
+
+    def _resolve_net_class_for_pair(self, detected_pair) -> Any | None:
+        """Best-effort lookup of the NetClassRouting for a detected pair.
+
+        Returns the NetClassRouting keyed by the positive net name in
+        ``self.net_class_map`` (the diff-pair convention is that both
+        halves share the same class).  When the positive net is not in
+        the class map (e.g. synthetic-test boards that don't configure
+        net classes), returns ``None`` and the caller falls back to
+        default thresholds.
+        """
+        net_class_map = getattr(self, "net_class_map", None) or {}
+        if not net_class_map:
+            return None
+        p_name = detected_pair.pair.positive.net_name
+        return net_class_map.get(p_name)
 
     @property
     def length_tracker(self) -> LengthTracker:
