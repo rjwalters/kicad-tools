@@ -1660,7 +1660,22 @@ def route_with_layer_escalation(
         # Issue #2412: Early termination — zero overflow means failures
         # are placement/topology issues, not congestion.  Adding layers
         # cannot help when there is no congestion to relieve.
-        if overflow == 0 and nets_routed < nets_to_route:
+        #
+        # Issue #2634: This heuristic was calibrated for ``route_all_negotiated``,
+        # which deliberately allows overlapping tracks and records overflow as
+        # a first-class congestion signal.  The basic A*, monte-carlo, and
+        # evolutionary strategies never plant overlaps, so ``grid.get_total_overflow()``
+        # is 0 by construction regardless of true congestion.  Reading 0 from
+        # those strategies as "no congestion" is wrong, and historically it
+        # broke after attempt #1 even with ``--auto-layers`` on (see the
+        # chorus-test-revA fixture, which negotiated escalates 2L -> 4L while
+        # MC stopped at 2L=42%).  Skip the heuristic for those strategies.
+        strategies_without_overflow_signal = {"monte-carlo", "basic", "evolutionary"}
+        if (
+            overflow == 0
+            and nets_routed < nets_to_route
+            and args.strategy not in strategies_without_overflow_signal
+        ):
             if not quiet:
                 flush_print(
                     "  Escalation stopped: failures are not congestion-related (overflow=0)"
@@ -1989,6 +2004,9 @@ def route_with_layer_escalation(
                 pcb_file=args.pcb,
                 nets_to_route_ids=_multi_pad_ids,
                 single_pad_count=getattr(final_result, "single_pad_count", 0),
+                # Issue #2634: auto-layer escalation already ran in this code
+                # path; suppress the redundant "Try --auto-layers" recommendation.
+                auto_layers_attempted=True,
             )
 
     if final_result.success:
@@ -3041,6 +3059,10 @@ def route_with_combined_escalation(
                 pcb_file=args.pcb,
                 nets_to_route_ids=_multi_pad_ids,
                 single_pad_count=getattr(final_result, "single_pad_count", 0),
+                # Issue #2634: combined escalation includes auto-layer escalation
+                # as one of its axes; suppress the redundant "Try --auto-layers"
+                # recommendation.
+                auto_layers_attempted=True,
             )
 
     if final_result.success:

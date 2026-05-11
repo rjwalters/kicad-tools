@@ -980,6 +980,152 @@ class TestEarlyTermination:
 
         assert result.overflow == 0
 
+    # Issue #2634: monte-carlo (and basic / evolutionary) strategies never
+    # accumulate a meaningful overflow signal because they don't plant
+    # overlapping tracks like the negotiated congestion router does.  Reading
+    # ``overflow == 0`` from them caused the zero-overflow heuristic above to
+    # fire after attempt 1, killing escalation even when ``--auto-layers`` was
+    # explicitly on.
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_monte_carlo_skips_zero_overflow_heuristic(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """MC + auto-layers must escalate past 2L even with overflow=0.
+
+        Regression for Issue #2634: ``run_monte_carlo`` calls basic A* per trial,
+        which never accumulates ``grid.get_total_overflow()``.  The zero-overflow
+        early-termination heuristic (calibrated for negotiated) used to fire
+        after attempt 1 and break the loop.  After the fix, MC trials no longer
+        trigger that heuristic and the escalation loop tries at least one
+        higher layer count.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Router: 2/3 nets routed every attempt, overflow=0 (MC has no signal)
+        # and nets_routed increases just enough between attempts to defeat the
+        # *stagnation* heuristic — we want to confirm the *zero-overflow*
+        # heuristic doesn't fire on its own.
+        attempt_results = [
+            (1, 3, 0),  # 2L: 1/3 routed, overflow=0
+            (2, 3, 0),  # 4L sig_gnd_pwr_sig: 2/3, overflow=0 (improved)
+            (3, 3, 0),  # 4L all_signal: 3/3, overflow=0 (success)
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            nets_routed, nets_to_route, overflow = attempt_results[
+                min(call_count, len(attempt_results) - 1)
+            ]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        args = self._make_args(strategy="monte-carlo")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                with patch("kicad_tools.router.show_routing_summary"):
+                    with patch(
+                        "kicad_tools.cli.route_cmd.run_post_route_drc",
+                        return_value=False,
+                    ):
+                        route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Must attempt at least 2 layer configurations.  Pre-fix this was 1 —
+        # the zero-overflow heuristic broke the loop after attempt 1.
+        assert call_count >= 2, (
+            f"Expected >=2 attempts with --strategy monte-carlo (zero-overflow "
+            f"heuristic must NOT fire on MC), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_basic_strategy_skips_zero_overflow_heuristic(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """``--strategy basic`` also escalates past 2L despite overflow=0.
+
+        Basic A* never plants overlaps; the same heuristic exemption applies.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        attempt_results = [
+            (1, 3, 0),
+            (2, 3, 0),
+            (3, 3, 0),
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            nets_routed, nets_to_route, overflow = attempt_results[
+                min(call_count, len(attempt_results) - 1)
+            ]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        args = self._make_args(strategy="basic")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                with patch("kicad_tools.router.show_routing_summary"):
+                    with patch(
+                        "kicad_tools.cli.route_cmd.run_post_route_drc",
+                        return_value=False,
+                    ):
+                        route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        assert call_count >= 2, (
+            f"Expected >=2 attempts with --strategy basic, got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_negotiated_still_uses_zero_overflow_heuristic(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """The zero-overflow heuristic still fires for ``--strategy negotiated``.
+
+        Regression guard: Issue #2634 must NOT change the negotiated behaviour
+        that Issue #2412 added.  Negotiated reading overflow=0 with incomplete
+        routing should still break after attempt 1.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        router = self._make_mock_router(nets_routed=2, nets_to_route=3, overflow=0)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args(strategy="negotiated")
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Negotiated: zero-overflow heuristic still fires after attempt 1
+        assert call_count == 1, (
+            f"Expected 1 attempt with --strategy negotiated (zero-overflow early "
+            f"stop preserved), got {call_count}"
+        )
+
 
 class TestPristineStatePerAttempt:
     """Tests for Issue #2396: pristine state per layer-escalation attempt.

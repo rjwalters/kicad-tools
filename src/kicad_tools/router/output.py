@@ -26,6 +26,7 @@ def show_routing_summary(
     pcb_file: str | None = None,
     nets_to_route_ids: set[int] | None = None,
     single_pad_count: int = 0,
+    auto_layers_attempted: bool = False,
 ) -> None:
     """Show comprehensive routing summary with successes, failures, and suggestions.
 
@@ -50,6 +51,11 @@ def show_routing_summary(
             When ``None``, the function falls back to ``router.nets``
             (multi-pad nets only) so user-skipped power/pour nets are not
             mis-reported as failed routes (Issue #2498).
+        auto_layers_attempted: If True, the layer-escalation loop already ran
+            (i.e. ``--auto-layers`` was on, which is the default).  Recommending
+            ``--auto-layers`` again in that case is misleading — Issue #2634.
+            Callers from outside the escalation loop should leave this False so
+            users still see the suggestion.
     """
     if quiet:
         return
@@ -460,16 +466,36 @@ def show_routing_summary(
                 f"RECOMMENDATION: {failed_count}/{nets_to_route} nets "
                 f"({failure_pct:.0f}%) failed on {num_layers} layers."
             )
-            print(f"  Try: kct route{pcb_arg} --auto-layers")
-            print(f"  Or:  kct route{pcb_arg} --layers 4")
+            # Issue #2634: Do not recommend --auto-layers when it already ran.
+            # The escalation loop chose this layer count as the best result.
+            if auto_layers_attempted:
+                print(
+                    "  Auto-layer escalation already ran; this was the best layer count."
+                )
+                print(
+                    f"  Try: kct route{pcb_arg} --layers {max(num_layers + 2, 4)} "
+                    "(force more layers)"
+                )
+                print(
+                    "  Or:  review component placement (failures look like topology, "
+                    "not congestion)"
+                )
+            else:
+                print(f"  Try: kct route{pcb_arg} --auto-layers")
+                print(f"  Or:  kct route{pcb_arg} --layers 4")
         elif num_layers < 4:
             print(
                 f"\nTip: {failed_count}/{nets_to_route} nets failed on {num_layers} layers "
                 f"({failure_pct:.0f}% failure rate)."
             )
-            print(f"Try automatic layer escalation: kct route{pcb_arg} --auto-layers")
+            # Issue #2634: Same suppression for the lower-severity tip.
+            if not auto_layers_attempted:
+                print(f"Try automatic layer escalation: kct route{pcb_arg} --auto-layers")
 
-        # Strategy suggestion: surface monte-carlo when using negotiated
+        # Strategy suggestion: surface monte-carlo when using negotiated.
+        # Issue #2634: Only suggest MC if the user is not already on it.  The
+        # ``current_strategy == "negotiated"`` guard already handles this, but
+        # be explicit for clarity in case the set of strategies grows.
         if current_strategy == "negotiated":
             print("\nTip: Try randomized net ordering for better results:")
             print(f"  kct route{pcb_arg} --strategy monte-carlo --mc-trials 20")
