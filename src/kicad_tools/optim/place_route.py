@@ -217,11 +217,13 @@ class PlaceRouteOptimizer:
         fixer = PlacementFixer(verbose=verbose, anchored=anchored)
 
         # Router factory - creates fresh router for each attempt
+        # Issue #2708: forward manufacturer so capability-gated routing
+        # features (e.g., via_in_pad_supported) opt in correctly.
         def router_factory() -> Autorouter:
             router = Autorouter(
                 width=board_width,
                 height=board_height,
-                rules=RouterDesignRules(),
+                rules=RouterDesignRules(manufacturer=manufacturer),
             )
             # Load components from PCB
             cls._load_components_into_router(router, pcb)

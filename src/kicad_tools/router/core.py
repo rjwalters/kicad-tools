@@ -8649,6 +8649,9 @@ class Autorouter:
         )
 
         # Create fine grid scoped to bounding box
+        # Issue #2708: propagate manufacturer so capability-gated routing
+        # features (e.g., via_in_pad_supported) remain active when the
+        # router escalates from the coarse grid into the fine-grid pass.
         fine_rules = DesignRules(
             grid_resolution=fine_resolution,
             trace_width=self.rules.trace_width,
@@ -8656,6 +8659,7 @@ class Autorouter:
             via_drill=self.rules.via_drill,
             via_diameter=self.rules.via_diameter,
             via_clearance=self.rules.via_clearance,
+            manufacturer=self.rules.manufacturer,
         )
 
         fine_grid = RoutingGrid(
@@ -8925,6 +8929,9 @@ class Autorouter:
             print(f"  Retrying {len(clearance_failed_nets)} failed net(s)")
 
             # Create relaxed design rules
+            # Issue #2708: propagate manufacturer so capability-gated routing
+            # features (e.g., via_in_pad_supported) remain active during the
+            # clearance-relaxation fallback pass.
             relaxed_rules = DesignRules(
                 grid_resolution=self.rules.grid_resolution,
                 trace_width=self.rules.trace_width,
@@ -8932,6 +8939,7 @@ class Autorouter:
                 via_drill=self.rules.via_drill,
                 via_diameter=self.rules.via_diameter,
                 via_clearance=relaxed_clearance,  # Also relax via clearance
+                manufacturer=self.rules.manufacturer,
             )
 
             # Create a relaxed router for these nets

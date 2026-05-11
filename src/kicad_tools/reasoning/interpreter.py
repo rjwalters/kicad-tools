@@ -193,6 +193,15 @@ class InterpreterConfig:
     use_negotiated: bool = False  # Use negotiated congestion routing
     layer_count: int = 2  # Number of copper layers
 
+    # Manufacturer identifier (Issue #2708)
+    # Optional; when set (e.g., ``"jlcpcb-tier1"``), it is forwarded to the
+    # router's ``DesignRules`` so manufacturer-capability-gated routing
+    # features (e.g., via-in-pad escape) can opt in.  Defaults to ``None``
+    # because the reasoning interpreter is typically driven by LLM prompts
+    # that do not carry manufacturer context — callers that do know the
+    # target manufacturer should set this field explicitly.
+    manufacturer: str | None = None
+
     # Zone defaults
     zone_min_thickness: float = 0.2
     zone_clearance: float = 0.3
@@ -235,7 +244,13 @@ class CommandInterpreter:
         self._design_rules: DesignRules | None = None
 
     def _get_design_rules(self) -> DesignRules:
-        """Get or create design rules from config."""
+        """Get or create design rules from config.
+
+        Issue #2708: forwards ``self.config.manufacturer`` so that
+        manufacturer-capability-gated routing features (e.g., via-in-pad
+        escape) opt in correctly when a caller has set the field on the
+        ``InterpreterConfig``.  Defaults to ``None``.
+        """
         if self._design_rules is None:
             self._design_rules = DesignRules(
                 trace_width=self.config.trace_width,
@@ -243,6 +258,7 @@ class CommandInterpreter:
                 via_drill=self.config.via_drill,
                 via_diameter=self.config.via_size,
                 grid_resolution=self.config.grid_size,
+                manufacturer=self.config.manufacturer,
             )
         return self._design_rules
 
