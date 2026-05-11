@@ -15,12 +15,8 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
 from kicad_tools.optim.bottom_up_placement import (
-    ClusterPlacement,
     HierarchicalPlacementConfig,
-    HierarchicalPlacementResult,
     place_hierarchical,
 )
 from kicad_tools.optim.components import Component, Pin
@@ -68,9 +64,7 @@ def _build_four_cluster_fixture() -> tuple[list[Component], Polygon]:
     components: list[Component] = []
 
     # ---- Power cluster ----
-    components.append(
-        _make_component("U1", [("1", 1, "VCC"), ("2", 2, "GND"), ("3", 3, "SIG_A")])
-    )
+    components.append(_make_component("U1", [("1", 1, "VCC"), ("2", 2, "GND"), ("3", 3, "SIG_A")]))
     components.append(_make_component("C1", [("1", 1, "VCC"), ("2", 2, "GND")]))
     components.append(_make_component("C2", [("1", 1, "VCC"), ("2", 2, "GND")]))
 
@@ -86,15 +80,9 @@ def _build_four_cluster_fixture() -> tuple[list[Component], Polygon]:
             ],
         )
     )
-    components.append(
-        _make_component("Y1", [("1", 20, "XTAL1"), ("2", 21, "XTAL2")])
-    )
-    components.append(
-        _make_component("C10", [("1", 20, "XTAL1"), ("2", 2, "GND")])
-    )
-    components.append(
-        _make_component("C11", [("1", 21, "XTAL2"), ("2", 2, "GND")])
-    )
+    components.append(_make_component("Y1", [("1", 20, "XTAL1"), ("2", 21, "XTAL2")]))
+    components.append(_make_component("C10", [("1", 20, "XTAL1"), ("2", 2, "GND")]))
+    components.append(_make_component("C11", [("1", 21, "XTAL2"), ("2", 2, "GND")]))
 
     # ---- Interface cluster ----
     components.append(
@@ -104,12 +92,8 @@ def _build_four_cluster_fixture() -> tuple[list[Component], Polygon]:
             fixed=True,
         )
     )
-    components.append(
-        _make_component("D1", [("1", 30, "USB_DP"), ("2", 2, "GND")])
-    )
-    components.append(
-        _make_component("R1", [("1", 30, "USB_DP"), ("2", 40, "USB_DP_FILT")])
-    )
+    components.append(_make_component("D1", [("1", 30, "USB_DP"), ("2", 2, "GND")]))
+    components.append(_make_component("R1", [("1", 30, "USB_DP"), ("2", 40, "USB_DP_FILT")]))
 
     return components, Polygon.rectangle(50.0, 40.0, 100.0, 80.0)
 
@@ -151,8 +135,7 @@ class TestFourClusterFixture:
             for ref, (ox, oy) in cp.offsets.items():
                 d = math.sqrt(ox * ox + oy * oy)
                 assert d <= radius, (
-                    f"{ref} at offset ({ox:.2f}, {oy:.2f}) "
-                    f"exceeds cluster radius {radius:.2f}"
+                    f"{ref} at offset ({ox:.2f}, {oy:.2f}) exceeds cluster radius {radius:.2f}"
                 )
 
     def test_no_component_overlap(self):
@@ -277,12 +260,8 @@ class TestConfigKnobs:
         r_loose = place_hierarchical(comps, board, loose)
 
         # The power cluster (U1 + caps) should be wider/taller with more padding.
-        cp_tight = next(
-            c for c in r_tight.clusters if c.cluster.anchor == "U1"
-        )
-        cp_loose = next(
-            c for c in r_loose.clusters if c.cluster.anchor == "U1"
-        )
+        cp_tight = next(c for c in r_tight.clusters if c.cluster.anchor == "U1")
+        cp_loose = next(c for c in r_loose.clusters if c.cluster.anchor == "U1")
         assert cp_loose.width > cp_tight.width or cp_loose.height > cp_tight.height
 
 

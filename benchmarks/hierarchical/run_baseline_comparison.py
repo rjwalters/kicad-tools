@@ -18,11 +18,9 @@ JSON snapshot to ``benchmarks/hierarchical/results.json``.
 from __future__ import annotations
 
 import json
-import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
 
 from kicad_tools.optim.bottom_up_placement import (
     HierarchicalPlacementConfig,
@@ -204,10 +202,17 @@ def _run_ga(
     components = _components_from_pcb(pcb)
     n_nets = len({pin.net for c in components for pin in c.pins if pin.net > 0})
 
+    # Pin a deterministic random seed at module level so GA results are
+    # reproducible. EvolutionaryConfig itself does not expose a random_seed
+    # field today; the global random state is what the GA samples.
+    import random
+
+    random.seed(42)
+
     config = EvolutionaryConfig(
         generations=generations,
         population_size=population_size,
-        random_seed=42,
+        parallel=False,  # serial keeps the comparison wall-clock single-threaded
     )
     t0 = time.perf_counter()
     optimizer = EvolutionaryPlacementOptimizer.from_pcb(pcb, config=config)
@@ -262,7 +267,7 @@ def _format_markdown(rows: list[BoardMetrics]) -> str:
     lines.append("")
     lines.append(
         "Issue #2721 -- Stelios's hypothesis: bottom-up hierarchical placement "
-        "gets \"80% of the way there\" on non-Analog boards without a "
+        'gets "80% of the way there" on non-Analog boards without a '
         "cascaded GA."
     )
     lines.append("")
@@ -271,9 +276,7 @@ def _format_markdown(rows: list[BoardMetrics]) -> str:
         "Wirelength (mm) | Overlap pairs | Overlap area (mm^2) | "
         "Wall-clock (s) | Generations |"
     )
-    lines.append(
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|"
-    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for m in rows:
         gens = "" if m.converged_generations is None else str(m.converged_generations)
         lines.append(
@@ -285,19 +288,15 @@ def _format_markdown(rows: list[BoardMetrics]) -> str:
     lines.append("## Reading the table")
     lines.append("")
     lines.append(
-        "- **Wirelength** is the half-perimeter sum across all multi-pin nets; "
-        "lower is better."
+        "- **Wirelength** is the half-perimeter sum across all multi-pin nets; lower is better."
     )
     lines.append(
         "- **Overlap pairs** counts pairs of components whose bounding-box "
         "rectangles intersect. Zero is required for a routable placement."
     )
+    lines.append("- **Overlap area** is total intersected area; zero is required.")
     lines.append(
-        "- **Overlap area** is total intersected area; zero is required."
-    )
-    lines.append(
-        "- **Wall-clock** is single-thread Python wall time on the dev "
-        "machine; not normalized."
+        "- **Wall-clock** is single-thread Python wall time on the dev machine; not normalized."
     )
     lines.append(
         "- **Generations** is the number of GA generations actually run "
@@ -330,17 +329,20 @@ def main() -> None:
             f"t={m_bu.wall_clock_s:.3f}s"
         )
 
-        try:
-            m_ga = _run_ga(pcb, label)
-            rows.append(m_ga)
-            print(
-                f"  ga     : wl={m_ga.total_wirelength_mm:8.2f}  "
-                f"overlap_pairs={m_ga.overlap_pairs}  "
-                f"t={m_ga.wall_clock_s:.3f}s  "
-                f"gens={m_ga.converged_generations}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ga FAILED: {exc!r}")
+        # GA at two settings: fast (20 gen, 20 pop) and tuned (50 gen, 50 pop).
+        for gens, pop in [(20, 20), (50, 50)]:
+            try:
+                m_ga = _run_ga(pcb, label, generations=gens, population_size=pop)
+                rows.append(m_ga)
+                print(
+                    f"  ga gen={gens:3d} pop={pop:3d}: "
+                    f"wl={m_ga.total_wirelength_mm:8.2f}  "
+                    f"overlap_pairs={m_ga.overlap_pairs}  "
+                    f"t={m_ga.wall_clock_s:.3f}s  "
+                    f"gens={m_ga.converged_generations}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ga gen={gens} pop={pop} FAILED: {exc!r}")
 
     out_dir = REPO_ROOT / "benchmarks/hierarchical"
     out_dir.mkdir(parents=True, exist_ok=True)

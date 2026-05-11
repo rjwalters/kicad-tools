@@ -41,7 +41,6 @@ Reference: see PR linked from issue #2721 for the comparison study.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -232,7 +231,6 @@ def _pack_within_cluster(
 
     # Pack members in two rows: above the anchor, then below if needed.
     # Row strategy keeps things deterministic and reproducible.
-    anchor_half_w = anchor.width / 2.0
     anchor_half_h = anchor.height / 2.0
 
     row_above: list[tuple[Component, float]] = []  # (comp, x-offset)
@@ -268,9 +266,7 @@ def _pack_within_cluster(
     y_below = -(anchor_half_h + pad + row_below_max_h / 2.0)
 
     # Translate row X so each row is centered on the anchor's X=0 axis
-    def _centered_offsets(
-        row: list[tuple[Component, float]], y: float
-    ) -> None:
+    def _centered_offsets(row: list[tuple[Component, float]], y: float) -> None:
         if not row:
             return
         total_w = row[-1][1] + row[-1][0].width / 2.0
@@ -286,19 +282,11 @@ def _pack_within_cluster(
 
     # Cluster bounding box: half-extents in each direction
     xs = [
-        placement.offsets[ref][0] - component_map[ref].width / 2.0
-        for ref in placement.offsets
-    ] + [
-        placement.offsets[ref][0] + component_map[ref].width / 2.0
-        for ref in placement.offsets
-    ]
+        placement.offsets[ref][0] - component_map[ref].width / 2.0 for ref in placement.offsets
+    ] + [placement.offsets[ref][0] + component_map[ref].width / 2.0 for ref in placement.offsets]
     ys = [
-        placement.offsets[ref][1] - component_map[ref].height / 2.0
-        for ref in placement.offsets
-    ] + [
-        placement.offsets[ref][1] + component_map[ref].height / 2.0
-        for ref in placement.offsets
-    ]
+        placement.offsets[ref][1] - component_map[ref].height / 2.0 for ref in placement.offsets
+    ] + [placement.offsets[ref][1] + component_map[ref].height / 2.0 for ref in placement.offsets]
     placement.width = (max(xs) - min(xs)) if xs else max(anchor.width, 1.0)
     placement.height = (max(ys) - min(ys)) if ys else max(anchor.height, 1.0)
 
@@ -397,12 +385,8 @@ def _place_cluster_superblocks(
         used_x = [centers[a][0] for a in centers]
         used_y = [centers[a][1] for a in centers]
         if used_x:
-            shift_x = ((bx_min + bx_max) / 2.0) - (
-                (min(used_x) + max(used_x)) / 2.0
-            )
-            shift_y = ((by_min + by_max) / 2.0) - (
-                (min(used_y) + max(used_y)) / 2.0
-            )
+            shift_x = ((bx_min + bx_max) / 2.0) - ((min(used_x) + max(used_x)) / 2.0)
+            shift_y = ((by_min + by_max) / 2.0) - ((min(used_y) + max(used_y)) / 2.0)
             # Only shift if doing so keeps everything on the board.
             # Simple heuristic: only shift in the positive direction (smaller
             # use case wouldn't go off-board after shift).
@@ -496,14 +480,10 @@ def place_hierarchical(
     ]
 
     # Phase 3
-    cluster_centers = _place_cluster_superblocks(
-        cluster_placements, board_outline, config
-    )
+    cluster_centers = _place_cluster_superblocks(cluster_placements, board_outline, config)
 
     # Phase 4
-    positions = _expand_to_positions(
-        cluster_placements, cluster_centers, component_map
-    )
+    positions = _expand_to_positions(cluster_placements, cluster_centers, component_map)
 
     return HierarchicalPlacementResult(
         positions=positions,
@@ -531,7 +511,6 @@ def place_hierarchical_from_pcb(
     # Importing inside the function keeps the module top-level cheap and
     # avoids circular imports (PCB module pulls in a lot).
     from kicad_tools.optim.board_outline import extract_board_outline
-    from kicad_tools.optim.placement import PlacementOptimizer
 
     fixed = set(fixed_refs or [])
 
