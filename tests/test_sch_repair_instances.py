@@ -727,6 +727,384 @@ class TestPowerSymbolWrongProject:
         assert "wrong_project_name" not in modified_text
 
 
+# ---------------------------------------------------------------------------
+# Tests for loose-project-block detection and repair (issue #2624)
+# ---------------------------------------------------------------------------
+
+# Sub-sheet where a symbol has TWO (project ...) blocks at symbol-child
+# indent (siblings of, not children of, (instances)) AND an empty
+# (instances) block.  This is the malformed shape produced by KiCad
+# variants / stale standalone-sheet edits, where kicad-cli silently drops
+# the symbol from the netlist.  See issue #2624.
+SUB_SCHEMATIC_LOOSE_PROJECT = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-3")
+\t\t)
+\t\t(pin "2"
+\t\t\t(uuid "pin-uuid-4")
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(project "test_project"
+\t\t\t(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+\t\t\t\t(reference "R2")
+\t\t\t\t(unit 1)
+\t\t\t)
+\t\t)
+\t\t(project "sub"
+\t\t\t(path "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+\t\t\t\t(reference "R2")
+\t\t\t\t(unit 1)
+\t\t\t)
+\t\t)
+\t\t(instances)
+\t)
+)
+"""
+
+
+# Variant: only the correct-project loose block is present (no stray
+# standalone-sheet leftover) — still malformed because it's at symbol-child
+# indent and (instances) is empty.
+SUB_SCHEMATIC_LOOSE_PROJECT_SINGLE = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-3")
+\t\t)
+\t\t(pin "2"
+\t\t\t(uuid "pin-uuid-4")
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(project "test_project"
+\t\t\t(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+\t\t\t\t(reference "R2")
+\t\t\t\t(unit 1)
+\t\t\t)
+\t\t)
+\t\t(instances)
+\t)
+)
+"""
+
+
+# Variant: well-formed instances block (with our project) AND a stray
+# sibling (project "other" ...) at symbol-child indent.  This must still
+# be flagged for repair: the sibling has to be dropped.
+SUB_SCHEMATIC_LOOSE_PROJECT_PARTIAL = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "cccccccc-cccc-cccc-cccc-cccccccccccc")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(pin "1"
+\t\t\t(uuid "pin-uuid-3")
+\t\t)
+\t\t(pin "2"
+\t\t\t(uuid "pin-uuid-4")
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(project "stale_sheet"
+\t\t\t(path "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+\t\t\t\t(reference "R2")
+\t\t\t\t(unit 1)
+\t\t\t)
+\t\t)
+\t\t(instances
+\t\t\t(project "test_project"
+\t\t\t\t(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+\t\t\t\t\t(reference "R2")
+\t\t\t\t\t(unit 1)
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+
+
+class TestLooseProjectBlocksDetection:
+    """Tests for detection of (project ...) blocks at symbol-child indent."""
+
+    def test_loose_project_detected(self):
+        """Symbol with loose (project) siblings of empty (instances)."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_LOOSE_PROJECT, "test_project"
+        )
+        assert len(symbols) == 1
+        s = symbols[0]
+        assert s["reference"] == "R2"
+        # has_project_instance must be False (project is NOT inside instances)
+        assert s["has_project_instance"] is False
+        # has_loose_project_blocks must be True (project is at symbol-child)
+        assert s["has_loose_project_blocks"] is True
+        # has_wrong_project must be False (loose-project repair takes
+        # precedence; wrong_project is reserved for the well-formed-but-
+        # wrong-name shape, which this isn't)
+        assert s["has_wrong_project"] is False
+        # Both loose blocks should be captured
+        names = {p["name"] for p in s["loose_project_blocks"]}
+        assert names == {"test_project", "sub"}
+
+    def test_well_formed_does_not_report_loose(self):
+        """Properly nested (project) inside (instances) is NOT flagged loose."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_OK, "test_project"
+        )
+        assert len(symbols) == 1
+        assert symbols[0]["has_loose_project_blocks"] is False
+
+    def test_wrong_project_does_not_report_loose(self):
+        """Wrong-project (still inside instances) is NOT flagged loose."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_WRONG_PROJECT, "test_project"
+        )
+        assert len(symbols) == 1
+        assert symbols[0]["has_loose_project_blocks"] is False
+        assert symbols[0]["has_wrong_project"] is True
+
+    def test_missing_instances_does_not_report_loose(self):
+        """Symbol with no instances at all is NOT flagged loose."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_MISSING, "test_project"
+        )
+        # Two symbols, both have no instances and no loose blocks
+        assert len(symbols) == 2
+        assert all(not s["has_loose_project_blocks"] for s in symbols)
+
+    def test_loose_project_single_block(self):
+        """Single loose (project) sibling of empty (instances) is detected."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_LOOSE_PROJECT_SINGLE, "test_project"
+        )
+        assert len(symbols) == 1
+        s = symbols[0]
+        assert s["has_project_instance"] is False
+        assert s["has_loose_project_blocks"] is True
+        names = {p["name"] for p in s["loose_project_blocks"]}
+        assert names == {"test_project"}
+
+    def test_partial_loose_with_correct_instances(self):
+        """Well-formed instances + stray loose sibling is also flagged."""
+        symbols = _extract_symbols_with_instance_info(
+            SUB_SCHEMATIC_LOOSE_PROJECT_PARTIAL, "test_project"
+        )
+        assert len(symbols) == 1
+        s = symbols[0]
+        # The instances block names the correct project, but the stray
+        # sibling at symbol-child indent must still be cleaned up.
+        # has_project_instance reports the structural truth (project IS
+        # nested correctly inside instances).
+        assert s["has_project_instance"] is True
+        assert s["has_loose_project_blocks"] is True
+        names = {p["name"] for p in s["loose_project_blocks"]}
+        assert names == {"stale_sheet"}
+
+
+class TestLooseProjectBlocksRepair:
+    """End-to-end tests for repairing loose-project-block schematics."""
+
+    def test_dry_run_flags_loose_project(self, tmp_path, capsys):
+        """Dry run identifies loose-project repairs with the right tag."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=True, backup=False)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "1 symbol(s) needing repair" in captured.out
+        assert "[loose project blocks]" in captured.out
+        assert "1 loose project blocks" in captured.out
+        # File should not be modified
+        assert sub.read_text(encoding="utf-8") == SUB_SCHEMATIC_LOOSE_PROJECT
+
+    def test_dry_run_json_reports_loose_project(self, tmp_path, capsys):
+        """JSON dry-run output sets repair_type=loose_project_blocks."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(
+            root, dry_run=True, backup=False, format="json"
+        )
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total"] == 1
+        assert data["repairs"][0]["repair_type"] == "loose_project_blocks"
+        # Reference must be preserved (R2 -> R2, no re-annotation)
+        assert data["repairs"][0]["old_ref"] == "R2"
+        assert data["repairs"][0]["new_ref"] == "R2"
+
+    def test_repairs_loose_project_blocks(self, tmp_path, capsys):
+        """Actually rewrites the malformed shape into a well-formed one."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        # Exactly one (project ...) form should remain, nested inside
+        # (instances).
+        assert modified_text.count("(project") == 1
+        assert '(project "test_project"' in modified_text
+        # The stale standalone-sheet leftover must be gone.
+        assert '(project "sub"' not in modified_text
+        # Reference must be preserved (R2 -> R2, no re-annotation).
+        assert '(reference "R2")' in modified_text
+        # The path inside (instances) is the canonical hierarchical path.
+        expected_path = (
+            "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        assert f'(path "{expected_path}"' in modified_text
+
+    def test_repair_removes_loose_blocks_from_symbol(self, tmp_path, capsys):
+        """After repair, no (project ...) at symbol-child indent."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        # Re-run extraction on the repaired text: no loose blocks should
+        # remain, and the project instance is correctly nested.
+        symbols = _extract_symbols_with_instance_info(
+            modified_text, "test_project"
+        )
+        assert len(symbols) == 1
+        assert symbols[0]["has_loose_project_blocks"] is False
+        assert symbols[0]["has_project_instance"] is True
+
+    def test_repair_does_not_re_annotate_reference(self, tmp_path, capsys):
+        """Loose-project repair must NOT re-annotate the reference."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        # The Reference *property* on the symbol must remain "R2".
+        assert '(property "Reference" "R2"' in modified_text
+
+    def test_backup_created_for_loose_project_repair(
+        self, tmp_path, capsys
+    ):
+        """Backup files are created when backup=True for loose-project repair."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=True)
+        assert result == 0
+
+        backups = list(tmp_path.glob("*_backup_*.kicad_sch"))
+        assert len(backups) >= 1
+
+    def test_repair_drops_stale_sibling_with_correct_instances(
+        self, tmp_path, capsys
+    ):
+        """Stray sibling project gets dropped even when instances is correct."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(
+            SUB_SCHEMATIC_LOOSE_PROJECT_PARTIAL, encoding="utf-8"
+        )
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        modified_text = sub.read_text(encoding="utf-8")
+        # The stale_sheet sibling block must be gone.
+        assert '(project "stale_sheet"' not in modified_text
+        assert "stale_sheet" not in modified_text
+        # The correct project entry inside (instances) must remain.
+        assert '(project "test_project"' in modified_text
+        # Only one project entry total.
+        assert modified_text.count("(project") == 1
+        # Reference preserved.
+        assert '(property "Reference" "R2"' in modified_text
+
+    def test_other_symbols_unaffected(self, tmp_path, capsys):
+        """Symbols not exhibiting the loose-project shape are untouched."""
+        root = tmp_path / "test_project.kicad_sch"
+        sub = tmp_path / "sub.kicad_sch"
+        root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
+
+        result = run_repair_instances(root, dry_run=False, backup=False)
+        assert result == 0
+
+        # The root schematic has a properly-instanced R1.  After repair
+        # of the sub-sheet, the root must be unchanged.
+        assert root.read_text(encoding="utf-8") == ROOT_SCHEMATIC
+
+
 class TestPwrFlagReferenceReannotation:
     """Tests for #PWR_FLAG bare-name reference re-annotation."""
 
