@@ -56,7 +56,12 @@ class TestExplicitDeclaration:
         assert out[0].reference_net_id is None  # No reference policy -> "longest"
 
     def test_multiple_classes_merge_into_single_group(self):
-        """The MIPI-lane use case: per-pair classes share a group."""
+        """The MIPI-lane use case: per-pair classes share a group.
+
+        Phase 2F producer-side: differential-pair members (``_P``/``_N``
+        suffix) are extracted from ``net_ids`` into ``pair_ids`` so the
+        Phase 2F tuner can dispatch to the pair-aware path.
+        """
         net_names = {
             1: "CSI_DAT0_P",
             2: "CSI_DAT0_N",
@@ -80,7 +85,9 @@ class TestExplicitDeclaration:
         )
         assert len(out) == 1
         assert out[0].name == "MIPI_CSI"
-        assert out[0].net_ids == [1, 2, 3, 4]
+        # All four members are paired -> net_ids empty, pair_ids has 2 lanes.
+        assert out[0].net_ids == []
+        assert out[0].pair_ids == [(1, 2), (3, 4)]
 
     def test_explicit_reference_resolution(self):
         net_names = {1: "DQ0", 2: "DQ1", 3: "DQ2", 4: "DQS_P"}
@@ -214,6 +221,11 @@ class TestSuffixInference:
         assert len(out[0].net_ids) == 16
 
     def test_mipi_csi_lane_data(self):
+        """4-lane MIPI CSI: all paired -> pair_ids has 4 lanes, net_ids empty.
+
+        Phase 2F producer-side: differential-pair members are extracted
+        from ``net_ids`` into ``pair_ids``.
+        """
         net_names = {
             1: "CSI_DAT0_P",
             2: "CSI_DAT0_N",
@@ -227,7 +239,9 @@ class TestSuffixInference:
         out = detect_match_groups(net_names, enable_suffix_inference=True)
         assert len(out) == 1
         assert out[0].name == "MIPI_CSI_DATA"
-        assert len(out[0].net_ids) == 8
+        # All 8 members are paired -> 4 lanes in pair_ids.
+        assert out[0].net_ids == []
+        assert out[0].pair_ids == [(1, 2), (3, 4), (5, 6), (7, 8)]
 
     def test_hdmi_tmds_data_lanes_clock_excluded(self):
         # 6 data nets (3 lanes x P/N) + 2 clock nets.  The clock is
@@ -244,13 +258,19 @@ class TestSuffixInference:
             8: "TMDS_CLK_N",
         }
         out = detect_match_groups(net_names, enable_suffix_inference=True)
-        # The data lanes form one group of 6 (TMDS_CLK_* doesn't match
-        # the data pattern).
+        # The data lanes form one group of 3 paired lanes.
         data_groups = [g for g in out if g.name == "HDMI_TMDS_DATA"]
         assert len(data_groups) == 1
-        assert len(data_groups[0].net_ids) == 6
-        assert 7 not in data_groups[0].net_ids
-        assert 8 not in data_groups[0].net_ids
+        # Phase 2F producer-side: 6 paired members extracted into pair_ids.
+        assert data_groups[0].net_ids == []
+        assert data_groups[0].pair_ids == [(1, 2), (3, 4), (5, 6)]
+        # Clock nets are excluded from the data-lane group.
+        all_member_ids: set[int] = set(data_groups[0].net_ids)
+        for p_id, n_id in data_groups[0].pair_ids:
+            all_member_ids.add(p_id)
+            all_member_ids.add(n_id)
+        assert 7 not in all_member_ids
+        assert 8 not in all_member_ids
 
 
 # =============================================================================
@@ -664,7 +684,12 @@ class TestExpandedFixtures:
     """The curator-spec'd fixture scenarios in the issue body."""
 
     def test_ddr_data_byte_10_nets_explicit(self):
-        """DDR byte: 8 data + 1 mask + 2 strobe = 11 nets in one group."""
+        """DDR byte: 8 data + 1 mask + 2 strobe = 11 nets in one group.
+
+        Phase 2F producer-side: the DQS_P/DQS_N pair is extracted into
+        ``pair_ids``; the 8 DQ data lines and the DM0 mask remain as
+        scalar ``net_ids``.
+        """
         net_names = {
             1: "DQ0",
             2: "DQ1",
@@ -690,11 +715,16 @@ class TestExpandedFixtures:
         )
         assert len(out) == 1
         assert out[0].name == "DDR_DATA_BYTE_0"
-        assert len(out[0].net_ids) == 11
+        # 9 scalar (8 DQ + DM0) + 1 pair (DQS_P/DQS_N) = 11 nets.
+        assert sorted(out[0].net_ids) == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert out[0].pair_ids == [(10, 11)]
         assert out[0].reference_net_id == 10  # DQS_P
 
     def test_4_lane_mipi_csi_via_explicit(self):
-        """4-lane MIPI CSI: 1 clock pair + 4 data pairs = 10 nets."""
+        """4-lane MIPI CSI: 1 clock pair + 4 data pairs = 10 nets, 5 pairs.
+
+        Phase 2F producer-side: all 5 pairs are extracted into ``pair_ids``.
+        """
         net_names = {
             1: "CSI_CLK_P",
             2: "CSI_CLK_N",
@@ -718,7 +748,9 @@ class TestExpandedFixtures:
             net_to_class=dict.fromkeys(net_names.values(), "MIPI_CSI"),
         )
         assert len(out) == 1
-        assert len(out[0].net_ids) == 10
+        # All 10 members are paired -> 5 lanes in pair_ids, net_ids empty.
+        assert out[0].net_ids == []
+        assert out[0].pair_ids == [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
         # "clock" sentinel finds CSI_CLK_P (lowest id, matches ^CLK
         # via CLK_).
         assert out[0].reference_net_id == 1
