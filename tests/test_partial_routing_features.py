@@ -181,6 +181,63 @@ class TestAutoLayersSuggestion:
         text = output.getvalue()
         assert text == ""
 
+    def test_auto_layers_suggestion_suppressed_when_already_attempted(self):
+        """Issue #2634: ``--auto-layers`` recommendation must not appear when
+        the escalation loop has already run.
+
+        Calling ``show_routing_summary`` with ``auto_layers_attempted=True``
+        (the layer-escalation code path) should not tell the user to try
+        ``--auto-layers``, because that's the path they're already on.
+        """
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {f"Net{i}": i for i in range(1, 5)}
+        # 2 of 4 routed on 2 layers (>20% failure)
+        router = _make_mock_router(routed_nets=[1, 2], num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=4,
+                quiet=False,
+                pcb_file="board.kicad_pcb",
+                auto_layers_attempted=True,
+            )
+
+        text = output.getvalue()
+        # The recommendation block still appears...
+        assert "RECOMMENDATION" in text
+        # ...but no longer says "Try: kct route ... --auto-layers"
+        assert "kct route board.kicad_pcb --auto-layers" not in text
+        # Helpful guidance is given instead
+        assert "Auto-layer escalation already ran" in text
+
+    def test_auto_layers_low_severity_tip_suppressed_when_already_attempted(self):
+        """Lower-severity ``Try automatic layer escalation`` tip also suppressed.
+
+        Same fix at the ``elif num_layers < 4`` branch (failure_pct <= 20).
+        """
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {f"Net{i}": i for i in range(1, 11)}
+        # 9/10 routed on 2 layers => 10% failure (low severity branch)
+        router = _make_mock_router(routed_nets=list(range(1, 10)), num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=10,
+                quiet=False,
+                auto_layers_attempted=True,
+            )
+
+        text = output.getvalue()
+        assert "Try automatic layer escalation" not in text
+
 
 class TestExportFailedNets:
     """Tests for --export-failed-nets feature."""

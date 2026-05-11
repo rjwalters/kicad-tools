@@ -286,7 +286,21 @@ def run_monte_carlo(
     if verbose:
         print(f"\n  Best: Trial {best_trial + 1} (score={best_score:.2f})")
 
+    # Issue #2634: The grid state at the end of the trial loop reflects whatever
+    # the *last* trial left behind, not the *best* trial whose routes we are
+    # about to surface.  ``_reset_for_new_trial`` rebuilds the grid and re-adds
+    # pads but never re-marks routes; the parallel path skips this entirely
+    # because all trials ran in worker processes.  Downstream consumers — the
+    # layer-escalation overflow heuristic at ``route_cmd.py``, zone fills,
+    # statistics — read grid state expecting it to match ``autorouter.routes``.
+    # Rebuild the grid once more and replay the best routes onto it so that
+    # invariant holds.  Note: ``_reset_for_new_trial`` clears ``autorouter.routes``,
+    # so the assignment must happen *after* the reset.
+    autorouter._reset_for_new_trial()
     autorouter.routes = best_routes if best_routes else []
+    for route in autorouter.routes:
+        autorouter.grid.mark_route_usage(route)
+
     if progress_callback is not None:
         routed = len({r.net for r in autorouter.routes}) if autorouter.routes else 0
         progress_callback(
