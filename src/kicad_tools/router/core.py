@@ -2345,6 +2345,64 @@ class Autorouter:
             except AttributeError:
                 pass
 
+    # ------------------------------------------------------------------
+    # Diff-pair partner map for escape routing
+    # (Issue #2639 / Epic #2556 Phase 2F)
+    # ------------------------------------------------------------------
+    def get_diff_pair_map(self) -> dict[str, str]:
+        """Build a bidirectional net-name to partner-net-name map.
+
+        Used by ``EscapeRouter`` to know which pads on a dense package
+        should be escaped as a coupled pair (Issue #2639 / Epic #2556
+        Phase 2F).
+
+        Detection order matches ``_prepare_routing`` exactly: layered
+        detection consults explicit ``NetClassRouting.diffpair_partner``
+        declarations first, then KiCad-group declarations, then
+        suffix-based inference.  When detection returns no pairs (or
+        ``self.net_names`` is empty), this method returns ``{}`` which
+        leaves the escape router in its pre-#2639 single-ended path.
+
+        Returns:
+            A ``dict[str, str]`` where each pair ``(p, n)`` is recorded
+            in both directions: ``{p: n, n: p}``.  This lets the escape
+            router look up a pad's partner by net name without having
+            to know which half of the pair the pad belongs to.
+        """
+        out: dict[str, str] = {}
+        if not self.net_names:
+            return out
+
+        try:
+            from .diffpair_detection import detect_diff_pairs
+        except ImportError:
+            return out
+
+        # Build net_to_class for explicit-declaration consultation.
+        # Same construction as _prepare_routing.
+        net_to_class: dict[str, str] = {}
+        for net_name, net_class in self.net_class_map.items():
+            net_to_class[net_name] = net_class.name
+
+        try:
+            detected = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=self.net_class_map,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection must never break routing.
+            return out
+
+        for d in detected:
+            p_name = d.pair.positive.net_name
+            n_name = d.pair.negative.net_name
+            if p_name and n_name:
+                out[p_name] = n_name
+                out[n_name] = p_name
+        return out
+
     def _filter_pour_nets(self, net_order: list[int]) -> list[int]:
         """Remove pour nets from a net ordering and log a warning.
 
@@ -7273,6 +7331,12 @@ class Autorouter:
                 edge_clearance=self._edge_clearance,
                 board_bounds=self._board_bbox,
                 manufacturer=getattr(self.rules, "manufacturer", None),
+                # Issue #2639 / Epic #2556 Phase 2F: thread the diff-pair
+                # partner map into the escape router so paired pads on
+                # dense packages get coupled-at-launch escape routes.
+                # ``get_diff_pair_map`` returns {} when no pairs are
+                # detected, which preserves pre-#2639 behavior bit-for-bit.
+                diff_pair_map=self.get_diff_pair_map(),
             )
         return self._escape_router
 
