@@ -416,9 +416,7 @@ class TestManufacturingPackageExport:
             PreflightResult(name="board_outline", status="FAIL", message="No board outline found"),
             PreflightResult(name="bom_pcb_match", status="OK", message="All BOM components placed"),
         ]
-        monkeypatch.setattr(
-            PreflightChecker, "run_all", lambda self: fail_results
-        )
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
 
         config = ManufacturingConfig(
             include_report=False,
@@ -473,9 +471,7 @@ class TestManufacturingPackageExport:
                 details="Expected Edge.Cuts layer",
             ),
         ]
-        monkeypatch.setattr(
-            PreflightChecker, "run_all", lambda self: fail_results
-        )
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
 
         config = ManufacturingConfig(
             include_report=False,
@@ -499,6 +495,115 @@ class TestManufacturingPackageExport:
 
         # Output directory should not exist
         assert not out_dir.exists()
+
+    def test_unbuildable_bom_blocks_export_by_default(self, tmp_path, monkeypatch):
+        """A bom_pcb_match FAIL (schematic-only refs) blocks export even
+        when strict_preflight is False.
+
+        Issue #2729: an unbuildable BOM (BOM references parts with no PCB
+        footprint) is treated as a hard failure independently of
+        strict_preflight so the pipeline cannot accidentally ship a
+        manufacturing package the fab cannot build.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight: bom_pcb_match FAIL (sch refs missing on PCB)
+        fail_results = [
+            PreflightResult(
+                name="bom_pcb_match",
+                status="FAIL",
+                message="BOM/PCB reference mismatch",
+                details="36 in BOM but not on PCB: U1, U2, U3",
+            ),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        # strict_preflight defaults to False, but block_on_unbuildable_bom
+        # defaults to True
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export should NOT have proceeded
+        assert not assembly_called["value"]
+        assert not result.success
+        assert len(result.errors) == 1
+        assert "bom_pcb_match" in result.errors[0]
+        # No bom_jlcpcb.csv written
+        assert not out_dir.exists() or not (out_dir / "bom_jlcpcb.csv").exists()
+
+    def test_unbuildable_bom_allowed_when_flag_disabled(self, tmp_path, monkeypatch):
+        """With block_on_unbuildable_bom=False (--allow-unbuildable-bom),
+        the export proceeds and the failure is recorded as a warning.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        fail_results = [
+            PreflightResult(
+                name="bom_pcb_match",
+                status="FAIL",
+                message="BOM/PCB reference mismatch",
+                details="36 in BOM but not on PCB: U1, U2, U3",
+            ),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            block_on_unbuildable_bom=False,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export proceeds
+        assert assembly_called["value"]
+        # Failure recorded as warning, not error
+        assert any("bom_pcb_match" in w for w in result.warnings)
+        assert result.success
 
 
 class TestLatestReportOnly:
@@ -573,6 +678,7 @@ class TestLatestReportOnly:
 
         # No vN/ directories should remain
         import re
+
         for child in out_dir.iterdir():
             if child.is_dir():
                 assert not re.fullmatch(r"v\d+", child.name), (
@@ -900,6 +1006,7 @@ class TestLatestReportOnly:
 
         # Parse manifest
         import json
+
         manifest = json.loads((out_dir / "manifest.json").read_text())
 
         # Manifest should have "report.md" key (at root), not "report/report.md"
@@ -956,6 +1063,7 @@ class TestLatestReportOnly:
 
         # Parse manifest -- both should have checksums
         import json
+
         manifest = json.loads((out_dir / "manifest.json").read_text())
         assert "report.pdf" in manifest["files"]
         assert "report.md" in manifest["files"]

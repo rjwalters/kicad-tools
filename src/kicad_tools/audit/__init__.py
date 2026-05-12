@@ -21,6 +21,7 @@ from .auditor import (
     AuditResult,
     AuditVerdict,
     ManufacturingAudit,
+    SyncStatus,
 )
 from .net_audit import (
     AffectedPad,
@@ -33,6 +34,7 @@ __all__ = [
     "ManufacturingAudit",
     "AuditResult",
     "AuditVerdict",
+    "SyncStatus",
     "AffectedPad",
     "StaleNetGroup",
     "find_stale_nets",

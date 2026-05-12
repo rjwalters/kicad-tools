@@ -1096,6 +1096,17 @@ def _run_step_export(ctx: PipelineContext, console: Console) -> PipelineResult:
         str(mfr_dir),
     ]
 
+    # Pass --sch so the BOM/PCB match preflight check can run.  Without
+    # the schematic, ``_check_bom_footprint_match`` falls back to the
+    # PCB-derived BOM (which trivially matches itself), so schematic-only
+    # refs are not detected.  Auto-detect via the pipeline context or
+    # ``find_schematic`` when no explicit path is set.
+    sch_path: Path | None = ctx.schematic_file
+    if sch_path is None:
+        sch_path = _resolve_schematic(ctx.pcb_file, ctx.project_file)
+    if sch_path is not None and sch_path.exists():
+        cmd.extend(["--sch", str(sch_path)])
+
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
     return PipelineResult(
@@ -1123,6 +1134,56 @@ def _is_git_repo(directory: Path) -> bool:
         return result.returncode == 0
     except FileNotFoundError:
         return False
+
+
+def _fetch_audit_results(ctx: PipelineContext) -> dict | None:
+    """Run ``kct audit --format json`` and return parsed result dict.
+
+    Used by :func:`_print_final_summary` so the pipeline can derive its
+    verdict from the audit's sync drift state (schematic-only refs make
+    the BOM unbuildable -> NOT_READY).
+
+    Args:
+        ctx: Pipeline context (project or PCB path, manufacturer).
+
+    Returns:
+        Parsed JSON dict on success, ``None`` on any failure.
+    """
+    import json as _json
+
+    # Audit needs a project file when available so it can pick up the
+    # schematic for sync drift detection.  Fall back to the PCB.
+    if ctx.is_project and ctx.project_file:
+        target = str(ctx.project_file)
+    else:
+        target = str(ctx.pcb_file)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "audit",
+        target,
+        "--mfr",
+        ctx.mfr,
+        "--format",
+        "json",
+    ]
+
+    try:
+        audit_result = subprocess.run(
+            cmd,
+            cwd=str(ctx.pcb_file.parent),
+            capture_output=True,
+            text=True,
+        )
+        # audit exits 2 on NOT_READY but still emits valid JSON to stdout
+        data = _json.loads(audit_result.stdout)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
 
 
 def _fetch_check_results(ctx: PipelineContext) -> dict | None:
@@ -1172,6 +1233,7 @@ def _print_final_summary(
     results: list[PipelineResult],
     console: Console,
     check_data: dict | None = None,
+    audit_data: dict | None = None,
 ) -> None:
     """Print a DRC/ERC/verdict summary block after pipeline completion.
 
@@ -1184,6 +1246,10 @@ def _print_final_summary(
         console: Rich console for output.
         check_data: Pre-fetched ``kct check --format json`` result, or
             ``None`` to skip the subprocess (used for dry-run placeholder).
+        audit_data: Pre-fetched ``kct audit --format json`` result with
+            the new ``sync`` section.  When supplied with schematic-only
+            refs, the verdict is forced to NOT READY regardless of
+            DRC/ERC pass state (an unbuildable BOM blocks manufacturing).
     """
     # --- DRC ---
     if check_data is not None:
@@ -1237,11 +1303,44 @@ def _print_final_summary(
         None,
     )
 
+    # --- Sync drift (schematic <-> PCB) ---
+    # Read from audit JSON when available.  Schematic-only refs make the
+    # BOM unbuildable, which trumps every other check: the package cannot
+    # be manufactured regardless of DRC/ERC pass state.
+    sync_summary = audit_data.get("sync", {}) if audit_data else {}
+    sync_schematic_only = sync_summary.get("schematic_only_count", 0)
+    sync_pcb_only = sync_summary.get("pcb_only_count", 0)
+    sync_value_mm = sync_summary.get("value_mismatch_count", 0)
+    sync_fp_mm = sync_summary.get("footprint_mismatch_count", 0)
+    sync_drift_parts: list[str] = []
+    if sync_schematic_only:
+        sync_drift_parts.append(f"{sync_schematic_only} schematic-only")
+    if sync_pcb_only:
+        sync_drift_parts.append(f"{sync_pcb_only} PCB-only")
+    if sync_value_mm:
+        sync_drift_parts.append(f"{sync_value_mm} value mm")
+    if sync_fp_mm:
+        sync_drift_parts.append(f"{sync_fp_mm} fp mm")
+    if not audit_data:
+        sync_line = "skipped (audit unavailable)"
+    elif not sync_drift_parts:
+        sync_line = "in sync"
+    else:
+        sync_line = ", ".join(sync_drift_parts)
+
     # --- Verdict ---
+    # Schematic-only refs == unbuildable BOM == hard fail.  Check this
+    # before audit_result.success because the pipeline's audit subprocess
+    # may have run before the sync axis was wired in, but the JSON we
+    # just fetched is authoritative.
+    if sync_schematic_only > 0:
+        verdict = (
+            f"[red]NOT READY[/red] -- {sync_schematic_only} schematic-only refs (unbuildable BOM)"
+        )
     # When the AUDIT step ran, its success/failure reflects the full audit
     # verdict (ERC, DRC, connectivity, manufacturer compatibility).  Use it
     # as the authoritative source so the pipeline summary matches the audit.
-    if audit_result is not None and not audit_result.skipped:
+    elif audit_result is not None and not audit_result.skipped:
         if audit_result.success:
             # Audit passed -- distinguish READY from WARNING.
             # Check for DRC/ERC warnings to surface a WARNING verdict.
@@ -1256,9 +1355,17 @@ def _print_final_summary(
                     or (erc_result.warning and erc_result.success)
                 )
             )
-            if has_drc_warnings or erc_has_warnings:
+            has_sync_warnings = sync_pcb_only > 0 or sync_value_mm > 0 or sync_fp_mm > 0
+            if has_drc_warnings or erc_has_warnings or has_sync_warnings:
+                bits: list[str] = []
+                if has_drc_warnings:
+                    bits.append("DRC warnings")
+                if erc_has_warnings:
+                    bits.append("ERC warnings")
+                if has_sync_warnings:
+                    bits.append("sync drift")
                 verdict = (
-                    "[yellow]WARNING[/yellow] -- audit passed with warnings (review recommended)"
+                    f"[yellow]WARNING[/yellow] -- audit passed with warnings ({', '.join(bits)})"
                 )
             else:
                 verdict = "[green]READY[/green] -- audit passed"
@@ -1293,6 +1400,7 @@ def _print_final_summary(
     console.print(f"  DRC:        {drc_line}")
     console.print(f"  ERC:        {erc_line}")
     console.print(f"  Silkscreen: {silk_count} warnings")
+    console.print(f"  Sync:       {sync_line}")
     console.print(f"  Verdict:    {verdict}")
 
 
@@ -1595,11 +1703,19 @@ def run_pipeline(
             console.print("  DRC:        N/A (dry run)")
             console.print("  ERC:        N/A (dry run)")
             console.print("  Silkscreen: N/A (dry run)")
+            console.print("  Sync:       N/A (dry run)")
             console.print("  Verdict:    N/A (dry run)")
         else:
             check_data = _fetch_check_results(ctx)
+            audit_data = _fetch_audit_results(ctx)
             ctx._check_data = check_data  # cache for _build_commit_message
-            _print_final_summary(ctx, results, console, check_data=check_data)
+            _print_final_summary(
+                ctx,
+                results,
+                console,
+                check_data=check_data,
+                audit_data=audit_data,
+            )
 
     return results
 
@@ -1823,8 +1939,7 @@ Examples:
     #   1 = hard failure
     all_succeeded = all(r.success for r in results)
     has_route_warning = any(
-        r.step == PipelineStep.ROUTE and not r.success and r.warning
-        for r in results
+        r.step == PipelineStep.ROUTE and not r.success and r.warning for r in results
     )
 
     if not all_succeeded and not has_route_warning:
