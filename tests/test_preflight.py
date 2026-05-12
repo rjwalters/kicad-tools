@@ -578,7 +578,16 @@ class TestPreflightManufacturingIntegration:
         assert not PreflightChecker.has_failures(result.preflight_results)
 
     def test_export_blocked_by_preflight_fail(self, tmp_path):
-        """Manufacturing export should fail when preflight has FAIL results."""
+        """Manufacturing export should fail when the PCB cannot be loaded.
+
+        Previously this test relied on the preflight ``file_exists`` check
+        catching a missing PCB.  After issue #2741 the export pipeline
+        constructs an ``AssemblyPackage`` up-front (so a missing schematic
+        cannot leak a partial package), which means a missing PCB now
+        fails in ``AssemblyPackage.__init__`` before preflight runs.  The
+        observable contract -- "export fails, nothing is written" -- is
+        unchanged.
+        """
         from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
         from kicad_tools.export.preflight import PreflightConfig
 
@@ -586,16 +595,19 @@ class TestPreflightManufacturingIntegration:
             include_report=False,
             preflight=PreflightConfig(skip_drc=True, skip_erc=True),
         )
-        # Non-existent PCB will cause a FAIL
+        # Non-existent PCB will cause a fatal failure
         pkg = ManufacturingPackage(
             pcb_path=tmp_path / "nonexistent.kicad_pcb",
             manufacturer="jlcpcb",
             config=config,
         )
-        result = pkg.export(tmp_path / "output")
+        out_dir = tmp_path / "output"
+        result = pkg.export(out_dir)
 
         assert not result.success
-        assert any("Preflight FAIL" in e for e in result.errors)
+        assert any("PCB file not found" in e for e in result.errors)
+        # No output directory should be created on the fail-fast path
+        assert not out_dir.exists()
 
     def test_skip_preflight_bypasses_checks(self, tmp_path, monkeypatch):
         """With skip_all=True, preflight checks are not run."""
@@ -603,6 +615,10 @@ class TestPreflightManufacturingIntegration:
         project_dir.mkdir()
         pcb = _create_minimal_pcb(project_dir, include_outline=True)
         (project_dir / "board.kicad_pro").write_text("{}")
+        # A sibling .kicad_sch is needed because AssemblyPackage now fails
+        # fast when the BOM is schematic-sourced and the schematic cannot
+        # be auto-discovered (regression: see issue #2741).
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
         from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
@@ -692,6 +708,10 @@ class TestPreflightCLI:
         project_dir.mkdir()
         pcb = _create_minimal_pcb(project_dir, include_outline=True)
         (project_dir / "board.kicad_pro").write_text("{}")
+        # Sibling .kicad_sch needed: AssemblyPackage now fails fast when
+        # the BOM is schematic-sourced and no schematic is discoverable
+        # (regression: see issue #2741).
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -758,6 +778,10 @@ class TestPreflightCLI:
         project_dir.mkdir()
         pcb = _create_minimal_pcb(project_dir, include_outline=True)
         (project_dir / "board.kicad_pro").write_text("{}")
+        # Sibling .kicad_sch needed: AssemblyPackage now fails fast when
+        # the BOM is schematic-sourced and no schematic is discoverable
+        # (regression: see issue #2741).
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -1204,7 +1228,7 @@ def _create_pcb_with_mixed_footprints(
         )
         x += 5.0
 
-    for ref in (dnp_refs or []):
+    for ref in dnp_refs or []:
         footprints.append(
             f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
@@ -1328,7 +1352,9 @@ class TestPreflightBomCplMatchTHT:
             items=[
                 BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
                 BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
-                BOMItem(reference="J1", value="Conn", footprint="PinHeader", lib_id="Connector:Conn"),
+                BOMItem(
+                    reference="J1", value="Conn", footprint="PinHeader", lib_id="Connector:Conn"
+                ),
             ]
         )
         monkeypatch.setattr(checker, "_load_bom", lambda: bom)

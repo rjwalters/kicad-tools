@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import kicad_tools
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
 from .preflight import PreflightChecker, PreflightConfig, PreflightResult
@@ -270,6 +271,24 @@ class ManufacturingPackage:
         if dry_run:
             return self._dry_run(out_dir, result)
 
+        # Pre-construct the assembly package so we surface fatal input
+        # errors (e.g. a schematic-sourced BOM with no discoverable
+        # .kicad_sch) *before* preflight runs or we create any output
+        # files.  This guarantees that a schematic-missing failure
+        # leaves nothing on disk -- avoiding the "5/8 files written,
+        # exit code 1, partial package" gap.
+        try:
+            AssemblyPackage(
+                pcb_path=self.pcb_path,
+                schematic_path=self.schematic_path,
+                manufacturer=self.manufacturer,
+                config=self.config,
+            )
+        except KiCadFileNotFoundError as e:
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return result
+
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
         if preflight_cfg is None or not preflight_cfg.skip_all:
@@ -316,8 +335,14 @@ class ManufacturingPackage:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: BOM + CPL + Gerbers via AssemblyPackage
-        self._generate_assembly(out_dir, result)
+        # Step 1: BOM + CPL + Gerbers via AssemblyPackage.  When this
+        # returns False the stage aborted before writing any artefacts
+        # (e.g. schematic missing for a schematic-sourced BOM), so we
+        # skip the rest of the pipeline to avoid producing a partial
+        # package on disk.
+        assembly_ok = self._generate_assembly(out_dir, result)
+        if not assembly_ok:
+            return result
 
         # Step 2: Report (optional)
         if self.config.include_report:
@@ -396,8 +421,16 @@ class ManufacturingPackage:
             result.manifest_path = out_dir / self.config.manifest_name
         return result
 
-    def _generate_assembly(self, out_dir: Path, result: ManufacturingResult) -> None:
-        """Run BOM + CPL + Gerber generation."""
+    def _generate_assembly(self, out_dir: Path, result: ManufacturingResult) -> bool:
+        """Run BOM + CPL + Gerber generation.
+
+        Returns:
+            ``True`` when the assembly stage was attempted successfully
+            (whether or not its individual artefacts succeeded), ``False``
+            when the stage aborted before producing any files -- in which
+            case the caller should skip subsequent stages (Report, Project
+            ZIP, Manifest) so we don't leave a partial package on disk.
+        """
         try:
             assembly = AssemblyPackage(
                 pcb_path=self.pcb_path,
@@ -405,12 +438,28 @@ class ManufacturingPackage:
                 manufacturer=self.manufacturer,
                 config=self.config,  # ManufacturingConfig extends AssemblyConfig
             )
+        except KiCadFileNotFoundError as e:
+            # Construction failed (e.g. schematic missing for a
+            # schematic-sourced BOM).  No artefacts have been written.
+            # Bail out hard so we don't produce a partial package.
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return False
+        except Exception as e:
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return False
+
+        try:
             result.assembly_result = assembly.export(out_dir)
             if result.assembly_result.errors:
                 result.errors.extend(result.assembly_result.errors)
         except Exception as e:
             result.errors.append(f"Assembly generation failed: {e}")
             logger.error(f"Assembly generation failed: {e}")
+            return True  # files may already have been written
+
+        return True
 
     def _generate_report(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a Markdown design report."""

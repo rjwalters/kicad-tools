@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.exceptions import ValidationError
 
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from .bom_formats import BOMExportConfig, export_bom, read_existing_lcsc_assignments
@@ -144,6 +143,13 @@ class AssemblyPackage:
                            If not provided, will look for same name as PCB
             manufacturer: Manufacturer ID (jlcpcb, pcbway, etc.)
             config: Assembly configuration
+
+        Raises:
+            KiCadFileNotFoundError: when the PCB file does not exist, or when
+                the schematic cannot be auto-discovered and the configured
+                ``bom_source`` requires one (i.e. anything other than
+                ``"pcb"``).  Failing fast here avoids generating a partial
+                manufacturing package (Gerbers + CPL but no BOM) on disk.
         """
         self.pcb_path = Path(pcb_path)
         if not self.pcb_path.exists():
@@ -152,6 +158,9 @@ class AssemblyPackage:
                 context={"file": str(pcb_path)},
                 suggestions=["Check that the file path is correct"],
             )
+
+        self.manufacturer = manufacturer.lower()
+        self.config = config or AssemblyConfig()
 
         # Find schematic
         if schematic_path:
@@ -165,8 +174,37 @@ class AssemblyPackage:
             logger.warning(f"Schematic not found: {self.schematic_path}")
             self.schematic_path = None
 
-        self.manufacturer = manufacturer.lower()
-        self.config = config or AssemblyConfig()
+        # Fail-fast when the schematic is required for the configured
+        # BOM source.  Without this guard ``export`` would still produce
+        # Gerbers/CPL/Report/ProjectZip/Manifest before ``_generate_bom``
+        # raised -- leaving a partial (and easily misread) package on disk.
+        if (
+            self.config.include_bom
+            and self.schematic_path is None
+            and self.config.bom_source != "pcb"
+        ):
+            from kicad_tools.report.utils import (
+                SCHEMATIC_STRIP_SUFFIXES,
+                schematic_candidate_paths,
+            )
+
+            candidates = schematic_candidate_paths(self.pcb_path)
+            raise KiCadFileNotFoundError(
+                "Schematic file not found for BOM generation",
+                context={
+                    "pcb": str(self.pcb_path),
+                    "pcb_stem": self.pcb_path.stem,
+                    "search_dir": str(self.pcb_path.parent),
+                    "bom_source": self.config.bom_source,
+                    "strip_suffixes": list(SCHEMATIC_STRIP_SUFFIXES),
+                    "candidates_tried": [str(c) for c in candidates],
+                },
+                suggestions=[
+                    "Pass --sch <path-to-.kicad_sch> to point at the schematic explicitly",
+                    "Use --bom-source pcb to generate the BOM from PCB footprints",
+                    "Use --no-bom to skip BOM generation entirely",
+                ],
+            )
 
     @classmethod
     def create(
@@ -270,12 +308,26 @@ class AssemblyPackage:
         else:
             # Default: schematic source
             if not self.schematic_path:
-                raise ValidationError(
-                    ["Schematic path required for BOM generation"],
-                    context={"pcb": str(self.pcb_path)},
+                from kicad_tools.report.utils import (
+                    SCHEMATIC_STRIP_SUFFIXES,
+                    schematic_candidate_paths,
+                )
+
+                candidates = schematic_candidate_paths(self.pcb_path)
+                raise KiCadFileNotFoundError(
+                    "Schematic file not found for BOM generation",
+                    context={
+                        "pcb": str(self.pcb_path),
+                        "pcb_stem": self.pcb_path.stem,
+                        "search_dir": str(self.pcb_path.parent),
+                        "bom_source": bom_source,
+                        "strip_suffixes": list(SCHEMATIC_STRIP_SUFFIXES),
+                        "candidates_tried": [str(c) for c in candidates],
+                    },
                     suggestions=[
-                        "Provide a schematic file path when creating the AssemblyPackage",
-                        "Use --bom-source pcb to generate BOM from PCB footprints instead",
+                        "Pass --sch <path-to-.kicad_sch> to point at the schematic explicitly",
+                        "Use --bom-source pcb to generate the BOM from PCB footprints",
+                        "Use --no-bom to skip BOM generation entirely",
                     ],
                 )
 
@@ -308,9 +360,7 @@ class AssemblyPackage:
                             logger.info(line)
                         # Collect refs that got an LCSC from spec
                         spec_refs = {
-                            e.reference
-                            for e in overlay_report.entries
-                            if e.matched and e.lcsc
+                            e.reference for e in overlay_report.entries if e.matched and e.lcsc
                         }
             except Exception as e:
                 logger.warning(f"Spec overlay failed (continuing without): {e}")
@@ -448,9 +498,7 @@ class AssemblyPackage:
 
             sch_bom = extract_bom(self.schematic_path)
             sch_refs = {
-                item.reference
-                for item in sch_bom.items
-                if not item.is_virtual and not item.dnp
+                item.reference for item in sch_bom.items if not item.is_virtual and not item.dnp
             }
 
             # Compute mismatch

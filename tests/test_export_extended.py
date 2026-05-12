@@ -536,6 +536,10 @@ class TestAssemblyPackage:
         return pcb_path
 
     def test_init(self, mock_pcb_path):
+        # A sibling .kicad_sch is required for the default schematic-sourced
+        # BOM path -- AssemblyPackage fails fast otherwise (see issue #2741).
+        sch_path = mock_pcb_path.with_suffix(".kicad_sch")
+        sch_path.write_text("(kicad_sch)")
         pkg = AssemblyPackage(mock_pcb_path)
         assert pkg.pcb_path == mock_pcb_path
 
