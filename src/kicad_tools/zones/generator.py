@@ -770,7 +770,7 @@ def _order_ground_nets_canonically(
 
 def _assign_layers_for_pour_nets(
     copper_layer_count: int,
-    pour_nets: list[tuple[str, "NetClass"]],
+    pour_nets: list[tuple[str, NetClass]],
 ) -> list[tuple[str, str, int]]:
     """Assign layers and priorities for pour nets based on board stackup.
 
@@ -907,7 +907,7 @@ def _assign_layers_for_pour_nets(
 
 def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
-    pour_nets: list[tuple[str, "NetClass"]],
+    pour_nets: list[tuple[str, NetClass]],
     edge_clearance: float | None = None,
 ) -> int:
     """Create zones for power and ground nets on a PCB.
