@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.router import (
     DesignRules,
+    DifferentialPairConfig,
     create_net_class_map,
     load_pcb_for_routing,
     show_routing_summary,
@@ -166,9 +167,21 @@ def main():
             pad_count = len(router.nets.get(net_num, []))
             print(f"    {net_name}: {pad_count} pads")
 
-    # Route all nets using standard routing (DRC-safe, no overlaps)
-    print("\n--- Routing (standard mode) ---")
-    router.route_all()
+    # Route all nets with differential-pair-aware routing (Issue #2760).
+    #
+    # Without this, the router schedules USB_D- before USB_D+ via per-net
+    # priority ordering and lays down a via near U1.29 / J1.A6, blocking
+    # the diagonal pad-flip corridor that USB_D+ then needs.  The result
+    # was 4 diffpair_clearance_intra violations at the J1 USB-C connector.
+    #
+    # ``route_all_with_diffpairs`` runs ``CoupledPathfinder`` over USB_D+ /
+    # USB_D- first, atomically reserving both halves' geometry before any
+    # single-net A* runs.  Pairs that the CoupledPathfinder cannot handle
+    # fall through to independent per-net routing (default behaviour for
+    # the basic strategy).  See ``router/diffpair_routing.py:1751``.
+    print("\n--- Routing (diff-pair-aware mode) ---")
+    diffpair_config = DifferentialPairConfig(enabled=True)
+    router.route_all_with_diffpairs(diffpair_config=diffpair_config)
 
     # Get statistics before optimization
     stats_before = router.get_statistics()
