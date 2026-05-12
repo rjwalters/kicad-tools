@@ -570,6 +570,11 @@ def apply_net_class_rules(
             zone_priority=20,  # Highest zone priority
             zone_connection="solid",
             is_pour_net=True,
+            # Issue #2772: declarative routing-intent.  Ground nets are
+            # always satisfied by a copper zone (or fall through to the
+            # no-zone warning path) -- they should never enter the
+            # pathfinder as ordinary traces.
+            route_via="pour",
         ),
         NetClass.HIGH_CURRENT_SIGNAL: NET_CLASS_HIGH_CURRENT_SIGNAL,
         NetClass.CLOCK: NET_CLASS_CLOCK,

@@ -8,8 +8,19 @@ This module provides:
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from .layers import Layer
+
+# Allowed values for :attr:`NetClassRouting.route_via`.
+# - ``"pathfinder"`` (default) -- ordinary trace, standard pathfinder routing.
+# - ``"pour"`` -- skip from pathfinder; expect a copper zone/pour to satisfy
+#   the net (e.g. GND, VCC).  When no zone exists, callers fall through to
+#   the existing ``no_zone_nets`` warning path rather than skipping silently.
+# - ``"manual"`` -- skip from pathfinder; designer is responsible for routing
+#   the net by hand (e.g. wide motor-phase traces).  Emits a distinct log
+#   line so the user is not left wondering why the net is unconnected.
+RouteVia = Literal["pathfinder", "pour", "manual"]
 
 
 @dataclass
@@ -442,6 +453,42 @@ class NetClassRouting:
     zone_connection: str = "thermal"  # Default connection type ("thermal", "solid", "none")
     is_pour_net: bool = False  # This net is used for copper pours (e.g., GND, VCC)
 
+    # Routing-intent opt-out (Issue #2772)
+    route_via: RouteVia = "pathfinder"
+    """Declarative routing-intent selector for nets in this class.
+
+    Lets designers opt OUT of the pathfinder declaratively rather than
+    hand-rolling ``skip_nets`` in a custom ``design.py``:
+
+    - ``"pathfinder"`` (default) -- standard pathfinder routing; preserves
+      pre-#2772 behavior for every existing class.
+    - ``"pour"`` -- ``_auto_skip_pour_nets`` skips this net when a zone for
+      it exists in the PCB; otherwise falls through to the existing
+      ``no_zone_nets`` warning path so the user is not left silently
+      unconnected.  ``NET_CLASS_POWER`` flips to this value in #2772 to
+      match the long-standing ``is_pour_net=True`` semantics.
+    - ``"manual"`` -- always skip from the pathfinder; the designer is
+      responsible for laying down the trace by hand (e.g. wide motor-phase
+      traces routed in a custom script).  ``_auto_skip_pour_nets`` emits a
+      distinct log line (``Manual: <names> ...``) so the user sees that the
+      net was deliberately deferred to manual routing rather than dropped.
+
+    Orthogonal to :attr:`is_pour_net`.  The legacy flag continues to drive
+    zone-fill priority and zone-connection inference at the auto-pour layer
+    (``router/auto_pour.py``); the new field drives the pathfinder skip
+    predicate at the CLI layer (``cli/route_cmd.py``).  When both are set
+    on a class, ``route_via`` takes precedence in the skip predicate -- a
+    class with ``is_pour_net=True`` and an explicit ``route_via="pathfinder"``
+    will NOT be auto-skipped, allowing a designer to override the legacy
+    inference for a specific net class.
+
+    Backward-compat: ``NET_CLASS_HIGH_CURRENT_SIGNAL`` deliberately stays
+    at the ``"pathfinder"`` default; its phase outputs (PHASE_A/B/C) are
+    point-to-point traces, not pours, and the per-net timeout pathology
+    that motivated the original framing of this issue is fixed in sibling
+    issues #2768 / #2769, not here.
+    """
+
     # Layer preference parameters (Issue #625)
     preferred_layers: list[int] | None = None  # Layer indices to prefer (lower cost)
     avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
@@ -811,6 +858,7 @@ class NetClassRouting:
             "zone_priority": self.zone_priority,
             "zone_connection": self.zone_connection,
             "is_pour_net": self.is_pour_net,
+            "route_via": self.route_via,
             "preferred_layers": (
                 list(self.preferred_layers) if self.preferred_layers is not None else None
             ),
@@ -865,6 +913,7 @@ class NetClassRouting:
             zone_priority=data.get("zone_priority", 0),
             zone_connection=data.get("zone_connection", "thermal"),
             is_pour_net=data.get("is_pour_net", False),
+            route_via=data.get("route_via", "pathfinder"),
             preferred_layers=data.get("preferred_layers"),
             avoid_layers=data.get("avoid_layers"),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
@@ -897,6 +946,11 @@ NET_CLASS_POWER = NetClassRouting(
     zone_priority=10,  # Fill power zones first
     zone_connection="solid",  # Direct connection for power
     is_pour_net=True,  # Power nets often have pours
+    # Issue #2772: declarative routing-intent matches the long-standing
+    # ``is_pour_net=True`` semantics -- power nets should be satisfied by a
+    # copper zone (or fall through to the no-zone warning path) rather than
+    # consumed by the pathfinder.
+    route_via="pour",
 )
 
 # High-current signal nets such as motor phase outputs (PHASE_A/B/C),
