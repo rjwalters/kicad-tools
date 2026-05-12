@@ -29,6 +29,40 @@ MINIMAL_PCB = """\
   (net 0 "")
   (net 1 "GND")
   (net 2 "+3.3V")
+  (net 3 "SDA")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+
+# Board where every net classifies as POWER or GROUND (issue #2740).
+# The build pipeline must SKIP zone creation entirely on such boards so
+# the router can route VIN/VOUT/GND as ordinary signal traces.  Without
+# this guard, _auto_skip_pour_nets in route_cmd would skip every net,
+# nets_to_route would drop to 0, and the router would silently emit a
+# PCB with zero copper.
+MINIMAL_PCB_ALL_POWER = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VIN")
+  (net 2 "VOUT")
+  (net 3 "GND")
   (gr_rect
     (start 0 0)
     (end 50 50)
@@ -81,6 +115,7 @@ MINIMAL_PCB_AGND = """\
   (net 0 "")
   (net 1 "AGND")
   (net 2 "+3.3V")
+  (net 3 "SDA")
   (gr_rect
     (start 0 0)
     (end 50 50)
@@ -121,9 +156,17 @@ MINIMAL_PCB_GND_ONLY = """\
 
 @pytest.fixture
 def pcb_with_power(tmp_path: Path) -> Path:
-    """PCB containing GND and +3.3V nets."""
+    """PCB containing GND, +3.3V, and one signal net (SDA)."""
     p = tmp_path / "board.kicad_pcb"
     p.write_text(MINIMAL_PCB)
+    return p
+
+
+@pytest.fixture
+def pcb_all_power(tmp_path: Path) -> Path:
+    """PCB whose only nets are VIN/VOUT/GND (all-power board, issue #2740)."""
+    p = tmp_path / "board.kicad_pcb"
+    p.write_text(MINIMAL_PCB_ALL_POWER)
     return p
 
 
@@ -432,3 +475,286 @@ class TestRunStepZonesEdgeClearance:
             assert max(xs) >= 49.99
             assert min(ys) <= 0.01
             assert max(ys) >= 49.99
+
+
+# ---------------------------------------------------------------------------
+# All-power-board guard (issue #2740)
+# ---------------------------------------------------------------------------
+
+
+class TestAllPowerBoardGuard:
+    """Regression test for issue #2740 — board 01 silent empty-route.
+
+    On boards where every net classifies as POWER or GROUND (e.g.
+    01-voltage-divider with VIN/VOUT/GND), ``_run_step_zones`` MUST
+    skip zone creation so the router routes those nets as signal
+    traces.  Without this guard, ``kct route``'s ``_auto_skip_pour_nets``
+    skips every net (each has a zone), ``nets_to_route`` drops to 0,
+    the router hard-codes completion = 1.0 and exits 0, and the build
+    silently ships a PCB with zero copper segments.
+
+    The guard mirrors the one in
+    :func:`kicad_tools.router.auto_pour.auto_pour_if_missing` and both
+    call sites share :func:`classify_pour_candidates`.
+    """
+
+    def test_all_power_board_skips_zone_creation(self, pcb_all_power: Path):
+        """VIN/VOUT/GND-only board must not get zones from kct build."""
+        ctx = _make_ctx(pcb_file=pcb_all_power)
+        result = _run_step_zones(ctx, Console())
+
+        assert result.success is True
+        assert "skipping zone creation" in result.message.lower()
+        assert "#2740" in result.message or "power/ground" in result.message.lower()
+
+        # Critical postcondition: NO zones on disk.
+        pcb = PCB.load(str(pcb_all_power))
+        assert len(pcb.zones) == 0, (
+            "All-power board must have zero zones so the router can route "
+            "every net as a signal (see issue #2740)."
+        )
+
+    def test_all_power_guard_mirrors_auto_pour(self, pcb_all_power: Path):
+        """Both call sites must agree the board is all-power.
+
+        Drift between :func:`_run_step_zones` and
+        :func:`auto_pour_if_missing` was the root cause of issue #2740.
+        Both now share ``classify_pour_candidates`` so they cannot drift.
+        """
+        from kicad_tools.router.auto_pour import (
+            auto_pour_if_missing,
+            classify_pour_candidates,
+        )
+
+        # Shared helper agrees this is an all-power board.
+        net_names = {1: "VIN", 2: "VOUT", 3: "GND"}
+        _pour, _signal_count, is_all_power = classify_pour_candidates(net_names)
+        assert is_all_power is True
+
+        # auto_pour_if_missing also skips this board.
+        count, names = auto_pour_if_missing(pcb_all_power)
+        assert count == 0
+        assert names == []
+        # And the file is unchanged.
+        pcb = PCB.load(str(pcb_all_power))
+        assert len(pcb.zones) == 0
+
+    def test_mixed_board_still_creates_zones(self, pcb_with_power: Path):
+        """A board with power/ground + signal nets must still get zones.
+
+        Guards against over-correction: the all-power guard must only
+        fire when every classified net is POWER or GROUND.  MINIMAL_PCB
+        contains GND + +3.3V + SDA, so the guard must NOT fire.
+        """
+        ctx = _make_ctx(pcb_file=pcb_with_power)
+        result = _run_step_zones(ctx, Console())
+
+        assert result.success is True
+        assert "created" in result.message.lower()
+
+        pcb = PCB.load(str(pcb_with_power))
+        # 2 zones expected: GND and +3.3V.  SDA has no zone (it's signal).
+        zone_nets = {z.net_name for z in pcb.zones}
+        assert "GND" in zone_nets
+        assert "+3.3V" in zone_nets
+        assert "SDA" not in zone_nets
+
+
+# ---------------------------------------------------------------------------
+# Route-step postcondition (issue #2740 defense-in-depth)
+# ---------------------------------------------------------------------------
+
+
+class TestRouteStepPostcondition:
+    """Tests for :func:`build_cmd._check_route_postcondition`.
+
+    This postcondition catches the "silent green empty PCB" failure mode
+    where ``kct route`` exits 0 with ``completion = 1.0`` because every
+    routable net was auto-skipped (yielding ``nets_to_route == 0``).
+    See issue #2740.
+    """
+
+    @staticmethod
+    def _pcb_with_pads_no_traces(tmp_path: Path) -> tuple[Path, Path]:
+        """Build an input/output pair representing the empty-route regression.
+
+        Returns (input_pcb, routed_pcb) where:
+        - input_pcb has 3 multi-pad signal nets and zero zones
+          (so the postcondition expects segments to be produced).
+        - routed_pcb is byte-identical (zero segments, zero vias),
+          simulating the silent-success path.
+        """
+        # Minimal PCB with two footprints sharing 3 nets via pads.
+        # Each net has 2 pads => 3 multi-pad signal nets to route.
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VIN")
+  (net 2 "VOUT")
+  (net 3 "GND")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+  (footprint "Test:U1"
+    (layer "F.Cu")
+    (at 10 10)
+    (uuid "fp1-uuid")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "VIN"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 2 "VOUT"))
+    (pad "3" smd rect (at 4 0) (size 1 1) (layers "F.Cu") (net 3 "GND"))
+  )
+  (footprint "Test:U2"
+    (layer "F.Cu")
+    (at 30 10)
+    (uuid "fp2-uuid")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "VIN"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 2 "VOUT"))
+    (pad "3" smd rect (at 4 0) (size 1 1) (layers "F.Cu") (net 3 "GND"))
+  )
+)
+"""
+        input_pcb = tmp_path / "input.kicad_pcb"
+        input_pcb.write_text(pcb_text)
+        routed_pcb = tmp_path / "input_routed.kicad_pcb"
+        routed_pcb.write_text(pcb_text)  # Same content == zero segments produced.
+        return input_pcb, routed_pcb
+
+    def test_postcondition_fails_when_zero_segments_for_routable_nets(self, tmp_path: Path):
+        """Routed PCB with 0 segments + 0 vias for >=1 signal net must fail."""
+        from kicad_tools.cli.build_cmd import _check_route_postcondition
+
+        input_pcb, routed_pcb = self._pcb_with_pads_no_traces(tmp_path)
+        result = _check_route_postcondition(input_pcb=input_pcb, routed_pcb=routed_pcb)
+
+        assert result is not None, "Postcondition must fail on empty routed PCB"
+        assert result.success is False
+        assert "0 segments" in result.message
+        assert "#2740" in result.message
+
+    def test_postcondition_ok_when_no_routable_signal_nets(self, tmp_path: Path):
+        """No multi-pad signal nets in the input => zero segments is fine."""
+        from kicad_tools.cli.build_cmd import _check_route_postcondition
+
+        # Single-pad-per-net PCB: no multi-pad nets => nothing to route.
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (gr_rect
+    (start 0 0)
+    (end 10 10)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "e")
+  )
+  (footprint "Test:U1"
+    (layer "F.Cu")
+    (at 1 1)
+    (uuid "fp1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "VCC"))
+  )
+)
+"""
+        input_pcb = tmp_path / "input.kicad_pcb"
+        input_pcb.write_text(pcb_text)
+        routed_pcb = tmp_path / "input_routed.kicad_pcb"
+        routed_pcb.write_text(pcb_text)
+
+        result = _check_route_postcondition(input_pcb=input_pcb, routed_pcb=routed_pcb)
+        # No multi-pad signal nets => postcondition cannot fire.
+        assert result is None
+
+    def test_postcondition_ok_when_all_nets_have_zones(self, tmp_path: Path):
+        """All multi-pad nets are pour-handled with zones => 0 segments is fine."""
+        from kicad_tools.cli.build_cmd import _check_route_postcondition
+
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "e")
+  )
+  (footprint "Test:U1"
+    (layer "F.Cu")
+    (at 10 10)
+    (uuid "fp1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Test:U2"
+    (layer "F.Cu")
+    (at 30 10)
+    (uuid "fp2")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "z1")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.25))
+    (min_thickness 0.25)
+    (fill yes)
+    (polygon
+      (pts
+        (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50)
+      )
+    )
+  )
+)
+"""
+        input_pcb = tmp_path / "input.kicad_pcb"
+        input_pcb.write_text(pcb_text)
+        routed_pcb = tmp_path / "input_routed.kicad_pcb"
+        routed_pcb.write_text(pcb_text)
+
+        result = _check_route_postcondition(input_pcb=input_pcb, routed_pcb=routed_pcb)
+        # GND has a zone => pour-handled => postcondition does not fire.
+        assert result is None
+
+    def test_postcondition_ok_with_missing_files(self, tmp_path: Path):
+        """Missing files => postcondition returns None (best-effort)."""
+        from kicad_tools.cli.build_cmd import _check_route_postcondition
+
+        result = _check_route_postcondition(input_pcb=None, routed_pcb=None)
+        assert result is None
+
+        nonexistent = tmp_path / "ghost.kicad_pcb"
+        result = _check_route_postcondition(input_pcb=nonexistent, routed_pcb=nonexistent)
+        assert result is None

@@ -859,6 +859,21 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
     the same fill via ``kct zones fill``.  ``kct export`` also runs a
     safety-net fill if the PCB still has unfilled zones at export time
     (see :func:`export.gerber.GerberExporter._export_gerbers`).
+
+    All-power-board guard (issue #2740)
+    -----------------------------------
+
+    When *every* net on the board classifies as POWER or GROUND (e.g.
+    board 01-voltage-divider with VIN/VOUT/GND only), zone creation is
+    **skipped** entirely so the router can route those nets as ordinary
+    signals.  If zones were created instead, ``kct route``'s
+    ``_auto_skip_pour_nets`` would auto-skip every net (each has a zone),
+    ``nets_to_route`` would drop to 0, the router would report 100%
+    completion trivially, and the build would silently ship a PCB with
+    zero copper segments.  This guard mirrors the one in
+    :func:`kicad_tools.router.auto_pour.auto_pour_if_missing` and both
+    call sites share :func:`classify_pour_candidates` so the two cannot
+    drift again.
     """
     if not ctx.pcb_file or not ctx.pcb_file.exists():
         return BuildResult(
@@ -868,7 +883,7 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
     try:
-        from kicad_tools.router.net_class import NetClass, auto_classify_nets
+        from kicad_tools.router.auto_pour import classify_pour_candidates
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
 
@@ -886,21 +901,33 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
                 message="No nets found in PCB, skipping zone creation",
             )
 
-        # Classify nets
-        classifications = auto_classify_nets(net_names)
-
-        # Identify pour nets (POWER and GROUND)
-        pour_nets: list[tuple[str, NetClass]] = []
-        for net_id, classification in classifications.items():
-            if classification.net_class in (NetClass.POWER, NetClass.GROUND):
-                net_name = net_names[net_id]
-                pour_nets.append((net_name, classification.net_class))
+        # Classify nets and check the all-power-board guard.  This MUST
+        # match the guard in router.auto_pour.auto_pour_if_missing -- both
+        # call sites use the same helper to prevent drift.  See the
+        # function docstring for issue-#2740 context.
+        pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(net_names)
 
         if not pour_nets:
             return BuildResult(
                 step="zones",
                 success=True,
                 message="No power/ground nets detected, skipping zone creation",
+            )
+
+        if is_all_power_board:
+            if not ctx.quiet:
+                console.print(
+                    "  All nets are power/ground "
+                    "(skipping zone creation — routing as signals instead)"
+                )
+            return BuildResult(
+                step="zones",
+                success=True,
+                message=(
+                    "All nets are power/ground; skipping zone creation so the "
+                    "router routes them as signals (see issue #2740)"
+                ),
+                output_file=ctx.pcb_file,
             )
 
         # Check for existing zones on these nets (idempotency)
@@ -1157,6 +1184,17 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
         if result.returncode == 0:
+            # Defense-in-depth postcondition (issue #2740): the router can
+            # silently "succeed" with zero segments when every multi-pad net
+            # is auto-skipped for zone fill but no traces are produced.
+            # Verify that the routed PCB actually contains copper when the
+            # input had routable signal nets.
+            postcondition = _check_route_postcondition(
+                input_pcb=ctx.pcb_file,
+                routed_pcb=output_file,
+            )
+            if postcondition is not None:
+                return postcondition
             return BuildResult(
                 step="route",
                 success=True,
@@ -1196,6 +1234,121 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             success=False,
             message=f"Routing failed: {e}",
         )
+
+
+def _count_multi_pad_signal_nets(input_pcb: Path) -> int:
+    """Return the count of nets that need routing (>=2 pads, not pour-only).
+
+    Used by :func:`_check_route_postcondition` to decide whether a
+    "success exit, zero segments" result from ``kct route`` is plausible
+    (no signal nets to route) or pathological (silent empty output --
+    issue #2740).
+
+    A net counts as routable if:
+
+    * It is referenced by at least two pads in the PCB, AND
+    * It is *not* a pure pour net with an existing zone (those nets
+      get connected via copper fill rather than traces, so zero
+      segments on them is legitimate).
+
+    A POWER/GROUND net **without** a zone is still counted -- such nets
+    must be routed as signal traces (see :func:`route_cmd._auto_skip_pour_nets`
+    and the ``_pour_nets_without_zones`` carve-out from issue #1841).
+
+    Args:
+        input_pcb: Path to the unrouted PCB the router consumed.
+
+    Returns:
+        Number of nets the router was expected to produce segments for.
+        Returns 0 if the file cannot be parsed (postcondition then
+        cannot fire -- best-effort).
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(input_pcb))
+
+        # Count pads per net.
+        pad_counts: dict[int, int] = {}
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0:
+                    pad_counts[pad.net_number] = pad_counts.get(pad.net_number, 0) + 1
+
+        # Determine which nets have zones (pour-handled, segments not required).
+        zone_net_names = {z.net_name for z in pcb.zones if z.net_name}
+
+        # Build net_number -> net_name lookup.
+        nets_with_zones: set[int] = set()
+        for net_id, net in pcb.nets.items():
+            if net.name and net.name in zone_net_names:
+                nets_with_zones.add(net_id)
+
+        # Count multi-pad nets that lack a zone (so must be routed as signals).
+        return sum(
+            1
+            for net_id, count in pad_counts.items()
+            if count >= 2 and net_id not in nets_with_zones
+        )
+    except Exception:
+        return 0
+
+
+def _check_route_postcondition(
+    input_pcb: Path | None,
+    routed_pcb: Path | None,
+) -> BuildResult | None:
+    """Validate that ``kct route``'s successful exit produced real copper.
+
+    Defense-in-depth check for issue #2740.  The router can exit 0 with
+    ``completion = 1.0`` when every multi-pad net is auto-skipped as a
+    pour net (``nets_to_route`` becomes 0 -> the
+    ``nets_routed / nets_to_route if nets_to_route > 0 else 1.0`` ternary
+    in :mod:`kicad_tools.cli.route_cmd` returns 1.0).  Without this
+    postcondition the build pipeline would proceed to verify/export with
+    an electrically empty PCB and the only symptom would be
+    ``zone_unfilled`` warnings (severity = warning, not error).
+
+    Returns a *failure* :class:`BuildResult` when:
+
+    * The input PCB had at least one multi-pad signal net (so routing
+      should produce >=1 segment), AND
+    * The routed PCB exists and contains zero segments AND zero vias.
+
+    Returns ``None`` (i.e., "postcondition OK, continue") otherwise --
+    including when the input PCB has no routable signal nets (small
+    designs where every net is poured), when files are missing (handled
+    by upstream callers), or when the PCB cannot be parsed.
+    """
+    if not input_pcb or not routed_pcb or not routed_pcb.exists():
+        return None
+
+    expected = _count_multi_pad_signal_nets(input_pcb)
+    if expected == 0:
+        return None  # No signal nets to route -- zero segments is legitimate
+
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        routed = PCB.load(str(routed_pcb))
+        segment_count = len(routed.segments)
+        via_count = len(routed.vias)
+    except Exception:
+        return None  # Best-effort: parse failure should not break the build
+
+    if segment_count == 0 and via_count == 0:
+        return BuildResult(
+            step="route",
+            success=False,
+            message=(
+                f"Route step exited 0 but produced 0 segments and 0 vias "
+                f"for {expected} routable signal net(s).  This indicates a "
+                f"silent router failure (see issue #2740 -- the build will "
+                f"not ship an electrically empty PCB)."
+            ),
+            output_file=routed_pcb,
+        )
+    return None
 
 
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:

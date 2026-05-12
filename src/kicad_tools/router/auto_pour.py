@@ -72,6 +72,64 @@ def _is_erc_marker_net(name: str) -> bool:
     return any(re.match(p, name) for p in ERC_MARKER_NET_PATTERNS)
 
 
+def classify_pour_candidates(
+    net_names: dict[int, str],
+):
+    """Classify a board's nets into pour candidates and signal nets.
+
+    Shared helper used by both :func:`auto_pour_if_missing` and the
+    ``kct build`` zones step (:func:`kicad_tools.cli.build_cmd._run_step_zones`).
+    Both call sites must agree on the all-power-board guard so a board
+    whose only nets are POWER/GROUND is *never* given zones for every
+    net -- doing so converts every net into a pour-skip target and the
+    router then has nothing to route (see issue #2740).
+
+    Args:
+        net_names: Mapping of net id -> net name from the PCB file.
+
+    Returns:
+        A 3-tuple ``(pour_nets, signal_net_count, is_all_power_board)``:
+
+        * ``pour_nets`` -- list of ``(name, NetClass)`` tuples for nets
+          classified as POWER or GROUND, excluding ERC-marker nets such
+          as ``PWR_FLAG`` (which carry no copper).
+        * ``signal_net_count`` -- count of nets that are *not* pour
+          candidates (i.e., not POWER/GROUND, not ERC markers, or
+          unclassified).  Used by the all-power-board guard.
+        * ``is_all_power_board`` -- True when ``pour_nets`` is non-empty
+          and ``signal_net_count == 0``.  Callers should skip zone
+          creation entirely when this is True so the router can route
+          every net as a signal.
+    """
+    from kicad_tools.router.net_class import NetClass, auto_classify_nets
+
+    classifications = auto_classify_nets(net_names)
+
+    pour_nets: list[tuple[str, NetClass]] = []
+    signal_net_count = 0
+    for net_id, classification in classifications.items():
+        net_name = net_names[net_id]
+        # ERC-marker nets (PWR_FLAG and friends) carry no copper; the
+        # name-based classifier reports them as POWER but they must not
+        # be poured.  Treat them as if they did not exist for the
+        # all-power guard below -- a board whose only "power" net is
+        # PWR_FLAG should not be mistaken for a power-only design.
+        if _is_erc_marker_net(net_name):
+            continue
+        if classification.net_class in (NetClass.POWER, NetClass.GROUND):
+            pour_nets.append((net_name, classification.net_class))
+        else:
+            signal_net_count += 1
+
+    # Count unclassified nets (those that didn't meet confidence threshold)
+    # as signal nets -- they are certainly not power/ground.
+    unclassified = len(net_names) - len(classifications)
+    signal_net_count += unclassified
+
+    is_all_power_board = bool(pour_nets) and signal_net_count == 0
+    return pour_nets, signal_net_count, is_all_power_board
+
+
 def _detect_uninset_zones(
     pcb_path: Path,
     edge_clearance: float,
@@ -243,7 +301,6 @@ def auto_pour_if_missing(
         Tuple of ``(zones_created, pour_net_names)`` where
         *pour_net_names* lists the nets that received new zones.
     """
-    from kicad_tools.router.net_class import NetClass, auto_classify_nets
     from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
 
     pcb_path = Path(pcb_path)
@@ -262,30 +319,17 @@ def auto_pour_if_missing(
         return 0, []
 
     # ------------------------------------------------------------------
-    # 2. Classify nets
+    # 2. Classify nets + apply all-power-board guard
     # ------------------------------------------------------------------
-    classifications = auto_classify_nets(net_names)
-
-    pour_nets: list[tuple[str, NetClass]] = []
-    signal_net_count = 0
-    for net_id, classification in classifications.items():
-        net_name = net_names[net_id]
-        # ERC-marker nets (PWR_FLAG and friends) carry no copper; the
-        # name-based classifier reports them as POWER but they must not
-        # be poured.  Treat them as if they did not exist for the
-        # all-power guard below -- a board whose only "power" net is
-        # PWR_FLAG should not be mistaken for a power-only design.
-        if _is_erc_marker_net(net_name):
-            continue
-        if classification.net_class in (NetClass.POWER, NetClass.GROUND):
-            pour_nets.append((net_name, classification.net_class))
-        else:
-            signal_net_count += 1
-
-    # Count unclassified nets (those that didn't meet confidence threshold)
-    # as signal nets -- they are certainly not power/ground.
-    unclassified = len(net_names) - len(classifications)
-    signal_net_count += unclassified
+    # NOTE: the all-power guard must mirror the one in
+    # :func:`kicad_tools.cli.build_cmd._run_step_zones` (kct build's
+    # zone-creation step).  Both call sites share ``classify_pour_candidates``
+    # so the two cannot drift.  Drifting once caused issue #2740, where
+    # ``kct build`` created zones for every net on board 01 (VIN/VOUT/GND
+    # all-power), the auto-skip step then skipped every net as a pour
+    # net, ``nets_to_route`` became 0, the router reported 100%
+    # completion trivially, and the build silently shipped an empty PCB.
+    pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(net_names)
 
     if not pour_nets:
         return 0, []
@@ -293,7 +337,7 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 3. Board-level guard: skip if ALL nets are power/ground
     # ------------------------------------------------------------------
-    if signal_net_count == 0:
+    if is_all_power_board:
         if not quiet:
             print("Auto-pour: skipped (all nets are power/ground — routing as signals instead)")
         return 0, []
