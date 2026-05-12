@@ -3,6 +3,12 @@
 These tests verify that flush_print is called with per-net progress messages
 during both the targeted and full rip-up reroute loops in route_all_negotiated(),
 and during two-phase rip-up reroute iterations (Issue #2318).
+
+Issue #2795 adds tests for visibility into ``NegotiatedRouter.targeted_ripup``
+itself when invoked from ``_attempt_blocked_component_ripup_negotiated``:
+the rip-up of N siblings + the failed-net reroute is N+1 sequential A* calls
+that previously emitted zero log lines mid-flight, causing chorus-test runs
+to look hung for many minutes.
 """
 
 import re
@@ -643,3 +649,280 @@ class TestTwoPhaseRerouteProgressOutput:
             f"Expected no 'Re-routing net' messages when nets_to_reroute is empty, "
             f"but found {len(reroute_msgs)}: {reroute_msgs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2795: targeted_ripup progress-callback visibility tests
+# ---------------------------------------------------------------------------
+
+
+def _make_router_with_three_nets():
+    """Three-net variant of ``_make_router_with_two_nets`` for rip-up tests.
+
+    Constructs an :class:`Autorouter` with three two-pin nets so we can
+    exercise the ``targeted_ripup(failed_net, blocking_nets={B, C})`` shape
+    that produces 1 + 2 = 3 sequential ``route_net_negotiated`` calls.
+    """
+    router = Autorouter(width=60.0, height=40.0)
+    # Net 1: failed net (A)
+    pads_a = [
+        {"number": "1", "x": 5.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "A"},
+        {"number": "2", "x": 25.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "A"},
+    ]
+    router.add_component("U1", pads_a)
+    # Net 2: sibling (B) - crosses A's path
+    pads_b = [
+        {"number": "1", "x": 12.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "B"},
+        {"number": "2", "x": 12.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "B"},
+    ]
+    router.add_component("U2", pads_b)
+    # Net 3: sibling (C)
+    pads_c = [
+        {"number": "1", "x": 18.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 3, "net_name": "C"},
+        {"number": "2", "x": 18.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 3, "net_name": "C"},
+    ]
+    router.add_component("U3", pads_c)
+    return router
+
+
+def _build_pads_by_net(router):
+    """Group router pads by net id (mirroring the runtime structure).
+
+    ``router.pads`` is a dict mapping pad-id to Pad; ``router.nets`` maps
+    net-id to list of pad-ids.  This mirrors the lookup used by
+    ``route_all_negotiated`` when it constructs ``pads_by_net``.
+    """
+    pads_by_net: dict[int, list] = {}
+    for net_id, pad_ids in router.nets.items():
+        if net_id == 0:
+            continue
+        pads_by_net[net_id] = [router.pads[p] for p in pad_ids]
+    return pads_by_net
+
+
+class TestTargetedRipupProgressCallback:
+    """Issue #2795: progress_callback fires N+1 times per targeted_ripup call.
+
+    These tests focus on the *inner* loop (``NegotiatedRouter.targeted_ripup``).
+    They stub ``route_net_negotiated`` so no actual A* is run; we only verify
+    the callback contract and the resulting flush_print output when the
+    callback is the one supplied by ``_attempt_blocked_component_ripup_negotiated``.
+    """
+
+    def test_progress_callback_invoked_per_step(self):
+        """Callback fires once for failed net + once for each sibling (=N+1)."""
+        router = _make_router_with_three_nets()
+        # Build a NegotiatedRouter mirroring the one constructed inside route_all.
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        pads_by_net = _build_pads_by_net(router)
+        # Pre-populate net_routes with stub Route objects so rip_up_nets has
+        # something to clear; the exact content doesn't matter because we
+        # mock route_net_negotiated.
+        net_routes: dict[int, list] = {2: [], 3: []}
+        routes_list: list = []
+
+        callback = MagicMock()
+
+        # Stub route_net_negotiated to return [] so we don't run A*.  The
+        # progress callback fires BEFORE each call, so we still see N+1
+        # invocations even though no routes are produced.
+        with (
+            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(NegotiatedRouter, "rip_up_nets"),
+        ):
+            neg_router.targeted_ripup(
+                failed_net=1,
+                blocking_nets={2, 3},
+                net_routes=net_routes,
+                routes_list=routes_list,
+                pads_by_net=pads_by_net,
+                present_cost_factor=1.0,
+                mark_route_callback=lambda r: None,
+                ripup_history={},
+                max_ripups_per_net=3,
+                progress_callback=callback,
+                net_names={1: "A", 2: "B", 3: "C"},
+            )
+
+        # 1 failed-net + 2 siblings = 3 callback invocations.
+        assert callback.call_count == 3, (
+            f"Expected 3 progress_callback invocations (1 failed + 2 siblings), "
+            f"got {callback.call_count}"
+        )
+
+        # Inspect each call's payload.
+        phases_seen = []
+        for call_args in callback.call_args_list:
+            label, info = call_args.args
+            assert label == "ripup_phase", f"Unexpected label {label}"
+            assert "phase" in info
+            assert "net_name" in info
+            assert "index" in info
+            assert "total" in info
+            assert "elapsed" in info
+            assert info["total"] == 3
+            phases_seen.append(info["phase"])
+
+        # First payload is the failed-net retry; remaining are siblings.
+        assert phases_seen[0] == "failed_net"
+        assert phases_seen[1] == "sibling"
+        assert phases_seen[2] == "sibling"
+
+        # Index is 1-indexed against total.
+        indices = [c.args[1]["index"] for c in callback.call_args_list]
+        assert indices == [1, 2, 3], f"Expected indices [1,2,3], got {indices}"
+
+        # Net names propagate from the net_names map.
+        names = [c.args[1]["net_name"] for c in callback.call_args_list]
+        assert names[0] == "A"
+        assert set(names[1:]) == {"B", "C"}
+
+    def test_progress_callback_optional_no_regression(self):
+        """When progress_callback=None (default), no exception and no calls."""
+        router = _make_router_with_three_nets()
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        pads_by_net = _build_pads_by_net(router)
+        net_routes: dict[int, list] = {2: [], 3: []}
+
+        with (
+            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(NegotiatedRouter, "rip_up_nets"),
+        ):
+            # Should not raise; existing call sites pass no callback.
+            neg_router.targeted_ripup(
+                failed_net=1,
+                blocking_nets={2, 3},
+                net_routes=net_routes,
+                routes_list=[],
+                pads_by_net=pads_by_net,
+                present_cost_factor=1.0,
+                mark_route_callback=lambda r: None,
+                ripup_history={},
+                max_ripups_per_net=3,
+            )
+
+    def test_progress_callback_exception_does_not_break_ripup(self):
+        """A buggy callback raising must not abort the rip-up."""
+        router = _make_router_with_three_nets()
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        pads_by_net = _build_pads_by_net(router)
+        net_routes: dict[int, list] = {2: [], 3: []}
+
+        def bad_callback(phase, info):
+            raise RuntimeError("boom")
+
+        with (
+            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(NegotiatedRouter, "rip_up_nets"),
+        ):
+            # Should not raise despite callback throwing each call.
+            neg_router.targeted_ripup(
+                failed_net=1,
+                blocking_nets={2, 3},
+                net_routes=net_routes,
+                routes_list=[],
+                pads_by_net=pads_by_net,
+                present_cost_factor=1.0,
+                mark_route_callback=lambda r: None,
+                ripup_history={},
+                max_ripups_per_net=3,
+                progress_callback=bad_callback,
+                net_names={1: "A", 2: "B", 3: "C"},
+            )
+
+
+class TestAttemptBlockedComponentRipupNegotiatedLogging:
+    """Issue #2795: ``_attempt_blocked_component_ripup_negotiated`` emits
+    per-sibling flush_print lines so users can tell progress from a hang.
+    """
+
+    def test_per_sibling_flush_print_lines_with_index_and_elapsed(self):
+        """Each rip-up step emits ``rip-up [i/N] for <failed>:`` with elapsed time."""
+        router = _make_router_with_three_nets()
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        pads_by_net = _build_pads_by_net(router)
+        net_routes: dict[int, list] = {2: [], 3: []}
+
+        flush_print_calls: list[str] = []
+
+        # Simulate the call-site shape used by
+        # ``_attempt_blocked_component_ripup_negotiated``: the same closure,
+        # the same flush_print module path.
+        failed_name = router.net_names.get(1, "Net_1")
+
+        def _progress(phase_label, info):
+            from kicad_tools.cli.progress import flush_print as _fp
+
+            phase = info["phase"]
+            if phase == "failed_net":
+                action = f"routing failed net {failed_name}"
+            else:
+                action = f"routing sibling {info['net_name']}"
+            _fp(
+                f"    rip-up [{info['index']}/{info['total']}] for {failed_name}: "
+                f"{action} (elapsed {info['elapsed']:.1f}s)"
+            )
+
+        def tracking_flush_print(msg):
+            flush_print_calls.append(msg)
+
+        with (
+            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(NegotiatedRouter, "rip_up_nets"),
+            patch("kicad_tools.cli.progress.flush_print", side_effect=tracking_flush_print),
+        ):
+            neg_router.targeted_ripup(
+                failed_net=1,
+                blocking_nets={2, 3},
+                net_routes=net_routes,
+                routes_list=[],
+                pads_by_net=pads_by_net,
+                present_cost_factor=1.0,
+                mark_route_callback=lambda r: None,
+                ripup_history={},
+                max_ripups_per_net=3,
+                progress_callback=_progress,
+                net_names=router.net_names,
+            )
+
+        ripup_msgs = [m for m in flush_print_calls if "rip-up [" in m]
+        assert len(ripup_msgs) == 3, (
+            f"Expected 3 rip-up progress lines (1 failed + 2 siblings), "
+            f"got {len(ripup_msgs)}: {flush_print_calls}"
+        )
+        # Each message follows the [i/N] for FAILED: action (elapsed Xs) shape.
+        for msg in ripup_msgs:
+            assert re.search(r"rip-up \[\d+/3\] for", msg), (
+                f"Expected '[i/3] for' counter in: {msg}"
+            )
+            assert re.search(r"elapsed \d+\.\d+s", msg), (
+                f"Expected 'elapsed N.Ns' in: {msg}"
+            )
+
+        # Counters increase 1..3.
+        counters = []
+        for msg in ripup_msgs:
+            m = re.search(r"\[(\d+)/3\]", msg)
+            assert m is not None
+            counters.append(int(m.group(1)))
+        assert counters == [1, 2, 3], f"Expected ordered [1,2,3], got {counters}"

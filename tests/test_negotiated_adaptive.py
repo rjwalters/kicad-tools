@@ -2243,6 +2243,8 @@ class TestAttemptBlockedComponentRipupNegotiated:
             ripup_history=None,
             max_ripups_per_net=3,
             per_net_timeout=None,
+            progress_callback=None,
+            net_names=None,
         ):
             new_route = Route(net=failed_net, net_name="DAC_CLK", segments=[], vias=[])
             net_routes.setdefault(failed_net, []).append(new_route)
