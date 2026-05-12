@@ -50,3 +50,15 @@ tolerances:
   # partner-via escape — 3x diffpair_clearance_intra), Epic #2556 Phase 4N
   # (#2660) will tighten this floor once those land.
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 28
+
+  # Match-group regression testbench (Epic #2661 Phase 3L, #2724). Initial
+  # floor at 80 (~25% headroom over empirical 64 = 55x impedance + 4x
+  # diffpair_length_skew + 4x diffpair_routing_continuity + 1x
+  # match_group_length_skew). The 55x impedance count shares the same
+  # root cause as board 06 (#2672 -- impedance solver outputs widths that
+  # don't fit pad-pitch corridors); the 4x diffpair_routing_continuity +
+  # 4x diffpair_length_skew reflect that 6/31 nets are unrouted (PARTIAL
+  # routing on MIPI / TMDS / DDR.DQ0 -- pad-spacing tight at QFN-48 pin
+  # boundary). Phase 3N (#2726) will tighten this iteratively as
+  # match-group tuning (#2723) lands and reduces skew.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 80
