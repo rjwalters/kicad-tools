@@ -26,8 +26,6 @@ These tests pin the new behaviour by:
    complement of the row-pads against ``package.pads``.
 """
 
-import pytest
-
 from kicad_tools.router.escape import EscapeRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
@@ -94,10 +92,15 @@ def _make_tqfp32_pads(
     # West edge: x = -edge_offset, y increases (south->north)
     for i in range(pins_per_edge):
         p = Pad(
-            x=-edge_offset, y=start_offset + i * pin_pitch,
-            width=pad_height, height=pad_width,
-            net=1 + i, net_name=f"NET{1 + i}",
-            ref=ref, pin=str(1 + i), layer=Layer.F_CU,
+            x=-edge_offset,
+            y=start_offset + i * pin_pitch,
+            width=pad_height,
+            height=pad_width,
+            net=1 + i,
+            net_name=f"NET{1 + i}",
+            ref=ref,
+            pin=str(1 + i),
+            layer=Layer.F_CU,
         )
         west.append(p)
         pads.append(p)
@@ -105,10 +108,15 @@ def _make_tqfp32_pads(
     # North edge: y = +edge_offset, x increases (west->east)
     for i in range(pins_per_edge):
         p = Pad(
-            x=start_offset + i * pin_pitch, y=edge_offset,
-            width=pad_width, height=pad_height,
-            net=9 + i, net_name=f"NET{9 + i}",
-            ref=ref, pin=str(9 + i), layer=Layer.F_CU,
+            x=start_offset + i * pin_pitch,
+            y=edge_offset,
+            width=pad_width,
+            height=pad_height,
+            net=9 + i,
+            net_name=f"NET{9 + i}",
+            ref=ref,
+            pin=str(9 + i),
+            layer=Layer.F_CU,
         )
         north.append(p)
         pads.append(p)
@@ -116,10 +124,15 @@ def _make_tqfp32_pads(
     # East edge: x = +edge_offset, y decreases (north->south)
     for i in range(pins_per_edge):
         p = Pad(
-            x=edge_offset, y=-start_offset - i * pin_pitch,
-            width=pad_height, height=pad_width,
-            net=17 + i, net_name=f"NET{17 + i}",
-            ref=ref, pin=str(17 + i), layer=Layer.F_CU,
+            x=edge_offset,
+            y=-start_offset - i * pin_pitch,
+            width=pad_height,
+            height=pad_width,
+            net=17 + i,
+            net_name=f"NET{17 + i}",
+            ref=ref,
+            pin=str(17 + i),
+            layer=Layer.F_CU,
         )
         east.append(p)
         pads.append(p)
@@ -127,10 +140,15 @@ def _make_tqfp32_pads(
     # South edge: y = -edge_offset, x decreases (east->west)
     for i in range(pins_per_edge):
         p = Pad(
-            x=-start_offset - i * pin_pitch, y=-edge_offset,
-            width=pad_width, height=pad_height,
-            net=25 + i, net_name=f"NET{25 + i}",
-            ref=ref, pin=str(25 + i), layer=Layer.F_CU,
+            x=-start_offset - i * pin_pitch,
+            y=-edge_offset,
+            width=pad_width,
+            height=pad_height,
+            net=25 + i,
+            net_name=f"NET{25 + i}",
+            ref=ref,
+            pin=str(25 + i),
+            layer=Layer.F_CU,
         )
         south.append(p)
         pads.append(p)
@@ -152,9 +170,7 @@ class TestOtherFootprintPadsHelper:
         extra_ids = {id(p) for p in extras}
 
         # Extras must not include any north-edge pad.
-        assert north_ids.isdisjoint(extra_ids), (
-            "North-edge pads must NOT appear in extras"
-        )
+        assert north_ids.isdisjoint(extra_ids), "North-edge pads must NOT appear in extras"
         # Extras must include the rest of the TQFP-32 pads (24 of them).
         assert len(extras) == len(all_pads) - len(north), (
             f"Expected {len(all_pads) - len(north)} extras, got {len(extras)}"
@@ -177,8 +193,7 @@ class TestOtherFootprintPadsHelper:
 
         extras = router._other_footprint_pads(package, signal_north)
         assert any(p is plane_pad for p in extras), (
-            "Plane-net pad must be returned as an extra so the clearance "
-            "check sees it"
+            "Plane-net pad must be returned as an extra so the clearance check sees it"
         )
 
 
@@ -203,8 +218,10 @@ class TestSegmentClearanceAgainstExtraPads:
         # Construct a segment from the source pad center to a point that
         # lands very close to ``victim`` (well inside its half-extent).
         seg = Segment(
-            x1=source.x, y1=source.y,
-            x2=victim.x, y2=victim.y,
+            x1=source.x,
+            y1=source.y,
+            x2=victim.x,
+            y2=victim.y,
             width=0.2,
             layer=Layer.F_CU,
             net=source.net,
@@ -215,19 +232,25 @@ class TestSegmentClearanceAgainstExtraPads:
         # east row, so the function under the OLD behavior would not see
         # it.  This is the bug.
         old_result = router._segment_violates_pad_clearance(
-            seg, len(north) - 1, north, router.rules.trace_clearance,
+            seg,
+            len(north) - 1,
+            north,
+            router.rules.trace_clearance,
         )
         assert old_result is False, (
-            "Sanity: row-only check should miss the east-edge pad "
-            "(this is the pre-#2755 behavior)"
+            "Sanity: row-only check should miss the east-edge pad (this is the pre-#2755 behavior)"
         )
 
         # With extras (post-#2755 fix): the east-edge pad must be flagged.
         extras = router._other_footprint_pads(
-            router.analyze_package(all_pads), north,
+            router.analyze_package(all_pads),
+            north,
         )
         new_result = router._segment_violates_pad_clearance(
-            seg, len(north) - 1, north, router.rules.trace_clearance,
+            seg,
+            len(north) - 1,
+            north,
+            router.rules.trace_clearance,
             extra_pads=extras,
         )
         assert new_result is True, (
@@ -260,8 +283,10 @@ class TestSegmentClearanceAgainstExtraPads:
         # Construct a segment that ends right on top of plane_pad
         # (which is no longer in ``signal_east`` because net=0).
         seg = Segment(
-            x1=source.x, y1=source.y,
-            x2=plane_pad.x, y2=plane_pad.y,
+            x1=source.x,
+            y1=source.y,
+            x2=plane_pad.x,
+            y2=plane_pad.y,
             width=0.2,
             layer=Layer.F_CU,
             net=source.net,
@@ -271,18 +296,23 @@ class TestSegmentClearanceAgainstExtraPads:
         # Pre-fix behaviour: plane_pad is not in signal_east, so the
         # row-only check misses it.
         old_result = router._segment_violates_pad_clearance(
-            seg, 0, signal_east, router.rules.trace_clearance,
+            seg,
+            0,
+            signal_east,
+            router.rules.trace_clearance,
         )
-        assert old_result is False, (
-            "Sanity: pre-#2755 row-only check should miss a plane-net pad"
-        )
+        assert old_result is False, "Sanity: pre-#2755 row-only check should miss a plane-net pad"
 
         # Post-fix behaviour: extras include plane_pad -> violation found.
         extras = router._other_footprint_pads(
-            router.analyze_package(all_pads), signal_east,
+            router.analyze_package(all_pads),
+            signal_east,
         )
         new_result = router._segment_violates_pad_clearance(
-            seg, 0, signal_east, router.rules.trace_clearance,
+            seg,
+            0,
+            signal_east,
+            router.rules.trace_clearance,
             extra_pads=extras,
         )
         assert new_result is True, (
@@ -298,8 +328,10 @@ class TestSegmentClearanceAgainstExtraPads:
 
         source = north[0]
         seg = Segment(
-            x1=source.x, y1=source.y,
-            x2=source.x, y2=source.y + 1.0,  # short outward stub
+            x1=source.x,
+            y1=source.y,
+            x2=source.x,
+            y2=source.y + 1.0,  # short outward stub
             width=0.2,
             layer=Layer.F_CU,
             net=source.net,
@@ -309,7 +341,10 @@ class TestSegmentClearanceAgainstExtraPads:
         # Put source in extras as well as in pads -- it must still be
         # skipped by object identity (no false positive).
         result = router._segment_violates_pad_clearance(
-            seg, 0, north, router.rules.trace_clearance,
+            seg,
+            0,
+            north,
+            router.rules.trace_clearance,
             extra_pads=[source],
         )
         assert result is False, (
@@ -326,8 +361,10 @@ class TestSegmentClearanceAgainstExtraPads:
         source = north[0]
         # Escape straight outward (north), well clear of every pad.
         seg = Segment(
-            x1=source.x, y1=source.y,
-            x2=source.x, y2=source.y + 5.0,
+            x1=source.x,
+            y1=source.y,
+            x2=source.x,
+            y2=source.y + 5.0,
             width=0.2,
             layer=Layer.F_CU,
             net=source.net,
@@ -335,15 +372,17 @@ class TestSegmentClearanceAgainstExtraPads:
         )
 
         extras = router._other_footprint_pads(
-            router.analyze_package(all_pads), north,
+            router.analyze_package(all_pads),
+            north,
         )
         result = router._segment_violates_pad_clearance(
-            seg, 0, north, router.rules.trace_clearance,
+            seg,
+            0,
+            north,
+            router.rules.trace_clearance,
             extra_pads=extras,
         )
-        assert result is False, (
-            "Clean outward escape stub must not be flagged"
-        )
+        assert result is False, "Clean outward escape stub must not be flagged"
 
     def test_extra_pads_layer_filter(self):
         """Pads on a different layer must not produce false positives."""
@@ -358,8 +397,10 @@ class TestSegmentClearanceAgainstExtraPads:
         source = north[-1]
         victim = _east[0]
         seg = Segment(
-            x1=source.x, y1=source.y,
-            x2=victim.x, y2=victim.y,
+            x1=source.x,
+            y1=source.y,
+            x2=victim.x,
+            y2=victim.y,
             width=0.2,
             layer=Layer.F_CU,
             net=source.net,
@@ -367,14 +408,16 @@ class TestSegmentClearanceAgainstExtraPads:
         )
 
         extras = router._other_footprint_pads(
-            router.analyze_package(all_pads), north,
+            router.analyze_package(all_pads),
+            north,
         )
         result = router._segment_violates_pad_clearance(
-            seg, len(north) - 1, north, router.rules.trace_clearance,
+            seg,
+            len(north) - 1,
+            north,
+            router.rules.trace_clearance,
             extra_pads=extras,
         )
         # The east pad is on B.Cu now -- it must NOT be flagged as a
         # clearance violation against an F.Cu segment.
-        assert result is False, (
-            "Pads on a different layer must not be flagged"
-        )
+        assert result is False, "Pads on a different layer must not be flagged"
