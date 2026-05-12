@@ -1,4 +1,4 @@
-"""Tests for two-phase router stall-recovery integration (issue #2527).
+"""Tests for two-phase router stall-recovery integration (issues #2527, #2745).
 
 When the two-phase router's detailed-routing initial pass leaves
 ``overflow == 0`` but unrouted (or partially routed) nets remain, the
@@ -7,14 +7,24 @@ entire rip-up loop -- so the destination-component sibling rip-up that
 PR #2523 added to the negotiated ``route_all`` path was never invoked
 from the two-phase code path.
 
+Issue #2745 (board 04 OSC_OUT stagnation) showed that the original
+``overflow == 0`` gate also failed the inverse case: when **one** net is
+fully blocked (zero placed segments) AND **another** net produced minor
+overflow, the standard rip-up loop selects victims via
+``find_nets_through_overused_cells`` which can only see nets with placed
+segments — so the failed net never enters the rip-up rotation.  The
+recovery gate has therefore been broadened: it now fires whenever
+``stall_failed`` is non-empty, regardless of overflow.  The per-net
+``stall_budget = 3`` prevents thrash.
+
 These tests exercise the two-phase router's stall-recovery hook
 (``attempt_blocked_component_ripup`` callable) and verify:
 
 1. The hook is invoked when the initial pass stalls with overflow=0.
 2. The hook is NOT invoked when the initial pass completes cleanly
    (no unrouted nets).
-3. The hook is NOT invoked when overflow > 0 (the existing iteration
-   loop handles that case).
+3. The hook IS invoked when overflow > 0 but unrouted/partial nets
+   remain (issue #2745).
 4. ``build_pads_by_net`` is called with the routing-order net list and
    the returned mapping is what the helper sees.
 """
@@ -248,18 +258,36 @@ class TestTwoPhaseStallRecoveryInvocation:
         # All nets routed -> stall recovery must NOT fire.
         assert tp_router._attempt_blocked_component_ripup.call_count == 0
 
-    def test_helper_not_invoked_when_overflow_positive(self, autorouter_with_two_phase):
-        """Issue #2527: When overflow > 0 the existing iteration loop
-        owns rip-up.  The new stall path is gated on overflow == 0 to
-        avoid double-charging budget for nets the iteration loop is
-        already going to displace."""
+    def test_helper_invoked_when_overflow_positive_and_nets_unrouted(
+        self, autorouter_with_two_phase
+    ):
+        """Issue #2745: When the initial pass leaves at least one net
+        fully unrouted (or partially routed) AND another net produces
+        minor overflow, the standard iteration loop's
+        ``find_nets_through_overused_cells`` scheduler cannot see the
+        zero-segment failed net.  The BLOCKED_BY_COMPONENT recovery
+        must therefore fire even when ``overflow > 0`` -- otherwise the
+        failed net is invisible to every subsequent rip-up rotation and
+        the only "recovery" is wasted layer escalation.
+
+        This is the exact failure signature of board 04 OSC_OUT:
+        OSC_OUT had zero placed segments and OSC_IN's escape produced
+        ``overflow = 1`` near U2, so the old gate (``overflow == 0``)
+        skipped recovery and the iteration loop never re-evaluated
+        OSC_OUT.
+        """
         ar = autorouter_with_two_phase
         tp_router = self._make_two_phase_router_with_mock_helper(ar)
 
+        # Force the per-net router to fail every net so both nets are
+        # left unrouted (zero placed segments).
         tp_router._route_net_with_corridor = MagicMock(return_value=[])
-        # Non-zero overflow -> stall path must skip; iteration loop
-        # owns recovery.
-        tp_router.grid.get_total_overflow = MagicMock(return_value=5)
+
+        # Simulate the OSC_IN overflow=1 scenario: another (hypothetically
+        # placed) sibling produced minor overflow, but the failed net
+        # has no placed segments and so cannot enter the standard
+        # iteration loop's rip-up cohort.
+        tp_router.grid.get_total_overflow = MagicMock(return_value=1)
 
         from unittest.mock import patch as _patch
 
@@ -280,4 +308,10 @@ class TestTwoPhaseStallRecoveryInvocation:
                 patience=2,
             )
 
-        assert tp_router._attempt_blocked_component_ripup.call_count == 0
+        # Both nets unrouted -> recovery must fire for each, even with
+        # overflow > 0 (this is the issue #2745 fix).
+        assert tp_router._attempt_blocked_component_ripup.call_count == 2
+        # Per-net rip-up budget must still be at least 3 to prevent
+        # thrash on charlieplex-style boards.
+        for call in tp_router._attempt_blocked_component_ripup.call_args_list:
+            assert call.kwargs["max_ripups_per_net"] >= 3
