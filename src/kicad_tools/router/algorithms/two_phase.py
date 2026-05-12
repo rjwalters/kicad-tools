@@ -462,22 +462,36 @@ class TwoPhaseRouter:
         overflow = self.grid.get_total_overflow()
         flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
 
-        # Issue #2527: When the initial pass leaves ``overflow == 0`` but
-        # one or more nets are unrouted (or partially routed because an A*
-        # edge into a dense IC was blocked by a sibling net), the iteration
-        # loop below short-circuits on the ``overflow > 0`` guard and the
-        # destination-component sibling rip-up (``_attempt_blocked_component
-        # _ripup_negotiated``) is never invoked.  This is the exact failure
-        # signature on board 03 USB_CC1 / USB_CC2 (escape from U1 north
-        # edge collides with already-routed USB_D+/USB_D-).  Engage the
-        # helper here, before the iteration-loop guard, so the two-phase
-        # path benefits from the same recovery PR #2523 added to the
-        # ``route_all`` negotiated path.  Per-net rip-up budget is shared
-        # with the iteration loop's ``ripup_history`` (built below).
+        # Issue #2527 / #2745: When the initial pass leaves one or more
+        # multi-pad nets unrouted (or partially routed because an A* edge
+        # into a dense IC was blocked by a sibling net), the destination-
+        # component sibling rip-up (``_attempt_blocked_component
+        # _ripup_negotiated``) is the recovery mechanism that can free
+        # them.  Originally (#2527) the gate required ``overflow == 0``
+        # because the iteration loop below was assumed to handle the
+        # ``overflow > 0`` case via standard rip-up scheduling.
+        #
+        # Issue #2745: That assumption breaks on board 04-stm32-devboard.
+        # The standard rip-up loop at ``two_phase.py`` below selects victim
+        # nets via ``find_nets_through_overused_cells(net_routes, overused)``
+        # which only sees nets with *placed segments*.  A net classified
+        # ``blocked_path`` with **zero placed segments** (e.g. OSC_OUT on
+        # board 04 — U2.6 pad couldn't escape WEST because OSC_IN already
+        # occupied the corridor) is invisible to that scheduler, no matter
+        # how many iterations run.  Meanwhile ``overflow == 1`` (from
+        # OSC_IN's tight escape) gates this recovery off, so the failed
+        # net is never re-evaluated — the 4L escalation replays the same
+        # deterministic failure.
+        #
+        # Drop the ``overflow == 0`` gate.  Engage BLOCKED_BY_COMPONENT
+        # recovery whenever ``stall_failed`` (fully unrouted or partially
+        # routed multi-pad nets) is non-empty, regardless of overflow.
+        # The per-net rip-up budget (``stall_budget = 3``) prevents thrash
+        # on charlieplex-style boards where many sibling rip-ups would
+        # otherwise be attempted.
         ripup_history: dict[int, int] = {}
         if (
             not timed_out
-            and overflow == 0
             and self._attempt_blocked_component_ripup is not None
             and self._build_pads_by_net is not None
         ):
@@ -496,16 +510,16 @@ class TwoPhaseRouter:
             ]
             if stall_failed:
                 flush_print(
-                    f"  Initial pass stall (overflow=0): {len(stall_failed)} "
-                    f"net(s) unrouted -- engaging BLOCKED_BY_COMPONENT rip-up "
-                    f"({elapsed_str()})"
+                    f"  Initial pass stall (overflow={overflow}): "
+                    f"{len(stall_failed)} net(s) unrouted -- engaging "
+                    f"BLOCKED_BY_COMPONENT rip-up ({elapsed_str()})"
                 )
                 rescued_count = 0
                 # Issue #2527: Use a per-net rip-up budget of at least 3 here
                 # (matching the negotiated ``route_all`` default).  Connector-
                 # adjacent escapes routinely need 2-3 rip-ups before they
                 # converge, and this stall path runs at most once before the
-                # iteration loop skips entirely.
+                # iteration loop takes over.
                 stall_budget = 3
                 for failed_net in list(stall_failed):
                     if check_timeout():
