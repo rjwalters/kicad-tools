@@ -7561,6 +7561,191 @@ class Autorouter:
         )
         return results
 
+    def apply_match_group_tuning(
+        self,
+        detected_groups: list[MatchGroup],
+        verbose: bool = True,
+    ) -> dict[str, dict[int, tuple[Route, Any]]]:
+        """Apply N-trace serpentine tuning to detected match groups.
+
+        Sibling to :meth:`apply_diffpair_length_tuning` (Epic #2556
+        Phase 3I).  For each group whose net class is flagged
+        ``length_critical=True`` AND whose measured skew exceeds the
+        per-group tolerance, attempt serpentine insertions until skew is
+        within tolerance OR the cascade budget is exhausted.
+
+        Per-insertion DRC self-check + byte-for-byte rollback (Phase 2E
+        contract).  Group-of-pairs members (when
+        :attr:`MatchGroup.pair_ids` is non-empty) are routed to the
+        Phase 2F-aware code path inside :func:`tune_match_group_v2`,
+        which applies symmetric serpentine geometry to both halves of
+        each pair member.  The orchestrator is dispatch-agnostic --
+        :func:`tune_match_group_v2` selects the right internal helper
+        based on ``group.pair_ids``.
+
+        Args:
+            detected_groups: List of
+                :class:`~kicad_tools.router.match_group_length.MatchGroup`
+                instances from
+                :func:`~kicad_tools.router.match_group_detection.detect_match_groups`.
+                Groups whose net class is not length-critical are routed
+                through the engagement gate inside
+                :func:`tune_match_group_v2` and returned with
+                ``reason="not_length_critical"``.
+            verbose: Whether to print progress information.
+
+        Returns:
+            ``{group_name: {net_id: (route, result)}}`` for each group
+            processed.  Mirrors the return shape of
+            :func:`tune_match_group_v2` per-group, keyed by
+            :attr:`MatchGroup.name`.  The per-member ``result`` values
+            are :class:`~kicad_tools.router.match_group_tuning.TuneResult`
+            instances.
+        """
+        from .match_group_tuning import TuneResult, tune_match_group_v2
+
+        results: dict[str, dict[int, tuple[Route, TuneResult]]] = {}
+
+        # Build routes_by_net lookup from the autorouter's current state.
+        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+
+        # Update the match-group skew tracker so the post-tuning results are
+        # queryable.  Use the layer-stack count when available, else default
+        # to 2.  Mirrors apply_diffpair_length_tuning's pre/post bracket.
+        if self.layer_stack is not None:
+            num_layers = len(self.layer_stack.layers)
+        else:
+            num_layers = 2
+        self._match_group_tracker.record_routes(
+            routes=self.routes,
+            groups=detected_groups,
+            num_copper_layers=num_layers,
+        )
+
+        for group in detected_groups:
+            # Default per-class info.  When a net class is not configured
+            # for this group's reference net (the common synthetic-test
+            # case) the tuner is invoked with the module-level default
+            # tolerance and the manufacturer minimum clearance.
+            tolerance_mm = 0.5
+            intra_group_clearance_mm = self.rules.trace_clearance
+            intra_pair_clearance_mm = self.rules.trace_clearance
+            length_critical = True
+
+            net_class = self._resolve_net_class_for_group(group)
+            if net_class is not None:
+                tolerance_mm = net_class.effective_length_match_tolerance(0.5)
+                intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
+                length_critical = net_class.length_critical
+
+            # Phase 2F (#2701) requires intra_pair_clearance_mm
+            # unconditionally for groups whose pair_ids is non-empty.  The
+            # single-ended path inside tune_match_group_v2 ignores it
+            # (see match_group_tuning.py docstring).  We pass it
+            # unconditionally so the dispatch is fully transparent here.
+            try:
+                group_results = tune_match_group_v2(
+                    group=group,
+                    routes_by_net=routes_by_net,
+                    tolerance_mm=tolerance_mm,
+                    intra_group_clearance_mm=intra_group_clearance_mm,
+                    intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    length_critical=length_critical,
+                )
+            except ValueError as exc:
+                # Defensive: a malformed group (e.g. mixed pair/scalar
+                # membership for the same net) should not break the run.
+                # Skip this group with a warning and continue.
+                if verbose:
+                    print(f"  {group.name}: skipped ({exc})")
+                results[group.name] = {}
+                continue
+
+            # Commit any new Route references back into self.routes and the
+            # working ``routes_by_net`` map so subsequent groups' DRC
+            # self-checks see the updated geometry.  Mirrors the
+            # apply_diffpair_length_tuning per-pair commit-back loop.
+            for net_id, (new_route, _result) in group_results.items():
+                if net_id in routes_by_net and new_route is not routes_by_net[net_id]:
+                    routes_by_net[net_id] = new_route
+                    for i, r in enumerate(self.routes):
+                        if r.net == net_id:
+                            self.routes[i] = new_route
+                            break
+
+            results[group.name] = group_results
+
+            if verbose:
+                tuned = sum(1 for (_r, res) in group_results.values() if res.reason == "tuned")
+                clean = sum(
+                    1
+                    for (_r, res) in group_results.values()
+                    if res.reason == "already_within_tolerance"
+                )
+                rolled = sum(
+                    1
+                    for (_r, res) in group_results.values()
+                    if res.reason == "post_insertion_drc_violation"
+                )
+                budget = sum(
+                    1
+                    for (_r, res) in group_results.values()
+                    if res.reason
+                    in ("exceeded_max_inserts", "cascade_budget_exhausted")
+                )
+                skipped = sum(
+                    1
+                    for (_r, res) in group_results.values()
+                    if res.reason == "not_length_critical"
+                )
+                print(
+                    f"  {group.name}: {len(group_results)} members "
+                    f"({tuned} tuned, {clean} clean, {rolled} rolled back, "
+                    f"{budget} budget-exhausted, {skipped} skipped)"
+                )
+
+        # Refresh the skew tracker after tuning so downstream consumers
+        # (e.g. the Phase 2G match_group_length_skew DRC rule) see the
+        # updated lengths.
+        self._match_group_tracker.record_routes(
+            routes=self.routes,
+            groups=detected_groups,
+            num_copper_layers=num_layers,
+        )
+        return results
+
+    def _resolve_net_class_for_group(self, group: MatchGroup) -> Any | None:
+        """Best-effort lookup of the NetClassRouting for a match group.
+
+        Sibling to :meth:`_resolve_net_class_for_pair`.  Returns the
+        NetClassRouting keyed by the group's reference net (``"pace
+        car"`` / longest member).  When the reference net id is unset
+        (legacy ``None`` -> "longest in group" policy), falls back to
+        the first scalar member; when no member is in the class map
+        (e.g. synthetic-test boards that don't configure net classes),
+        returns ``None`` and the caller falls back to default
+        thresholds.
+        """
+        net_class_map = getattr(self, "net_class_map", None) or {}
+        if not net_class_map:
+            return None
+        # Priority 1: explicit reference net.
+        candidate_net_ids: list[int] = []
+        if group.reference_net_id is not None:
+            candidate_net_ids.append(group.reference_net_id)
+        # Priority 2: scalar members.
+        candidate_net_ids.extend(group.net_ids)
+        # Priority 3: paired members (positive halves first).
+        for p_id, n_id in group.pair_ids:
+            candidate_net_ids.append(p_id)
+            candidate_net_ids.append(n_id)
+        net_names = getattr(self, "net_names", None) or {}
+        for net_id in candidate_net_ids:
+            net_name = net_names.get(net_id)
+            if net_name and net_name in net_class_map:
+                return net_class_map[net_name]
+        return None
+
     def _resolve_net_class_for_pair(self, detected_pair) -> Any | None:
         """Best-effort lookup of the NetClassRouting for a detected pair.
 

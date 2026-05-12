@@ -2481,6 +2481,19 @@ def _add_route_parser(subparsers) -> None:
             "warns and short-circuits)."
         ),
     )
+    route_parser.add_argument(
+        "--length-match-groups",
+        action="store_true",
+        help=(
+            "Enable N-trace match-group length-match tuning (Epic #2661 "
+            "Phase 3H). Detects parallel-bus groups (DDR, MIPI, HDMI TMDS) "
+            "declared via NetClassRouting.length_match_group, then inserts "
+            "serpentines on shorter group members until the per-group skew "
+            "is within tolerance. Compatible with --length-match-diffpairs; "
+            "groups whose members are diff pairs (MIPI/HDMI lane groups) "
+            "engage the Phase 2F symmetric-serpentine path."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
