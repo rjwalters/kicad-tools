@@ -72,8 +72,8 @@ _ALLOWLIST: dict[str, dict[int, str]] = {
     # the caller explicitly passes ``rules=None`` (no PCB rules either).
     # The CLI always supplies its own rules with manufacturer wired in.
     "router/io.py": {
-        2057: "route_pcb() fallback when caller passes rules=None and no PCB rules",
-        2548: "route_pcb() inner fallback when neither rules nor pcb_rules supplied",
+        2224: "route_pcb() fallback when caller passes rules=None and no PCB rules",
+        2715: "route_pcb() inner fallback when neither rules nor pcb_rules supplied",
     },
     # Benchmark/synthetic fixture generators — no real CLI context.
     "benchmark/runner.py": {
