@@ -110,8 +110,7 @@ def test_baseline_no_regression():
         ar, snapshot, phase="length_match_groups", strict=False, quiet=True
     )
     assert not result.regressed_nets, (
-        f"Baseline tuning should not regress connectivity, but got "
-        f"{result.regressed_nets}"
+        f"Baseline tuning should not regress connectivity, but got {result.regressed_nets}"
     )
 
 
@@ -119,14 +118,6 @@ def test_corrupted_route_triggers_invariant_strict_mode():
     """A corrupting tuner that drops segments mid-pad causes the
     connectivity invariant to raise in strict mode (AC7)."""
     ar = _make_4_net_routed_autorouter()
-    group = MatchGroup(
-        name="DDR_DATA_BYTE_0",
-        net_ids=[1, 2, 3, 4],
-        tolerance=0.1,
-        reference_net_id=1,
-        source=MatchGroupSource.LEGACY_API,
-    )
-
     snapshot = snapshot_connectivity(ar)
 
     # Mutate the routes directly to simulate a faulty tuner that breaks

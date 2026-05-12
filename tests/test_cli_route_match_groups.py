@@ -26,7 +26,6 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 # =============================================================================
 # AC2 + AC3: CLI flag is defined in both parsers
 # =============================================================================
@@ -58,9 +57,7 @@ class TestFlagDefinedInBothParsers:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args(
-            ["route", "test.kicad_pcb", "--length-match-groups"]
-        )
+        args = parser.parse_args(["route", "test.kicad_pcb", "--length-match-groups"])
         assert args.length_match_groups is True
 
     def test_length_match_groups_default_false(self):
@@ -79,44 +76,44 @@ class TestFlagDefinedInBothParsers:
 
 def _base_args(**overrides) -> SimpleNamespace:
     """Build a minimal args namespace mirroring run_route_command's needs."""
-    base = dict(
-        pcb="test.kicad_pcb",
-        output=None,
-        strategy="negotiated",
-        skip_nets=None,
-        grid="auto",
-        trace_width=0.2,
-        clearance=0.15,
-        via_drill=0.3,
-        via_diameter=0.6,
-        mc_trials=10,
-        iterations=15,
-        verbose=False,
-        dry_run=True,
-        quiet=True,
-        power_nets=None,
-        layers="auto",
-        force=False,
-        no_optimize=False,
-        auto_layers=False,
-        max_layers=6,
-        min_completion=0.95,
-        adaptive_rules=False,
-        min_trace=None,
-        min_clearance_floor=None,
-        manufacturer="jlcpcb",
-        high_performance=False,
-        skip_drc=False,
-        auto_fix=False,
-        auto_fix_passes=None,
-        export_failed_nets=None,
-        differential_pairs=False,
-        diffpair_spacing=None,
-        diffpair_max_delta=None,
-        length_match_diffpairs=False,
-        length_match_groups=False,
-        strict=False,
-    )
+    base: dict[str, object] = {
+        "pcb": "test.kicad_pcb",
+        "output": None,
+        "strategy": "negotiated",
+        "skip_nets": None,
+        "grid": "auto",
+        "trace_width": 0.2,
+        "clearance": 0.15,
+        "via_drill": 0.3,
+        "via_diameter": 0.6,
+        "mc_trials": 10,
+        "iterations": 15,
+        "verbose": False,
+        "dry_run": True,
+        "quiet": True,
+        "power_nets": None,
+        "layers": "auto",
+        "force": False,
+        "no_optimize": False,
+        "auto_layers": False,
+        "max_layers": 6,
+        "min_completion": 0.95,
+        "adaptive_rules": False,
+        "min_trace": None,
+        "min_clearance_floor": None,
+        "manufacturer": "jlcpcb",
+        "high_performance": False,
+        "skip_drc": False,
+        "auto_fix": False,
+        "auto_fix_passes": None,
+        "export_failed_nets": None,
+        "differential_pairs": False,
+        "diffpair_spacing": None,
+        "diffpair_max_delta": None,
+        "length_match_diffpairs": False,
+        "length_match_groups": False,
+        "strict": False,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -255,9 +252,7 @@ class TestBackwardCompat:
 
         src = inspect.getsource(route_cmd)
         # The gate must be present and exact.
-        assert (
-            'getattr(args, "length_match_groups", False)' in src
-        ), (
+        assert 'getattr(args, "length_match_groups", False)' in src, (
             "route_cmd.py must gate the match-group tuning dispatch on "
             "args.length_match_groups (AC1)."
         )

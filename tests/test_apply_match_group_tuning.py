@@ -23,15 +23,12 @@ from __future__ import annotations
 import inspect
 from unittest.mock import patch
 
-import pytest
-
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import TuneResult
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import NetClassRouting
-
 
 # =============================================================================
 # Test helpers
