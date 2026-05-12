@@ -234,6 +234,7 @@ class Reconciler:
         self._schematic_path: Path | None = None
         self._pcb_path: Path | None = None
 
+        project_path: Path | None = None
         if project:
             project_path = Path(project)
             if not project_path.exists():
@@ -247,6 +248,28 @@ class Reconciler:
             self._pcb_path = Path(pcb)
 
         if not self._schematic_path or not self._pcb_path:
+            if project_path is not None:
+                missing = []
+                if not self._schematic_path:
+                    missing.append("schematic")
+                if not self._pcb_path:
+                    missing.append("PCB")
+                project_dir = project_path.parent
+                pcb_candidates = sorted(project_dir.glob("*.kicad_pcb"))
+                sch_candidates = sorted(project_dir.glob("*.kicad_sch"))
+                pcb_str = (
+                    ", ".join(p.name for p in pcb_candidates) if pcb_candidates else "(none)"
+                )
+                sch_str = (
+                    ", ".join(p.name for p in sch_candidates) if sch_candidates else "(none)"
+                )
+                raise ValueError(
+                    f"Project {project_path.name} loaded, but "
+                    f"{' and '.join(missing)} file(s) could not be resolved. "
+                    f"Candidate PCBs in {project_dir}: {pcb_str}. "
+                    f"Candidate schematics: {sch_str}. "
+                    f"Pass --schematic/--pcb explicitly to disambiguate."
+                )
             raise ValueError(
                 "Must provide either a project file or both --schematic and --pcb paths"
             )

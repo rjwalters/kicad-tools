@@ -255,6 +255,53 @@ class TestReconciler:
         finally:
             Path(sch_path).unlink()
 
+    def test_init_project_loaded_but_pcb_unresolved_lists_candidates(self, tmp_path):
+        """When project loads but resolves to no PCB and multi-candidate scan would
+        also fail to disambiguate at Project.load(), the project loader itself
+        raises with a candidate list. We assert the candidate names appear."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        sib1 = tmp_path / "foo_v1.kicad_pcb"
+        sib2 = tmp_path / "foo_v2.kicad_pcb"
+
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        sib1.write_text("")
+        sib2.write_text("")
+
+        # Project.load raises in the ambiguous case; the reconciler surfaces it.
+        with pytest.raises(FileNotFoundError) as exc_info:
+            Reconciler(project=str(pro_path))
+
+        msg = str(exc_info.value)
+        assert "foo_v1.kicad_pcb" in msg
+        assert "foo_v2.kicad_pcb" in msg
+        assert "--pcb" in msg
+
+    def test_init_project_loaded_but_no_pcb_names_project_file(self, tmp_path):
+        """When project loads but no PCB resolves (e.g. no .kicad_pcb files at all),
+        the reconciler error must name the project file and the candidate list."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        # No PCB files anywhere -> Project.load logs warning, returns _pcb_path=None.
+
+        with pytest.raises(ValueError) as exc_info:
+            Reconciler(project=str(pro_path))
+
+        msg = str(exc_info.value)
+        assert "foo.kicad_pro" in msg
+        assert "PCB" in msg
+        assert "(none)" in msg
+        assert "--pcb" in msg
+
+    def test_init_no_args_still_raises_generic_error(self):
+        """When neither project nor schematic+pcb provided, the generic error
+        message is still surfaced (no project context to enrich it with)."""
+        with pytest.raises(ValueError, match="Must provide either a project file"):
+            Reconciler()
+
 
 class TestReconcilerAnalyze:
     """Tests for Reconciler.analyze() using mocked schematic/PCB data."""
