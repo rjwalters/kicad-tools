@@ -127,18 +127,40 @@ class TestRoutedPcbArtifact:
         "net_name",
         [
             # DDR data byte (10 nets: DQ0-7 + DM0 + DQS pair)
-            "DQ0", "DQ1", "DQ2", "DQ3", "DQ4", "DQ5", "DQ6", "DQ7", "DM0",
-            "DQS_P", "DQS_N",
+            "DQ0",
+            "DQ1",
+            "DQ2",
+            "DQ3",
+            "DQ4",
+            "DQ5",
+            "DQ6",
+            "DQ7",
+            "DM0",
+            "DQS_P",
+            "DQS_N",
             # MIPI CSI (3 pairs = 6 nets)
-            "MIPI_CLK_P", "MIPI_CLK_N",
-            "MIPI_DAT0_P", "MIPI_DAT0_N",
-            "MIPI_DAT1_P", "MIPI_DAT1_N",
+            "MIPI_CLK_P",
+            "MIPI_CLK_N",
+            "MIPI_DAT0_P",
+            "MIPI_DAT0_N",
+            "MIPI_DAT1_P",
+            "MIPI_DAT1_N",
             # HDMI TMDS (3 pairs = 6 nets)
-            "TMDS_D0_P", "TMDS_D0_N",
-            "TMDS_D1_P", "TMDS_D1_N",
-            "TMDS_D2_P", "TMDS_D2_N",
+            "TMDS_D0_P",
+            "TMDS_D0_N",
+            "TMDS_D1_P",
+            "TMDS_D1_N",
+            "TMDS_D2_P",
+            "TMDS_D2_N",
             # ADDR bus (8 nets)
-            "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7",
+            "A0",
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6",
+            "A7",
         ],
     )
     def test_routed_pcb_declares_each_match_group_net(
@@ -169,12 +191,7 @@ class TestRoutedPcbArtifact:
         assert len(addr_singles) == 8, f"ADDR_BUS expected 8 singles, got {len(addr_singles)}"
 
         # Total group member nets = 11 + 6 + 6 + 8 = 31 (issue spec says ~30)
-        total_group_nets = (
-            ddr_total
-            + 2 * len(mipi_pairs)
-            + 2 * len(hdmi_pairs)
-            + len(addr_singles)
-        )
+        total_group_nets = ddr_total + 2 * len(mipi_pairs) + 2 * len(hdmi_pairs) + len(addr_singles)
         # Issue spec: "10/6/6/8 = 30 group-member nets" -- this counts the
         # DDR group as 10 (9 singles + 1 PAIR counted as 1 entry, not 2 nets).
         # We assert >=30 to match the spec's lower bound.
@@ -226,9 +243,7 @@ class TestPhaseFeatureCoverage:
         exercise the explicit-reference path.
         """
         engaged = [
-            (net, nc)
-            for net, nc in net_class_map.items()
-            if nc.length_match_reference is not None
+            (net, nc) for net, nc in net_class_map.items() if nc.length_match_reference is not None
         ]
         assert engaged, (
             "Phase 1A: no net class declares length_match_reference. "
@@ -334,9 +349,7 @@ class TestBoardsReadmeUpdated:
             "AC#5: boards/README.md must list board 07 in its status table."
         )
         # Reference to Epic #2661 should appear near the board 07 row.
-        assert "#2661" in text, (
-            "AC#5: boards/README.md should cite Epic #2661 in board 07's row."
-        )
+        assert "#2661" in text, "AC#5: boards/README.md should cite Epic #2661 in board 07's row."
 
 
 # =============================================================================
@@ -443,16 +456,12 @@ class TestNetCountBudget:
         nets = generate_pcb_mod.NETS
         signal_nets = [n for n in nets if n != ""]
         count = len(signal_nets)
-        assert 30 <= count <= 36, (
-            f"Net count {count} out of approved budget [30, 36]"
-        )
+        assert 30 <= count <= 36, f"Net count {count} out of approved budget [30, 36]"
 
     def test_seven_diffpairs_declared(self, generate_pcb_mod) -> None:
         """At least 7 diff pairs declared (DQS + 3 MIPI + 3 HDMI = 7)."""
         diffpairs = generate_pcb_mod.DIFFPAIRS
-        assert len(diffpairs) >= 7, (
-            f"Expected at least 7 diff pairs declared, got {len(diffpairs)}"
-        )
+        assert len(diffpairs) >= 7, f"Expected at least 7 diff pairs declared, got {len(diffpairs)}"
 
     def test_diffpair_partner_consistency(self, generate_pcb_mod) -> None:
         """Each declared pair has its partner net in NETS."""

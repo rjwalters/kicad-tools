@@ -106,7 +106,15 @@ NETS: dict[str, int] = {
 # detection (#2689) groups them; Phase 2F (#2701) tunes them as a
 # composite group with symmetric serpentine geometry on DQS.
 DDR_DATA_BYTE_0_SINGLES: list[str] = [
-    "DQ0", "DQ1", "DQ2", "DQ3", "DQ4", "DQ5", "DQ6", "DQ7", "DM0",
+    "DQ0",
+    "DQ1",
+    "DQ2",
+    "DQ3",
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "DM0",
 ]
 DDR_DATA_BYTE_0_PAIRS: list[tuple[str, str]] = [
     ("DQS_P", "DQS_N"),

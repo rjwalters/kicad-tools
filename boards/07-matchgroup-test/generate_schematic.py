@@ -169,9 +169,7 @@ def create_matchgroup_schematic(output_path: Path) -> bool:
     print("   DDR_DATA_BYTE_0:")
     ddr_singles = ["DQ0", "DQ1", "DQ2", "DQ3", "DQ4", "DQ5", "DQ6", "DQ7", "DM0"]
     for name in ddr_singles:
-        sch.add_global_label(
-            name, label_x, label_y, shape="bidirectional", rotation=0, snap=False
-        )
+        sch.add_global_label(name, label_x, label_y, shape="bidirectional", rotation=0, snap=False)
         label_y += 5.08
     # DQS pair
     sch.add_global_label("DQS_P", label_x, label_y, shape="bidirectional", rotation=0, snap=False)
@@ -217,14 +215,11 @@ def create_matchgroup_schematic(output_path: Path) -> bool:
     print("   ADDR_BUS:")
     addr = ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"]
     for name in addr:
-        sch.add_global_label(
-            name, label_x, label_y, shape="bidirectional", rotation=0, snap=False
-        )
+        sch.add_global_label(name, label_x, label_y, shape="bidirectional", rotation=0, snap=False)
         label_y += 5.08
 
     print(
-        f"   Emitted {len(ddr_singles) + 2 + 6 + 6 + len(addr)} signal labels "
-        f"across 4 match groups"
+        f"   Emitted {len(ddr_singles) + 2 + 6 + 6 + len(addr)} signal labels across 4 match groups"
     )
 
     # =========================================================================
