@@ -52,50 +52,69 @@
 #   * board 07 -- #2758 (clearance_pad_segment cleanup), #2724/#2726 (impedance)
 
 tolerances:
-  # Bumped from 15 -> 120 in PR #2753 (issue #2742) to reflect the new
-  # ground truth after the segment/via/zone coord-space fix. The previous
-  # floor of 15 was an artifact of the coord-space bug silently masking
-  # 105x clearance_pad_segment violations. Per-rule (post-fix):
-  # 105x clearance_pad_segment (the newly-surfaced class), 13x
-  # clearance_segment_segment + 2x clearance_segment_via (pre-existing,
-  # locked in by PR #2583 Hall-sensor placement tuning -- closes #2532).
-  # Tracked in #2756 for re-routing, #2542 for full clean state.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 120
+  # Tightened from 120 -> 53 by PR fixing issue #2781.  The
+  # ``_segment_circle_clearance`` rect-pad fix dropped 67 of the 105
+  # ``clearance_pad_segment`` reports on this board -- they were
+  # false-positive marginal shortfalls produced by the prior
+  # "treat rect pad as a disc of radius max(w, h) / 2" approximation
+  # along the SHORT axis of TQFP and DDR rectangular pads.  The
+  # remaining 38 ``clearance_pad_segment`` reports are real
+  # routing defects (most are negative-actual_value cases where
+  # SW_OUT routes through U1's TO-263 GND tab and similar -- these
+  # are the dominant failure mode tracked in #2756).  Per-rule
+  # (post-fix): 38 clearance_pad_segment, 9 clearance_segment_segment,
+  # 4 clearance_segment_via, 1 diffpair_clearance_intra,
+  # 1 dimension_drill_clearance.  Tracked in #2756 for re-routing,
+  # #2542 for full clean state.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 53
 
-  # Restored after PR #2762 (board 03 diff-pair re-route) removed this
-  # entry on main. PR #2762's re-route dropped pre-coord-fix DRC errors
-  # to 0, but PR #2753's segment/via/zone coord-space fix exposes
-  # ~22 previously-hidden clearance_pad_segment violations on the
-  # re-routed PCB (the bug was silently masking trace endpoint vs pad
-  # clearance comparisons in mixed coord-spaces). The 22 floor reflects
-  # the post-coord-fix ground truth on the post-#2762-rerouted board.
-  # Tracked in #2755 for clearance_pad_segment cleanup; coordinates
-  # with #2749 (board 03 generator emits missing schematic parts).
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 22
+  # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
+  # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19
+  # were false-positive marginal shortfalls produced by treating the
+  # USB-C 0.5 x 1.2 mm rectangular pads as discs of radius 0.6 mm
+  # (the disc approximation extended the obstacle 0.35 mm past each
+  # pad's short edge into the routing channel between USB SS pairs).
+  # With the rect-aware fix from issue #2781, board 03 reaches 0
+  # errors -- the entry is removed entirely; the absence of an entry
+  # is the strict 0-error gate per this file's policy.
 
-  # Bumped from 28 -> 43 in PR #2753 (issue #2742) to reflect the new
-  # ground truth after the segment/via/zone coord-space fix. The previous
-  # floor of 28 (25x impedance + 3x diffpair_clearance_intra) was an
-  # artifact of the bug silently masking 15x clearance_pad_segment
-  # violations. This caused the Diff-Pair Routing Regression CI gate to
-  # fail on PR #2753 itself. Tracked: #2757 (clearance_pad_segment
-  # cleanup), #2672 (impedance-width selection -- 25x errors), #2677
-  # (BGA USB3 partner-via escape -- 3x diffpair_clearance_intra), Epic
-  # #2556 Phase 4N (#2660) will tighten this floor once those land.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 43
+  # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
+  # legitimate ``clearance_pad_segment`` violations (diff-pair partner
+  # pad encroachments at J3/J4 USB3 SS pairs -- tracked under #2660 /
+  # #2677), plus 25 impedance + 3 diffpair_clearance_intra.  The
+  # rect-pad fix doesn't reduce the count on this board because the
+  # 3 pad_segment cases are partner-pad near-misses where the
+  # rect-aware bound and the disc bound agree to within an epsilon.
+  # Tracked: #2757 (residual diff-pair partner cases), #2672
+  # (impedance-width selection), #2677, Epic #2556 Phase 4N (#2660).
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 31
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
-  # Tightened from 80 -> 70 after PR #2767 (issue #2757) landed the
-  # optimizer collision-checker fix that rejects paths through pad copper
-  # on skipped pour nets.  Post-regen empirical count on the routed
-  # artifact is 59 = 56x impedance + 3x clearance_pad_segment
-  # (NEAR-clearance: DQS_N/DQ4 0.083, DQ7/+1V2 0.095, A4/A5 0.051 mm
-  # vs 0.102 mm minimum -- distinct from the BGA pad-copper crossings
-  # the collision-checker fix targeted, these require routing-precision
-  # work tracked under Epic #2556 Phase 3I).  The 56x impedance count
-  # shares the same root cause as board 06 (#2672 -- impedance solver
-  # outputs widths that don't fit pad-pitch corridors).  70 is a small
-  # headroom over the empirical 59 floor; Phase 3N (#2726) will tighten
-  # this iteratively as match-group tuning (#2723) and the NEAR cases
-  # land.
+  # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
+  # this board against this allowlist and they currently disagree
+  # on the floor:
+  #
+  #   * "Routed PCB DRC Check" measures the COMMITTED
+  #     ``_routed.kicad_pcb`` artifact and reports 61 (post-fix:
+  #     -2 marginal disc-bound positives + 2 newly-surfaced
+  #     near-corner cases the disc bound under-reported).
+  #
+  #   * "Match-Group Routing Regression" RE-ROUTES from source
+  #     (``scripts/ci/check_matchgroup_coverage.py
+  #     boards/07-matchgroup-test --seed 42``) and then runs DRC.
+  #     The seed-42 re-route lands on a partial routing solution
+  #     (25/31 nets routed; 6 nets fail pin-access on PADS_OFF_GRID
+  #     + clearance-blocked corridors: Net 4 DQ0, Nets 17/18
+  #     MIPI_DAT0_*, Nets 23/24 TMDS_D1_*, Net 25 TMDS_D2_P).
+  #     The unrouted-net gaps and partial-route DRC sweep produce
+  #     70 errors against the rect-aware geometry.
+  #
+  # The binding gate must accommodate the deterministic re-route,
+  # so the floor is 70.  The committed artifact's stricter 61
+  # count is preserved as the "best known" floor in the file's
+  # history; future routing-yield improvements (Phase 3N, #2726,
+  # match-group tuning #2723) will tighten this iteratively as
+  # the re-route stops dropping the 6 pin-access nets.  This
+  # PR locks in the GEOMETRY fix, not the routing yield.
+  # Tracked: Phase 3N (#2726), match-group tuning (#2723).
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70

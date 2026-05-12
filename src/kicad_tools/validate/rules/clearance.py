@@ -16,6 +16,9 @@ from kicad_tools.core.geometry import (
 from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
+from kicad_tools.core.geometry import (
+    segments_intersect as _segments_intersect,
+)
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
@@ -254,21 +257,171 @@ def _segment_segment_clearance(
 def _segment_circle_clearance(
     seg: CopperElement, circle: CopperElement
 ) -> tuple[float, float, float]:
-    """Calculate clearance between a segment and a circle (pad/via)."""
+    """Calculate clearance between a segment and a pad/via.
+
+    For circular obstacles (vias and square pads) the distance is
+    ``centerline_distance - seg_half_width - radius`` which models the
+    obstacle as a disc.
+
+    For rectangular pads, the previous "treat as a disc of radius
+    ``max(w, h) / 2``" approach was overly conservative -- a 0.5 x 1.2 mm
+    USB pad became a 1.2 mm-diameter disc, manufacturing 0.35 mm of
+    phantom inflation along the pad's narrow axis and flagging
+    ``clearance_pad_segment`` violations against traces that actually
+    cleared the rectangle by hundreds of microns.  Issue #2781 traced
+    the post-route DRC over-emission directly to this approximation
+    (commit 6ec0344c fixed the analogous bug for pad-to-pad clearance
+    but did not visit segment-to-pad).  Use axis-aligned rectangle
+    geometry for rectangular pads, mirroring ``_rect_circle_clearance``.
+    """
     x1, y1, x2, y2, seg_width = seg.geometry
     cx, cy, w, h = circle.geometry
+    seg_half = seg_width / 2
 
-    # Use max dimension as radius for conservative check
-    radius = max(w, h) / 2
+    # Vias are always circular; square pads (w == h within a micron) are
+    # equally well-modeled as discs and the circle path is simpler/faster.
+    is_circular = circle.element_type == "via" or abs(w - h) < 0.001
 
-    # Distance from circle center to segment centerline
-    center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+    if is_circular:
+        radius = max(w, h) / 2
+        center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+        clearance = center_dist - seg_half - radius
+    else:
+        # Rectangular pad: compute true segment-to-rectangle distance.
+        # ``_rect_segment_centerline_distance`` returns a signed
+        # centerline distance (negative when the segment overlaps the
+        # rectangle, mirroring ``_rect_circle_clearance``'s sign
+        # convention for the rect-vs-disc case).
+        center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
+        clearance = center_dist - seg_half
 
-    # Subtract half-width and radius for edge-to-edge clearance
-    clearance = center_dist - (seg_width / 2) - radius
-
-    # Location is at the circle center
+    # Location is at the pad/via center (sufficient for repair tooling
+    # and human readability; the previous behaviour also reported the
+    # pad center).
     return clearance, cx, cy
+
+
+def _rect_segment_centerline_distance(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    """Signed centerline distance between an axis-aligned rectangle and a segment.
+
+    Returns the minimum distance from the segment's centerline to the
+    rectangle.  The sign convention matches ``_rect_circle_clearance``:
+
+    - **Positive** -- segment is entirely outside the rectangle.
+    - **Zero**     -- segment touches/crosses the rectangle boundary.
+    - **Negative** -- segment centerline lies inside the rectangle; the
+      magnitude is the smallest perpendicular distance from a segment
+      endpoint to the nearest rectangle edge (i.e. how far the segment
+      would need to move to escape the rectangle).
+
+    The negative branch is what allows the DRC checker to flag
+    "trace runs through pad" defects with a meaningful depth indicator
+    (e.g. ``actual_value = -1.355mm`` on board 05's U1.5 TO-263 GND tab
+    -- a real router defect that the old conservative-disc check
+    correctly flagged but with a distorted magnitude).
+
+    Args:
+        cx, cy: Center of rectangle.
+        w, h: Width and height of rectangle.
+        x1, y1: Segment start.
+        x2, y2: Segment end.
+
+    Returns:
+        Signed centerline-to-rectangle distance in millimetres.
+    """
+    half_w = w / 2
+    half_h = h / 2
+    left = cx - half_w
+    right = cx + half_w
+    bot = cy - half_h
+    top = cy + half_h
+
+    def _inside(px: float, py: float) -> bool:
+        return left <= px <= right and bot <= py <= top
+
+    p1_in = _inside(x1, y1)
+    p2_in = _inside(x2, y2)
+
+    if p1_in and p2_in:
+        # Whole centerline inside rect -- return negative depth equal to
+        # the deepest point's signed distance to the nearest rect edge.
+        #
+        # For an axis-aligned rectangle the depth function along a
+        # straight segment is piecewise linear (the min of four linear
+        # functions, one per rect edge), so its maximum is attained at
+        # an endpoint or at one of the kinks where two adjacent edges
+        # tie.  The deepest kinks lie on the rectangle's two interior
+        # diagonals from the centre, which a horizontally or
+        # vertically axis-aligned segment crosses at predictable
+        # parametric ``t`` values.  Rather than enumerate cases, we
+        # sample the segment at 33 uniformly spaced points (including
+        # both endpoints) and return the most negative depth -- well
+        # over-sampled for DRC reporting purposes, and ``O(1)``.
+        def _signed_depth(px: float, py: float) -> float:
+            gap_x = max(px - right, left - px)
+            gap_y = max(py - top, bot - py)
+            # gap_x <= 0 and gap_y <= 0 when (px, py) is inside the rect.
+            return max(gap_x, gap_y)
+
+        # Deepest = most negative signed_depth along the segment.
+        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
+        steps = 32
+        dx = x2 - x1
+        dy = y2 - y1
+        for i in range(1, steps):
+            t = i / steps
+            d = _signed_depth(x1 + t * dx, y1 + t * dy)
+            if d < deepest:
+                deepest = d
+        return deepest
+
+    if p1_in != p2_in:
+        # Endpoint straddles the boundary -- centerline crosses an edge.
+        return 0.0
+
+    # Both endpoints outside.  Check whether the segment crosses any of
+    # the four rectangle edges; if so the centerline touches the
+    # boundary (distance 0).
+    rect_edges = (
+        (left, bot, right, bot),
+        (right, bot, right, top),
+        (right, top, left, top),
+        (left, top, left, bot),
+    )
+    for ex1, ey1, ex2, ey2 in rect_edges:
+        if _segments_intersect(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+            return 0.0
+
+    # No crossing -- the closest approach is either an endpoint of the
+    # segment to the rectangle or a corner of the rectangle to the
+    # segment.  Both are non-negative.
+    def _point_to_rect(px: float, py: float) -> float:
+        closest_x = max(left, min(px, right))
+        closest_y = max(bot, min(py, top))
+        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    candidates = [
+        _point_to_rect(x1, y1),
+        _point_to_rect(x2, y2),
+    ]
+    for corner_x, corner_y in (
+        (left, bot),
+        (right, bot),
+        (right, top),
+        (left, top),
+    ):
+        candidates.append(_point_to_segment_distance(corner_x, corner_y, x1, y1, x2, y2))
+
+    return min(candidates)
 
 
 def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[float, float, float]:
