@@ -1599,8 +1599,22 @@ def validate_routes(
                 if pad.net == route_net:
                     continue
 
-                # Skip unconnected pads (Net 0) -- these are pour/unconnected and not obstacles
-                if pad.net == 0:
+                # Skip truly unconnected pads -- pads with net == 0 AND no
+                # net name are unconnected mechanical pads / pour leftovers
+                # and do not represent copper that needs clearance from
+                # routed traces.
+                #
+                # Issue #2757: pads with net == 0 but a non-empty net_name
+                # are obstacles from *skipped* pour nets (GND, +3V3, +1V2,
+                # etc.) -- ``load_pcb_for_routing`` rewrites their net to 0
+                # so the autorouter doesn't try to route them, but they
+                # are real pad copper that segments must keep clearance
+                # from.  Surfacing these as violations lets
+                # ``drc_verify_and_nudge`` repair them and lets the
+                # ``format_clearance_violations`` summary report them so
+                # users can see "trace XYZ grazes U2.A1 (GND)" instead of
+                # silently emitting a routed PCB that fails ``kct check``.
+                if pad.net == 0 and not pad.net_name:
                     continue
 
                 # Skip SMD pads on a different layer than the segment
@@ -1616,14 +1630,38 @@ def validate_routes(
                 pad_radius = max(pad.width, pad.height) / 2
                 effective_dist = dist - pad_radius - seg_half_width
 
-                pair_clear = _get_pair_clearance(
-                    route_net, pad.net, clearance, net_names, ncm
+                # For skipped-pour-net pads, look up the clearance under the
+                # named net (GND, +3V3, ...) rather than net 0, so the
+                # per-class clearance map is honoured.  Falls through to
+                # ``clearance`` when no class match is found.
+                pad_class_clear = clearance
+                if pad.net == 0 and pad.net_name and ncm is not None:
+                    pad_class = ncm.get(pad.net_name)
+                    if pad_class is not None:
+                        pad_class_clear = pad_class.clearance
+                pair_clear = max(
+                    _get_pair_clearance(
+                        route_net, pad.net, clearance, net_names, ncm
+                    ),
+                    pad_class_clear,
                 )
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                     # Detect component-inherent violations: obstacle pad is
                     # on the same component as a pad in the route's net.
-                    is_component_inherent = ref in route_component_refs
+                    #
+                    # Issue #2757: for skipped-pour-net pads (e.g. U2 BGA
+                    # GND pads when the route is USB3_RX2+ on U2), the pad
+                    # IS on the same component but it's still a real
+                    # routing-clearance defect (the trace can be re-routed
+                    # to avoid the pad).  Mark these as non-inherent so
+                    # ``drc_verify_and_nudge`` (which filters out
+                    # ``component_inherent=True``) attempts repair.
+                    is_component_inherent = (
+                        ref in route_component_refs and not (
+                            pad.net == 0 and pad.net_name
+                        )
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -1638,7 +1676,11 @@ def validate_routes(
                             distance=effective_dist,
                             required=pair_clear,
                             net_name=_resolve_net_name(route_net),
-                            obstacle_net_name=_resolve_net_name(pad.net),
+                            obstacle_net_name=(
+                                pad.net_name
+                                if pad.net == 0 and pad.net_name
+                                else _resolve_net_name(pad.net)
+                            ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
                             layer=segment.layer,
@@ -1753,8 +1795,10 @@ def validate_routes(
                 if pad.net == route_net:
                     continue
 
-                # Skip unconnected pads (Net 0)
-                if pad.net == 0:
+                # Skip truly unconnected pads.  Pads on skipped pour nets
+                # (Issue #2757) have net=0 but a non-empty net_name and ARE
+                # real copper obstacles.
+                if pad.net == 0 and not pad.net_name:
                     continue
 
                 pad_radius = max(pad.width, pad.height) / 2
@@ -1762,7 +1806,15 @@ def validate_routes(
                 effective_dist = dist - via_radius - pad_radius
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
-                    is_component_inherent = ref in route_component_refs
+                    # Issue #2757: cross-net pad on the same component is
+                    # only "inherent" when it's a true net obstacle, not
+                    # when the pad belongs to a skipped pour net (the trace
+                    # / via can be re-routed to avoid it).
+                    is_component_inherent = (
+                        ref in route_component_refs and not (
+                            pad.net == 0 and pad.net_name
+                        )
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -1777,7 +1829,11 @@ def validate_routes(
                             distance=effective_dist,
                             required=via_clear,
                             net_name=_resolve_net_name(route_net),
-                            obstacle_net_name=_resolve_net_name(pad.net),
+                            obstacle_net_name=(
+                                pad.net_name
+                                if pad.net == 0 and pad.net_name
+                                else _resolve_net_name(pad.net)
+                            ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
                         )
