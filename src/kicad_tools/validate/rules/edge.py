@@ -325,4 +325,6 @@ class EdgeClearanceRule(DRCRule):
         Returns:
             Distance from point to the closest point on the segment
         """
-        return _core_pt_seg_dist(point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1])
+        return _core_pt_seg_dist(
+            point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1]
+        )

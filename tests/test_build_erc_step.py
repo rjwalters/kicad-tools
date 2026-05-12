@@ -28,7 +28,6 @@ from kicad_tools.cli.build_cmd import (
     main,
 )
 
-
 # ---------------------------------------------------------------------------
 # Enum + pipeline wiring
 # ---------------------------------------------------------------------------
@@ -140,16 +139,18 @@ class TestRunStepERC:
             output_path.write_text(json.dumps(report_payload))
             return MagicMock(success=True, output_path=output_path, stderr="")
 
-        with patch(
-            "kicad_tools.cli.runner.find_kicad_cli",
-            return_value=Path("/usr/bin/kicad-cli"),
-        ), patch("kicad_tools.cli.runner.run_erc", side_effect=fake_run_erc):
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch("kicad_tools.cli.runner.run_erc", side_effect=fake_run_erc),
+        ):
             result = _run_step_erc(ctx, Console(quiet=True))
 
         assert result.success is True, result.message
         assert report_path.exists(), (
-            f"ERC report should land at {report_path} so export preflight "
-            f"can auto-discover it"
+            f"ERC report should land at {report_path} so export preflight can auto-discover it"
         )
         assert result.output_file == report_path
 
@@ -164,10 +165,13 @@ class TestRunStepERC:
             output_path.write_text(json.dumps({"violations": []}))
             return MagicMock(success=True, output_path=output_path, stderr="")
 
-        with patch(
-            "kicad_tools.cli.runner.find_kicad_cli",
-            return_value=Path("/usr/bin/kicad-cli"),
-        ), patch("kicad_tools.cli.runner.run_erc", side_effect=fake_run_erc):
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch("kicad_tools.cli.runner.run_erc", side_effect=fake_run_erc),
+        ):
             result = _run_step_erc(ctx, Console(quiet=True))
 
         assert result.success is True, result.message
@@ -175,9 +179,7 @@ class TestRunStepERC:
         assert expected.exists()
         assert result.output_file == expected
 
-    def test_kicad_cli_unavailable_is_non_blocking(
-        self, schematic_file: Path
-    ) -> None:
+    def test_kicad_cli_unavailable_is_non_blocking(self, schematic_file: Path) -> None:
         """When kicad-cli is not installed, the step warns but does not fail.
 
         Failing here would block every developer machine without KiCad
@@ -185,9 +187,7 @@ class TestRunStepERC:
         "no report" warning, which is the existing pre-fix behavior.
         """
         ctx = _make_ctx(schematic=schematic_file)
-        with patch(
-            "kicad_tools.cli.runner.find_kicad_cli", return_value=None
-        ):
+        with patch("kicad_tools.cli.runner.find_kicad_cli", return_value=None):
             result = _run_step_erc(ctx, Console(quiet=True))
         assert result.success is True
         assert "kicad-cli" in result.message.lower()

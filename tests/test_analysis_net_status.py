@@ -1511,9 +1511,7 @@ class TestNonZeroBoardOriginRegression:
         pcb_file.write_text(NON_ZERO_ORIGIN_ROUTED_PCB)
         return pcb_file
 
-    def test_segments_loaded_in_board_relative_space(
-        self, non_zero_origin_pcb: Path
-    ) -> None:
+    def test_segments_loaded_in_board_relative_space(self, non_zero_origin_pcb: Path) -> None:
         """Segment endpoints must be in the same space as footprint positions.
 
         With the fix in place, ``PCB.load`` subtracts ``_board_origin``
@@ -1532,9 +1530,7 @@ class TestNonZeroBoardOriginRegression:
         # In-file: (120.5, 108) -> board-relative: (20.5, 8)
         assert seg.end == pytest.approx((20.5, 8.0))
 
-    def test_footprint_positions_remain_board_relative(
-        self, non_zero_origin_pcb: Path
-    ) -> None:
+    def test_footprint_positions_remain_board_relative(self, non_zero_origin_pcb: Path) -> None:
         """Pre-existing footprint behavior must not regress."""
         from kicad_tools.schema.pcb import PCB
 
@@ -1567,9 +1563,7 @@ class TestNonZeroBoardOriginRegression:
         assert sig.total_pads == 2
         assert sig.has_routing is True
 
-    def test_signal_net_completion_percent_is_100(
-        self, non_zero_origin_pcb: Path
-    ) -> None:
+    def test_signal_net_completion_percent_is_100(self, non_zero_origin_pcb: Path) -> None:
         """Report collector must surface 100% signal-net completion."""
         from kicad_tools.report.collector import ReportDataCollector
 
