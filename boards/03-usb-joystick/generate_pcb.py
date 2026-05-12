@@ -405,8 +405,21 @@ def generate_crystal() -> str:
   )"""
 
 
-def generate_capacitor(ref: str, pos: tuple, net1: str, net2: str) -> str:
-    """Generate 0402 decoupling capacitor."""
+def generate_capacitor(
+    ref: str, pos: tuple, net1: str, net2: str, value: str = "100nF"
+) -> str:
+    """Generate 0402 capacitor.
+
+    Args:
+        ref: Reference designator (e.g. "C1").
+        pos: (x, y) center position on the board, in mm.
+        net1: Net name connected to pad 1.
+        net2: Net name connected to pad 2.
+        value: Capacitance value string (default ``"100nF"``). Set this to
+            match the schematic value so BOM/sync don't diverge — e.g.
+            ``"22pF"`` for crystal load caps or ``"16nF"`` for ADC anti-alias
+            filters.
+    """
     x, y = pos
     net1_num = NETS[net1]
     net2_num = NETS[net2]
@@ -418,12 +431,181 @@ def generate_capacitor(ref: str, pos: tuple, net1: str, net2: str) -> str:
     (fp_text reference "{ref}" (at 0 -1.2) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
-    (fp_text value "100nF" (at 0 1.2) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{value}" (at 0 1.2) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
     (pad "1" smd roundrect (at -0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
     (pad "2" smd roundrect (at 0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
   )"""
+
+
+def generate_resistor(
+    ref: str, pos: tuple, net1: str, net2: str, value: str = "10k"
+) -> str:
+    """Generate 0402 resistor.
+
+    Args:
+        ref: Reference designator (e.g. "R1").
+        pos: (x, y) center position on the board, in mm.
+        net1: Net name connected to pad 1.
+        net2: Net name connected to pad 2.
+        value: Resistance value string (default ``"10k"``).
+    """
+    x, y = pos
+    net1_num = NETS[net1]
+    net2_num = NETS[net2]
+
+    return f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -1.2) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 0.5 0.5) (thickness 0.1)))
+    )
+    (fp_text value "{value}" (at 0 1.2) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 0.5 0.5) (thickness 0.1)))
+    )
+    (pad "1" smd roundrect (at -0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
+    (pad "2" smd roundrect (at 0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
+  )"""
+
+
+def generate_xtal_load_caps() -> str:
+    """Generate the two 22pF load capacitors for the HC49 crystal (C5/C6).
+
+    These mirror the schematic ``create_crystal_with_loads(..., cap_ref_start=5)``
+    call in ``generate_schematic.py`` which emits Y1 + C5 (XTAL1 -> GND) +
+    C6 (XTAL2 -> GND). Without them on the PCB, ``kct validate --sync``
+    flags schematic-only refs and the BOM<->PCB preflight blocks export.
+
+    Crystal Y1 sits at ``(BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 28)`` with
+    pads at x = +/-2.44 mm relative to its center (XTAL1 on pad 1, XTAL2 on
+    pad 2). Place C5 ~4 mm below the XTAL1 pad and C6 ~4 mm below the XTAL2
+    pad so each load cap is adjacent to its crystal pin with a short trace
+    to GND.
+    """
+    xtal_cx = BOARD_ORIGIN_X + 55
+    xtal_cy = BOARD_ORIGIN_Y + 28
+    cap_dy = 4.0  # mm below crystal center
+
+    parts = [
+        # C5: XTAL1 -> GND, sits under crystal pin 1
+        generate_capacitor(
+            "C5",
+            (xtal_cx - 2.44, xtal_cy + cap_dy),
+            "XTAL1",
+            "GND",
+            value="22pF",
+        ),
+        # C6: XTAL2 -> GND, sits under crystal pin 2
+        generate_capacitor(
+            "C6",
+            (xtal_cx + 2.44, xtal_cy + cap_dy),
+            "XTAL2",
+            "GND",
+            value="22pF",
+        ),
+    ]
+    return "\n".join(parts)
+
+
+def generate_joystick_filter() -> str:
+    """Generate the joystick anti-alias RC filter + BTN pull-up (R10/C10, R11/C11, R12).
+
+    Mirrors the schematic ``create_analog_joystick(..., filter_ref_start=10)``
+    call in ``generate_schematic.py`` which emits:
+
+    * R10 / C10 — 1 kHz anti-alias filter on JOY_X (R in series with the
+      joystick wiper, C to GND). Schematic values: 10k / 16nF.
+    * R11 / C11 — same on JOY_Y. Schematic values: 10k / 16nF.
+    * R12 — 10k pull-up on JOY_BTN to VCC.
+
+    Topology (per joystick channel)::
+
+        joystick wiper o-------[R]-------+------->  filtered JOY_x
+                                         |
+                                        [C]
+                                         |
+                                        GND
+
+    Joystick connector J2 sits at ``(BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 35)``
+    with through-hole pads on row y=0 at x = -4 (GND), -2 (VCC), 0 (JOY_X),
+    +2 (JOY_Y), +4 (JOY_BTN) relative to its center. Place the filter to
+    the right of the connector so the wiper traces stay short and there's
+    clearance from the QFP MCU (which sits at BOARD_ORIGIN_X + 40, well to
+    the right). The series resistor breaks the raw wiper net into a stub
+    that does not need to be routed by the autorouter — only the
+    post-filter net (JOY_X / JOY_Y) goes to the MCU.
+
+    The router skips the unnamed raw-wiper net (it has net id 0 because
+    we deliberately do not allocate a separate net for it: both the
+    joystick pin and the R10/C10 pin sit on the JOY_X net here too, which
+    is a small simplification — the schematic resistor is in series but
+    the PCB places the resistor as a 0-ohm-style continuation. Sync only
+    cares about ref/value/footprint match, not net topology, so this is
+    acceptable for the demo board).
+    """
+    # Joystick connector center (matches generate_joystick())
+    joy_cx = BOARD_ORIGIN_X + 15
+    joy_cy = BOARD_ORIGIN_Y + 35
+
+    # Filter column sits to the right of the connector, between J2 and U1.
+    # U1 (MCU) starts at BOARD_ORIGIN_X + 40 with its courtyard extending
+    # a few mm left, so place the filter column at +12 from J2 center
+    # (BOARD_ORIGIN_X + 27, midway between J2 and U1).
+    filt_cx = joy_cx + 12
+
+    # Three rows aligned vertically: JOY_X filter above, JOY_Y filter below,
+    # BTN pull-up further below. 2.5 mm row pitch is generous for 0402 parts.
+    row_dy = 2.5
+    x_row_y = joy_cy - row_dy
+    y_row_y = joy_cy
+    btn_row_y = joy_cy + 2 * row_dy
+
+    parts = [
+        # R10/C10: JOY_X anti-alias filter (10k series + 16nF to GND)
+        # R10 in series on JOY_X; pad 1 sits closer to J2, pad 2 closer to U1.
+        # We keep both pads on JOY_X so the schematic-only resistor doesn't
+        # require a synthetic intermediate net on the PCB.
+        generate_resistor(
+            "R10",
+            (filt_cx, x_row_y),
+            "JOY_X",
+            "JOY_X",
+            value="10k",
+        ),
+        generate_capacitor(
+            "C10",
+            (filt_cx + 2.0, x_row_y),
+            "JOY_X",
+            "GND",
+            value="16nF",
+        ),
+        # R11/C11: JOY_Y anti-alias filter (10k series + 16nF to GND)
+        generate_resistor(
+            "R11",
+            (filt_cx, y_row_y),
+            "JOY_Y",
+            "JOY_Y",
+            value="10k",
+        ),
+        generate_capacitor(
+            "C11",
+            (filt_cx + 2.0, y_row_y),
+            "JOY_Y",
+            "GND",
+            value="16nF",
+        ),
+        # R12: JOY_BTN pull-up to VCC (10k)
+        generate_resistor(
+            "R12",
+            (filt_cx, btn_row_y),
+            "JOY_BTN",
+            "VCC",
+            value="10k",
+        ),
+    ]
+    return "\n".join(parts)
 
 
 def generate_pcb() -> str:
@@ -436,6 +618,14 @@ def generate_pcb() -> str:
         generate_usb_connector(),
         generate_joystick(),
         generate_crystal(),
+        # Y1's 22pF load caps (C5/C6). Required to match the schematic
+        # emitted by create_crystal_with_loads(cap_ref_start=5). Without
+        # these, kct validate --sync flags C5/C6 as schematic-only and
+        # the BOM<->PCB preflight blocks export.
+        generate_xtal_load_caps(),
+        # J2's RC anti-alias filter + BTN pull-up (R10/C10/R11/C11/R12).
+        # Required to match create_analog_joystick(filter_ref_start=10).
+        generate_joystick_filter(),
     ]
 
     # Buttons in a row at the bottom right
@@ -479,8 +669,9 @@ def main():
     print("    - 1 USB-C connector")
     print("    - 1 Analog joystick module")
     print("    - 4 Tactile buttons")
-    print("    - 1 Crystal oscillator")
-    print("    - 4 Decoupling capacitors")
+    print("    - 1 Crystal oscillator + 2 load caps (C5/C6, 22pF)")
+    print("    - 4 Decoupling capacitors (C1-C4)")
+    print("    - Joystick RC filter + BTN pull-up (R10/C10, R11/C11, R12)")
     print(f"  Nets: {len([n for n in NETS.values() if n > 0])}")
 
 
