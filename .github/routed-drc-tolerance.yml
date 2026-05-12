@@ -84,11 +84,18 @@ tolerances:
   # #2556 Phase 4N (#2660) will tighten this floor once those land.
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 43
 
-  # Match-group regression testbench (Epic #2661 Phase 3L, #2724). Floor
-  # unchanged at 80 -- post-PR-2753 actual count is 65 (55x impedance +
-  # 10x newly-surfaced clearance_pad_segment), still well under the
-  # original 80 headroom. The 10x clearance_pad_segment delta (tracked
-  # in #2758) is absorbed by the existing buffer. Phase 3N (#2726) will
-  # tighten this iteratively as match-group tuning (#2723) lands and
-  # reduces skew.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 80
+  # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
+  # Tightened from 80 -> 70 after PR #2767 (issue #2757) landed the
+  # optimizer collision-checker fix that rejects paths through pad copper
+  # on skipped pour nets.  Post-regen empirical count on the routed
+  # artifact is 59 = 56x impedance + 3x clearance_pad_segment
+  # (NEAR-clearance: DQS_N/DQ4 0.083, DQ7/+1V2 0.095, A4/A5 0.051 mm
+  # vs 0.102 mm minimum -- distinct from the BGA pad-copper crossings
+  # the collision-checker fix targeted, these require routing-precision
+  # work tracked under Epic #2556 Phase 3I).  The 56x impedance count
+  # shares the same root cause as board 06 (#2672 -- impedance solver
+  # outputs widths that don't fit pad-pitch corridors).  70 is a small
+  # headroom over the empirical 59 floor; Phase 3N (#2726) will tighten
+  # this iteratively as match-group tuning (#2723) and the NEAR cases
+  # land.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70
