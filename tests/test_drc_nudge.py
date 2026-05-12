@@ -1182,3 +1182,335 @@ class TestNudgeSegmentWithChainViaAnchor:
         # Segment moved as expected.
         assert math.isclose(seg.y1, 0.2)
         assert math.isclose(seg.y2, 0.2)
+
+
+# ---------------------------------------------------------------------------
+# Via-vs-via nudge tests (Issue #2743)
+# ---------------------------------------------------------------------------
+
+
+class TestViaViaNudgeDispatch:
+    """The via-vs-via dispatch fix for the 0/6 nudge effectiveness regression
+    on board 02 (Issue #2743).
+
+    The validator emits via-via violations with ``obstacle_type="via"`` AND
+    ``segment_index == -1``.  Before the fix the dispatch routed these
+    through ``_try_nudge_seg_via`` which called
+    ``_find_segment(..., -1, x, y, x, y)`` — there is no zero-length
+    segment, so the lookup always returned None and the nudge silently
+    failed.  The fix adds a dedicated ``_try_nudge_via_via`` handler.
+    """
+
+    def _make_via_via_routes(
+        self,
+        *,
+        center_distance: float,
+        net_a: int = 1,
+        net_b: int = 2,
+        via_diameter: float = 0.7,
+    ) -> tuple[Route, Route, Via, Via]:
+        """Build two single-via routes on different nets at the requested
+        centre-to-centre distance along the x-axis.
+        """
+        via_a = Via(
+            x=0.0, y=0.0, drill=0.35, diameter=via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU), net=net_a,
+        )
+        via_b = Via(
+            x=center_distance, y=0.0, drill=0.35, diameter=via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU), net=net_b,
+        )
+        # Add stub segments so the routes are non-trivial, terminating
+        # at the via centres.  These should remain connected after the
+        # via-via nudge.
+        seg_a = Segment(
+            x1=-1.0, y1=0.0, x2=0.0, y2=0.0,
+            width=0.2, layer=Layer.F_CU, net=net_a,
+        )
+        seg_b = Segment(
+            x1=center_distance + 1.0, y1=0.0, x2=center_distance, y2=0.0,
+            width=0.2, layer=Layer.F_CU, net=net_b,
+        )
+        route_a = Route(net=net_a, net_name=f"N{net_a}",
+                        segments=[seg_a], vias=[via_a])
+        route_b = Route(net=net_b, net_name=f"N{net_b}",
+                        segments=[seg_b], vias=[via_b])
+        return route_a, route_b, via_a, via_b
+
+    def test_via_via_violation_resolved_by_dispatch(self):
+        """With via-via dispatch, a sub-clearance pair is repaired.
+
+        Place two vias on different nets at centre-to-centre 0.85mm.
+        With diameter=0.7mm each (radius=0.35), edge-to-edge = 0.85 - 0.7 = 0.15mm.
+        With via_clearance=0.2mm, deficit = 0.05mm — repairable within
+        the default 0.2mm max displacement budget.
+        """
+        route_a, route_b, via_a, via_b = self._make_via_via_routes(
+            center_distance=0.85,
+        )
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
+
+        result = drc_verify_and_nudge(router)
+        assert result.initial_violations >= 1, (
+            "Expected at least one via-via clearance violation pre-nudge."
+        )
+        assert result.vias_nudged >= 1, (
+            "Expected at least one via to be nudged — the via-via dispatch "
+            "is the fix for Issue #2743's 0/6 resolved regression."
+        )
+        assert result.remaining_violations == 0, (
+            "Via-via violation should be fully resolved after nudge; "
+            f"got {result.remaining_violations} remaining."
+        )
+
+    def test_via_via_anchored_pair_records_structured_skip(self):
+        """Both vias pad-anchored: nudge declines, surfaces structured skip.
+
+        This is the chain-protection contract: a via dropped on a same-net
+        pad centre is part of the connection — moving it breaks the net.
+        We refuse the nudge and record a ``via_via_anchored`` skip so the
+        user sees "0/1 resolved; 1 unsupported (via_via_anchored)" rather
+        than a silent no-op.
+        """
+        route_a, route_b, via_a, via_b = self._make_via_via_routes(
+            center_distance=0.85,
+        )
+        # Pads at via_a and via_b centres on their respective nets.
+        pad_a = Pad(
+            x=via_a.x, y=via_a.y, width=0.7, height=0.7,
+            net=via_a.net, net_name="Na", layer=Layer.F_CU,
+            ref="J1", pin="1",
+        )
+        pad_b = Pad(
+            x=via_b.x, y=via_b.y, width=0.7, height=0.7,
+            net=via_b.net, net_name="Nb", layer=Layer.F_CU,
+            ref="J2", pin="1",
+        )
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route_a, route_b],
+            rules=rules,
+            pads={("J1", "1"): pad_a, ("J2", "1"): pad_b},
+            nets={via_a.net: [("J1", "1")], via_b.net: [("J2", "1")]},
+        )
+
+        result = drc_verify_and_nudge(router)
+        assert result.initial_violations >= 1
+        # Both vias are pad-anchored, so no nudge can happen.
+        assert result.vias_nudged == 0
+        # Structured skip reason recorded.
+        assert result.skipped.get("via_via_anchored", 0) >= 1, (
+            f"Expected ``via_via_anchored`` skip; got {result.skipped!r}"
+        )
+        # Vias did not move.
+        assert math.isclose(via_a.x, 0.0)
+        assert math.isclose(via_b.x, 0.85)
+
+    def test_via_via_chain_segments_snap_to_new_via(self):
+        """When a via is nudged, attached same-net segments move with it.
+
+        Without chain snapping, sliding via_a sideways would leave seg_a
+        terminating at the old via centre, leaving the routed chain
+        disconnected and the net silently dropping its endpoint.
+        """
+        route_a, route_b, via_a, via_b = self._make_via_via_routes(
+            center_distance=0.85,
+        )
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
+        seg_a = route_a.segments[0]
+
+        # Capture pre-nudge: seg_a ends at via_a's centre exactly.
+        assert math.isclose(seg_a.x2, via_a.x)
+        assert math.isclose(seg_a.y2, via_a.y)
+
+        drc_verify_and_nudge(router)
+
+        # Post-nudge: seg_a still terminates at via_a's (possibly new)
+        # centre.  This is the chain-preservation invariant.
+        assert math.isclose(seg_a.x2, via_a.x, abs_tol=1e-6)
+        assert math.isclose(seg_a.y2, via_a.y, abs_tol=1e-6)
+
+    def test_via_via_pre_fix_repro_with_legacy_seg_via_handler(self):
+        """Repro of the pre-fix behaviour for documentation.
+
+        Calling ``_try_nudge_seg_via`` directly on a via-via violation
+        (``segment_index == -1``, zero-length segment endpoints) does NOT
+        repair the violation: ``_find_segment`` cannot match a zero-length
+        segment, so the function returns False.  This is the bug that
+        Issue #2743 fixes by adding ``_try_nudge_via_via``.
+        """
+        from kicad_tools.router.drc_nudge import _try_nudge_seg_via
+        from kicad_tools.router.io import validate_routes
+
+        route_a, route_b, via_a, via_b = self._make_via_via_routes(
+            center_distance=0.85,
+        )
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
+
+        violations = validate_routes(router)
+        via_via = [
+            v for v in violations
+            if v.obstacle_type == "via" and v.segment_index == -1
+        ]
+        assert via_via, "Need at least one via-via violation for repro."
+
+        # The legacy handler cannot find a zero-length segment and bails.
+        assert _try_nudge_seg_via(via_via[0], router, 0.2) is False
+
+
+# ---------------------------------------------------------------------------
+# Edge-clearance nudge tests (Issue #2743)
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeClearanceNudge:
+    """Trace-vs-board-edge violation handling (Issue #2743).
+
+    Before the fix, ``edge_clearance_trace`` violations were produced by
+    ``validate/rules/edge.py`` and never reached ``drc_nudge`` — the post-
+    route nudge pass was blind to them.  Now ``validate_routes`` emits
+    them as ``obstacle_type="edge"`` violations consumed by
+    ``_try_nudge_seg_edge``.
+    """
+
+    def _make_router_with_edge(
+        self,
+        *,
+        seg: Segment,
+        edge_clearance: float = 0.3,
+        bottom_edge_y: float = 0.0,
+        right_edge_x: float = 50.0,
+    ) -> "_StubAutorouter":
+        """Build a router with a rectangular board outline and one route.
+
+        The outline is the rectangle (0,0)-(right_edge_x, 50.0) so the
+        bottom edge runs along y=bottom_edge_y.
+        """
+        route = Route(net=seg.net, net_name="N", segments=[seg])
+        rules = DesignRules(
+            trace_clearance=0.2, via_clearance=0.2,
+        )
+        router = _StubAutorouter(routes=[route], rules=rules)
+        # Rectangular outline.
+        router._edge_segments = [  # type: ignore[attr-defined]
+            ((0.0, bottom_edge_y), (right_edge_x, bottom_edge_y)),
+            ((right_edge_x, bottom_edge_y), (right_edge_x, 50.0)),
+            ((right_edge_x, 50.0), (0.0, 50.0)),
+            ((0.0, 50.0), (0.0, bottom_edge_y)),
+        ]
+        router._edge_clearance = edge_clearance  # type: ignore[attr-defined]
+        return router
+
+    def test_edge_violation_detected(self):
+        """A trace centred at y=0.35 with width 0.2mm and edge_clearance
+        0.30mm has actual_clearance = 0.35 - 0.10 = 0.25mm < 0.30mm —
+        a real violation that validate_routes must emit.
+        """
+        seg = Segment(
+            x1=10.0, y1=0.35, x2=20.0, y2=0.35,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        router = self._make_router_with_edge(seg=seg)
+
+        from kicad_tools.router.io import validate_routes
+        violations = validate_routes(router)
+        edge_violations = [v for v in violations if v.obstacle_type == "edge"]
+        assert edge_violations, (
+            "validate_routes must emit obstacle_type=='edge' for traces "
+            "violating board-edge keepout (Issue #2743)."
+        )
+        v = edge_violations[0]
+        assert v.net == 1
+        assert v.layer == Layer.F_CU
+        # Closest point on outline is on the y=0 edge directly below
+        # the segment.  Distance from segment centerline is 0.35mm.
+        assert math.isclose(v.distance, 0.25, abs_tol=1e-6)
+        assert math.isclose(v.required, 0.30, abs_tol=1e-6)
+
+    def test_edge_violation_nudged_inward(self):
+        """The nudge handler slides the segment toward the board interior.
+
+        Trace centred at y=0.35 with width 0.2mm:
+            actual_clearance = 0.35 - 0.10 = 0.25mm
+        With edge_clearance=0.30mm:
+            deficit = 0.05mm
+            nudge_amount = 0.05 + 0.03 (margin) = 0.08mm
+        Well within the default 0.2mm max_displacement budget.
+        """
+        seg = Segment(
+            x1=10.0, y1=0.35, x2=20.0, y2=0.35,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        router = self._make_router_with_edge(seg=seg)
+
+        result = drc_verify_and_nudge(router)
+        assert result.initial_violations >= 1
+        assert result.segments_nudged >= 1, (
+            f"Expected segment nudge; got result={result!r}"
+        )
+        # Post-nudge: the segment must be ≥ (0 + 0.3 + 0.1) = 0.4mm from y=0.
+        # (edge_y + edge_clearance + half_width)
+        assert seg.y1 >= 0.4 - 1e-6, (
+            f"Expected seg.y1 ≥ 0.4 after inward nudge; got {seg.y1!r}"
+        )
+        assert seg.y2 >= 0.4 - 1e-6
+        assert result.remaining_violations == 0
+
+    def test_edge_handler_skipped_when_no_outline(self):
+        """No outline stored on router → no edge violations emitted.
+
+        Backward compat: routers loaded without ``_edge_segments`` (e.g.
+        synthetic test routers) must not crash and must not emit edge
+        violations.
+        """
+        seg = Segment(
+            x1=10.0, y1=0.2, x2=20.0, y2=0.2,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        route = Route(net=1, net_name="N", segments=[seg])
+        rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+        router = _StubAutorouter(routes=[route], rules=rules)
+        # NOTE: no _edge_segments, no _edge_clearance.
+
+        result = drc_verify_and_nudge(router)
+        # No edge violations should appear because the router has no
+        # outline data; only trace-trace and trace-via violations are
+        # possible, and we have neither obstacle here.
+        assert result.initial_violations == 0
+
+
+def test_dispatch_records_unsupported_obstacle_type():
+    """Hand-craft a violation with an obstacle_type the dispatch doesn't
+    handle.  The dispatch must record a structured skip rather than
+    silently no-op.
+    """
+    from kicad_tools.router.io import ClearanceViolation
+
+    seg = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
+    route = Route(net=1, net_name="N", segments=[seg])
+    rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
+    router = _StubAutorouter(routes=[route], rules=rules)
+
+    # Inject a synthetic violation with an unknown obstacle_type by
+    # monkey-patching validate_routes to return it.
+    fake = ClearanceViolation(
+        segment_index=0,
+        x1=0.0, y1=0.0, x2=10.0, y2=0.0,
+        net=1, obstacle_type="quasar", obstacle_net=0,
+        distance=0.0, required=0.2,
+        location=(5.0, 0.0),
+    )
+    with patch("kicad_tools.router.drc_nudge.validate_routes",
+               return_value=[fake]):
+        result = drc_verify_and_nudge(router)
+    assert result.initial_violations == 1
+    # The dispatch should not have nudged anything, but should have
+    # recorded a structured skip reason.
+    assert result.segments_nudged == 0
+    assert any(
+        reason.startswith("unsupported_obstacle:")
+        for reason in result.skipped
+    ), f"Expected unsupported_obstacle skip; got {result.skipped!r}"
