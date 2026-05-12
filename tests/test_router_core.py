@@ -1439,6 +1439,131 @@ class TestAutorouterRouteAll:
         routes = router_with_nets.route_all(timeout=60.0)
         assert isinstance(routes, list)
 
+    # ------------------------------------------------------------------
+    # Issue #2800: wrappers must forward ``timeout`` / ``per_net_timeout``
+    # to the underlying ``route_all`` / ``route_all_negotiated`` calls so
+    # board scripts that pass a wall-clock budget actually have it honoured
+    # by the inner-most search.  Each test asserts:
+    #   1. the kwarg is accepted at the wrapper signature (no TypeError),
+    #   2. the wrapper returns within a generous slack on the tiny fixture,
+    #   3. ``timeout=None`` (default) still works (legacy back-compat).
+    # ------------------------------------------------------------------
+
+    def test_route_all_multi_resolution_accepts_timeout_kwarg(
+        self, router_with_nets
+    ):
+        """Issue #2800: ``route_all_multi_resolution`` must accept
+        ``timeout`` and forward it through both branches.
+
+        Exercises the previously-leaky non-negotiated branch where the
+        outer wall-clock budget was silently dropped at L8876.
+        """
+        import time
+
+        start = time.time()
+        routes = router_with_nets.route_all_multi_resolution(
+            use_negotiated=False,  # exercise the previously-leaky branch
+            timeout=10.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        assert elapsed < 30.0, (
+            f"Wrapper exceeded generous slack: {elapsed:.1f}s "
+            f"(would indicate kwarg silently dropped)"
+        )
+
+    def test_route_all_multi_resolution_default_no_timeout(
+        self, router_with_nets
+    ):
+        """Issue #2800: legacy back-compat -- ``timeout=None`` (default)
+        must continue to work."""
+        routes = router_with_nets.route_all_multi_resolution(
+            use_negotiated=False,
+        )
+        assert isinstance(routes, list)
+
+    def test_route_all_tuned_accepts_timeout_kwarg(self, router_with_nets):
+        """Issue #2800: ``route_all_tuned`` must accept ``timeout`` and
+        ``per_net_timeout`` and forward them to all 3 inner ``route_all``
+        call sites (profile branch, quick branch, full-optimization branch).
+        """
+        import time
+
+        start = time.time()
+        routes = router_with_nets.route_all_tuned(
+            method="quick",
+            timeout=10.0,
+            per_net_timeout=5.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        assert elapsed < 30.0, (
+            f"Wrapper exceeded generous slack: {elapsed:.1f}s "
+            f"(would indicate kwarg silently dropped)"
+        )
+
+    def test_route_all_tuned_profile_accepts_timeout_kwarg(
+        self, router_with_nets
+    ):
+        """Issue #2800: same contract on the ``profile=`` branch
+        (separate code path at L4129)."""
+        routes = router_with_nets.route_all_tuned(
+            profile="standard",
+            timeout=10.0,
+            per_net_timeout=5.0,
+        )
+        assert isinstance(routes, list)
+
+    def test_route_all_tuned_default_no_timeout(self, router_with_nets):
+        """Issue #2800: legacy back-compat -- defaults must still work."""
+        routes = router_with_nets.route_all_tuned(method="quick")
+        assert isinstance(routes, list)
+
+    def test_route_all_block_aware_accepts_timeout_kwarg(
+        self, router_with_nets
+    ):
+        """Issue #2800: ``route_all_block_aware`` must accept ``timeout``
+        and ``per_net_timeout`` and forward them through both the
+        no-blocks fallback and Phase B inter-block routing.
+
+        The fixture has no registered blocks, so this exercises the
+        fallback path (L6688-6701) which previously dropped both kwargs.
+        """
+        import time
+
+        start = time.time()
+        routes = router_with_nets.route_all_block_aware(
+            use_negotiated=False,
+            timeout=10.0,
+            per_net_timeout=5.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        assert elapsed < 30.0, (
+            f"Wrapper exceeded generous slack: {elapsed:.1f}s "
+            f"(would indicate kwarg silently dropped)"
+        )
+
+    def test_route_all_block_aware_negotiated_accepts_timeout_kwarg(
+        self, router_with_nets
+    ):
+        """Issue #2800: same contract on the negotiated fallback branch
+        (L6690 -- forwards to ``route_all_negotiated``)."""
+        routes = router_with_nets.route_all_block_aware(
+            use_negotiated=True,
+            timeout=10.0,
+            per_net_timeout=5.0,
+        )
+        assert isinstance(routes, list)
+
+    def test_route_all_block_aware_default_no_timeout(self, router_with_nets):
+        """Issue #2800: legacy back-compat -- defaults must still work."""
+        routes = router_with_nets.route_all_block_aware(use_negotiated=False)
+        assert isinstance(routes, list)
+
 
 class TestAutorouterZones:
     """Tests for zone (copper pour) support."""
