@@ -1,0 +1,264 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Match-Group Regression Testbench
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Match-Group Test Board"
+  revision: "A"
+  created: 2026-05-11
+  author: "kicad-tools"
+  description: |
+    Regression testbench for the N-trace match-group routing subsystem
+    introduced by Epic #2661 (Phases 1-2).  Demonstrates each
+    match-group scenario the epic was scoped against (DDR data byte,
+    MIPI CSI lane group, HDMI TMDS lane group, generic address bus)
+    by routing one or more match-grouped nets per scenario on a
+    4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR /
+    B.Cu).
+
+    Not a working device.  Source connectors / sink ICs are synthetic
+    footprints chosen to expose adequate escape lengths for each
+    group.  The board's purpose is to exercise every Phase 1A-2G
+    feature on at least one group so future router/validate changes
+    have an end-to-end witness on disk.
+  artifacts:
+    schematic: "output/matchgroup_test.kicad_sch"
+    pcb: "output/matchgroup_test.kicad_pcb"
+    pcb_routed: "output/matchgroup_test_routed.kicad_pcb"
+    net_class_map_sidecar: "output/net_class_map.json"
+
+intent:
+  summary: |
+    Multi-protocol match-group test board with 4 length-matched
+    groups across 4 protocol families (DDR / MIPI / HDMI / address
+    bus).  Each net class declares the Phase 1-2 features it
+    exercises: length_match_group (Phase 1A #2687),
+    length_match_reference (Phase 1A), length_match_tolerance_mm
+    (Phase 1A), and skew_tolerance_mm (Phase 3H #2647) for diff-pair
+    members.
+
+  use_cases:
+    - "Regression testbench for match-group subsystem (Epic #2661 Phase 3L)"
+    - "End-to-end witness for Phase 1A declaration, Phase 1B tracker, Phase 1C detection, Phase 1D producer wiring, Phase 2.5G derive_group_skew_data"
+    - "Validation target for the Phase 3N CI gate (consumer of this board)"
+    - "Documentation anchor for the per-group NetClassRouting declarations (Phase 3M)"
+
+  interfaces:
+    - name: DDR_BYTE_0
+      type: ddr
+      description: "DDR data byte (10 nets: DQ0-7 + DM0 + DQS_P/N pair) -- N-trace + diff-pair group composition"
+      protocol: "DDR-style data byte"
+      pins:
+        - "DQ0"
+        - "DQ1"
+        - "DQ2"
+        - "DQ3"
+        - "DQ4"
+        - "DQ5"
+        - "DQ6"
+        - "DQ7"
+        - "DM0"
+        - "DQS_P"
+        - "DQS_N"
+
+    - name: MIPI_CSI
+      type: mipi
+      description: "MIPI CSI lanes (3 pairs = 6 nets: CLK + DAT0 + DAT1)"
+      protocol: "MIPI D-PHY 1 Gbps/lane"
+      pins:
+        - "MIPI_CLK_P"
+        - "MIPI_CLK_N"
+        - "MIPI_DAT0_P"
+        - "MIPI_DAT0_N"
+        - "MIPI_DAT1_P"
+        - "MIPI_DAT1_N"
+
+    - name: HDMI_TMDS
+      type: hdmi
+      description: "HDMI TMDS lanes (3 pairs = 6 nets: D0 + D1 + D2). Clock pair excluded; lanes match to each other."
+      protocol: "HDMI 1.4b TMDS 165 MHz"
+      pins:
+        - "TMDS_D0_P"
+        - "TMDS_D0_N"
+        - "TMDS_D1_P"
+        - "TMDS_D1_N"
+        - "TMDS_D2_P"
+        - "TMDS_D2_N"
+
+    - name: ADDR_BUS
+      type: parallel_bus
+      description: "Generic 8-bit address bus (A0-A7) -- single-ended N-trace group (suffix-inference fallback also applicable)"
+      protocol: "Generic FPGA-to-SRAM parallel bus"
+      pins:
+        - "A0"
+        - "A1"
+        - "A2"
+        - "A3"
+        - "A4"
+        - "A5"
+        - "A6"
+        - "A7"
+
+  constraints:
+    - "DDR data byte: tight ±0.1mm group skew (length_match_tolerance_mm=0.1); DQS pair within-pair skew ≤0.05mm"
+    - "MIPI CSI lanes: 100 Ohm differential, ±0.05mm group + within-pair skew"
+    - "HDMI TMDS lanes: 100 Ohm differential, ±0.075mm group + within-pair skew"
+    - "ADDR bus: looser ±0.5mm group skew (commodity parallel bus tier)"
+    - "4-layer stackup: F.Cu (signal), In1.Cu (GND plane), In2.Cu (PWR), B.Cu (signal)"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "1.8V"
+      current:
+        max: "300mA"
+    signals:
+      ddr_byte:
+        skew_tolerance: "0.1mm"
+        intra_pair_clearance: "0.10mm"
+      mipi_csi:
+        impedance: "100ohm_differential"
+        skew_tolerance: "0.05mm"
+        intra_pair_clearance: "0.10mm"
+      hdmi_tmds:
+        impedance: "100ohm_differential"
+        skew_tolerance: "0.075mm"
+        intra_pair_clearance: "0.10mm"
+      addr_bus:
+        skew_tolerance: "0.5mm"
+
+  mechanical:
+    dimensions:
+      width: "110mm"
+      height: "95mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 4
+      stackup:
+        - "F.Cu (signal, escape + outer routing)"
+        - "In1.Cu (GND plane, impedance reference)"
+        - "In2.Cu (PWR plane, +1V2 / +1V8 domains)"
+        - "B.Cu (signal, optional bottom escape)"
+    min_trace: "0.15mm"
+    min_space: "0.15mm"
+    min_via: "0.3mm"
+    assembly: smt
+
+  compliance:
+    standards:
+      - DDR3
+      - MIPI_D-PHY
+      - HDMI_1.4b
+    rohs: true
+
+suggestions:
+  components:
+    ddr_source: "QFN-48 0.8mm pitch (DDR controller)"
+    ddr_sink: "QFN-48 0.8mm pitch (DRAM module)"
+    mipi_source: "FFC-6 1.0mm pitch"
+    mipi_sink: "QFN-24 0.8mm pitch"
+    hdmi_source: "HDMI Type A receptacle"
+    hdmi_sink: "BGA-49 simulator (7x7 1.27mm pitch)"
+    addr_source: "1x9 0.1in pin header"
+    addr_sink: "QFP-48 0.8mm pitch (SRAM-style)"
+
+  layout:
+    - "DDR controller + DRAM placed across short routing channel for tight skew matching"
+    - "MIPI source/sink placed close together (short escape)"
+    - "HDMI placed with BGA escape pattern to exercise group-of-pairs composition"
+    - "ADDR bus placed across longer channel to exercise looser tolerance"
+    - "GND/PWR planes on inner layers provide impedance reference"
+
+  bom:
+    preferred_vendors: ["LCSC"]
+    cost_target: "Not a working device; BOM is generic footprints only"
+
+bom_entries:
+  - ref: U1
+    part: "QFN-48 (synthetic DDR controller)"
+    lcsc: "generic"
+  - ref: U2
+    part: "QFN-48 (synthetic DRAM)"
+    lcsc: "generic"
+  - ref: J1
+    part: "FFC 6-pin connector (MIPI source)"
+    lcsc: "generic"
+  - ref: U3
+    part: "QFN-24 (synthetic MIPI sink)"
+    lcsc: "generic"
+  - ref: J2
+    part: "HDMI Type A receptacle"
+    lcsc: "generic"
+  - ref: U4
+    part: "BGA-49 simulator (synthetic HDMI sink)"
+    lcsc: "generic"
+  - ref: J3
+    part: "1x9 pin header (ADDR source)"
+    lcsc: "generic"
+  - ref: U5
+    part: "QFP-48 (synthetic SRAM sink)"
+    lcsc: "generic"
+
+decisions:
+  - date: 2026-05-11
+    phase: concept
+    topic: "Scope"
+    choice: "Routing regression testbench for match groups, not working device"
+    rationale: "Epic #2661 Phase 3L explicitly scopes this as a regression bench (issue #2724). Synthetic sinks keep BOM minimal while exercising all Phase 1-2 features."
+    alternatives: ["Full reference designs (rejected: out of scope)", "Single-protocol board (rejected: insufficient feature coverage)"]
+  - date: 2026-05-11
+    phase: concept
+    topic: "New board (07) vs reuse of board 06"
+    choice: "New board"
+    rationale: "Board 06 is locked at 28 DRC errors pending #2672/#2677; mixing match-group regression with diff-pair regression would conflate two budgets. Board 06 footprints (USB-C, BGA, FFC) are tuned for HSDI diff pairs; match-group fixtures want parallel-bus footprints (memory-style QFN/BGA, address-bus header)."
+    alternatives: ["Merge into board 06 (rejected: scope conflation)"]
+  - date: 2026-05-11
+    phase: concept
+    topic: "Group composition: DDR includes DQS pair as a member"
+    choice: "Yes"
+    rationale: "Per curator note on issue #2724: exercises Phase 2F group-of-pairs composition AT THE DDR LEVEL (a group containing both single-ended nets and a diff pair as members). Matches real DDR practice."
+    alternatives: ["DDR group as 9 single-ended nets only (rejected: doesn't exercise Phase 2F composition)"]
+  - date: 2026-05-11
+    phase: concept
+    topic: "Layer count"
+    choice: "4-layer (identical to board 06)"
+    rationale: "Phase 3K impedance formulas calibrated against JLCPCB tier-1 4-layer stackup. Reuses the same calibration board 06 was designed against."
+    alternatives: ["2-layer (rejected: insufficient impedance reference)"]
+  - date: 2026-05-11
+    phase: concept
+    topic: "File layout"
+    choice: "Split (generate_schematic.py + generate_pcb.py + generate_design.py)"
+    rationale: "Mirror board 06's pattern. Board 05's monolithic design.py is what we're trying to avoid for a regression bench."
+    alternatives: ["Monolithic design.py (rejected: scaling concern)"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define group coverage (DDR, MIPI, HDMI, ADDR bus)"
+        - "[x] Select footprint mix (QFN-48 x2, FFC-6 + QFN-24, HDMI + BGA-49, 1x9 header + QFP-48)"
+        - "[x] Choose 4-layer JLCPCB tier-1 stackup"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] Source connectors / ICs (U1 DDR ctrl, J1 MIPI, J2 HDMI, J3 ADDR)"
+        - "[x] Sink ICs (U2 DRAM, U3 MIPI sink, U4 HDMI BGA, U5 SRAM)"
+        - "[x] Match-group nets declared with global labels"
+        - "[x] Power rails (+1V2, +1V8, GND)"
+    layout:
+      status: in_progress
+      checklist:
+        - "[x] Component placement"
+        - "[x] Net-class declarations engaging Phase 1A-2G features"
+        - "[x] PCB routing via kct route"
+        - "[x] net_class_map.json sidecar emission (Phase 3M)"
+        - "[ ] Phase 3H (#2723) --length-match-groups CLI flag wired into route step (deferred until #2723 lands)"
+        - "[ ] 0 DRC errors at JLCPCB tier-1 (allowlist tightened iteratively by Phase 3N)"
