@@ -429,6 +429,14 @@ class Autorouter:
         # the edge clearance zone.
         self._edge_clearance: float | None = None
 
+        # Board outline segments extracted from Edge.Cuts.  Used by
+        # ``validate_routes`` to emit ``obstacle_type="edge"`` violations
+        # so the post-route nudge pass can repair traces that violate the
+        # edge keepout (Issue #2743).
+        self._edge_segments: list[
+            tuple[tuple[float, float], tuple[float, float]]
+        ] | None = None
+
         # Shapely-based board geometry for accurate non-rectangular edge
         # clearance (Issue #2340).  Set by load_pcb_for_routing() when
         # Shapely is available.

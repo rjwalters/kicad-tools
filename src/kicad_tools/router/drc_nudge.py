@@ -57,7 +57,16 @@ class DRCNudgeResult:
     remaining_violations: int = 0
     segments_nudged: int = 0
     vias_merged: int = 0
+    vias_nudged: int = 0
     passes_run: int = 0
+    # Issue #2743: structured skip-reason counters so the user sees
+    # "4/6 resolved; 2 unsupported (via-via anchored)" instead of a
+    # silent 0/6 with no diagnostic.  Keyed by reason; integer counts.
+    skipped: dict[str, int] = field(default_factory=dict)
+
+    def _bump_skipped(self, reason: str) -> None:
+        """Increment a structured skip-reason counter."""
+        self.skipped[reason] = self.skipped.get(reason, 0) + 1
 
     def summary(self) -> str:
         """Return a human-readable summary."""
@@ -68,8 +77,13 @@ class DRCNudgeResult:
         ]
         if self.segments_nudged:
             lines.append(f"  Segments nudged: {self.segments_nudged}")
+        if self.vias_nudged:
+            lines.append(f"  Vias nudged: {self.vias_nudged}")
         if self.vias_merged:
             lines.append(f"  Same-net vias merged: {self.vias_merged}")
+        if self.skipped:
+            for reason, count in sorted(self.skipped.items()):
+                lines.append(f"  Skipped ({reason}): {count}")
         if self.remaining_violations:
             lines.append(f"  Remaining violations: {self.remaining_violations}")
         return "\n".join(lines)
@@ -682,6 +696,301 @@ def _try_nudge_seg_via(
     return _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
 
 
+def _find_via_at(
+    router: Autorouter,
+    net: int,
+    x: float,
+    y: float,
+    tol: float = 0.001,
+) -> tuple[Route, Via] | None:
+    """Locate a via on *net* at coordinate (x, y).
+
+    Returns the (route, via) pair, or None when no match is found.
+    Used by the via-via nudge handler (Issue #2743) which receives
+    violations with ``segment_index == -1`` and ``x1 == x2 == via.x``,
+    ``y1 == y2 == via.y``.
+    """
+    for route in router.routes:
+        if route.net != net:
+            continue
+        for via in route.vias:
+            if abs(via.x - x) < tol and abs(via.y - y) < tol:
+                return route, via
+    return None
+
+
+def _via_is_pad_anchored(
+    via: Via,
+    net: int,
+    router: Autorouter,
+) -> bool:
+    """Return True when ``via`` sits on a pad of the same net.
+
+    A via that coincides with a pad centre is an in-pad escape via (or a
+    through-hole pad that the routing layer treats as a via).  Moving such
+    a via off its pad disconnects the net, so we decline to nudge it.
+    Mirrors the segment pad-anchor guard at
+    :func:`_segment_endpoints_anchored_to_net_pads`.
+    """
+    pads = getattr(router, "pads", None)
+    nets = getattr(router, "nets", None)
+    if not pads or not nets:
+        return False
+    pad_keys = nets.get(net) or []
+    for key in pad_keys:
+        pad = pads.get(key)
+        if pad is None:
+            continue
+        if abs(via.x - pad.x) < _PAD_ANCHOR_TOL and abs(via.y - pad.y) < _PAD_ANCHOR_TOL:
+            return True
+    return False
+
+
+def _nudge_via_with_chain(
+    via: Via,
+    new_x: float,
+    new_y: float,
+    router: Autorouter,
+    chain_tol: float | None = None,
+) -> bool:
+    """Move ``via`` to (new_x, new_y) and reconnect same-net segments.
+
+    Issue #2743: When repairing a via-via clearance violation we slide one
+    of the two vias perpendicular to the line between them.  The same-net
+    segments that terminate at the via centre must also be snapped to the
+    new position so the chain stays electrically connected.
+
+    Refuses to move a via that is pad-anchored (a via dropped on a pad
+    centre is part of the connection to that pad — moving it would break
+    the net).  Returns True on success, False when the move is declined.
+    """
+    if chain_tol is None:
+        chain_tol = _ENDPOINT_TOL
+
+    if _via_is_pad_anchored(via, via.net, router):
+        logger.debug(
+            "Skipping via nudge for net %s: via is pad-anchored",
+            via.net,
+        )
+        return False
+
+    old_x, old_y = via.x, via.y
+    via.x = new_x
+    via.y = new_y
+
+    # Snap any same-net segment endpoint that previously coincided with
+    # this via's centre to the new position.
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        if route.net != via.net:
+            continue
+        for seg in route.segments:
+            if abs(seg.x1 - old_x) < chain_tol and abs(seg.y1 - old_y) < chain_tol:
+                seg.x1 = new_x
+                seg.y1 = new_y
+            if abs(seg.x2 - old_x) < chain_tol and abs(seg.y2 - old_y) < chain_tol:
+                seg.x2 = new_x
+                seg.y2 = new_y
+    return True
+
+
+def _try_nudge_via_via(
+    violation: ClearanceViolation,
+    router: Autorouter,
+    max_displacement: float,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Attempt to repair a via-vs-via clearance violation.
+
+    Issue #2743: The validator at :func:`validate_routes` emits via-via
+    violations with ``obstacle_type="via"``, ``segment_index=-1``, and
+    ``x1==x2==via_a.x``, ``y1==y2==via_a.y`` (the offending via centre).
+    ``location`` holds the midpoint between the two vias.  The legacy
+    ``_try_nudge_seg_via`` calls ``_find_segment(..., -1, x1, y1, x1, y1)``
+    which can never match a zero-length segment, so via-via violations
+    used to silently no-op — observed as the ``0/6 resolved`` regression
+    on board 02.
+
+    Repair strategy: slide one via perpendicular to the line between the
+    two vias by ``(required - distance + margin)``.  ``_nudge_via_with_chain``
+    refuses to move a pad-anchored via (preserving connectivity); when
+    that happens we try the other via.  If both are anchored we record
+    a structured skip reason and return False.
+
+    Args:
+        violation: The via-via clearance violation.
+        router: Autorouter instance.
+        max_displacement: Maximum displacement budget in mm.
+        result: Optional ``DRCNudgeResult`` to record skip reasons and
+            ``vias_nudged`` increments on.
+
+    Returns:
+        True if a via was successfully nudged; False otherwise.
+    """
+    deficit = violation.required - violation.distance
+    if deficit <= 0:
+        return False
+
+    margin = max(0.005, violation.required * 0.10)
+    nudge_amount = deficit + margin
+
+    if nudge_amount > max_displacement:
+        if result is not None:
+            result._bump_skipped("via_via_budget")
+        return False
+
+    if violation.location is None:
+        # Without a midpoint we can't compute the nudge direction.
+        if result is not None:
+            result._bump_skipped("via_via_no_location")
+        return False
+
+    # Locate via A on the violating net by (x1, y1) – this is one of the
+    # two vias by the emit contract documented on ClearanceViolation.
+    match_a = _find_via_at(router, violation.net, violation.x1, violation.y1)
+    if match_a is None:
+        if result is not None:
+            result._bump_skipped("via_via_not_found")
+        return False
+    route_a, via_a = match_a
+
+    # via B is on the obstacle net.  ``location`` is the midpoint between
+    # the two via centres, so via_b = 2 * location - via_a.
+    loc_x, loc_y = violation.location
+    bx = 2 * loc_x - via_a.x
+    by = 2 * loc_y - via_a.y
+    match_b = _find_via_at(router, violation.obstacle_net, bx, by)
+
+    # Direction from via_b -> via_a (move via_a further from via_b).
+    if match_b is not None:
+        _, via_b = match_b
+        dx = via_a.x - via_b.x
+        dy = via_a.y - via_b.y
+    else:
+        # Fallback: move via_a away from the midpoint.
+        dx = via_a.x - loc_x
+        dy = via_a.y - loc_y
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < 1e-9:
+        # Vias are coincident — cannot derive a direction.  Skip and
+        # surface as a structured failure.
+        if result is not None:
+            result._bump_skipped("via_via_coincident")
+        return False
+    ux = dx / length
+    uy = dy / length
+
+    # Try via_a first.  Move only half of the deficit because shifting
+    # via_a away from via_b by ``nudge_amount`` adds the full deficit to
+    # the centre-to-centre distance.  Use the full amount to give a
+    # small over-shoot for stability.
+    new_x = via_a.x + ux * nudge_amount
+    new_y = via_a.y + uy * nudge_amount
+    if _nudge_via_with_chain(via_a, new_x, new_y, router):
+        if result is not None:
+            result.vias_nudged += 1
+        return True
+
+    # via_a was pad-anchored.  Try via_b in the opposite direction.
+    if match_b is not None:
+        _, via_b = match_b
+        new_bx = via_b.x - ux * nudge_amount
+        new_by = via_b.y - uy * nudge_amount
+        if _nudge_via_with_chain(via_b, new_bx, new_by, router):
+            if result is not None:
+                result.vias_nudged += 1
+            return True
+
+    # Both vias declined — surface a structured skip.
+    if result is not None:
+        result._bump_skipped("via_via_anchored")
+    return False
+
+
+def _try_nudge_seg_edge(
+    violation: ClearanceViolation,
+    router: Autorouter,
+    max_displacement: float,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Attempt to repair a trace-to-board-edge clearance violation.
+
+    Issue #2743: ``edge_clearance_trace`` violations were previously
+    invisible to the post-route nudge pass.  ``validate_routes`` now
+    emits these as ``obstacle_type="edge"`` violations with the closest
+    point on the board outline stored in ``location``.
+
+    Repair strategy: slide the segment along the inward-facing direction
+    (from outline point toward segment midpoint) by
+    ``(required - distance + margin)``, using the chain-aware nudge so
+    abutting same-net segments are snapped.  Refuses to nudge pad- or
+    via-anchored segments (same guards as the existing handlers).
+    """
+    deficit = violation.required - violation.distance
+    if deficit <= 0:
+        return False
+
+    margin = max(0.005, violation.required * 0.10)
+    nudge_amount = deficit + margin
+
+    if nudge_amount > max_displacement:
+        if result is not None:
+            result._bump_skipped("edge_budget")
+        return False
+
+    if violation.location is None:
+        if result is not None:
+            result._bump_skipped("edge_no_location")
+        return False
+
+    target_seg = _find_segment(
+        router, violation.net, violation.segment_index,
+        violation.x1, violation.y1, violation.x2, violation.y2,
+        layer=violation.layer,
+    )
+    if target_seg is None:
+        if result is not None:
+            result._bump_skipped("edge_segment_not_found")
+        return False
+
+    edge_x, edge_y = violation.location
+
+    # We want to slide the segment along the perpendicular to its own
+    # axis (so its length is preserved) toward the board interior.  The
+    # segment's perpendicular gives two candidate directions; we choose
+    # the one whose dot product with (segment_midpoint - closest_edge_pt)
+    # is positive (i.e. points away from the edge).
+    px, py = _perpendicular_unit(target_seg)
+    if px == 0.0 and py == 0.0:
+        # Zero-length segment — fall back to away-vector.
+        seg_mid_x = (target_seg.x1 + target_seg.x2) / 2
+        seg_mid_y = (target_seg.y1 + target_seg.y2) / 2
+        away_dx = seg_mid_x - edge_x
+        away_dy = seg_mid_y - edge_y
+        away_len = math.sqrt(away_dx * away_dx + away_dy * away_dy)
+        if away_len < 1e-9:
+            if result is not None:
+                result._bump_skipped("edge_zero_length_seg")
+            return False
+        nx = away_dx / away_len
+        ny = away_dy / away_len
+    else:
+        seg_mid_x = (target_seg.x1 + target_seg.x2) / 2
+        seg_mid_y = (target_seg.y1 + target_seg.y2) / 2
+        # Dot product of (midpoint - edge) with perpendicular: positive
+        # means the perpendicular points away from the edge.
+        dot = (seg_mid_x - edge_x) * px + (seg_mid_y - edge_y) * py
+        if dot < 0:
+            nx, ny = -px, -py
+        else:
+            nx, ny = px, py
+
+    success = _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
+    if not success and result is not None:
+        result._bump_skipped("edge_seg_anchored")
+    return success
+
+
 def _try_nudge_seg_pad(
     violation: ClearanceViolation,
     router: Autorouter,
@@ -829,9 +1138,30 @@ def drc_verify_and_nudge(
             if v.obstacle_type == "segment":
                 success = _try_nudge_seg_seg(v, router, max_displacement)
             elif v.obstacle_type == "via":
-                success = _try_nudge_seg_via(v, router, max_displacement)
+                # Issue #2743: ``segment_index == -1`` marks a via-vs-via
+                # violation (zero-length "segment" at via_a's centre).
+                # The seg-vs-via handler would call ``_find_segment`` with
+                # an unmatchable shape and silently fail.  Dispatch to
+                # the via-via handler instead.
+                if v.segment_index == -1:
+                    success = _try_nudge_via_via(
+                        v, router, max_displacement, result=result
+                    )
+                else:
+                    success = _try_nudge_seg_via(v, router, max_displacement)
             elif v.obstacle_type == "pad":
                 success = _try_nudge_seg_pad(v, router, max_displacement)
+            elif v.obstacle_type == "edge":
+                # Issue #2743: trace-vs-board-edge violations now flow
+                # through the same dispatch path.
+                success = _try_nudge_seg_edge(
+                    v, router, max_displacement, result=result
+                )
+            else:
+                # Unknown obstacle type — record a structured skip so
+                # the user sees "0/1 resolved; 1 unsupported" instead of
+                # an opaque no-op.
+                result._bump_skipped(f"unsupported_obstacle:{v.obstacle_type}")
 
             if success:
                 nudged_this_pass += 1

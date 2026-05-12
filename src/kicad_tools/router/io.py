@@ -191,7 +191,32 @@ class PCBDesignRules:
 
 @dataclass
 class ClearanceViolation:
-    """A potential clearance violation detected during post-route validation."""
+    """A potential clearance violation detected during post-route validation.
+
+    Shape contract per ``obstacle_type``:
+
+    * ``"pad"``:    ``segment_index >= 0`` and ``(x1,y1)-(x2,y2)`` is the
+                    offending segment; ``location`` is the pad centre.
+                    OR ``segment_index == -1`` and ``x1==x2, y1==y2`` (the
+                    via centre) when the violation is via-vs-pad.
+    * ``"segment"``: ``segment_index >= 0`` and ``(x1,y1)-(x2,y2)`` is the
+                    offending segment; ``location`` is the approximate
+                    midpoint of closest approach.
+    * ``"via"``:    Two distinct shapes share this tag:
+                    (a) segment-vs-via: ``segment_index >= 0`` and
+                        ``(x1,y1)-(x2,y2)`` is the offending segment;
+                        ``location`` is the via centre.
+                    (b) via-vs-via: ``segment_index == -1`` and
+                        ``x1==x2, y1==y2`` (one of the two vias' centres);
+                        ``location`` is the midpoint between the two vias.
+                    Downstream handlers (e.g. ``drc_nudge.py``) MUST
+                    distinguish (a) from (b) by checking ``segment_index``.
+    * ``"edge"``:   Trace-vs-board-edge violation.  ``segment_index >= 0``
+                    and ``(x1,y1)-(x2,y2)`` is the offending segment;
+                    ``obstacle_net == 0`` and ``location`` is the closest
+                    point on the board outline.  ``layer`` is the segment
+                    layer.  Issue #2743.
+    """
 
     segment_index: int
     x1: float
@@ -199,7 +224,7 @@ class ClearanceViolation:
     x2: float
     y2: float
     net: int
-    obstacle_type: str  # "pad", "via", "segment"
+    obstacle_type: str  # "pad", "via", "segment", "edge"
     obstacle_net: int
     distance: float  # Actual distance in mm
     required: float  # Required clearance in mm
@@ -1823,6 +1848,92 @@ def validate_routes(
                             )
                         )
 
+    # --- Segment-to-board-edge checks (Issue #2743) ---
+    # Edge keepout violations are otherwise invisible to the post-route
+    # nudge pass because they are produced by a separate validator
+    # (``validate/rules/edge.py``).  Emit them here as
+    # ``obstacle_type="edge"`` violations so ``drc_nudge.py`` can consume
+    # them through the same dispatch path.
+    edge_clearance = getattr(router, "_edge_clearance", None)
+    edge_segments = getattr(router, "_edge_segments", None)
+    if edge_clearance is not None and edge_clearance > 0 and edge_segments:
+        for route in router.routes:
+            route_net = route.net
+            for seg_idx, segment in enumerate(route.segments):
+                seg_half_width = segment.width / 2
+
+                # Find the minimum distance from the *trace centerline* to
+                # any edge segment, plus the corresponding closest point on
+                # the outline.  We must use segment-to-segment distance
+                # (not point-to-segment) so a trace running parallel to an
+                # edge sees the perpendicular distance, not the endpoint-
+                # to-endpoint distance.  We then locate the closest point
+                # on the edge by sampling: project each segment endpoint
+                # onto the edge and pick whichever projection is closest
+                # to the trace as a whole.
+                closest_dist = float("inf")
+                closest_pt: tuple[float, float] | None = None
+                for (ex1, ey1), (ex2, ey2) in edge_segments:
+                    d = _segment_to_segment_distance(
+                        segment.x1, segment.y1, segment.x2, segment.y2,
+                        ex1, ey1, ex2, ey2,
+                    )
+                    if d < closest_dist:
+                        closest_dist = d
+                        # Find the closest point on this edge segment to
+                        # the trace centerline.  We sample the trace at
+                        # its endpoints and midpoint and pick the
+                        # projection that yields the smallest distance.
+                        best_local = float("inf")
+                        best_pt: tuple[float, float] = (ex1, ey1)
+                        edge_dx = ex2 - ex1
+                        edge_dy = ey2 - ey1
+                        edge_len_sq = edge_dx * edge_dx + edge_dy * edge_dy
+                        sample_points = [
+                            (segment.x1, segment.y1),
+                            (segment.x2, segment.y2),
+                            ((segment.x1 + segment.x2) / 2,
+                             (segment.y1 + segment.y2) / 2),
+                        ]
+                        for px, py in sample_points:
+                            if edge_len_sq < 1e-12:
+                                cx, cy = ex1, ey1
+                            else:
+                                t = ((px - ex1) * edge_dx
+                                     + (py - ey1) * edge_dy) / edge_len_sq
+                                t = max(0.0, min(1.0, t))
+                                cx = ex1 + t * edge_dx
+                                cy = ey1 + t * edge_dy
+                            pt_dist = math.sqrt(
+                                (cx - px) ** 2 + (cy - py) ** 2
+                            )
+                            if pt_dist < best_local:
+                                best_local = pt_dist
+                                best_pt = (cx, cy)
+                        closest_pt = best_pt
+
+                # actual_clearance = distance_from_centerline - half_width
+                actual_clearance = closest_dist - seg_half_width
+                if actual_clearance < edge_clearance - _CLEARANCE_EPSILON_MM:
+                    violations.append(
+                        ClearanceViolation(
+                            segment_index=seg_idx,
+                            x1=segment.x1,
+                            y1=segment.y1,
+                            x2=segment.x2,
+                            y2=segment.y2,
+                            net=route_net,
+                            obstacle_type="edge",
+                            obstacle_net=0,
+                            distance=actual_clearance,
+                            required=edge_clearance,
+                            net_name=_resolve_net_name(route_net),
+                            obstacle_net_name="Edge.Cuts",
+                            location=closest_pt,
+                            layer=segment.layer,
+                        )
+                    )
+
     return violations
 
 
@@ -2632,6 +2743,9 @@ def load_pcb_for_routing(
         all_xs = [p[0] for seg in edge_segments for p in seg]
         all_ys = [p[1] for seg in edge_segments for p in seg]
         router._board_bbox = (min(all_xs), min(all_ys), max(all_xs), max(all_ys))
+        # Store the raw outline segments for post-route edge-clearance
+        # validation in drc_nudge / validate_routes (Issue #2743).
+        router._edge_segments = edge_segments
 
     # Attach Shapely-based board geometry when available (Issue #2340).
     # This enables accurate non-rectangular edge clearance checking.
