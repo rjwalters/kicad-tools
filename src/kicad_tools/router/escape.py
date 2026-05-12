@@ -1775,6 +1775,8 @@ class EscapeRouter:
             else self._get_trace_width_for_net(package.pads[0].net_name if package.pads else "")
         )
 
+        skipped_clearance = 0
+
         # Generate escapes for each edge
         for pads, primary_dir, alt_dir_cw, alt_dir_ccw in [
             (north_pads, EscapeDirection.NORTH, EscapeDirection.EAST, EscapeDirection.WEST),
@@ -1788,10 +1790,20 @@ class EscapeRouter:
                 else:
                     direction = alt_dir_cw if (i // 2) % 2 == 0 else alt_dir_ccw
 
-                escape = self._create_alternating_escape(
+                # Issue #2756: generate the unclipped escape first so we
+                # can detect the pre-#2756 violation condition and route
+                # it through the in-pad fallback when supported.  The
+                # in-pad fallback rescues pins that would otherwise be
+                # blocked at the launch step; without this ordering, the
+                # clipped escape would mask the violation from the
+                # ``_segment_violates_pad_clearance`` check and the
+                # in-pad rescue would never trigger (regression of
+                # Issue #2695).
+                unclipped_escape = self._create_alternating_escape(
                     pad=pad,
                     direction=direction,
                     package=package,
+                    pad_clearance_margin=None,
                 )
 
                 # Issue #2695: For fine-pitch QFP packages on capable
@@ -1801,8 +1813,8 @@ class EscapeRouter:
                 # The alternating scheme alone cannot fit traces between
                 # 0.5mm-pitch pads, so without this rescue inner pins
                 # never reach the main router successfully.
-                if try_in_pad_fallback and escape.segments:
-                    surface_seg = escape.segments[0]
+                if try_in_pad_fallback and unclipped_escape.segments:
+                    surface_seg = unclipped_escape.segments[0]
                     if self._segment_violates_pad_clearance(
                         surface_seg, i, pads, effective_clearance,
                         # Issue #2755: Also check against pads on the OTHER
@@ -1820,7 +1832,55 @@ class EscapeRouter:
                             escapes.append(in_pad_route)
                             continue
 
+                # Issue #2756: clip the segment endpoint against
+                # neighbour-pad clearance.  When the manufacturer does
+                # not support in-pad rescue (the common JLCPCB case) the
+                # clipped segment is the right answer -- it stops short
+                # of the violating pad and the main router picks up the
+                # net cleanly from the safe endpoint.
+                escape = self._create_alternating_escape(
+                    pad=pad,
+                    direction=direction,
+                    package=package,
+                    pad_clearance_margin=effective_clearance,
+                )
+
+                # Issue #2756: if the clipped segment is too short to be
+                # useful (heuristic: less than half the original launch
+                # distance), defer to the main router rather than
+                # emitting a stub that does not meaningfully exit the
+                # pin row.  Half the launch distance is the threshold
+                # used by the diff-pair coupling path
+                # (_escape_diff_pair_segment) and matches the failure
+                # mode the curator identified: violating odd-pin
+                # parallel-along-the-edge escapes get clipped to ~0
+                # while perpendicular even-pin escapes retain most of
+                # their original launch length.
+                original_launch = self.escape_clearance + self.rules.trace_width * 2
+                min_useful_length = original_launch * 0.5
+                if escape.segments:
+                    seg = escape.segments[0]
+                    seg_len = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+                    if seg_len < min_useful_length:
+                        skipped_clearance += 1
+                        logger.debug(
+                            "Escape for %s pin %s skipped: pad-clearance "
+                            "clip produced segment of %.3fmm "
+                            "(< %.3fmm threshold)",
+                            pad.net_name, pad.pin, seg_len, min_useful_length,
+                        )
+                        continue
+
                 escapes.append(escape)
+
+        if skipped_clearance:
+            logger.info(
+                "Escape routing for %s (%s): %d pins deferred to main "
+                "router due to pad-clearance clip (Issue #2756)",
+                package.ref,
+                package.package_type.name,
+                skipped_clearance,
+            )
 
         return escapes
 
@@ -1829,13 +1889,29 @@ class EscapeRouter:
         pad: Pad,
         direction: EscapeDirection,
         package: PackageInfo,
+        pad_clearance_margin: float | None = None,
     ) -> EscapeRoute:
         """Create an escape route with alternating direction.
+
+        Issue #2756: When ``pad_clearance_margin`` is provided, the escape
+        segment endpoint is shortened along the launch direction so that the
+        segment maintains at least ``pad_clearance_margin`` mm of edge-to-edge
+        clearance against every OTHER pad in ``package.pads`` on the same
+        layer.  If the maximum safe length is shorter than the requested
+        launch distance, the segment is clipped; if no useful length is
+        achievable (the pad is fully boxed in), the returned escape carries a
+        zero-length segment which the caller can detect and skip.  Passing
+        ``None`` (the default) preserves pre-#2756 behaviour exactly for
+        callers that have not yet been ported to the clipping API.
 
         Args:
             pad: The pad to escape
             direction: Escape direction
             package: Package info
+            pad_clearance_margin: Optional minimum edge-to-edge clearance
+                from the escape segment to every other package pad.  When
+                provided, the segment endpoint is clipped to honour this
+                margin.
 
         Returns:
             EscapeRoute for this pad
@@ -1845,6 +1921,25 @@ class EscapeRouter:
 
         # Calculate escape distance
         escape_dist = self.escape_clearance + self.rules.trace_width * 2
+        trace_w = self._get_trace_width_for_net(pad.net_name)
+
+        # Issue #2756: clip the escape distance against neighbour-pad
+        # clearance when requested.  This stops the QFP/QFN/HTSSOP
+        # alternating-direction emitter from producing segments that run
+        # through (or just clip) adjacent pads on the same edge -- the
+        # dominant failure mode behind board 05's 105 clearance_pad_segment
+        # violations on U3 (DRV8301 HTSSOP-56) and U10 (STM32G431 LQFP-32).
+        if pad_clearance_margin is not None:
+            safe_dist = self._compute_max_safe_escape_length(
+                pad=pad,
+                dx=dx,
+                dy=dy,
+                trace_width=trace_w,
+                package_pads=package.pads,
+                min_clearance=pad_clearance_margin,
+                max_length=escape_dist,
+            )
+            escape_dist = min(escape_dist, safe_dist)
 
         escape_x = pad.x + dx * escape_dist
         escape_y = pad.y + dy * escape_dist
@@ -1855,7 +1950,7 @@ class EscapeRouter:
             y1=pad.y,
             x2=escape_x,
             y2=escape_y,
-            width=self._get_trace_width_for_net(pad.net_name),
+            width=trace_w,
             layer=pad.layer,
             net=pad.net,
             net_name=pad.net_name,
@@ -1871,6 +1966,111 @@ class EscapeRouter:
             via=None,
             ring_index=0,
         )
+
+    def _compute_max_safe_escape_length(
+        self,
+        pad: Pad,
+        dx: float,
+        dy: float,
+        trace_width: float,
+        package_pads: list[Pad],
+        min_clearance: float,
+        max_length: float,
+    ) -> float:
+        """Find the maximum escape-segment length that respects pad clearance.
+
+        Issue #2756: The escape-pattern endpoint emitter (used by
+        ``_create_alternating_escape`` and ``_escape_radial``) historically
+        emitted segments of a fixed launch length without checking that the
+        segment kept ``pad_to_segment`` clearance to neighbour pads on the
+        same package.  When the launch direction is parallel-along-the-edge
+        (the ``alt_dir_cw`` / ``alt_dir_ccw`` cases for odd pins in
+        ``_escape_qfp_alternating``) the segment runs right past the next
+        pad in the row and clips it, producing a ``clearance_pad_segment``
+        DRC error.  This helper computes the maximum length ``L`` such that
+        the candidate segment from ``pad`` to ``(pad + (dx,dy) * L)`` keeps
+        at least ``min_clearance`` mm of edge-to-edge gap from every other
+        pad in ``package_pads`` on the same layer.
+
+        The search is a coarse binary search bracketed by 0 and
+        ``max_length`` -- a 1-D search is sufficient because the candidate
+        segment is a straight line from the pad in a single direction, and
+        the clearance function is monotonically non-decreasing as the
+        endpoint pulls back toward the originating pad along the launch
+        axis (for reasonable launch directions away from neighbours).
+
+        Args:
+            pad: Originating pad (segment starts here)
+            dx: X component of the unit launch direction
+            dy: Y component of the unit launch direction
+            trace_width: Width of the candidate segment in mm
+            package_pads: All pads on the same package (the originating pad
+                is identified by identity and skipped from the check)
+            min_clearance: Required minimum edge-to-edge clearance in mm
+            max_length: Upper bound on the search (typically the original
+                requested launch distance)
+
+        Returns:
+            The maximum safe length in mm, in the range
+            ``[0.0, max_length]``.  A returned value of 0.0 means even a
+            zero-length stub would conflict with a neighbour (only possible
+            when ``min_clearance`` is larger than the pad-to-pad spacing
+            and the originating pad already touches its neighbour's
+            clearance halo).  The caller should treat values below a small
+            useful threshold (e.g. ``min_clearance + trace_width``) as a
+            defer-to-router signal.
+        """
+        if max_length <= 0:
+            return 0.0
+
+        def _gap_at(length: float) -> float:
+            """Minimum edge-to-edge gap from the candidate segment to any
+            other pad on the same layer."""
+            ex = pad.x + dx * length
+            ey = pad.y + dy * length
+            candidate = Segment(
+                x1=pad.x, y1=pad.y, x2=ex, y2=ey,
+                width=trace_width, layer=pad.layer,
+                net=pad.net, net_name=pad.net_name,
+            )
+            min_gap = float("inf")
+            for other in package_pads:
+                if other is pad:
+                    continue
+                # Defensive: skip pads that share coords with the originator
+                # (would be a duplicate pad entry; rare but seen in tests).
+                if other.x == pad.x and other.y == pad.y:
+                    continue
+                # Only check pads that touch the segment's layer.  PTH pads
+                # touch every copper layer so always check those.
+                if not other.through_hole and other.layer != pad.layer:
+                    continue
+                gap = self._segment_to_pad_edge_gap(candidate, other)
+                if gap < min_gap:
+                    min_gap = gap
+            return min_gap
+
+        # If the full-length segment is already clear, no clipping needed.
+        full_gap = _gap_at(max_length)
+        if full_gap >= min_clearance - 1e-6:
+            return max_length
+
+        # Otherwise, binary-search for the longest length that still clears.
+        # If even a zero-length stub conflicts (rare), bail out at 0.
+        if _gap_at(0.0) < min_clearance - 1e-6:
+            return 0.0
+
+        lo = 0.0
+        hi = max_length
+        # 12 iterations resolves to ~max_length / 4096 -- well below the
+        # router grid resolution for any practical launch distance.
+        for _ in range(12):
+            mid = (lo + hi) / 2
+            if _gap_at(mid) >= min_clearance - 1e-6:
+                lo = mid
+            else:
+                hi = mid
+        return lo
 
     def _escape_fine_pitch_dual_row(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate escape routes with alternating layer escapes for fine-pitch SSOP/TSSOP.
@@ -2871,6 +3071,14 @@ class EscapeRouter:
 
         Each pin escapes directly outward from package center.
 
+        Issue #2756: When neighbour pads sit close enough to the launch
+        line that the escape stub would clip them (the dominant failure
+        mode on TO-220 MOSFETs Q5/Q6 on board 05), the segment endpoint
+        is clipped to honour pad-to-segment clearance.  Stubs that get
+        clipped below a useful threshold are dropped so the main router
+        can pick the pad up cleanly instead of having to fight an
+        already-violating escape segment.
+
         Args:
             package: Package info
 
@@ -2880,6 +3088,16 @@ class EscapeRouter:
         escapes: list[EscapeRoute] = []
         center_x, center_y = package.center
 
+        # Issue #2756: resolve the effective clearance once per package.
+        effective_clearance = self.rules.get_clearance_for_component(
+            package.ref, pin_pitch=package.pin_pitch,
+        )
+
+        # Useful-length threshold for the clipped stub: half the original
+        # launch distance.  Matches the heuristic in
+        # ``_escape_qfp_alternating``.
+        min_useful_length = self.escape_clearance * 0.5
+
         for pad in package.pads:
             # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
             # via planes, not routed via escapes.
@@ -2888,8 +3106,30 @@ class EscapeRouter:
 
             direction = self._get_quadrant_direction(pad.x, pad.y, center_x, center_y)
             dx, dy = self._direction_to_vector(direction)
+            trace_w = self._get_trace_width_for_net(pad.net_name)
 
-            escape_dist = self.escape_clearance
+            # Issue #2756: clip the radial escape against neighbour pads.
+            requested_dist = self.escape_clearance
+            safe_dist = self._compute_max_safe_escape_length(
+                pad=pad,
+                dx=dx,
+                dy=dy,
+                trace_width=trace_w,
+                package_pads=package.pads,
+                min_clearance=effective_clearance,
+                max_length=requested_dist,
+            )
+            escape_dist = min(requested_dist, safe_dist)
+
+            # Drop stubs that are too short to exit the pad halo.
+            if escape_dist < min_useful_length:
+                logger.debug(
+                    "Radial escape for %s pin %s skipped: clipped length "
+                    "%.3fmm < %.3fmm threshold (Issue #2756)",
+                    pad.net_name, pad.pin, escape_dist, min_useful_length,
+                )
+                continue
+
             escape_x = pad.x + dx * escape_dist
             escape_y = pad.y + dy * escape_dist
 
@@ -2898,7 +3138,7 @@ class EscapeRouter:
                 y1=pad.y,
                 x2=escape_x,
                 y2=escape_y,
-                width=self._get_trace_width_for_net(pad.net_name),
+                width=trace_w,
                 layer=pad.layer,
                 net=pad.net,
                 net_name=pad.net_name,

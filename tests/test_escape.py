@@ -636,7 +636,17 @@ class TestEscapeRouter:
             assert escape.direction != EscapeDirection.VIA_DOWN or escape.via is not None
 
     def test_generate_escapes_qfp(self, grid_and_rules):
-        """Test escape generation for QFP."""
+        """Test escape generation for QFP.
+
+        Issue #2756: With the post-fix pad-clearance clipping, a 0.5mm-pitch
+        QFP-32 escape with trace_clearance=0.2mm produces fewer escapes than
+        the naive ``one-per-pad`` upper bound -- escapes whose clipped
+        segment is too short to clear the pad halo are deferred to the main
+        router rather than emitted as clearance-violating stubs.  The
+        previous assertion of ``len(escapes) == 32`` was relying on the
+        broken pre-#2756 behaviour where the alternating direction emitter
+        wrote violating segments unconditionally.
+        """
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
@@ -644,8 +654,35 @@ class TestEscapeRouter:
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
-        # Should have escape for each edge pad
-        assert len(escapes) == 32
+        # At least the perpendicular (even-indexed) escapes on every edge
+        # should survive clipping (perpendicular launches don't run along
+        # the same-edge pads).  4 edges * 4 even pins = 16 minimum.
+        assert len(escapes) >= 16, (
+            f"Expected at least 16 perpendicular-axis escapes for QFP-32, "
+            f"got {len(escapes)}"
+        )
+        # Upper bound is one-per-edge-pad (32) -- no escape should be added
+        # spuriously by the clipping path.
+        assert len(escapes) <= 32
+
+        # Every escape must respect pad-to-segment clearance against
+        # every OTHER pad on the package (the post-#2756 invariant).
+        for escape in escapes:
+            for seg in escape.segments:
+                if seg.layer != Layer.F_CU:
+                    continue  # vias escape on other layers, skip
+                for other in pads:
+                    if other is escape.pad:
+                        continue
+                    if other.layer != seg.layer and not other.through_hole:
+                        continue
+                    gap = router._segment_to_pad_edge_gap(seg, other)
+                    # Allow a small float tolerance.
+                    assert gap >= rules.trace_clearance - 1e-6, (
+                        f"Escape from pad {escape.pad.net_name} violates "
+                        f"clearance against pad {other.net_name}: "
+                        f"gap={gap:.4f} < required={rules.trace_clearance:.4f}"
+                    )
 
     def test_escape_directions_vary(self, grid_and_rules):
         """Test that escapes use different directions."""
