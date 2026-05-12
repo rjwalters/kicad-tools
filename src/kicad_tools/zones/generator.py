@@ -185,17 +185,12 @@ class ZoneGenerator:
         coordinates. ``get_board_outline()`` returns board-relative coords,
         so we add the board origin back.
 
-        .. note::
-            **Coord-space mismatch with ``existing.polygon`` (deferred -- #2759):**
-            After PR #2753 normalized ``Zone.polygon`` to board-relative
-            coordinates during ``PCB.load()``, ``_check_overlap()`` at line
-            431 compares this sheet-absolute boundary against
-            ``existing.polygon`` (board-relative). For boards with a
-            non-zero ``Edge.Cuts`` origin the bounding-box overlap test
-            will silently report "no overlap" for actually-overlapping
-            zones. The zone-writeout path is correct (it needs sheet-absolute
-            for the sexp tree); the bug is confined to the overlap-warning
-            heuristic. Tracked in #2759.
+        Note: this property is the source of the sheet-absolute ``boundary``
+        argument passed to ``_check_overlap()``. Since PR #2753 normalized
+        ``Zone.polygon`` to board-relative coordinates on load, the overlap
+        comparison must reconcile the two frames; ``_check_overlap()`` does
+        so by shifting ``existing.polygon`` by the board origin before
+        computing the AABB intersection (see #2759).
         """
         if self._board_outline is None:
             outline = self._pcb.get_board_outline()
@@ -425,10 +420,24 @@ class ZoneGenerator:
         Checks both existing PCB zones and zones already queued in
         this generator.
 
+        Coordinate frames:
+            * ``boundary`` is sheet-absolute (sourced from
+              :attr:`board_outline`, which converts the board-relative
+              outline back to sheet-absolute for PCB output -- see PR #2753).
+            * ``existing.polygon`` is board-relative on PCBs loaded via
+              :class:`PCB` (see ``_detect_board_origin`` in
+              ``schema/pcb.py``).  We add the board origin so both polygons
+              live in the same frame before the AABB intersection test.
+            * Queued zones (``self._zones``) already carry sheet-absolute
+              boundaries because :meth:`add_zone` derives them from
+              :attr:`board_outline` (or accepts a caller-supplied boundary
+              in the same frame), so no conversion is required there.
+
         Returns:
             List of overlap warnings (empty if no overlaps detected).
         """
         warnings: list[ZoneOverlapWarning] = []
+        ox, oy = self._pcb.board_origin
 
         # Check against existing zones in the PCB
         for existing in self._pcb.zones:
@@ -437,12 +446,13 @@ class ZoneGenerator:
             if existing.net_name == net:
                 continue  # Same net on same layer is fine (e.g. re-run)
 
-            # TODO(#2759): mixed coord-space comparison. After PR #2753
-            # `existing.polygon` is board-relative while `boundary` (derived
-            # from `self.board_outline`) is sheet-absolute. For non-zero
-            # `Edge.Cuts` origin this silently misses real overlaps. Fix
-            # is deferred to keep PR #2753's blast radius bounded.
-            existing_boundary = existing.polygon
+            # Bring the board-relative existing polygon (post-PR-2753
+            # invariant) into the sheet-absolute frame used by ``boundary``
+            # so the AABB intersection test works for non-zero-origin boards.
+            if ox != 0.0 or oy != 0.0:
+                existing_boundary = [(x + ox, y + oy) for x, y in existing.polygon]
+            else:
+                existing_boundary = existing.polygon
             if self._boundaries_overlap(boundary, existing_boundary):
                 if priority <= existing.priority:
                     msg = (

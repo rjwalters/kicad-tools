@@ -533,6 +533,197 @@ class TestZoneOverlapDetection:
         assert "zero copper" in captured.err
 
 
+class TestZoneOverlapNonzeroOrigin:
+    """Tests for overlap detection on PCBs with non-zero board origin.
+
+    Regression coverage for the mixed-coordinate-space bug introduced by
+    PR #2753: ``board_outline`` is sheet-absolute (PCB-output frame), but
+    ``Zone.polygon`` is board-relative after loading.  ``_check_overlap``
+    must reconcile the two frames before running the AABB intersection
+    test, otherwise overlap detection silently fails on every non-zero-
+    origin board (which is every demo board in this repo).
+    """
+
+    @pytest.fixture
+    def offset_pcb_with_existing_zone(self, tmp_path):
+        """Create a PCB at origin (100, 80) with one pre-existing GND zone.
+
+        The zone polygon is written in sheet-absolute coordinates (KiCad's
+        on-disk convention).  After PCB.load, ``Zone.polygon`` will be
+        board-relative, while ``board_outline`` (consumed by
+        ``ZoneGenerator``) will be re-converted to sheet-absolute for
+        PCB output.
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "+5V")
+  (gr_rect
+    (start 100 80)
+    (end 150 110)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "existing-zone-uuid")
+    (hatch edge 0.5)
+    (priority 1)
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.25)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+    (polygon (pts (xy 100.3 80.3) (xy 149.7 80.3) (xy 149.7 109.7) (xy 100.3 109.7)))
+  )
+)
+"""
+        pcb_file = tmp_path / "offset_with_zone.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    @pytest.fixture
+    def offset_pcb_no_zone(self, tmp_path):
+        """Create a PCB at origin (100, 80) with no pre-existing zones."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect
+    (start 100 80)
+    (end 150 110)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "offset_no_zone.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_existing_zone_polygon_is_board_relative(self, offset_pcb_with_existing_zone):
+        """Confirm the PCB.load invariant: Zone.polygon is board-relative.
+
+        This is a pre-condition for the regression we are guarding against;
+        if this assumption changes upstream the overlap fix may become
+        unnecessary (or wrong) and these tests should be revisited.
+        """
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+        assert len(gen.pcb.zones) == 1
+        existing = gen.pcb.zones[0]
+
+        # Origin should be (100, 80)
+        assert gen.pcb.board_origin == (100.0, 80.0)
+
+        # Polygon should be board-relative (~ [0..50] x [0..30])
+        xs = [p[0] for p in existing.polygon]
+        ys = [p[1] for p in existing.polygon]
+        assert min(xs) == pytest.approx(0.3, abs=0.5)
+        assert max(xs) == pytest.approx(49.7, abs=0.5)
+        assert min(ys) == pytest.approx(0.3, abs=0.5)
+        assert max(ys) == pytest.approx(29.7, abs=0.5)
+
+    def test_overlap_detected_with_nonzero_origin(self, offset_pcb_with_existing_zone):
+        """Overlap warning fires when new zone overlaps existing on non-zero origin.
+
+        Regression for PR #2753: before the fix, ``_check_overlap``
+        compared sheet-absolute ``boundary`` against board-relative
+        ``existing.polygon`` and the AABBs were offset by the board
+        origin, so the overlap was silently missed.
+        """
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+
+        # Add a +3.3V zone on B.Cu, which fully overlaps the existing GND
+        # zone on B.Cu.  Use default boundary (==board_outline, sheet-abs).
+        gen.add_zone(net="+3.3V", layer="B.Cu", priority=0)
+
+        assert len(gen.warnings) == 1
+        w = gen.warnings[0]
+        assert isinstance(w, ZoneOverlapWarning)
+        assert w.new_net == "+3.3V"
+        assert w.existing_net == "GND"
+        assert w.layer == "B.Cu"
+        # Lower priority new zone => "new zone will get zero copper"
+        assert "new zone will get zero copper" in w.message
+
+    def test_overlap_higher_priority_overrides_existing(self, offset_pcb_with_existing_zone):
+        """Higher-priority new zone reports the existing-zone-loses warning."""
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+
+        # New zone at priority 2 > existing priority 1
+        gen.add_zone(net="+5V", layer="B.Cu", priority=2)
+
+        assert len(gen.warnings) == 1
+        w = gen.warnings[0]
+        assert "existing zone will get zero copper" in w.message
+        assert w.existing_net == "GND"
+
+    def test_no_overlap_warning_on_different_layer(self, offset_pcb_with_existing_zone):
+        """No overlap warning when new zone is on a different layer."""
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+
+        # Existing zone is on B.Cu; add a different zone on F.Cu
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+
+        assert len(gen.warnings) == 0
+
+    def test_no_overlap_warning_same_net_same_layer(self, offset_pcb_with_existing_zone):
+        """No overlap warning when re-adding the same net on the same layer."""
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+
+        assert len(gen.warnings) == 0
+
+    def test_no_overlap_warning_disjoint_custom_boundary(self, offset_pcb_with_existing_zone):
+        """No overlap when caller supplies a sheet-absolute boundary disjoint from the existing zone.
+
+        Existing zone covers (100,80) -> (150,110) in sheet-absolute.
+        Supply a boundary far away (e.g. 200,200 -> 250,250) and expect
+        no warning.  This guards against false positives caused by an
+        over-zealous origin shift.
+        """
+        gen = ZoneGenerator.from_pcb(offset_pcb_with_existing_zone)
+
+        far_away = [(200, 200), (250, 200), (250, 250), (200, 250)]
+        gen.add_zone(
+            net="+3.3V",
+            layer="B.Cu",
+            priority=0,
+            boundary=far_away,
+        )
+
+        assert len(gen.warnings) == 0
+
+    def test_no_existing_zones_no_warning(self, offset_pcb_no_zone):
+        """Sanity check: non-zero origin PCB with no existing zones produces no warning."""
+        gen = ZoneGenerator.from_pcb(offset_pcb_no_zone)
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+
+        assert len(gen.warnings) == 0
+
+
 class TestBoundariesOverlap:
     """Tests for the static _boundaries_overlap method."""
 
