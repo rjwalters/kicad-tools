@@ -992,6 +992,45 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _resolve_routed_pcb_path(ctx: BuildContext) -> Path:
+    """Resolve the on-disk path for the router's output PCB.
+
+    Resolution order (first match wins):
+
+    1. ``ctx.spec.project.artifacts.pcb_routed`` if declared in ``project.kct``.
+       Resolved relative to ``ctx.project_dir``.  This lets boards opt into a
+       non-default path (e.g. ``output/<name>_routed.kicad_pcb``) without
+       relying on ``--output``.
+    2. ``ctx.output_dir / "<stem>_routed.kicad_pcb"`` if ``--output`` was
+       passed on the CLI.
+    3. ``<pcb_file>.with_stem(<stem> + "_routed")`` as the historical
+       default (sibling of the unrouted PCB).
+
+    The caller is responsible for ensuring ``ctx.pcb_file`` is set before
+    invoking this; ``_run_step_route`` guards that precondition.
+
+    Returns:
+        Absolute or project-relative ``Path`` to write the routed PCB to.
+    """
+    assert ctx.pcb_file is not None, "_resolve_routed_pcb_path requires ctx.pcb_file"
+
+    if (
+        ctx.spec
+        and ctx.spec.project
+        and ctx.spec.project.artifacts
+        and ctx.spec.project.artifacts.pcb_routed
+    ):
+        declared = Path(ctx.spec.project.artifacts.pcb_routed)
+        if not declared.is_absolute():
+            declared = ctx.project_dir / declared
+        return declared
+
+    if ctx.output_dir:
+        return ctx.output_dir / (ctx.pcb_file.stem + "_routed.kicad_pcb")
+
+    return ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -1132,10 +1171,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
     # Place routed PCB in output dir if specified, otherwise alongside input
-    if ctx.output_dir:
-        output_file = ctx.output_dir / (ctx.pcb_file.stem + "_routed.kicad_pcb")
-    else:
-        output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+    output_file = _resolve_routed_pcb_path(ctx)
 
     # Get routing parameters from project spec (preferred) or manufacturer rules (fallback)
     grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
@@ -1303,9 +1339,9 @@ def _check_route_postcondition(
 ) -> BuildResult | None:
     """Validate that ``kct route``'s successful exit produced real copper.
 
-    Defense-in-depth check for issue #2740.  The router can exit 0 with
-    ``completion = 1.0`` when every multi-pad net is auto-skipped as a
-    pour net (``nets_to_route`` becomes 0 -> the
+    Defense-in-depth check for issues #2740 and #2782.  The router can
+    exit 0 with ``completion = 1.0`` when every multi-pad net is
+    auto-skipped as a pour net (``nets_to_route`` becomes 0 -> the
     ``nets_routed / nets_to_route if nets_to_route > 0 else 1.0`` ternary
     in :mod:`kicad_tools.cli.route_cmd` returns 1.0).  Without this
     postcondition the build pipeline would proceed to verify/export with
@@ -1315,8 +1351,11 @@ def _check_route_postcondition(
     Returns a *failure* :class:`BuildResult` when:
 
     * The input PCB had at least one multi-pad signal net (so routing
-      should produce >=1 segment), AND
-    * The routed PCB exists and contains zero segments AND zero vias.
+      should produce >=1 segment) AND the routed PCB has zero segments
+      and zero vias (issue #2740 -- silent empty-route), OR
+    * The routed PCB is byte-identical to the input PCB despite
+      ``kct route`` reporting success (issue #2782 -- silent write-path
+      failure where the router never touched the on-disk file).
 
     Returns ``None`` (i.e., "postcondition OK, continue") otherwise --
     including when the input PCB has no routable signal nets (small
@@ -1329,6 +1368,36 @@ def _check_route_postcondition(
     expected = _count_multi_pad_signal_nets(input_pcb)
     if expected == 0:
         return None  # No signal nets to route -- zero segments is legitimate
+
+    # Byte-identical check (issue #2782): if the router reported success
+    # for a PCB with routable signal nets but the output file's bytes
+    # exactly match the input, then either the router silently failed to
+    # write its result or the build pipeline pointed at the wrong path.
+    # Either way, the on-disk artifact is an unrouted PCB masquerading
+    # as a routed one -- fail loudly rather than ship it downstream.
+    try:
+        if input_pcb.exists() and input_pcb.resolve() != routed_pcb.resolve():
+            input_bytes = input_pcb.read_bytes()
+            routed_bytes = routed_pcb.read_bytes()
+            if input_bytes == routed_bytes:
+                return BuildResult(
+                    step="route",
+                    success=False,
+                    message=(
+                        f"Route step exited 0 but the routed PCB at "
+                        f"{routed_pcb} is byte-identical to the unrouted "
+                        f"input at {input_pcb} despite {expected} routable "
+                        f"signal net(s).  This indicates a silent write-path "
+                        f"failure (see issue #2782 -- the build will not "
+                        f"ship an unrouted PCB as a routed one)."
+                    ),
+                    output_file=routed_pcb,
+                )
+    except OSError:
+        # Best-effort: I/O failures should fall through to the segment
+        # check rather than mask a real router fault behind a file-read
+        # error.
+        pass
 
     try:
         from kicad_tools.schema.pcb import PCB

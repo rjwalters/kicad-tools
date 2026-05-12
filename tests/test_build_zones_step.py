@@ -581,12 +581,17 @@ class TestRouteStepPostcondition:
         Returns (input_pcb, routed_pcb) where:
         - input_pcb has 3 multi-pad signal nets and zero zones
           (so the postcondition expects segments to be produced).
-        - routed_pcb is byte-identical (zero segments, zero vias),
-          simulating the silent-success path.
+        - routed_pcb has zero segments and zero vias, but a different
+          generator string so it is **not** byte-identical to the input
+          (the byte-identical check from issue #2782 is exercised
+          separately in :class:`TestRouteStepWritePath`).
         """
         # Minimal PCB with two footprints sharing 3 nets via pads.
         # Each net has 2 pads => 3 multi-pad signal nets to route.
-        pcb_text = """\
+        # The two files share the same structure but differ in the
+        # generator string -- this models a router that processed the
+        # PCB (rewrote it) but produced zero copper segments.
+        pcb_text_input = """\
 (kicad_pcb
   (version 20240108)
   (generator "kicad")
@@ -626,10 +631,13 @@ class TestRouteStepPostcondition:
   )
 )
 """
+        pcb_text_routed = pcb_text_input.replace(
+            '(generator "kicad")', '(generator "kicad-tools-router")'
+        )
         input_pcb = tmp_path / "input.kicad_pcb"
-        input_pcb.write_text(pcb_text)
+        input_pcb.write_text(pcb_text_input)
         routed_pcb = tmp_path / "input_routed.kicad_pcb"
-        routed_pcb.write_text(pcb_text)  # Same content == zero segments produced.
+        routed_pcb.write_text(pcb_text_routed)
         return input_pcb, routed_pcb
 
     def test_postcondition_fails_when_zero_segments_for_routable_nets(self, tmp_path: Path):

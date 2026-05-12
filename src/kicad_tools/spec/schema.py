@@ -79,7 +79,14 @@ class ProjectArtifacts(BaseModel):
     """Project file artifacts."""
 
     schematic: str | None = Field(default=None, description="Path to schematic file")
-    pcb: str | None = Field(default=None, description="Path to PCB file")
+    pcb: str | None = Field(default=None, description="Path to PCB file (unrouted)")
+    pcb_routed: str | None = Field(
+        default=None,
+        description=(
+            "Path to routed PCB file. If unset, defaults to '<pcb_stem>_routed.kicad_pcb' "
+            "alongside the PCB. Consumed by `kct build` (see _run_step_route)."
+        ),
+    )
     project: str | None = Field(default=None, description="Path to KiCad project file")
 
 
@@ -240,6 +247,14 @@ class ManufacturingRequirements(BaseModel):
     layers: dict[str, int] | None = Field(
         default=None, description="Layer count (preferred, min, max)"
     )
+    stackup: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional human-readable description of each PCB layer "
+            "(e.g., ['F.Cu (signal)', 'In1.Cu (GND plane)', ...]). "
+            "Captured for documentation/audit; not consumed by the router."
+        ),
+    )
     copper_weight: float | None = Field(
         default=None,
         description="Copper weight in oz/ft^2 (e.g., 1, 2, '2oz', '0.5oz')",
@@ -278,6 +293,32 @@ class ManufacturingRequirements(BaseModel):
                     layers.pop("copper_weight")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def extract_stackup_from_layers(cls, data: Any) -> Any:
+        """Promote ``stackup`` from layers dict to top-level field if nested.
+
+        Boards historically wrote::
+
+            layers:
+              preferred: 4
+              stackup:
+                - "F.Cu (signal)"
+                - "In1.Cu (GND plane)"
+
+        ``layers`` is typed ``dict[str, int]`` so a nested ``stackup`` list
+        produces a Pydantic validation error. Promote it to the top-level
+        ``stackup`` field for backwards compatibility.
+        """
+        if isinstance(data, dict):
+            layers = data.get("layers")
+            if isinstance(layers, dict) and "stackup" in layers:
+                if "stackup" not in data or data["stackup"] is None:
+                    data["stackup"] = layers.pop("stackup")
+                else:
+                    layers.pop("stackup")
+        return data
+
 
 class Compliance(BaseModel):
     """Compliance and certification requirements."""
@@ -309,11 +350,41 @@ class Requirements(BaseModel):
 
 
 class ComponentSuggestion(BaseModel):
-    """Component suggestion with preferences and rationale."""
+    """Component suggestion with preferences and rationale.
+
+    Accepts two equivalent YAML shapes for ergonomic authoring:
+
+    * Full form (preserves rationale/avoid)::
+
+          regulator:
+            preferred: ["LM7805", "TPS562201"]
+            rationale: "Common, well-documented regulators"
+
+    * Shorthand (bare string -> ``preferred: [<string>]``)::
+
+          regulator: "LM7805 5V LDO"
+
+    The shorthand is unwrapped by :meth:`unwrap_string_shorthand` so the
+    canonical model still has a list-of-strings ``preferred`` field.
+    """
 
     preferred: list[str] | None = Field(default=None, description="Preferred part numbers")
     rationale: str | None = Field(default=None, description="Reason for preference")
     avoid: list[str] | None = Field(default=None, description="Parts to avoid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def unwrap_string_shorthand(cls, data: Any) -> Any:
+        """Allow a bare string to stand in for ``{preferred: [<string>]}``.
+
+        This is symmetric with how the loader is permissive about
+        single-element lists elsewhere -- it keeps board authors from
+        having to write the full mapping for the common case of a
+        one-line component note.
+        """
+        if isinstance(data, str):
+            return {"preferred": [data]}
+        return data
 
 
 class BOMSuggestions(BaseModel):
