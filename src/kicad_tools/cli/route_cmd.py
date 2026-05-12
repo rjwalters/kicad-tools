@@ -61,6 +61,7 @@ import shutil
 import signal
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,6 +70,81 @@ if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Issue #2802: Total wall-clock deadline helpers
+# =============================================================================
+#
+# ``--timeout`` is intended to be a *total* wall-clock budget for the whole
+# routing invocation, but historically the orchestration layer re-used it as a
+# per-stage budget: every layer-escalation attempt, every placement-feedback
+# iteration, and every auto-fix pass received its own fresh copy of the same
+# ``args.timeout`` value, so worst-case wall-clock for a single ``kct route``
+# invocation could exceed 10x the configured budget.
+#
+# The fix is a single monotonic deadline computed once in ``main()`` and
+# threaded through every outer-loop site via these helpers.  The deadline is
+# stored on the parsed ``args`` namespace as ``_wall_clock_deadline`` so it
+# travels naturally with the other CLI parameters.  When ``--timeout`` is not
+# set the deadline is ``None`` and these helpers preserve legacy unbounded
+# behaviour.
+
+
+def _set_wall_clock_deadline(args) -> None:
+    """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
+
+    Called once near the start of ``main()`` (after argparse).  If
+    ``args.timeout`` is falsy (None, 0, or negative) the deadline is set
+    to ``None`` so the rest of the orchestration treats the run as
+    unbounded.
+    """
+    timeout = getattr(args, "timeout", None)
+    if timeout and timeout > 0:
+        args._wall_clock_deadline = time.monotonic() + float(timeout)
+    else:
+        args._wall_clock_deadline = None
+
+
+def _remaining_budget(args) -> float | None:
+    """Return seconds remaining vs the total wall-clock deadline.
+
+    Returns ``None`` when no deadline is configured (legacy unbounded
+    behaviour).  Returns a non-negative float otherwise; callers should
+    treat zero as "deadline expired."
+    """
+    deadline = getattr(args, "_wall_clock_deadline", None)
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _deadline_expired(args) -> bool:
+    """True iff a deadline is configured and has been reached or passed."""
+    rem = _remaining_budget(args)
+    return rem is not None and rem <= 0.0
+
+
+def _budgeted_timeout(args) -> float | None:
+    """Return the per-call timeout to pass into inner router routines.
+
+    When a deadline is configured this is the smaller of the original
+    ``--timeout`` (preserving per-stage semantics for the *first* stage)
+    and the remaining wall-clock budget (so the *final* stage shortens
+    naturally as time runs out).  When no deadline is configured this
+    returns ``args.timeout`` unchanged so existing behaviour is preserved
+    for users who never passed ``--timeout``.
+    """
+    timeout = getattr(args, "timeout", None)
+    remaining = _remaining_budget(args)
+    if remaining is None:
+        return timeout
+    if timeout is None:
+        # ``_wall_clock_deadline`` is derived from ``args.timeout`` so this
+        # branch is unreachable in practice; guard against future refactors
+        # that decouple the two.
+        return remaining
+    return min(float(timeout), remaining)
 
 
 def _emit_single_pad_net_warning(
@@ -736,6 +812,7 @@ def _run_auto_fix(
     output_path: Path,
     max_passes: int = 1,
     quiet: bool = False,
+    args=None,
 ) -> int:
     """Run fix-drc on the routed PCB to auto-repair DRC violations.
 
@@ -743,11 +820,29 @@ def _run_auto_fix(
         output_path: Path to the routed PCB file to repair.
         max_passes: Number of iterative repair passes.
         quiet: If True, suppress output.
+        args: Parsed ``route`` CLI args.  When provided, the function
+            honors ``args._wall_clock_deadline`` (issue #2802) and skips
+            the auto-fix invocation entirely if the total budget has been
+            consumed.  Optional for backward compatibility with callers
+            that do not have the args namespace handy.
 
     Returns:
         Exit code from fix_drc_cmd.main() (0 = all violations fixed).
+        Returns a non-zero "skipped" code (1) when the wall-clock
+        deadline has already expired.
     """
     from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+    # Issue #2802: skip auto-fix when the total wall-clock budget has
+    # already been exhausted by upstream routing stages.  ``fix-drc``
+    # itself has no ``--timeout`` flag and runs unbounded per pass, so
+    # without this guard a single auto-fix invocation can easily double
+    # the user's configured ``--timeout``.
+    if args is not None and _deadline_expired(args):
+        if not quiet:
+            print("\n--- Auto-Fix DRC Violations ---")
+            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
+        return 1
 
     if not quiet:
         print("\n--- Auto-Fix DRC Violations ---")
@@ -896,6 +991,18 @@ def _run_placement_feedback(
 
     from kicad_tools.schema.pcb import PCB
 
+    # Issue #2802: bail out early when the total wall-clock budget has
+    # already been consumed by upstream stages.  Each PF iteration kicks
+    # off a fresh negotiated re-route, so skipping the loop entirely
+    # preserves the remaining time for downstream steps (optimize, DRC,
+    # auto-fix) instead of burning it on routing we'll never get to
+    # finish.
+    if _deadline_expired(args):
+        if not quiet:
+            print("\n--- Placement-Routing Feedback ---")
+            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
+        return None
+
     if not quiet:
         print("\n--- Placement-Routing Feedback ---")
         failed = router.get_failed_nets()
@@ -916,7 +1023,12 @@ def _run_placement_feedback(
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
 
-    timeout = getattr(args, "timeout", None)
+    # Issue #2802: forward the remaining wall-clock budget as the per-call
+    # ``timeout`` so each PF iteration's inner re-route gets a smaller
+    # slice of the deadline as time runs out, rather than always asking
+    # for a fresh ``args.timeout`` slot.  Falls back to ``args.timeout``
+    # when no deadline is configured.
+    timeout = _budgeted_timeout(args)
     per_net_timeout = getattr(args, "per_net_timeout", None)
 
     # Issue #2606: stagnation + outer-timeout guards.  Defaults match
@@ -924,6 +1036,14 @@ def _run_placement_feedback(
     stagnation_patience = int(getattr(args, "placement_feedback_stagnation_patience", 3) or 0)
     outer_timeout_raw = getattr(args, "placement_feedback_outer_timeout", None)
     outer_timeout = float(outer_timeout_raw) if outer_timeout_raw is not None else None
+
+    # Issue #2802: cap the PF outer-timeout at the remaining total budget
+    # so the feedback loop terminates when the deadline fires even if the
+    # user did not pass ``--placement-feedback-outer-timeout``.  When both
+    # are set, we take the smaller (most restrictive) value.
+    _remaining = _remaining_budget(args)
+    if _remaining is not None:
+        outer_timeout = _remaining if outer_timeout is None else min(outer_timeout, _remaining)
 
     try:
         result = router.route_with_placement_feedback(
@@ -1606,6 +1726,19 @@ def route_with_layer_escalation(
     last_power_stall_nets: list[str] = []
 
     for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
+        # Issue #2802: honor the total wall-clock deadline before starting
+        # another layer-stack attempt.  Without this guard the loop would
+        # blindly start a fresh ``route_all_negotiated`` call (each with
+        # its own copy of ``args.timeout``) even after the user-configured
+        # total budget has expired.
+        if _deadline_expired(args):
+            if not quiet:
+                flush_print(
+                    f"  Wall-clock deadline reached before attempt {attempt_num}; "
+                    "stopping layer escalation (issue #2802)"
+                )
+            break
+
         # Issue #2388: When the previous attempt stalled on power nets and
         # this stack provides dedicated planes for them, auto-skip those
         # plane nets so the router doesn't try to route them as signals.
@@ -1677,31 +1810,38 @@ def route_with_layer_escalation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
+        # Issue #2802: shorten this attempt's timeout to the remaining
+        # wall-clock budget so the final layer-stack attempt does not
+        # blow past ``--timeout`` after earlier attempts have already
+        # consumed most of it.  Falls back to ``args.timeout`` when no
+        # deadline is configured.
+        _attempt_timeout = _budgeted_timeout(args)
+
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
                 router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
@@ -1720,7 +1860,7 @@ def route_with_layer_escalation(
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                 )
         except Exception as e:
             if not quiet:
@@ -2138,6 +2278,7 @@ def route_with_layer_escalation(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
+                args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
     # Final summary
@@ -2290,6 +2431,16 @@ def route_with_rule_relaxation(
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
 
     for tier in tiers:
+        # Issue #2802: honor the total wall-clock deadline before starting
+        # another rule-relaxation tier.
+        if _deadline_expired(args):
+            if not quiet:
+                flush_print(
+                    f"  Wall-clock deadline reached before tier {tier.tier + 1}; "
+                    "stopping rule relaxation (issue #2802)"
+                )
+            break
+
         if not quiet:
             flush_print("=" * 60)
             flush_print(f"Attempt {tier.tier + 1}: {tier.description}")
@@ -2352,31 +2503,35 @@ def route_with_rule_relaxation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
+        # Issue #2802: shorten this tier's timeout to the remaining
+        # wall-clock budget.
+        _attempt_timeout = _budgeted_timeout(args)
+
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
                 router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
@@ -2395,7 +2550,7 @@ def route_with_rule_relaxation(
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
-                    timeout=args.timeout,
+                    timeout=_attempt_timeout,
                 )
         except Exception as e:
             if not quiet:
@@ -2653,6 +2808,7 @@ def route_with_rule_relaxation(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
+                args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
     # Final summary
@@ -2818,8 +2974,29 @@ def route_with_combined_escalation(
 
     # 2D search: prioritize fewer layers first, then stricter rules
     for layer_count, layer_stack in layer_configs:
+        # Issue #2802: honor the total wall-clock deadline before starting
+        # another layer-stack column of the 2D search.
+        if _deadline_expired(args):
+            if not quiet:
+                flush_print(
+                    f"  Wall-clock deadline reached before {layer_count}L column; "
+                    "stopping combined escalation (issue #2802)"
+                )
+            break
+
         best_completion_for_layer: float | None = None
         for tier in tiers:
+            # Issue #2802: honor the deadline before each tier within the
+            # current layer column.
+            if _deadline_expired(args):
+                if not quiet:
+                    flush_print(
+                        f"  Wall-clock deadline reached before {layer_count}L "
+                        f"tier {tier.tier}; stopping combined escalation "
+                        "(issue #2802)"
+                    )
+                break
+
             if not quiet:
                 flush_print(
                     f"\nTrying: {layer_count} layers, tier {tier.tier} "
@@ -2872,24 +3049,29 @@ def route_with_combined_escalation(
             # Route
             escape_flag = _resolve_escape_routing_flag(args)
 
+            # Issue #2802: shorten this cell's timeout to the remaining
+            # wall-clock budget so the 2D search degrades gracefully
+            # toward the deadline rather than blowing past it.
+            _attempt_timeout = _budgeted_timeout(args)
+
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
                     router.route_with_escape(
                         use_negotiated=(args.strategy == "negotiated"),
-                        timeout=args.timeout,
+                        timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                 elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
                         use_negotiated=(args.strategy == "negotiated"),
                         max_iterations=args.iterations,
-                        timeout=args.timeout,
+                        timeout=_attempt_timeout,
                     )
                 elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                     router.route_all_two_phase(
                         use_negotiated=True,
                         corridor_width_factor=2.0,
-                        timeout=args.timeout,
+                        timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         max_iterations=getattr(args, "two_phase_iterations", None)
                         or args.iterations,
@@ -2897,7 +3079,7 @@ def route_with_combined_escalation(
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
                         max_iterations=args.iterations,
-                        timeout=args.timeout,
+                        timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         batch_routing=getattr(args, "batch_routing", False)
                         or getattr(args, "high_performance", False),
@@ -2916,7 +3098,7 @@ def route_with_combined_escalation(
                         pop_size=args.pop_size,
                         generations=args.generations,
                         verbose=args.verbose and not quiet,
-                        timeout=args.timeout,
+                        timeout=_attempt_timeout,
                     )
             except Exception as e:
                 if not quiet:
@@ -3214,6 +3396,7 @@ def route_with_combined_escalation(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
+                args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
     # Final summary
@@ -3420,7 +3603,14 @@ def main(argv: list[str] | None = None) -> int:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help=(
+            "Total wall-clock timeout in seconds for the whole routing "
+            "invocation (default: no timeout).  This is a TOTAL budget: "
+            "auto-layer escalation, placement-routing feedback, auto-fix "
+            "passes, and inner negotiated/two-phase/escape calls all share "
+            "the same deadline.  The command returns the best partial "
+            "result available when the deadline fires (issue #2802)."
+        ),
     )
     parser.add_argument(
         "--per-net-timeout",
@@ -4061,6 +4251,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #2802: Stamp a single monotonic wall-clock deadline derived from
+    # ``--timeout`` onto ``args`` so every orchestration site (layer-escalation
+    # loop, rule-relaxation tiers, combined-escalation 2D search, placement
+    # feedback, auto-fix passes, inner negotiated/two-phase/escape calls)
+    # shares the same budget rather than receiving a fresh per-stage copy of
+    # ``args.timeout``.  See ``_set_wall_clock_deadline`` / ``_remaining_budget``
+    # / ``_deadline_expired`` for the helpers that consume it.
+    _set_wall_clock_deadline(args)
 
     # Issue #2589: Seed the global ``random`` module for reproducible runs.
     # When ``--seed`` is supplied, all unseeded ``random.shuffle`` /
@@ -4897,7 +5096,7 @@ def main(argv: list[str] | None = None) -> int:
                             if args.strategy == "negotiated":
                                 return router.route_all_negotiated(
                                     max_iterations=args.iterations,
-                                    timeout=args.timeout,
+                                    timeout=_budgeted_timeout(args),
                                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                                     batch_routing=getattr(args, "batch_routing", False)
                                     or getattr(args, "high_performance", False),
@@ -4923,7 +5122,7 @@ def main(argv: list[str] | None = None) -> int:
                             pop_size=args.pop_size,
                             generations=args.generations,
                             verbose=args.verbose and not quiet,
-                            timeout=args.timeout,
+                            timeout=_budgeted_timeout(args),
                         )
                     elif args.strategy == "monte-carlo":
                         return router.route_all_monte_carlo(
@@ -4934,7 +5133,7 @@ def main(argv: list[str] | None = None) -> int:
                         return router.route_all_two_phase(
                             use_negotiated=True,
                             corridor_width_factor=2.0,
-                            timeout=args.timeout,
+                            timeout=_budgeted_timeout(args),
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                             max_iterations=getattr(args, "two_phase_iterations", None)
                             or args.iterations,
@@ -4942,7 +5141,7 @@ def main(argv: list[str] | None = None) -> int:
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
                             max_iterations=args.iterations,
-                            timeout=args.timeout,
+                            timeout=_budgeted_timeout(args),
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                             batch_routing=getattr(args, "batch_routing", False)
                             or getattr(args, "high_performance", False),
@@ -4967,7 +5166,7 @@ def main(argv: list[str] | None = None) -> int:
             if _should_use_escape_routing(router, escape_routing_flag, quiet):
                 return router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
 
@@ -4977,20 +5176,20 @@ def main(argv: list[str] | None = None) -> int:
                     min_clearance=getattr(args, "min_clearance", None),
                     num_relaxation_levels=getattr(args, "relaxation_levels", 3),
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                 )
                 return routes
             elif getattr(args, "multi_resolution", False):
                 return router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                 return router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
@@ -5002,7 +5201,7 @@ def main(argv: list[str] | None = None) -> int:
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         max_iterations=args.iterations,
-                        timeout=args.timeout,
+                        timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         batch_routing=getattr(args, "batch_routing", False)
                         or getattr(args, "high_performance", False),
@@ -5020,7 +5219,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
@@ -5068,7 +5267,7 @@ def main(argv: list[str] | None = None) -> int:
                     pop_size=args.pop_size,
                     generations=args.generations,
                     verbose=args.verbose and not quiet,
-                    timeout=args.timeout,
+                    timeout=_budgeted_timeout(args),
                 )
             return None
 
@@ -5646,6 +5845,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
+                args=args,  # Issue #2802: honor total wall-clock deadline
             )
             if fix_result == 0:
                 drc_errors = 0
