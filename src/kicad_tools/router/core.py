@@ -4082,6 +4082,8 @@ class Autorouter:
         max_iterations: int = 10,
         profile: CostProfile | str | None = None,
         progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets with auto-tuned cost parameters.
 
@@ -4100,6 +4102,12 @@ class Autorouter:
                 - String: "sparse", "standard", "dense", "minimize_vias",
                   "minimize_length", "high_speed"
             progress_callback: Optional callback for progress updates
+            timeout: Optional outer wall-clock budget in seconds, forwarded
+                to the underlying ``route_all`` (Issue #2800).  ``None``
+                preserves legacy behaviour.
+            per_net_timeout: Optional advisory per-net wall-clock budget,
+                forwarded to ``route_all`` (Issue #2800).  Suppresses the
+                "no timeout supplied" warning when present.
 
         Returns:
             List of Route objects for all nets
@@ -4126,7 +4134,13 @@ class Autorouter:
 
             # Apply parameters
             self.rules = params.apply_to_rules(self.rules)
-            return self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+            # Issue #2800: forward timeout/per_net_timeout to inner route_all
+            return self.route_all(
+                progress_callback=progress_callback,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
+            )
 
         # Analyze board characteristics
         characteristics = analyze_board(
@@ -4161,7 +4175,13 @@ class Autorouter:
             flush_print(f"    Congestion cost: {params.congestion:.1f}")
 
             self.rules = params.apply_to_rules(self.rules)
-            routes = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+            # Issue #2800: forward timeout/per_net_timeout to inner route_all
+            routes = self.route_all(
+                progress_callback=progress_callback,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
+            )
         else:
             # Full optimization
             flush_print(f"  Method: {method} optimization (max {max_iterations} iterations)")
@@ -4183,7 +4203,13 @@ class Autorouter:
                 flush_print(f"    Total vias: {result.quality.total_vias}")
 
             self.rules = result.params.apply_to_rules(self.rules)
-            routes = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+            # Issue #2800: forward timeout/per_net_timeout to inner route_all
+            routes = self.route_all(
+                progress_callback=progress_callback,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
+            )
 
         flush_print("\n=== Tuned Routing Complete ===")
         flush_print(f"  Routes: {len(routes)}")
@@ -6649,6 +6675,8 @@ class Autorouter:
         block_margin: float = 1.0,
         use_negotiated: bool = False,
         progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using per-block detail routing with sub-Pathfinders.
 
@@ -6670,6 +6698,20 @@ class Autorouter:
             use_negotiated: Use negotiated congestion routing for inter-block
                 nets. Default: False.
             progress_callback: Optional callback for progress updates.
+            timeout: Optional outer wall-clock budget in seconds, forwarded
+                to the no-blocks fallback ``route_all`` /
+                ``route_all_negotiated`` (Issue #2800).  ``None`` preserves
+                legacy behaviour.
+
+                Note: when blocks ARE defined, Phase A (``BlockRouter``)
+                does not yet honour this budget -- the per-block sub-grid
+                router has no timeout plumbing.  Phase B inter-block nets
+                route via ``_route_net_with_corridor`` which DOES accept
+                ``per_net_timeout`` (see below).
+            per_net_timeout: Optional advisory per-net wall-clock budget,
+                forwarded to ``_route_net_with_corridor`` for Phase B
+                inter-block nets, and to the no-blocks fallback
+                ``route_all`` /  ``route_all_negotiated`` (Issue #2800).
 
         Returns:
             List of Route objects (block-internal + inter-block).
@@ -6686,9 +6728,20 @@ class Autorouter:
 
         # Fallback to flat routing when no blocks defined
         if not block_list:
+            # Issue #2800: forward timeout/per_net_timeout so the fallback
+            # path honours the caller's wall-clock budget.
             if use_negotiated:
-                return self.route_all_negotiated(progress_callback=progress_callback)
-            return self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+                return self.route_all_negotiated(
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                    per_net_timeout=per_net_timeout,
+                )
+            return self.route_all(
+                progress_callback=progress_callback,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
+            )
 
         flush_print("\n=== Block-Aware Routing ===")
         flush_print(f"  Blocks: {len(block_list)}")
@@ -6850,7 +6903,13 @@ class Autorouter:
                 # interiors.  The RegionGraph congestion from
                 # register_block_occupancy() guides corridors away
                 # from occupied block regions.
-                routes = self._route_net_with_corridor(net, present_cost_factor=1.0)
+                # Issue #2800: forward per_net_timeout so each inter-block
+                # A* search honours the per-net wall-clock budget.
+                routes = self._route_net_with_corridor(
+                    net,
+                    present_cost_factor=1.0,
+                    per_net_timeout=per_net_timeout,
+                )
             else:
                 routes = self.route_net(net)
             all_routes.extend(routes)
@@ -8873,7 +8932,14 @@ class Autorouter:
                 adaptive=True,
             )
         else:
-            self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+            # Issue #2800: forward ``timeout`` so the non-negotiated branch
+            # honours the outer wall-clock budget instead of silently dropping
+            # it (companion to the negotiated branch above).
+            self.route_all(
+                progress_callback=progress_callback,
+                timeout=timeout,
+                suppress_no_timeout_warning=True,
+            )
 
         coarse_stats = self.get_statistics()
         coarse_routed = coarse_stats["nets_routed"]

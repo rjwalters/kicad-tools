@@ -265,3 +265,119 @@ class TestRouteAllSmokeBudget:
         assert isinstance(routes, list)
         # Tiny board: must finish well inside the budget.
         assert elapsed < 60.0
+
+    def test_route_all_multi_resolution_outer_timeout_returns_within_budget(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #2800: ``route_all_multi_resolution(timeout=...)`` must
+        honour its outer wall-clock budget on both branches.
+
+        Exercises the non-negotiated branch where ``timeout`` was
+        previously dropped, plus the wrapper's outer wall-clock guard
+        at line 8893.
+        """
+        import time
+
+        from kicad_tools.router.core import Autorouter
+
+        router = Autorouter(width=50.0, height=40.0)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "N1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "N2"},
+                {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "N2"},
+            ],
+        )
+
+        start = time.time()
+        routes = router.route_all_multi_resolution(
+            use_negotiated=False,
+            timeout=60.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        # Tiny board: must finish well inside the budget.
+        assert elapsed < 60.0
+
+    def test_route_all_tuned_outer_timeout_returns_within_budget(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #2800: ``route_all_tuned(timeout=...)`` must accept and
+        forward its budget on the quick-tune branch."""
+        import time
+
+        from kicad_tools.router.core import Autorouter
+
+        router = Autorouter(width=50.0, height=40.0)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "N1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "N2"},
+                {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "N2"},
+            ],
+        )
+
+        start = time.time()
+        routes = router.route_all_tuned(
+            method="quick",
+            timeout=60.0,
+            per_net_timeout=10.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        assert elapsed < 60.0
+
+    def test_route_all_block_aware_outer_timeout_returns_within_budget(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #2800: ``route_all_block_aware(timeout=...)`` must
+        accept and forward its budget on the no-blocks fallback path."""
+        import time
+
+        from kicad_tools.router.core import Autorouter
+
+        router = Autorouter(width=50.0, height=40.0)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "N1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "N2"},
+                {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "N2"},
+            ],
+        )
+
+        start = time.time()
+        routes = router.route_all_block_aware(
+            use_negotiated=False,
+            timeout=60.0,
+            per_net_timeout=10.0,
+        )
+        elapsed = time.time() - start
+
+        assert isinstance(routes, list)
+        assert elapsed < 60.0
