@@ -1365,6 +1365,80 @@ class TestAutorouterRouteAll:
         # Should not fail, net 0 is skipped
         assert isinstance(routes, list)
 
+    def test_route_all_warns_when_no_timeout(self, router_with_nets):
+        """Issue #2794: route_all() emits a UserWarning when called without
+        any timeout or explicit opt-out.
+
+        This is the regression-prevention guard for bare ``router.route_all()``
+        calls in board scripts (the trap that caused 22-minute silent hangs on
+        board 05 BLDC controller).  Future board authors who do not supply a
+        timeout will see the warning in their logs and CI output.
+        """
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            router_with_nets.route_all()
+
+        # Filter for the #2794 warning specifically (other modules may emit
+        # unrelated warnings during routing).
+        relevant = [w for w in caught if "#2794" in str(w.message)]
+        assert len(relevant) == 1, (
+            f"Expected exactly one #2794 warning, got {len(relevant)}: "
+            f"{[str(w.message) for w in caught]}"
+        )
+        assert issubclass(relevant[0].category, UserWarning)
+        assert "per_net_timeout" in str(relevant[0].message)
+        assert "route_all_negotiated" in str(relevant[0].message)
+
+    def test_route_all_no_warning_when_timeout_supplied(self, router_with_nets):
+        """Issue #2794: passing ``timeout`` suppresses the no-timeout warning."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            router_with_nets.route_all(timeout=60.0)
+
+        relevant = [w for w in caught if "#2794" in str(w.message)]
+        assert relevant == [], (
+            f"Expected no #2794 warning when timeout is supplied, "
+            f"got: {[str(w.message) for w in relevant]}"
+        )
+
+    def test_route_all_no_warning_when_per_net_timeout_supplied(
+        self, router_with_nets
+    ):
+        """Issue #2794: passing ``per_net_timeout`` suppresses the warning
+        even though it is currently advisory in the basic path."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            router_with_nets.route_all(per_net_timeout=30.0)
+
+        relevant = [w for w in caught if "#2794" in str(w.message)]
+        assert relevant == []
+
+    def test_route_all_no_warning_when_opt_out(self, router_with_nets):
+        """Issue #2794: explicit ``suppress_no_timeout_warning=True`` opts
+        out of the warning for callers that intentionally want bare
+        ``route_all`` semantics (small fixtures, unit tests, etc.)."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            router_with_nets.route_all(suppress_no_timeout_warning=True)
+
+        relevant = [w for w in caught if "#2794" in str(w.message)]
+        assert relevant == []
+
+    def test_route_all_accepts_timeout_kwarg(self, router_with_nets):
+        """Issue #2794: ``timeout`` keyword should not raise and should
+        return a list of routes (the tiny fixture finishes well within
+        any reasonable budget, so the outer break is never reached)."""
+        routes = router_with_nets.route_all(timeout=60.0)
+        assert isinstance(routes, list)
+
 
 class TestAutorouterZones:
     """Tests for zone (copper pour) support."""
