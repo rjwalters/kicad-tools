@@ -1436,3 +1436,152 @@ class TestMultiZoneConnectivity:
         d = status.to_dict()
         assert len(d["plane_layers"]) == 3
         assert d["plane_layer"] == "F.Cu"
+
+
+# PCB with non-zero board origin (regression for issue #2742)
+# - Edge.Cuts gr_rect starts at (100, 100), so board_origin = (100, 100)
+# - Footprints, pads, and trace segments are all expressed in
+#   sheet-absolute coordinates (matching what KiCad/the autorouter write).
+# - The trace between R1.2 and R2.2 fully connects the SIG_A net.
+NON_ZERO_ORIGIN_ROUTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG_A")
+
+  (gr_rect
+    (start 100 100)
+    (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "11111111-1111-1111-1111-111111111111")
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 112.5 108)
+    (uuid "22222222-2222-2222-2222-222222222221")
+    (property "Reference" "R1" (at 0 -1.5 0))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG_A"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 120 108)
+    (uuid "22222222-2222-2222-2222-222222222222")
+    (property "Reference" "R2" (at 0 -1.5 0))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG_A"))
+  )
+
+  (segment (start 113 108) (end 120.5 108) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "33333333-3333-3333-3333-333333333331"))
+)
+"""
+
+
+class TestNonZeroBoardOriginRegression:
+    """Regression tests for issue #2742.
+
+    Before the coordinate-space fix, PCB.load() converted footprint
+    positions to board-relative but left ``Segment.start/end``,
+    ``Via.position``, and ``Zone.polygon`` in sheet-absolute coordinates.
+    NetStatusAnalyzer compared pad positions (board-relative) directly
+    against segment endpoints (sheet-absolute), so every signal net on a
+    centered board (board_origin != (0, 0)) was reported as ``incomplete``
+    by exactly ``board_origin`` mm.
+
+    These tests pin the post-fix invariant: copper primitives loaded from
+    a PCB with a non-zero board origin are reported in the same
+    coordinate space as footprint positions, and a fully-routed signal
+    net is correctly classified as ``complete``.
+    """
+
+    @pytest.fixture
+    def non_zero_origin_pcb(self, tmp_path: Path) -> Path:
+        """PCB with gr_rect Edge.Cuts at (100, 100), routed SIG_A net."""
+        pcb_file = tmp_path / "centered_routed.kicad_pcb"
+        pcb_file.write_text(NON_ZERO_ORIGIN_ROUTED_PCB)
+        return pcb_file
+
+    def test_segments_loaded_in_board_relative_space(
+        self, non_zero_origin_pcb: Path
+    ) -> None:
+        """Segment endpoints must be in the same space as footprint positions.
+
+        With the fix in place, ``PCB.load`` subtracts ``_board_origin``
+        from every segment endpoint just as it already did for footprint
+        positions.  ``seg.start`` should therefore equal the segment's
+        in-file value minus the detected origin.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(non_zero_origin_pcb))
+        assert pcb._board_origin == (100.0, 100.0)
+        assert len(pcb.segments) == 1
+        seg = pcb.segments[0]
+        # In-file: (113, 108) -> board-relative: (13, 8)
+        assert seg.start == pytest.approx((13.0, 8.0))
+        # In-file: (120.5, 108) -> board-relative: (20.5, 8)
+        assert seg.end == pytest.approx((20.5, 8.0))
+
+    def test_footprint_positions_remain_board_relative(
+        self, non_zero_origin_pcb: Path
+    ) -> None:
+        """Pre-existing footprint behavior must not regress."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(non_zero_origin_pcb))
+        positions = {fp.reference: fp.position for fp in pcb.footprints}
+        # In-file: (112.5, 108) -> board-relative: (12.5, 8)
+        assert positions["R1"] == pytest.approx((12.5, 8.0))
+        # In-file: (120, 108) -> board-relative: (20, 8)
+        assert positions["R2"] == pytest.approx((20.0, 8.0))
+
+    def test_signal_net_reported_complete_on_centered_board(
+        self, non_zero_origin_pcb: Path
+    ) -> None:
+        """Issue #2742: fully routed signal net must not be 'incomplete'.
+
+        Before the fix this returned ``incomplete`` with connected=1/2
+        because the analyzer compared pads (board-relative) against
+        segment endpoints (sheet-absolute), off by 100mm in both axes.
+        """
+        analyzer = NetStatusAnalyzer(non_zero_origin_pcb)
+        result = analyzer.analyze()
+        sig = result.get_net("SIG_A")
+        assert sig is not None
+        assert sig.status == "complete", (
+            f"SIG_A should be complete after the coordinate-space fix; "
+            f"got status={sig.status} connected={sig.connected_count}/"
+            f"{sig.total_pads}"
+        )
+        assert sig.connected_count == 2
+        assert sig.total_pads == 2
+        assert sig.has_routing is True
+
+    def test_signal_net_completion_percent_is_100(
+        self, non_zero_origin_pcb: Path
+    ) -> None:
+        """Report collector must surface 100% signal-net completion."""
+        from kicad_tools.report.collector import ReportDataCollector
+
+        collector = ReportDataCollector(
+            pcb_path=non_zero_origin_pcb,
+            manufacturer="jlcpcb",
+        )
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(non_zero_origin_pcb))
+        status = collector.collect_net_status(pcb)
+        assert status["signal_net_count"] == 1
+        assert status["signal_complete_count"] == 1
+        assert status["signal_completion_percent"] == pytest.approx(100.0)
+        assert status["incomplete_count"] == 0

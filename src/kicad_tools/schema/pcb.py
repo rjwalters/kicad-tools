@@ -463,7 +463,9 @@ class Footprint:
     properties: dict[str, str] = field(default_factory=dict)
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
-        default=(0.0, 0.0), repr=False, compare=False,
+        default=(0.0, 0.0),
+        repr=False,
+        compare=False,
     )
 
     # ------------------------------------------------------------------
@@ -1619,8 +1621,7 @@ class PCB:
                     zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
                 if zone.filled_polygons:
                     zone.filled_polygons = [
-                        [(x - ox, y - oy) for x, y in poly]
-                        for poly in zone.filled_polygons
+                        [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
                     ]
 
     def _link_footprint_sexp_nodes(self) -> None:
@@ -1875,12 +1876,8 @@ class PCB:
                 continue
             for seg in self.segments_in_net(pad.net_number):
                 tolerance = 0.01  # mm
-                start_dist = math.sqrt(
-                    (seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2
-                )
-                end_dist = math.sqrt(
-                    (seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2
-                )
+                start_dist = math.sqrt((seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2)
+                end_dist = math.sqrt((seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2)
                 if start_dist < tolerance or end_dist < tolerance:
                     return True
 
@@ -2122,9 +2119,7 @@ class PCB:
         edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
         edge_arcs = [arc for arc in self._graphic_arcs if arc.layer == "Edge.Cuts"]
         edge_rects = [
-            g
-            for g in self._graphics
-            if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
+            g for g in self._graphics if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
         ]
 
         if not edge_lines and not edge_arcs and not edge_rects:
@@ -2228,10 +2223,7 @@ class PCB:
         # converted to board-relative in _detect_board_origin).
         ox, oy = self._board_origin
         if ox != 0.0 or oy != 0.0:
-            segments = [
-                ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy))
-                for (x1, y1), (x2, y2) in segments
-            ]
+            segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
 
         return segments
 
@@ -2411,15 +2403,9 @@ class PCB:
                     target_uuids.add(u)
 
         if target_uuids:
-            self._graphic_lines = [
-                gl for gl in self._graphic_lines if gl.uuid not in target_uuids
-            ]
-            self._graphic_arcs = [
-                ga for ga in self._graphic_arcs if ga.uuid not in target_uuids
-            ]
-            self._graphics = [
-                g for g in self._graphics if g.uuid not in target_uuids
-            ]
+            self._graphic_lines = [gl for gl in self._graphic_lines if gl.uuid not in target_uuids]
+            self._graphic_arcs = [ga for ga in self._graphic_arcs if ga.uuid not in target_uuids]
+            self._graphics = [g for g in self._graphics if g.uuid not in target_uuids]
         else:
             # Fallback: re-parse the in-memory lists from sexp
             self._graphic_lines = []
@@ -2513,7 +2499,9 @@ class PCB:
         so the result always reflects the actual file content, even if the
         in-memory ``_segments`` list has drifted.
         """
-        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "segment")
+        return sum(
+            1 for child in self._sexp.children if not child.is_atom and child.name == "segment"
+        )
 
     @property
     def via_count(self) -> int:
@@ -3756,9 +3744,7 @@ class PCB:
             if ox != 0.0 or oy != 0.0:
                 # Build sheet-absolute sexp without mutating the Python object.
                 seg_sexp = SExp.list("segment")
-                seg_sexp.append(
-                    SExp.list("start", seg.start[0] + ox, seg.start[1] + oy)
-                )
+                seg_sexp.append(SExp.list("start", seg.start[0] + ox, seg.start[1] + oy))
                 seg_sexp.append(SExp.list("end", seg.end[0] + ox, seg.end[1] + oy))
                 seg_sexp.append(SExp.list("width", seg.width))
                 seg_sexp.append(SExp.list("layer", seg.layer))
@@ -3821,9 +3807,7 @@ class PCB:
         ox, oy = self._board_origin
         if ox != 0.0 or oy != 0.0:
             via_sexp = SExp.list("via")
-            via_sexp.append(
-                SExp.list("at", via.position[0] + ox, via.position[1] + oy)
-            )
+            via_sexp.append(SExp.list("at", via.position[0] + ox, via.position[1] + oy))
             via_sexp.append(SExp.list("size", via.size))
             via_sexp.append(SExp.list("drill", via.drill))
             via_sexp.append(SExp.list("layers", *via.layers))
@@ -4314,9 +4298,7 @@ class PCB:
                             if isinstance(layers_node.values[i], str)
                         ]
                         # Via is orphan if NONE of its layers have a segment endpoint at its position
-                        connected = any(
-                            (vx, vy, vl) in remaining_endpoints for vl in via_layers
-                        )
+                        connected = any((vx, vy, vl) in remaining_endpoints for vl in via_layers)
                         if not connected:
                             removed_orphan_vias += 1
                             removed_vias += 1
@@ -4356,11 +4338,7 @@ class PCB:
             return False
 
         # Apply filtering helpers
-        has_any_filter = (
-            net_numbers_to_strip is not None
-            or layer_set is not None
-            or exclude_power
-        )
+        has_any_filter = net_numbers_to_strip is not None or layer_set is not None or exclude_power
         if has_any_filter:
             self._segments = [seg for seg in self._segments if _seg_matches(seg)]
             self._vias = [via for via in self._vias if _via_matches(via)]
@@ -4379,9 +4357,12 @@ class PCB:
                 remaining_ep_set.add((round(seg.start[0], 4), round(seg.start[1], 4), seg.layer))
                 remaining_ep_set.add((round(seg.end[0], 4), round(seg.end[1], 4), seg.layer))
             self._vias = [
-                v for v in self._vias
-                if any((round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
-                       for vl in v.layers)
+                v
+                for v in self._vias
+                if any(
+                    (round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
+                    for vl in v.layers
+                )
             ]
 
         return {
@@ -4555,7 +4536,8 @@ class PCB:
             >>> # JLCPCB format
             >>> pcb.export_bom("bom_jlcpcb.csv", format="jlcpcb")
         """
-        from ..export import BOMExportConfig, export_bom as _export_bom
+        from ..export import BOMExportConfig
+        from ..export import export_bom as _export_bom
         from ..schema.bom import extract_bom
 
         # Find schematic
@@ -4616,7 +4598,8 @@ class PCB:
             >>> # JLCPCB format
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
-        from ..export import PnPExportConfig, export_pnp as _export_pnp
+        from ..export import PnPExportConfig
+        from ..export import export_pnp as _export_pnp
 
         footprints = list(self.footprints)
 
