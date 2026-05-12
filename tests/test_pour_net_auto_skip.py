@@ -870,7 +870,7 @@ class TestFilterPourNetsWithoutZones:
 
         assert 1 not in filtered  # GND filtered
         assert 2 not in filtered  # GNDA filtered
-        assert 3 in filtered      # SPI_CLK kept
+        assert 3 in filtered  # SPI_CLK kept
 
     def test_auto_skip_returns_no_zone_list(self, pcb_mixed_zone: Path) -> None:
         """_auto_skip_pour_nets returns (skipped, no_zone) where no_zone
@@ -878,9 +878,7 @@ class TestFilterPourNetsWithoutZones:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped, no_zone = _auto_skip_pour_nets(
-            pcb_mixed_zone, skip_nets, quiet=True
-        )
+        auto_skipped, no_zone = _auto_skip_pour_nets(pcb_mixed_zone, skip_nets, quiet=True)
 
         assert "GND" in auto_skipped
         assert "+5V" in no_zone
@@ -947,9 +945,7 @@ class TestPourNetsWithoutZonesSerialization:
             origin_x=config["origin_x"],
             origin_y=config["origin_y"],
         )
-        reconstructed._pour_nets_without_zones = set(
-            config.get("pour_nets_without_zones", [])
-        )
+        reconstructed._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
         reconstructed.net_names = {int(k): v for k, v in config["net_names"].items()}
         reconstructed.net_class_map = config.get("net_class_map")
 
@@ -974,9 +970,7 @@ class TestPourNetsWithoutZonesSerialization:
         net_class_map = classify_and_apply_rules(reconstructed.net_names)
         reconstructed.net_class_map = net_class_map
         reconstructed.nets = {1: [], 2: [], 3: []}
-        reconstructed._pour_nets_without_zones = set(
-            config.get("pour_nets_without_zones", [])
-        )
+        reconstructed._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
 
         # GNDA is in _pour_nets_without_zones -> should NOT be treated as pour
         assert reconstructed._is_pour_net(2) is False
@@ -1067,9 +1061,7 @@ class TestAutoSkipExcludesErcMarkers:
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
         skip_nets: list[str] = []
-        auto_skipped, no_zone = _auto_skip_pour_nets(
-            pcb_with_pwr_flag, skip_nets, quiet=True
-        )
+        auto_skipped, no_zone = _auto_skip_pour_nets(pcb_with_pwr_flag, skip_nets, quiet=True)
 
         # GND has a zone -> auto-skipped.  +3.3V is a pour net without
         # zone -> reported in no_zone.  PWR_FLAG must appear in NEITHER.
@@ -1078,9 +1070,7 @@ class TestAutoSkipExcludesErcMarkers:
         assert "PWR_FLAG" not in skip_nets
         assert "PWR_FLAG" not in no_zone
 
-    def test_pwr_flag_not_in_auto_skip_log(
-        self, pcb_with_pwr_flag: Path, capsys
-    ) -> None:
+    def test_pwr_flag_not_in_auto_skip_log(self, pcb_with_pwr_flag: Path, capsys) -> None:
         """The auto-skip / routing log lines must not mention PWR_FLAG."""
         from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
 
@@ -1089,3 +1079,281 @@ class TestAutoSkipExcludesErcMarkers:
 
         out = capsys.readouterr().out
         assert "PWR_FLAG" not in out
+
+
+# ===========================================================================
+# Tests for declarative routing-intent opt-out via route_via (Issue #2772)
+# ===========================================================================
+
+
+# Minimal PCB with PHASE_A/B/C (HIGH_CURRENT_SIGNAL) plus a SIG_DATA signal,
+# no zones for the phase nets.  Used to verify that a synthetic
+# ``route_via="manual"`` classification causes the phases to be auto-skipped
+# without a zone, while ``route_via="pathfinder"`` does NOT.
+ROUTE_VIA_PHASE_PCB = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "PHASE_A")
+  (net 2 "PHASE_B")
+  (net 3 "PHASE_C")
+  (net 4 "SIG_DATA")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "PHASE_A"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 4 "SIG_DATA"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 20 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "PHASE_B"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 4 "SIG_DATA"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R3")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "PHASE_C"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 4 "SIG_DATA"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def pcb_phase_nets(tmp_path: Path) -> Path:
+    """Write a PCB with PHASE_A/B/C and a SIG_DATA net (no zones)."""
+    p = tmp_path / "board_phase.kicad_pcb"
+    p.write_text(ROUTE_VIA_PHASE_PCB)
+    return p
+
+
+class TestRouteViaField:
+    """Verify the new ``route_via`` field on :class:`NetClassRouting`."""
+
+    def test_route_via_defaults_to_pathfinder(self) -> None:
+        """New classes default to ``route_via="pathfinder"`` (no behaviour change)."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        nc = NetClassRouting(name="Custom")
+        assert nc.route_via == "pathfinder"
+
+    def test_route_via_pour_serializes(self) -> None:
+        """``route_via="pour"`` round-trips through ``to_dict``/``from_dict``."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        original = NetClassRouting(name="PowerLike", route_via="pour")
+        roundtripped = NetClassRouting.from_dict(original.to_dict())
+        assert roundtripped.route_via == "pour"
+
+    def test_route_via_manual_serializes(self) -> None:
+        """``route_via="manual"`` round-trips through ``to_dict``/``from_dict``."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        original = NetClassRouting(name="ManualPhase", route_via="manual")
+        roundtripped = NetClassRouting.from_dict(original.to_dict())
+        assert roundtripped.route_via == "manual"
+
+    def test_from_dict_missing_route_via_defaults_to_pathfinder(self) -> None:
+        """Legacy dicts without ``route_via`` deserialize to the default."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        legacy_dict = {"name": "Legacy"}  # No route_via key
+        nc = NetClassRouting.from_dict(legacy_dict)
+        assert nc.route_via == "pathfinder"
+
+    def test_net_class_power_routes_via_pour(self) -> None:
+        """``NET_CLASS_POWER`` declares the new ``route_via="pour"`` intent."""
+        from kicad_tools.router.rules import NET_CLASS_POWER
+
+        assert NET_CLASS_POWER.route_via == "pour"
+        # And keeps the legacy is_pour_net for backwards compatibility.
+        assert NET_CLASS_POWER.is_pour_net is True
+
+    def test_net_class_high_current_signal_stays_pathfinder(self) -> None:
+        """``NET_CLASS_HIGH_CURRENT_SIGNAL`` is the regression baseline:
+        PHASE_A/B/C must still be pathfinder-routed (NOT auto-skipped) so the
+        pathfinder produces point-to-point wide traces rather than coupling
+        switching noise via a pour.  See ``rules.py:902-921`` comment block.
+        """
+        from kicad_tools.router.rules import NET_CLASS_HIGH_CURRENT_SIGNAL
+
+        assert NET_CLASS_HIGH_CURRENT_SIGNAL.route_via == "pathfinder"
+        assert NET_CLASS_HIGH_CURRENT_SIGNAL.is_pour_net is False
+
+
+class TestAutoSkipRouteViaManual:
+    """Verify ``_auto_skip_pour_nets`` honours ``route_via="manual"``.
+
+    Issue #2772: designers can declaratively opt OUT of the pathfinder
+    by setting ``route_via="manual"`` on the relevant net class.  The
+    nets are then unconditionally added to ``skip_nets`` (regardless of
+    zone presence) and a distinct ``Manual:`` log line is emitted so the
+    user is not confused into thinking the net was dropped.
+    """
+
+    def _patch_classifier_with(self, mapping):
+        """Helper: return a patch context for classify_and_apply_rules.
+
+        ``_auto_skip_pour_nets`` calls
+        ``kicad_tools.router.net_class.classify_and_apply_rules`` but the
+        symbol is imported locally inside the function, so we must patch
+        the source module, not the route_cmd namespace.
+        """
+        return patch(
+            "kicad_tools.router.net_class.classify_and_apply_rules",
+            return_value=mapping,
+        )
+
+    def test_manual_net_is_auto_skipped_even_without_zone(self, pcb_phase_nets: Path) -> None:
+        """PHASE_A declared ``route_via="manual"`` is skipped (no zone needed)."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+        from kicad_tools.router.rules import NetClassRouting
+
+        manual = NetClassRouting(name="ManualPhase", route_via="manual")
+        signal = NetClassRouting(name="Signal", route_via="pathfinder")
+        mapping = {
+            "PHASE_A": manual,
+            "PHASE_B": manual,
+            "PHASE_C": manual,
+            "SIG_DATA": signal,
+        }
+
+        skip_nets: list[str] = []
+        with self._patch_classifier_with(mapping):
+            auto_skipped, no_zone = _auto_skip_pour_nets(pcb_phase_nets, skip_nets, quiet=True)
+
+        # PHASE_A/B/C are manual -> auto-skipped regardless of zone.
+        assert "PHASE_A" in auto_skipped
+        assert "PHASE_B" in auto_skipped
+        assert "PHASE_C" in auto_skipped
+        # SIG_DATA is pathfinder -> NOT skipped.
+        assert "SIG_DATA" not in auto_skipped
+        assert "SIG_DATA" not in skip_nets
+        # Manual nets do not appear in ``no_zone`` -- the designer has
+        # declared they are handled by hand, not by a missing zone.
+        assert "PHASE_A" not in no_zone
+        assert "PHASE_B" not in no_zone
+        assert "PHASE_C" not in no_zone
+
+    def test_manual_emits_distinct_log_line(self, pcb_phase_nets: Path, capsys) -> None:
+        """The ``Manual:`` log line is emitted (distinct from ``Auto-skip:``)."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+        from kicad_tools.router.rules import NetClassRouting
+
+        manual = NetClassRouting(name="ManualPhase", route_via="manual")
+        signal = NetClassRouting(name="Signal", route_via="pathfinder")
+        mapping = {
+            "PHASE_A": manual,
+            "PHASE_B": manual,
+            "PHASE_C": manual,
+            "SIG_DATA": signal,
+        }
+
+        skip_nets: list[str] = []
+        with self._patch_classifier_with(mapping):
+            _auto_skip_pour_nets(pcb_phase_nets, skip_nets, quiet=False)
+
+        out = capsys.readouterr().out
+        assert "Manual:" in out
+        assert "PHASE_A" in out
+        assert "route_via=manual" in out
+
+    def test_pathfinder_override_beats_is_pour_net(self, pcb_phase_nets: Path) -> None:
+        """Explicit ``route_via="pathfinder"`` wins over legacy ``is_pour_net=True``.
+
+        Acceptance criterion: a net with ``route_via="pathfinder"`` is NOT
+        skipped even when ``is_pour_net=True`` -- the explicit declarative
+        opt-IN overrides the legacy name-pattern inference.
+        """
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+        from kicad_tools.router.rules import NetClassRouting
+
+        # Net class with the legacy pour flag set, but explicit pathfinder
+        # routing intent -- the new field must take precedence.
+        override = NetClassRouting(
+            name="PourOverridePathfinder",
+            is_pour_net=True,
+            route_via="pathfinder",
+        )
+        mapping = {
+            "PHASE_A": override,
+            "PHASE_B": override,
+            "PHASE_C": override,
+            "SIG_DATA": NetClassRouting(name="Signal", route_via="pathfinder"),
+        }
+
+        skip_nets: list[str] = []
+        with self._patch_classifier_with(mapping):
+            auto_skipped, no_zone = _auto_skip_pour_nets(pcb_phase_nets, skip_nets, quiet=True)
+
+        # Despite is_pour_net=True, route_via="pathfinder" wins.
+        assert "PHASE_A" not in auto_skipped
+        assert "PHASE_B" not in auto_skipped
+        assert "PHASE_C" not in auto_skipped
+        assert "PHASE_A" not in skip_nets
+
+    def test_phase_nets_default_classifier_stay_pathfinder(self, pcb_phase_nets: Path) -> None:
+        """Regression baseline: under the default classifier, PHASE_A/B/C
+        are HIGH_CURRENT_SIGNAL with ``route_via="pathfinder"`` and must
+        NOT be auto-skipped.  Without this guard, board 05 (BLDC motor
+        controller) would regress -- the comment block at
+        ``router/rules.py:902-921`` explicitly forbids pouring phase
+        outputs because it couples switching noise into nearby traces.
+        """
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        # NO mock -- use the real classifier.
+        auto_skipped, no_zone = _auto_skip_pour_nets(pcb_phase_nets, skip_nets, quiet=True)
+
+        # PHASE_A/B/C are HIGH_CURRENT_SIGNAL; default route_via is
+        # "pathfinder"; must NOT be skipped.
+        assert "PHASE_A" not in auto_skipped
+        assert "PHASE_B" not in auto_skipped
+        assert "PHASE_C" not in auto_skipped
+        assert "PHASE_A" not in skip_nets
+        # They also should NOT show up in the no_zone (pour-without-zone)
+        # warning because their class does not declare is_pour_net.
+        assert "PHASE_A" not in no_zone
+
+    def test_pour_net_with_zone_still_skipped(self, pcb_with_gnd: Path) -> None:
+        """No-regression: predefined ground class (route_via="pour") still
+        auto-skips GND when a zone exists.  This verifies the
+        ``NetClass.GROUND`` migration in ``net_class.py`` is wired up.
+        """
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped, _no_zone = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+
+        assert "GND" in auto_skipped
+        assert "GND" in skip_nets

@@ -269,6 +269,7 @@ class TestDriftPrevention:
             "zone_priority": 42,
             "zone_connection": "solid",
             "is_pour_net": True,
+            "route_via": "manual",
             "preferred_layers": [3, 4, 5],
             "avoid_layers": [6, 7],
             "layer_cost_multiplier": 4.5,

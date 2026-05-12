@@ -1352,12 +1352,23 @@ def _auto_skip_pour_nets(
     skip_nets: list[str],
     quiet: bool = False,
 ) -> tuple[list[str], list[str]]:
-    """Detect pour nets in the PCB and add them to the skip list.
+    """Detect non-pathfinder nets in the PCB and add them to the skip list.
 
     Reads net definitions from the PCB file and classifies them.  Nets
-    identified as pour nets (GND, power rails, etc.) are appended to
-    *skip_nets* so the router excludes them -- they will be connected
-    via zone fill instead of traces.
+    whose net class declares a non-pathfinder routing intent are appended
+    to *skip_nets* so the router excludes them:
+
+    - ``route_via="pour"`` (or legacy ``is_pour_net=True``) -- the net is
+      satisfied by a copper zone if one exists in the PCB; otherwise the
+      net falls through to ``no_zone_nets`` and is routed as a signal.
+    - ``route_via="manual"`` (Issue #2772) -- the designer is responsible
+      for routing the net by hand (e.g. wide motor-phase traces); the net
+      is unconditionally skipped regardless of zone presence and a
+      distinct ``Manual:`` log line is emitted.
+
+    An explicit ``route_via="pathfinder"`` always wins over the legacy
+    ``is_pour_net=True`` inference -- the new declarative field lets
+    designers override the name-pattern classifier for a specific class.
 
     Args:
         pcb_path: Path to the .kicad_pcb file.
@@ -1367,7 +1378,8 @@ def _auto_skip_pour_nets(
 
     Returns:
         Tuple of (auto_skipped, no_zone_nets):
-        - auto_skipped: Net names that were auto-skipped (have zones).
+        - auto_skipped: Net names that were auto-skipped (zone-routed
+          pour nets and ``route_via="manual"`` nets combined).
         - no_zone_nets: Pour net names that lack zones and must be
           routed as signals.  Pass these to the autorouter's
           ``_pour_nets_without_zones`` attribute so that
@@ -1404,32 +1416,66 @@ def _auto_skip_pour_nets(
                 nets_with_zones.add(zm.group(1))
             del pcb_text  # free memory
 
+            # Issue #2772: route_via takes precedence over the legacy
+            # ``is_pour_net`` flag.  An explicit ``route_via="pathfinder"``
+            # overrides ``is_pour_net=True`` (designer-declared opt-IN to
+            # pathfinder routing for an otherwise-pour-classified class);
+            # ``route_via="pour"`` or ``"manual"`` are the opt-OUT signals.
+            def _wants_pour(routing) -> bool:
+                if routing.route_via == "pathfinder":
+                    return False
+                if routing.route_via == "pour":
+                    return True
+                # Legacy fall-back: pre-#2772 classes with default
+                # ``route_via="pathfinder"`` but ``is_pour_net=True``.
+                return routing.is_pour_net
+
+            def _wants_manual(routing) -> bool:
+                return routing.route_via == "manual"
+
             # ERC-marker nets (PWR_FLAG and friends) are misclassified as
             # pour nets by the name pattern but carry no copper and have
             # no zone -- exclude them from both the auto-skip and the
             # "pour nets without zones" warning so the user does not see
             # a misleading "use zone fill" log line for a non-existent
             # zone.  See router/auto_pour.py for the filter.
-            auto_skip = [
+            pour_skip = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net
+                if _wants_pour(routing)
                 and name not in skip_nets
                 and name in nets_with_zones
                 and not _is_erc_marker_net(name)
             ]
-            if auto_skip:
-                skip_nets.extend(auto_skip)
+            # ``route_via="manual"`` nets are always skipped (designer
+            # routes them by hand); zone presence is irrelevant.  ERC
+            # markers are still excluded for the same reason as above.
+            manual_skip = [
+                name
+                for name, routing in net_class_map.items()
+                if _wants_manual(routing) and name not in skip_nets and not _is_erc_marker_net(name)
+            ]
+            auto_skip = pour_skip + manual_skip
+            if pour_skip:
+                skip_nets.extend(pour_skip)
                 if not quiet:
                     print(
-                        f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)"
+                        f"Auto-skip: {', '.join(sorted(pour_skip))} (pour nets \u2014 use zone fill)"
+                    )
+            if manual_skip:
+                skip_nets.extend(manual_skip)
+                if not quiet:
+                    print(
+                        f"Manual: {', '.join(sorted(manual_skip))} (skipped \u2014 route_via=manual)"
                     )
             # Warn about pour nets without zones (excluding ERC markers
-            # which never get zones by design).
+            # which never get zones by design).  ``route_via="manual"``
+            # nets are intentionally NOT in this list -- the designer has
+            # declared they will handle routing by hand, not via a zone.
             no_zone = [
                 name
                 for name, routing in net_class_map.items()
-                if routing.is_pour_net
+                if _wants_pour(routing)
                 and name not in skip_nets
                 and name not in nets_with_zones
                 and not _is_erc_marker_net(name)
@@ -5320,9 +5366,7 @@ def main(argv: list[str] | None = None) -> int:
                     for (_route, res) in member_dict.values()
                 ]
                 n_tuned = sum(1 for r in all_results if r.reason == "tuned")
-                n_clean = sum(
-                    1 for r in all_results if r.reason == "already_within_tolerance"
-                )
+                n_clean = sum(1 for r in all_results if r.reason == "already_within_tolerance")
                 n_rollback = sum(
                     1 for r in all_results if r.reason == "post_insertion_drc_violation"
                 )
@@ -5331,9 +5375,7 @@ def main(argv: list[str] | None = None) -> int:
                     for r in all_results
                     if r.reason in ("exceeded_max_inserts", "cascade_budget_exhausted")
                 )
-                n_skipped = sum(
-                    1 for r in all_results if r.reason == "not_length_critical"
-                )
+                n_skipped = sum(1 for r in all_results if r.reason == "not_length_critical")
                 print(
                     f"  Summary: {len(tune_results_groups)} groups, "
                     f"{n_tuned} tuned, {n_clean} clean, "
