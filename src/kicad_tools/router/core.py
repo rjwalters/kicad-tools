@@ -166,6 +166,56 @@ class MSTEdgeInfo:
     is_first: bool = False
 
 
+@dataclass(frozen=True)
+class IterationMetrics:
+    """Per-iteration scalar metrics for the negotiated routing loop
+    (Issue #2803).
+
+    Provides a lexicographic comparator that lets the outer iteration loop
+    preserve the strictly-best iteration result, even when ``routed_count``
+    is unchanged but ``overflow`` regresses (the failure mode reported in
+    Issue #2803: iteration 0 produced overflow=16, iteration 1 climbed to
+    overflow=36 with the same routed count, and the existing route-count-
+    only restore from Issue #2540 did not roll back).
+
+    Lex order (used by :meth:`is_better_than`):
+
+    1. ``routed_count`` descending — more routed nets is always better.
+    2. ``overflow`` ascending — with equal route counts, lower overflow is
+       better.  This is the new dimension Issue #2803 needs.
+    3. ``iteration`` descending — on a complete tie, prefer the later
+       iteration so perturbation/escape strategies have a chance to bake
+       in.
+
+    Attributes:
+        iteration: Iteration index (0 = initial pass, 1..N = rip-up iters).
+        routed_count: Number of nets with at least one route at iter end.
+        overflow: Grid total overflow at iter end (lower is better).
+    """
+
+    iteration: int
+    routed_count: int
+    overflow: int
+
+    @property
+    def sort_key(self) -> tuple[int, int, int]:
+        """Tuple suitable for ``min()`` / sort key.
+
+        Negated where descending is desired so the *smallest* tuple is the
+        *best* iteration.
+        """
+        return (-self.routed_count, self.overflow, -self.iteration)
+
+    def is_better_than(self, other: IterationMetrics) -> bool:
+        """Return True if ``self`` is strictly better than ``other``.
+
+        Strict (not >=) so equal results never trigger a restore-on-tie,
+        matching Issue #2540's existing semantics (no churn when nothing
+        improved).
+        """
+        return self.sort_key < other.sort_key
+
+
 # Re-export for backward compatibility
 __all__ = [
     "Autorouter",
@@ -4679,24 +4729,92 @@ class Autorouter:
                 f"from rip-up: {', '.join(off_grid_names)}"
             )
 
-        # Issue #2540: Track best-of-iterations so a mid-iteration timeout
-        # does not destroy successful routes from earlier iterations.
+        # Issue #2540 + #2803: Track best-of-iterations so a mid-iteration
+        # timeout does not destroy successful routes from earlier iterations,
+        # AND a completed-but-worse iteration does not silently regress
+        # overflow on a tie in routed count.
+        #
         # ``rip_up_nets`` destructively mutates both ``net_routes`` and
         # ``self.routes`` BEFORE re-routing begins; if ``check_timeout()``
         # fires during the per-net reroute loop, ``self.routes`` is left in
         # the mid-rip-up state (e.g. only the few that survived being
-        # rerouted) instead of the iteration-N-1 stable state.  We snapshot
-        # at the top of each iteration so the post-loop restore can fall
-        # back to the pre-rip-up state from the previous iteration.
+        # rerouted) instead of the iteration-N-1 stable state.  Even without
+        # a timeout, a completed iteration can produce *worse* overflow with
+        # the same routed count (Issue #2803: live chorus-test run jumped
+        # from overflow=16 to overflow=36 across iterations 0->1 with no
+        # change in routed count, and the original Issue #2540 fix did not
+        # roll back because it compared route count only).
         #
-        # Comparison metric is route count (== ``successful_nets``), not
-        # overflow: the user-visible regression is route count, and a
-        # half-restored rip-up can leave overflow numerically identical
-        # while dropping from 20 routes to 10.
+        # Comparison metric is the lex tuple in ``IterationMetrics`` so the
+        # restore considers both routed count (primary) and overflow
+        # (secondary).  We snapshot at the top of each iteration AND at the
+        # end of each iteration on both branches (targeted and standard) so
+        # the post-loop restore has a candidate that reflects the actual
+        # iteration-end state, not just the pre-rip-up state.
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_routed_count = sum(1 for r in net_routes.values() if r)
         best_iteration = 0  # 0 = initial pass
+        best_metrics = IterationMetrics(
+            iteration=0,
+            routed_count=best_routed_count,
+            overflow=overflow,
+        )
+
+        # Issue #2803: Lightweight trajectory log (three ints per iteration,
+        # no deep copies) so the per-iteration progression is visible in the
+        # user log and verifiable in tests.  Strategy B from the curator
+        # analysis: full state snapshots remain singleton, only the metric
+        # tuple history is kept.
+        iteration_trajectory: list[IterationMetrics] = [best_metrics]
+
+        def _capture_iteration_end(iter_index: int, overflow_val: int) -> None:
+            """Issue #2803: end-of-iteration capture point.
+
+            Called from BOTH branches (targeted and standard rip-up) after
+            ``overflow_history.append`` to:
+
+            1. Append to the lightweight trajectory log.
+            2. Replace the best-state snapshot if the lex-tuple metric
+               strictly improved.  Only deep-copy on strict improvement
+               (Strategy B — minimal memory cost).
+            3. Emit a single canonical per-iteration log line so the
+               trajectory is visible in the user-facing log.
+            """
+            nonlocal best_metrics, best_routes, best_net_routes
+            nonlocal best_routed_count, best_iteration
+
+            routed_now = sum(1 for r in net_routes.values() if r)
+            metrics = IterationMetrics(
+                iteration=iter_index,
+                routed_count=routed_now,
+                overflow=overflow_val,
+            )
+            iteration_trajectory.append(metrics)
+
+            improved = metrics.is_better_than(best_metrics)
+            if improved:
+                best_metrics = metrics
+                best_routed_count = routed_now
+                best_routes = copy.deepcopy(list(self.routes))
+                best_net_routes = copy.deepcopy(net_routes)
+                best_iteration = iter_index
+
+            # Canonical per-iteration log line.  Suffix shows whether this
+            # iteration replaced the best snapshot or what the running best
+            # still is — makes the regression visible at runtime.
+            if improved:
+                suffix = " (new best)"
+            else:
+                suffix = (
+                    f" | best-so-far=iter-{best_metrics.iteration} "
+                    f"(routed={best_metrics.routed_count}, "
+                    f"overflow={best_metrics.overflow})"
+                )
+            flush_print(
+                f"  iter {iter_index} | routed={routed_now}/{total_nets} | "
+                f"overflow={overflow_val}{suffix}"
+            )
 
         # Skip iteration loop if already timed out
         if not timed_out:
@@ -4707,19 +4825,28 @@ class Autorouter:
                     timed_out = True
                     break
 
-                # Issue #2540: Snapshot state at top of each iteration BEFORE
-                # any destructive ``rip_up_nets`` call.  If a mid-iteration
-                # timeout escapes the per-net reroute loop (line ~4843), the
+                # Issue #2540 + #2803: Snapshot state at top of each iteration
+                # BEFORE any destructive ``rip_up_nets`` call.  If a
+                # mid-iteration timeout escapes the per-net reroute loop, the
                 # post-loop restore can fall back to this pre-rip-up snapshot
-                # of the previous iteration's stable result.  Use route count
-                # (not overflow) as the comparison metric per acceptance
-                # criteria.
+                # of the previous iteration's stable result.
+                #
+                # Comparison is by the lex tuple ``(routed_count desc,
+                # overflow asc, iteration desc)`` so an iteration that
+                # produced equal route count with lower overflow is still
+                # preserved.
                 current_routed = sum(1 for r in net_routes.values() if r)
-                if current_routed > best_routed_count:
+                current_metrics = IterationMetrics(
+                    iteration=iteration - 1,  # captured state is end of prior iter
+                    routed_count=current_routed,
+                    overflow=overflow,
+                )
+                if current_metrics.is_better_than(best_metrics):
+                    best_metrics = current_metrics
                     best_routed_count = current_routed
                     best_routes = copy.deepcopy(list(self.routes))
                     best_net_routes = copy.deepcopy(net_routes)
-                    best_iteration = iteration - 1  # state captured is from end of prior iter
+                    best_iteration = iteration - 1
 
                 # Adaptive early termination check (Issue #633)
                 # Issue #2334: When perturbation is enabled, activate it
@@ -5367,6 +5494,13 @@ class Autorouter:
                     # Track overflow for both branches (Issue #633)
                     overflow_history.append(overflow)
 
+                    # Issue #2803: capture end-of-iteration metrics so the
+                    # best-state snapshot reflects the *actual* iteration
+                    # result, not just the pre-rip-up snapshot.  Replaces
+                    # the rolling best snapshot iff the lex-tuple metric
+                    # strictly improved.  Also emits the per-iter log line.
+                    _capture_iteration_end(iteration, overflow)
+
                     # Issue #2334: Reset perturbation when overflow improves
                     if perturbation and perturbation_best_overflow is not None:
                         if overflow < perturbation_best_overflow:
@@ -5822,6 +5956,13 @@ class Autorouter:
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
 
+                # Issue #2803: capture end-of-iteration metrics so the
+                # best-state snapshot reflects the *actual* iteration
+                # result, not just the pre-rip-up snapshot.  Replaces the
+                # rolling best snapshot iff the lex-tuple metric strictly
+                # improved.  Also emits the per-iter log line.
+                _capture_iteration_end(iteration, overflow)
+
                 # Issue #2334: Reset perturbation when overflow improves
                 if perturbation and perturbation_best_overflow is not None:
                     if overflow < perturbation_best_overflow:
@@ -5903,18 +6044,29 @@ class Autorouter:
         # Issue #2334: Always reset perturbation at end of routing
         self._reset_perturbation()
 
-        # Issue #2540: Restore best-of-iterations state if a later iteration
-        # was aborted mid-rip-up (typically by ``check_timeout()`` in the
-        # per-net reroute loop) and left ``self.routes`` with FEWER routes
-        # than a prior iteration produced.  Without this, the saved-partial
-        # result drops to whatever survived the half-completed rip-up
-        # instead of the best stable iteration captured at iteration top.
+        # Issue #2540 + #2803: Restore best-of-iterations state if a later
+        # iteration was either aborted mid-rip-up (the original #2540 case,
+        # ``self.routes`` left with FEWER routes than a prior iteration
+        # produced) or completed but produced a strictly worse PCB by the
+        # lex tuple ``(routed_count desc, overflow asc)`` (the #2803 case,
+        # e.g. overflow climbed from 16 to 36 on the same routed count).
+        #
+        # Without this restore, the saved-partial result drops to whatever
+        # the final iteration produced — which can be strictly worse than a
+        # prior iteration on either dimension.
         current_routed = sum(1 for r in net_routes.values() if r)
-        if best_routed_count > current_routed:
+        final_metrics = IterationMetrics(
+            iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
+            routed_count=current_routed,
+            overflow=overflow,
+        )
+        if best_metrics.is_better_than(final_metrics):
             flush_print(
                 f"  Restoring iteration {best_iteration} state "
-                f"(routed={best_routed_count}) instead of final "
-                f"(routed={current_routed})"
+                f"(routed={best_metrics.routed_count}, "
+                f"overflow={best_metrics.overflow}) instead of final "
+                f"(routed={final_metrics.routed_count}, "
+                f"overflow={final_metrics.overflow})"
             )
             # Unmark all current routes from the grid
             for route in list(self.routes):
@@ -5928,6 +6080,10 @@ class Autorouter:
             # Update net_routes to best state
             net_routes.clear()
             net_routes.update(best_net_routes)
+            # Update overflow to reflect the restored state so the final
+            # summary print at the end of route_all_negotiated shows the
+            # restored value, not the worse pre-restore value.
+            overflow = best_metrics.overflow
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time
