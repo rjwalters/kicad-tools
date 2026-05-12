@@ -3472,6 +3472,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--length-match-groups",
+        action="store_true",
+        help=(
+            "Enable N-trace match-group length-match tuning (Epic #2661 "
+            "Phase 3H). Detects parallel-bus groups (DDR, MIPI, HDMI TMDS) "
+            "declared via NetClassRouting.length_match_group, then inserts "
+            "serpentines on shorter group members until the per-group skew "
+            "is within tolerance. Compatible with --length-match-diffpairs; "
+            "groups whose members are diff pairs (MIPI/HDMI lane groups) "
+            "engage the Phase 2F symmetric-serpentine path."
+        ),
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -5248,6 +5261,81 @@ def main(argv: list[str] | None = None) -> int:
                         f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
                         f"{n_skipped} skipped (not length-critical)"
                     )
+
+    # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
+    # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
+    # AFTER --length-match-diffpairs so the within-pair skew invariant is
+    # preserved before group tuning perturbs lane lengths.  Graceful
+    # short-circuit when no groups are declared / detected.
+    if getattr(args, "length_match_groups", False) and router.routes:
+        from kicad_tools.router.match_group_detection import detect_match_groups
+
+        if not quiet:
+            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+        # Build net_to_class so explicit declarations can be consulted
+        # (mirrors the construction in core.py:_finalize_routing).
+        net_to_class: dict[str, str] = {}
+        for net_name, net_class in router.net_class_map.items():
+            net_to_class[net_name] = net_class.name
+        try:
+            detected_groups = detect_match_groups(
+                net_names=router.net_names,
+                net_class_routing=router.net_class_map,
+                net_to_class=net_to_class,
+                length_tracker=router.length_tracker,
+                enable_suffix_inference=False,
+            )
+        except Exception as exc:
+            if not quiet:
+                print(f"  Match-group detection failed: {exc}; skipping.")
+            detected_groups = []
+
+        if not detected_groups:
+            if not quiet:
+                print("  No match groups detected; nothing to tune.")
+        else:
+            # Snapshot connectivity for the pad-to-pad invariant.
+            _ci_snapshot_groups = _connectivity_snapshot(router)
+            tune_results_groups = router.apply_match_group_tuning(
+                detected_groups=detected_groups,
+                verbose=not quiet,
+            )
+            _enforce_connectivity_invariant_or_exit(
+                router,
+                _ci_snapshot_groups,
+                phase="length_match_groups",
+                args=args,
+                quiet=quiet,
+            )
+            if not quiet:
+                # Aggregate per-member counters across all groups for a
+                # single end-of-phase summary line.
+                all_results = [
+                    res
+                    for member_dict in tune_results_groups.values()
+                    for (_route, res) in member_dict.values()
+                ]
+                n_tuned = sum(1 for r in all_results if r.reason == "tuned")
+                n_clean = sum(
+                    1 for r in all_results if r.reason == "already_within_tolerance"
+                )
+                n_rollback = sum(
+                    1 for r in all_results if r.reason == "post_insertion_drc_violation"
+                )
+                n_budget = sum(
+                    1
+                    for r in all_results
+                    if r.reason in ("exceeded_max_inserts", "cascade_budget_exhausted")
+                )
+                n_skipped = sum(
+                    1 for r in all_results if r.reason == "not_length_critical"
+                )
+                print(
+                    f"  Summary: {len(tune_results_groups)} groups, "
+                    f"{n_tuned} tuned, {n_clean} clean, "
+                    f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                    f"{n_skipped} skipped (not length-critical)"
+                )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)

@@ -289,6 +289,9 @@ def run_route_command(args) -> int:
     # Issue #2648 (Epic #2556 Phase 3I): forward the length-match-diffpairs flag
     if getattr(args, "length_match_diffpairs", False):
         sub_argv.append("--length-match-diffpairs")
+    # Issue #2723 (Epic #2661 Phase 3H): forward the length-match-groups flag
+    if getattr(args, "length_match_groups", False):
+        sub_argv.append("--length-match-groups")
     return route_main(sub_argv)
 
 
