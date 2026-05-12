@@ -1271,6 +1271,7 @@ def cmd_optimize(args) -> int:
         edge_detect=edge_detect,
         fixed_refs=fixed_refs,
         boundary_margin=boundary_margin,
+        use_routing_fitness=getattr(args, "use_routing_fitness", False),
     )
 
     # Create and run workflow
@@ -1914,6 +1915,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="routing_aware",
         help="Use integrated place-route optimization (iterates between placement and routing)",
+    )
+    optimize_parser.add_argument(
+        "--use-routing-fitness",
+        action="store_true",
+        dest="use_routing_fitness",
+        help=(
+            "(KiCad-2 / Issue #2720) Replace the evolutionary GA's "
+            "average-pairwise-spacing routability proxy with actual routing "
+            "completion rate from the C++ A* router (CppAstarRoutingEvaluator). "
+            "Only effective with --strategy evolutionary or hybrid. Default off."
+        ),
     )
     optimize_parser.add_argument(
         "--check-routability",

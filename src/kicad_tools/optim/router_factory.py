@@ -7,13 +7,13 @@ spheresemi/sphere#7199).
 
 The :class:`~kicad_tools.router.evaluators.CppAstarRoutingEvaluator` accepts a
 ``RouterFactory`` callable: ``(positions, rotations) -> Autorouter``.  The
-factory's job is to materialize a fully-prepared :class:`Autorouter` whose pad
+factory's job is to produce a fully-prepared :class:`Autorouter` whose pad
 coordinates reflect the candidate placement so the inner GA can route it.
 
 Architecture
 ------------
 
-We take a **template + transform** approach:
+We take a **shared-base + in-place mutate** approach:
 
 1. Build a *base* :class:`Autorouter` once (via
    :func:`~kicad_tools.router.io.load_pcb_for_routing`) from the user's PCB.
@@ -21,29 +21,36 @@ We take a **template + transform** approach:
    reference position.  These offsets are read from the base PCB and remain
    constant for the duration of the placement GA (component footprints don't
    change shape during placement, only their position/rotation).
-3. On each ``factory(positions, rotations)`` invocation, deep-copy the base
-   router and rewrite each pad's ``(x, y)`` coordinates by applying the
-   candidate transform: ``pad.x = comp.x + rotate(local_offset_x)``.
-4. Return the mutated copy.
+3. On each ``factory(positions, rotations)`` invocation:
 
-Two design decisions worth noting:
+   a. Mutate the base router's :attr:`Autorouter.pads` ``(x, y)`` for the
+      candidate placement by applying ``pad.x = comp.x + rotate(local_dx)``.
+   b. Call :meth:`Autorouter._reset_for_new_trial` to rebuild the underlying
+      :class:`Grid` (obstacle masks, routing-cell occupancy) for the new pad
+      positions.  The grid contains C++-extension state that is **not
+      deep-copyable**, so we cannot clone the router; we mutate-in-place and
+      reset the trial state instead.
 
-* **Deep-copy** is used per call (rather than mutating-in-place) so that the
-  outer GA can evaluate multiple candidates without inter-call interference.
-  ``copy.deepcopy`` of the small Autorouter pad/net dicts is well under 1 ms
-  on the test boards; it is dwarfed by the inner-routing cost.
-* The grid (``Grid``) on the cloned router is **not** rebuilt — the inner GA's
-  ``run_evolutionary`` calls ``route_all`` which uses the C++ pathfinder
-  configured against the existing grid topology.  This is consistent with how
-  ``PlacementFeedbackLoop`` reuses the same router across iterations.
+   c. Return the same router instance.
+
+Concurrency caveat
+------------------
+
+Because step 3 mutates the shared base router, this factory is **not
+thread-safe**.  This is consistent with the
+:class:`~kicad_tools.router.evaluators.RoutingEvaluatorConfig` default
+``num_workers = 1``, which prevents nested ``ProcessPoolExecutor`` deadlocks
+on top of the outer placement GA's worker pool.  If callers want
+inter-candidate parallelism they must construct one factory per worker.
 
 Performance
 -----------
 
-The factory is intentionally cheap: a single deep-copy + dict iteration.  The
-expensive work (loading the PCB, parsing design rules, building the grid)
-happens once when :class:`PlacementRouterFactory` is constructed.  This
-amortizes well across the GA's ``population_size * generations`` evaluations.
+The factory is intentionally cheap: a single dict iteration + grid rebuild.
+The expensive work (loading the PCB, parsing design rules, computing the
+initial grid topology) happens once when :class:`PlacementRouterFactory` is
+constructed.  This amortizes well across the GA's
+``population_size * generations`` evaluations.
 
 See :func:`build_pcb_router_factory` for the public entry point used by
 ``OptimizationWorkflow`` (kicad-tools' high-level workflow API).
@@ -51,7 +58,6 @@ See :func:`build_pcb_router_factory` for the public entry point used by
 
 from __future__ import annotations
 
-import copy
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -143,7 +149,10 @@ class PlacementRouterFactory:
         positions: dict[str, tuple[float, float]],
         rotations: dict[str, float],
     ) -> Autorouter:
-        """Build an Autorouter for the candidate placement.
+        """Mutate and return the base Autorouter for the candidate placement.
+
+        This method is **not thread-safe** — see module docstring's
+        "Concurrency caveat" section.
 
         Args:
             positions: ``ref -> (x, y)`` in mm.  Components not listed retain
@@ -152,17 +161,16 @@ class PlacementRouterFactory:
                 retain their base PCB rotation.
 
         Returns:
-            A deep-copied :class:`Autorouter` whose pad coordinates reflect
-            the candidate placement.
+            The shared base :class:`Autorouter`, with pad coordinates updated
+            to reflect the candidate placement and routing-trial state reset.
         """
-        # Deep-copy the base router so the original stays pristine.  This is
-        # the single largest cost in the factory (~0.1-1 ms on test boards),
-        # but is still trivially small compared to the inner GA's runtime.
-        router = copy.deepcopy(self.base_router)
+        router = self.base_router
 
         # Apply the candidate transform to every pad.  We rotate the local
         # offset by (new_rotation - base_rotation) and translate by the
-        # candidate position.
+        # candidate position.  Mutates router.pads in place — the call to
+        # _reset_for_new_trial below propagates the new positions into the
+        # routing grid (which holds the obstacle masks).
         for off in self.pad_offsets:
             comp_ref = self.component_refs.get(off.ref)
             if comp_ref is None:
@@ -182,6 +190,23 @@ class PlacementRouterFactory:
                 continue
             pad.x = new_x + rx
             pad.y = new_y + ry
+
+        # Refresh the underlying grid for the new pad positions.  Without
+        # this, the C++ pathfinder would route against the *original* pad
+        # locations even though pad.x/pad.y have moved.  ``_reset_for_new_trial``
+        # rebuilds grid + zone manager and re-adds every pad with its new
+        # coordinates.  Optional: not all stub routers (e.g. test fakes) have
+        # this method, so we guard.
+        reset = getattr(router, "_reset_for_new_trial", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                # If the grid rebuild fails (e.g. pad now outside board
+                # bounds), let the inner GA see the partial state — it will
+                # report 0 routability and the placement GA will penalize
+                # accordingly.  Suppressing here keeps the factory robust.
+                pass
 
         return router
 
