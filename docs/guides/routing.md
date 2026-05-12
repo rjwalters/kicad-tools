@@ -208,6 +208,25 @@ The canonical pre-configured class is `NET_CLASS_HIGH_SPEED` in
 
 ---
 
+## Match Groups (Parallel Buses)
+
+Length-matching a parallel-bus **group** (DDR data byte, MIPI lane group,
+HDMI TMDS, address bus) is configured per net class on `NetClassRouting`
+— same pattern as diff pairs, but for N>=3 nets. See the dedicated
+guides under [`docs/guides/match-groups/`](match-groups/README.md):
+
+- [Declaring a group](match-groups/01-declaring-groups.md) (`length_match_group`, suffix detection, legacy API)
+- [Reference selection](match-groups/02-reference-selection.md) (longest / explicit / `clock`)
+- [Groups whose members are diff pairs](match-groups/03-group-of-pairs.md) (MIPI / HDMI)
+- [Cascade safety](match-groups/04-cascade-safety.md) (when the tuner gives up)
+- [Protocol recipes](match-groups/05-protocol-recipes.md) (DDR / MIPI / HDMI / address bus)
+- [DRC rule](match-groups/06-drc-rule.md) (`match_group_length_skew`)
+- [CLI + sidecar](match-groups/07-cli-and-sidecar.md) (`--length-match-groups`, `--net-class-map`)
+
+Engage from the CLI with `kct route --length-match-diffpairs --length-match-groups`.
+
+---
+
 ## Zone Awareness
 
 Handle copper pour zones:

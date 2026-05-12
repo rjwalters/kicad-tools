@@ -14,6 +14,7 @@ Epic #2556 (Phases 1–3).
 | Length-match a pair within a skew tolerance | [04-length-matching.md](04-length-matching.md) |
 | Copy a working setup for USB / PCIe / MIPI | [05-protocol-recipes.md](05-protocol-recipes.md) |
 | Understand the diff-pair DRC rules (`kct check`) | [06-drc-rules.md](06-drc-rules.md) |
+| Length-match N>=3 nets together (parallel bus, not a pair) | [../match-groups/README.md](../match-groups/README.md) |
 
 ## Canonical pre-configured class
 
