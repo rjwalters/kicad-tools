@@ -405,9 +405,7 @@ def generate_crystal() -> str:
   )"""
 
 
-def generate_capacitor(
-    ref: str, pos: tuple, net1: str, net2: str, value: str = "100nF"
-) -> str:
+def generate_capacitor(ref: str, pos: tuple, net1: str, net2: str, value: str = "100nF") -> str:
     """Generate 0402 capacitor.
 
     Args:
@@ -439,9 +437,7 @@ def generate_capacitor(
   )"""
 
 
-def generate_resistor(
-    ref: str, pos: tuple, net1: str, net2: str, value: str = "10k"
-) -> str:
+def generate_resistor(ref: str, pos: tuple, net1: str, net2: str, value: str = "10k") -> str:
     """Generate 0402 resistor.
 
     Args:

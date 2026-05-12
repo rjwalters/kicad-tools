@@ -137,7 +137,19 @@ def main():
     # Skip power/ground planes (assume these are routed as pours)
     # Skip USB_CC1/USB_CC2 - CC configuration channel nets between USB-C
     # connector and MCU that cannot be autorouted on 2 layers due to
-    # USB-C connector pad density exceeding 2-layer routing capacity
+    # USB-C connector pad density exceeding 2-layer routing capacity.
+    #
+    # Issue #2744 (re-evaluation note, May 2026): the curator asked
+    # whether USB_CC1/USB_CC2 could be un-skipped now that the router
+    # has layer-escalation logic. However, this script uses
+    # ``router.route_all_with_diffpairs()`` directly (not
+    # ``kct route --auto-layers``) so it has NO escalation path -- it
+    # can only attempt 2 layers and give up. Until/unless this script
+    # is rewritten to use the CLI route-with-escalation entrypoint, the
+    # CC1/CC2 skip is still the correct call: removing it would just
+    # turn two known-skip nets into two known-fail nets, with no
+    # behaviour benefit. The router escalation work is tracked
+    # separately (multi-layer escalation issue family).
     skip_nets = ["VCC", "GND", "VBUS", "USB_CC1", "USB_CC2"]
 
     print("\n--- Loading PCB ---")
