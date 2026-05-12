@@ -45,6 +45,7 @@ class BuildStep(str, Enum):
     ZONES = "zones"
     SILKSCREEN = "silkscreen"
     ROUTE = "route"
+    STITCH = "stitch"
     VERIFY = "verify"
     EXPORT = "export"
     ALL = "all"
@@ -1351,6 +1352,184 @@ def _check_route_postcondition(
     return None
 
 
+def _detect_layer_count(pcb_file: Path) -> int:
+    """Return the number of copper layers defined in *pcb_file*.
+
+    Probes the ``(layers ...)`` block via the same helper the stitch
+    command uses (``get_copper_layers``) so the layer count matches what
+    the stitcher sees.  Returns 2 on any error so the stitch step
+    short-circuits to the 2-layer skip path rather than crashing.
+    """
+    try:
+        from kicad_tools.cli.stitch_cmd import get_copper_layers
+        from kicad_tools.core.sexp_file import load_pcb
+
+        sexp = load_pcb(pcb_file)
+        return len(get_copper_layers(sexp))
+    except Exception as exc:
+        logger.debug("Could not detect layer count for %s: %s", pcb_file, exc)
+        return 2
+
+
+def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run stitching-via insertion on the routed PCB.
+
+    Adds thermal-relief / connection vias from plane-net pads (e.g.
+    GND, VCC, VBUS) down to the inner-layer zone copper so they end
+    up electrically connected after zone fill.
+
+    Skips gracefully when:
+    - No PCB to stitch (no route output) — succeeds as a no-op.
+    - The board has only 2 layers (no internal planes to stitch to).
+    - The PCB has no plane-net zones to stitch onto.
+
+    Operates on :attr:`BuildContext.routed_pcb_file` when present (the
+    output of the route step), falling back to :attr:`BuildContext.pcb_file`
+    so ``kct build --step stitch`` still works when invoked in isolation.
+
+    Idempotent: ``run_stitch`` skips already-connected pads via
+    ``is_pad_connected``, so a second invocation reports
+    ``already_connected > 0`` and adds zero new vias.
+    """
+    # Locate the PCB to stitch.  Preference order:
+    #   1. ctx.routed_pcb_file (populated by the preceding ROUTE step)
+    #   2. An on-disk *_routed.kicad_pcb sibling of ctx.pcb_file (so
+    #      `kct build --step stitch` finds the route output when
+    #      invoked in isolation, mirroring _run_step_route's recovery
+    #      path).
+    #   3. ctx.pcb_file (unrouted PCB) -- the stitcher will still
+    #      detect plane nets / pads correctly on an unrouted board.
+    pcb_to_stitch = ctx.routed_pcb_file
+    if (not pcb_to_stitch or not pcb_to_stitch.exists()) and ctx.pcb_file:
+        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+        if expected_routed.exists():
+            pcb_to_stitch = expected_routed
+
+    if not pcb_to_stitch or not pcb_to_stitch.exists():
+        pcb_to_stitch = ctx.pcb_file
+
+    if not pcb_to_stitch or not pcb_to_stitch.exists():
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message="stitch: no PCB file found — skipped",
+        )
+
+    # Layer-count check.  On 2-layer boards there are no internal planes
+    # to stitch to, so the step is a no-op.
+    layer_count = _detect_layer_count(pcb_to_stitch)
+    if layer_count <= 2:
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message="stitch: 2-layer board — skipped (no internal planes)",
+            output_file=pcb_to_stitch,
+        )
+
+    # Probe the PCB for plane nets before invoking the stitcher.  This
+    # avoids any work when there is nothing to stitch (e.g. a multi-layer
+    # board whose zones step did not run, or a board with no power pours).
+    try:
+        from kicad_tools.cli.stitch_cmd import find_all_plane_nets
+        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
+
+        sexp = _load_pcb(pcb_to_stitch)
+        plane_nets = find_all_plane_nets(sexp)
+    except Exception as exc:
+        logger.debug("Could not probe plane nets: %s", exc)
+        plane_nets = {}
+
+    if not plane_nets:
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message="stitch: no plane nets detected — skipped",
+            output_file=pcb_to_stitch,
+        )
+
+    # Look up manufacturer-aware via dimensions so the stitching vias
+    # satisfy DRC.  Fall back to conservative defaults if profile lookup
+    # fails (e.g. unknown manufacturer string).
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        profile = get_profile(ctx.mfr)
+        rules = profile.get_design_rules(layers=layer_count)
+        via_size = rules.min_via_diameter_mm
+        via_drill = rules.min_via_drill_mm
+    except Exception:
+        via_size = 0.6
+        via_drill = 0.3
+
+    if ctx.dry_run:
+        nets_str = ", ".join(sorted(plane_nets.keys()))
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct stitch {pcb_to_stitch.name} "
+                f"--via-size {via_size} --drill {via_drill} "
+                f"(auto-detected nets: {nets_str})"
+            ),
+            output_file=pcb_to_stitch,
+        )
+
+    if not ctx.quiet:
+        console.print(
+            f"  Stitching vias on {pcb_to_stitch.name} "
+            f"({len(plane_nets)} plane net(s), "
+            f"via {via_size}mm/{via_drill}mm drill for {ctx.mfr})..."
+        )
+
+    # Invoke the in-process stitcher.  Preferred over the subprocess
+    # entry point because it shares the loaded PCB representation and
+    # surfaces structured StitchResult details for error messages.
+    try:
+        from kicad_tools.cli.stitch_cmd import run_stitch
+
+        result = run_stitch(
+            pcb_to_stitch,
+            net_names=sorted(plane_nets.keys()),
+            via_size=via_size,
+            drill=via_drill,
+        )
+    except Exception as exc:
+        return BuildResult(
+            step="stitch",
+            success=False,
+            message=f"Stitching failed: {exc}",
+            output_file=pcb_to_stitch,
+        )
+
+    added = len(result.vias_added)
+    already = result.already_connected
+    skipped = len(result.pads_skipped)
+
+    if added == 0 and already > 0:
+        message = (
+            f"Stitching complete: {already} plane pad(s) already connected, no new vias needed"
+        )
+    elif added > 0:
+        message = (
+            f"Stitching complete: added {added} via(s) for "
+            f"{len(plane_nets)} plane net(s)"
+            + (f", {already} pad(s) already connected" if already else "")
+            + (f", {skipped} pad(s) skipped" if skipped else "")
+        )
+    else:
+        message = (
+            f"Stitching complete: no via candidates found for "
+            f"{len(plane_nets)} plane net(s)" + (f", {skipped} pad(s) skipped" if skipped else "")
+        )
+
+    return BuildResult(
+        step="stitch",
+        success=True,
+        message=message,
+        output_file=pcb_to_stitch,
+    )
+
+
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
     """Run verification step (DRC + audit)."""
     # Find the PCB to verify (prefer routed version)
@@ -1579,6 +1758,7 @@ _PCB_WRITE_STEPS: set[BuildStep] = {
     BuildStep.ZONES,
     BuildStep.SILKSCREEN,
     BuildStep.ROUTE,
+    BuildStep.STITCH,
 }
 
 
@@ -1704,6 +1884,7 @@ Examples:
             "zones",
             "silkscreen",
             "route",
+            "stitch",
             "verify",
             "export",
             "all",
@@ -1862,6 +2043,7 @@ Examples:
             BuildStep.ZONES,
             BuildStep.SILKSCREEN,
             BuildStep.ROUTE,
+            BuildStep.STITCH,
             BuildStep.VERIFY,
             BuildStep.EXPORT,
         ]
@@ -1904,6 +2086,11 @@ Examples:
 
             elif step == BuildStep.ROUTE:
                 result = _run_step_route(ctx, console)
+                if result.output_file:
+                    ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.STITCH:
+                result = _run_step_stitch(ctx, console)
                 if result.output_file:
                     ctx.routed_pcb_file = result.output_file
 
