@@ -1865,8 +1865,39 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Skipping power nets: {skip_nets}")
 
     # Route all nets
+    #
+    # Issue #2794: Use ``route_all_negotiated`` with explicit per-net and
+    # outer timeouts so a single pathological net cannot stall the build
+    # indefinitely.  The bare ``router.route_all()`` call (no timeouts,
+    # no progress callback) previously hung this board's ``kct build``
+    # for 22+ minutes inside A* heap-key churn -- with one net emitted
+    # and zero feedback after that point.
+    #
+    # The values below mirror the ``kct route`` CLI's defaults
+    # (``src/kicad_tools/cli/route_cmd.py:1702-1710``):
+    #
+    #   - ``per_net_timeout=30.0``  -- per-net A* deadline (#2775/#2779
+    #     bracketed this across the whole net rather than per RSMT edge,
+    #     so 30 s is now a reliable cap)
+    #   - ``timeout=240.0``         -- outer wall-clock budget for the
+    #     entire negotiated loop; on the off-chance every net hits its
+    #     timeout, total stays bounded
+    #   - ``progress_callback``     -- one-line per-net status so
+    #     ``kct build`` (and humans) see progress without ``--verbose``
     print("\n2. Routing nets...")
-    router.route_all()
+
+    def _route_progress(progress: float, message: str, _ok: bool) -> bool:
+        # Negotiated callback fires once per net plus a final summary;
+        # echo to stdout so build_cmd's streaming stdout (Issue #2794
+        # fix) surfaces it to the parent process.
+        print(f"   [{progress * 100:5.1f}%] {message}", flush=True)
+        return True
+
+    router.route_all_negotiated(
+        per_net_timeout=30.0,
+        timeout=240.0,
+        progress_callback=_route_progress,
+    )
 
     # Get statistics before optimization
     stats_before = router.get_statistics()

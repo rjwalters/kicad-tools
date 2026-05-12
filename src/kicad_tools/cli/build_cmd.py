@@ -244,18 +244,39 @@ def _run_python_script(
     verbose: bool = False,
     env_vars: dict[str, str] | None = None,
     script_args: list[str] | None = None,
+    quiet: bool = False,
 ) -> tuple[bool, str]:
     """Run a Python generator script.
 
     Args:
         script_path: Path to the Python script
         cwd: Working directory for execution
-        verbose: Whether to show script output
+        verbose: Reserved for backward compatibility -- previously gated
+            *all* stdout streaming behind ``--verbose``.  Issue #2794
+            inverts the default: stdout is now streamed line-by-line at
+            the default verbosity so users see board progress (per-net
+            routing, optimization steps, etc.) without needing
+            ``--verbose``.  Setting ``verbose=True`` is still honoured
+            for ``stderr`` echo.
         env_vars: Optional additional environment variables to pass
         script_args: Optional positional arguments to pass to the script
+        quiet: When True, suppress live stdout streaming (capture
+            silently and only surface errors).  Used by ``--quiet`` /
+            CI paths that don't want per-net chatter.
 
     Returns:
         Tuple of (success, output/error message)
+
+    Notes:
+        Issue #2794: ``subprocess.run(..., capture_output=not verbose)``
+        previously buffered the entire child stdout until the script
+        completed.  For long-running routing scripts (board 05 BLDC
+        controller, etc.) this meant a 22-minute silent hang was
+        indistinguishable from a 22-second silent wait -- the prints
+        existed, but were trapped in the buffer.  We now use
+        ``Popen`` with line-buffered stdout and stream each line to
+        the parent process as it arrives, so progress is observable
+        in real time.
     """
     import os
 
@@ -263,21 +284,63 @@ def _run_python_script(
     run_env = os.environ.copy()
     if env_vars:
         run_env.update(env_vars)
+    # Force unbuffered stdio in the child so per-line progress prints
+    # flush immediately even when the child doesn't call
+    # ``flush=True`` explicitly.  Equivalent to ``python -u``.
+    run_env.setdefault("PYTHONUNBUFFERED", "1")
+
+    cmd = [sys.executable, str(script_path)] + (script_args or [])
 
     try:
-        result = subprocess.run(
-            [sys.executable, str(script_path)] + (script_args or []),
+        if quiet:
+            # Quiet path: capture both streams silently; only surface
+            # stderr in the error message.  No live output.
+            result = subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                env=run_env,
+            )
+            if result.returncode == 0:
+                return True, f"Script {script_path.name} completed successfully"
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return False, f"Script {script_path.name} failed: {error_msg}"
+
+        # Default + verbose path: stream stdout line-by-line so progress
+        # is visible immediately.  stderr is captured (so we can include
+        # it in the failure message) and echoed at the end on failure.
+        process = subprocess.Popen(
+            cmd,
             cwd=str(cwd),
-            capture_output=not verbose,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,  # line-buffered
             env=run_env,
         )
 
-        if result.returncode == 0:
+        # Drain stdout into the parent's stdout as lines arrive.
+        # ``readline`` blocks until a line is available or the pipe
+        # closes; the loop exits when EOF (empty string) is hit.
+        assert process.stdout is not None
+        for line in iter(process.stdout.readline, ""):
+            # Already terminated by readline; just echo verbatim.
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        process.stdout.close()
+
+        # Now wait for the child and collect any stderr.
+        stderr_output = ""
+        if process.stderr is not None:
+            stderr_output = process.stderr.read()
+            process.stderr.close()
+        returncode = process.wait()
+
+        if returncode == 0:
             return True, f"Script {script_path.name} completed successfully"
-        else:
-            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
-            return False, f"Script {script_path.name} failed: {error_msg}"
+        error_msg = stderr_output if stderr_output else f"Exit code: {returncode}"
+        return False, f"Script {script_path.name} failed: {error_msg}"
 
     except Exception as e:
         return False, f"Failed to run {script_path.name}: {e}"
@@ -314,7 +377,11 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
 
     script_args = [str(ctx.output_dir)] if ctx.output_dir else None
     success, message = _run_python_script(
-        script, ctx.project_dir, ctx.verbose, script_args=script_args
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        script_args=script_args,
+        quiet=ctx.quiet,
     )
 
     # Mark this script as executed to avoid running it again in PCB step
@@ -399,7 +466,11 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
 
     script_args = [str(ctx.output_dir)] if ctx.output_dir else None
     success, message = _run_python_script(
-        script, ctx.project_dir, ctx.verbose, script_args=script_args
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        script_args=script_args,
+        quiet=ctx.quiet,
     )
 
     # Mark this script as executed
@@ -1143,6 +1214,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             ctx.verbose,
             env_vars=route_env_vars,
             script_args=script_args,
+            quiet=ctx.quiet,
         )
 
         # Find routed PCB (check output dir first, then project dir)

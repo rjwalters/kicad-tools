@@ -3207,6 +3207,9 @@ class Autorouter:
         parallel: bool = False,
         max_workers: int = 4,
         interleaved: bool = False,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+        suppress_no_timeout_warning: bool = False,
     ) -> list[Route]:
         """Route all nets in priority order.
 
@@ -3223,10 +3226,63 @@ class Autorouter:
                 "virtual 2-port net" and interleaved with actual 2-port nets
                 sorted by distance. This gives short segments the best chance
                 of routing before longer routes consume grid space.
+            timeout: Optional outer wall-clock budget in seconds.  When the
+                cumulative routing time exceeds this value, the per-net loop
+                breaks and returns the partial result.  ``None`` means no
+                outer budget (legacy behaviour).
+            per_net_timeout: Advisory per-net wall-clock budget in seconds.
+                Note: the basic ``route_all`` path does not yet enforce a
+                per-A* deadline -- that plumbing currently lives only in
+                :meth:`route_all_negotiated` / :meth:`route_with_escape`
+                (Issue #2775/#2779).  Passing this value here suppresses the
+                "no timeout supplied" warning and signals intent; the value
+                is *not* propagated into the underlying A* search.  For
+                hard per-net deadlines, prefer ``route_all_negotiated`` --
+                see Issue #2794.
+            suppress_no_timeout_warning: When True, skip the
+                "no per_net_timeout supplied" warning.  Used by callers
+                that intentionally want bare ``route_all`` semantics
+                (e.g. unit tests on tiny boards where A* completes in
+                sub-second wall-clock).
 
         Returns:
             List of Route objects for all nets
+
+        Notes:
+            Issue #2794: calling ``route_all`` without any timeout is a
+            silent-hang trap on dense boards -- A* heap-key churn in the
+            pathfinder can consume hours of wall-clock with no externally
+            visible progress.  This method now emits a one-line warning
+            in that case, recommending either ``route_all_negotiated``
+            (which has per-net timeout enforcement) or an explicit
+            ``suppress_no_timeout_warning=True`` opt-out.
         """
+        import time
+        import warnings
+
+        # Issue #2794: warn when caller has neither a per-net timeout nor an
+        # explicit opt-out.  This is the regression-prevention guard that
+        # makes future bare ``router.route_all()`` calls discoverable in
+        # logs/CI rather than rediscovered via 22-minute hangs.
+        if (
+            per_net_timeout is None
+            and timeout is None
+            and not suppress_no_timeout_warning
+        ):
+            warnings.warn(
+                "Router.route_all() called without per_net_timeout or timeout; "
+                "dense boards can hang indefinitely in A* heap-key churn. "
+                "Prefer Router.route_all_negotiated(per_net_timeout=30.0, "
+                "timeout=240.0) or pass suppress_no_timeout_warning=True to "
+                "acknowledge bare semantics. See issue #2794.",
+                stacklevel=2,
+            )
+
+        # Wall-clock start used by the outer-budget check after each net.
+        # Captured even when no timeout is requested so the variable is
+        # always bound (the inner check guards on ``timeout is not None``).
+        _route_all_start = time.time()
+
         if interleaved:
             return self.route_all_interleaved(progress_callback=progress_callback)
 
@@ -3263,6 +3319,20 @@ class Autorouter:
         all_routes: list[Route] = list(escape_routes)
 
         for i, net in enumerate(nets_to_route):
+            # Issue #2794: outer wall-clock budget.  Checked at the top of
+            # each iteration so a long-running net doesn't bypass the cap
+            # (and so the first net always gets at least one full try
+            # regardless of ``timeout``).
+            if timeout is not None and i > 0:
+                elapsed = time.time() - _route_all_start
+                if elapsed >= timeout:
+                    flush_print(
+                        f"  route_all: outer timeout reached "
+                        f"({elapsed:.1f}s >= {timeout}s) after {i}/{total_nets} nets; "
+                        f"returning partial result."
+                    )
+                    break
+
             if progress_callback is not None:
                 progress = i / total_nets if total_nets > 0 else 0.0
                 net_name = self.net_names.get(net, f"Net {net}")
@@ -4025,7 +4095,7 @@ class Autorouter:
 
             # Apply parameters
             self.rules = params.apply_to_rules(self.rules)
-            return self.route_all(progress_callback=progress_callback)
+            return self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
 
         # Analyze board characteristics
         characteristics = analyze_board(
@@ -4060,7 +4130,7 @@ class Autorouter:
             flush_print(f"    Congestion cost: {params.congestion:.1f}")
 
             self.rules = params.apply_to_rules(self.rules)
-            routes = self.route_all(progress_callback=progress_callback)
+            routes = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
         else:
             # Full optimization
             flush_print(f"  Method: {method} optimization (max {max_iterations} iterations)")
@@ -4082,7 +4152,7 @@ class Autorouter:
                 flush_print(f"    Total vias: {result.quality.total_vias}")
 
             self.rules = result.params.apply_to_rules(self.rules)
-            routes = self.route_all(progress_callback=progress_callback)
+            routes = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
 
         flush_print("\n=== Tuned Routing Complete ===")
         flush_print(f"  Routes: {len(routes)}")
@@ -6587,7 +6657,7 @@ class Autorouter:
         if not block_list:
             if use_negotiated:
                 return self.route_all_negotiated(progress_callback=progress_callback)
-            return self.route_all(progress_callback=progress_callback)
+            return self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
 
         flush_print("\n=== Block-Aware Routing ===")
         flush_print(f"  Blocks: {len(block_list)}")
@@ -6850,7 +6920,7 @@ class Autorouter:
             # skip the unified pass below to avoid double-correction.
             return self.route_all_negotiated(progress_callback=progress_callback)
         else:
-            result = self.route_all(progress_callback=progress_callback)
+            result = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
 
         # Issue #1783: Run post-route clearance correction for ALL strategies.
         # Previously this only ran inside route_all_negotiated, leaving
@@ -8363,6 +8433,9 @@ class Autorouter:
         else:
             main_routes = self.route_all(
                 progress_callback=progress_callback,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
             )
 
         # Combine results -- escape routes that survived rip-up are
@@ -8601,6 +8674,8 @@ class Autorouter:
         else:
             main_routes = self.route_all(
                 progress_callback=progress_callback,
+                timeout=timeout,
+                suppress_no_timeout_warning=True,
             )
 
         # Combine results
@@ -8674,6 +8749,8 @@ class Autorouter:
             else:
                 return self.route_all(
                     progress_callback=progress_callback,
+                    timeout=timeout,
+                    suppress_no_timeout_warning=True,
                 )
 
         result = adaptive.route_adaptive(
@@ -8765,7 +8842,7 @@ class Autorouter:
                 adaptive=True,
             )
         else:
-            self.route_all(progress_callback=progress_callback)
+            self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
 
         coarse_stats = self.get_statistics()
         coarse_routed = coarse_stats["nets_routed"]
