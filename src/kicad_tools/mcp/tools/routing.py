@@ -627,7 +627,8 @@ def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
             continue
 
         fp_x, fp_y = fp.position
-        rot_rad = math.radians(-fp.rotation)
+        # KiCad rotation is CCW-positive; standard 2D rotation matrix applies directly
+        rot_rad = math.radians(fp.rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:

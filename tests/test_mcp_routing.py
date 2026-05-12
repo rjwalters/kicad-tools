@@ -741,3 +741,134 @@ class TestRouteAutoCommandErrorHandling:
         assert "Error:" in captured.err
         # Without verbose, no traceback should appear
         assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_pads_for_net forward-rotation sign convention (issue #2788)
+# ---------------------------------------------------------------------------
+
+
+def _rotated_pcb_text(rotation_deg: float) -> str:
+    """Build a minimal 1-footprint, 1-net PCB with a known pad offset and
+    rotation.  The pad's local position has nonzero, distinct x/y so the
+    canonical and buggy (negated) rotation produce DIFFERENT world
+    coordinates at 45°/90°/270° — pure 0°/180° fixtures pass under both
+    sign conventions because cos is even and sin terms vanish, so this
+    fixture is intentionally asymmetric.
+
+    Board origin is implicitly (0, 0) (no setup block), isolating
+    rotation from origin-offset effects.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "Custom"
+    (layer "F.Cu")
+    (at 20 15 {rotation_deg})
+    (attr smd)
+    (property "Reference" "U1")
+    (property "Value" "ASYM")
+    (pad "1" smd rect (at 3.0 1.0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+)
+"""
+
+
+class TestBuildPadsForNetRotationSignConvention:
+    """Verify that _build_pads_for_net applies the canonical CCW-positive
+    rotation when projecting pad-local offsets into world coordinates.
+
+    Regression coverage for issue #2788: prior code computed
+    ``math.radians(-fp.rotation)`` which mirrored pad world positions for
+    rotated footprints, feeding the autorouter wrong anchors and causing
+    unroutable nets / off-pad escape attempts.
+
+    Pure 0°/180° rotations pass under BOTH sign conventions (cos is even
+    and sin*y_local terms cancel when chosen symmetrically), so the
+    parametrization MUST include {45°, 90°, 270°} to catch the bug.
+    Agreement is asserted against the canonical reference implementation
+    in ``PCB.get_pad_position`` to within 1e-9 mm.
+    """
+
+    @pytest.mark.parametrize("rotation", [45.0, 90.0, 270.0])
+    def test_pad_world_position_matches_get_pad_position(
+        self, tmp_path: Path, rotation: float
+    ) -> None:
+        from kicad_tools.mcp.tools.routing import _build_pads_for_net
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "rotated.kicad_pcb"
+        pcb_file.write_text(_rotated_pcb_text(rotation))
+
+        pcb = PCB.load(str(pcb_file))
+
+        # Canonical reference: PCB.get_pad_position uses the correct,
+        # un-negated forward rotation (schema/pcb.py:3628).
+        expected = pcb.get_pad_position("U1", "1")
+        assert expected is not None, (
+            f"Reference get_pad_position returned None for rotation={rotation}°"
+        )
+
+        pads = _build_pads_for_net(pcb, net_number=1, net_name="SIG1")
+        assert len(pads) == 1, (
+            f"rotation={rotation}°: expected exactly 1 pad on SIG1, got "
+            f"{len(pads)}"
+        )
+
+        actual = (pads[0].x, pads[0].y)
+        assert abs(actual[0] - expected[0]) < 1e-9, (
+            f"rotation={rotation}°: pad world x={actual[0]} differs from "
+            f"canonical {expected[0]} — sign convention regression."
+        )
+        assert abs(actual[1] - expected[1]) < 1e-9, (
+            f"rotation={rotation}°: pad world y={actual[1]} differs from "
+            f"canonical {expected[1]} — sign convention regression."
+        )
+
+    def test_negative_control_buggy_vs_canonical_differ(self) -> None:
+        """Sanity check: at each chosen rotation the canonical (CCW) and
+        buggy (negated) transforms produce noticeably different world
+        positions, so the parametrized test above can actually
+        distinguish a correct fix from the bug.
+
+        (If the fixture coordinates were symmetric — e.g., pad_local =
+        (0, 0) or (x, 0) at 180° — both sign conventions would yield the
+        same result and the test would silently pass against buggy code.)
+        """
+        import math
+
+        fp_pos = (20.0, 15.0)
+        pad_local = (3.0, 1.0)
+        for rot in (45.0, 90.0, 270.0):
+            rot_rad = math.radians(rot)
+            cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+            canonical = (
+                fp_pos[0] + pad_local[0] * cos_r - pad_local[1] * sin_r,
+                fp_pos[1] + pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            # Buggy negated-rotation: cos same, sin flipped sign.
+            buggy = (
+                fp_pos[0] + pad_local[0] * cos_r + pad_local[1] * sin_r,
+                fp_pos[1] - pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            dx = abs(canonical[0] - buggy[0])
+            dy = abs(canonical[1] - buggy[1])
+            assert max(dx, dy) > 0.5, (
+                f"rotation={rot}°: fixture too symmetric — canonical="
+                f"{canonical}, buggy={buggy}; fixture pad_local must have "
+                f"nonzero, distinct x/y components."
+            )

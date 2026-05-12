@@ -12,8 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kicad_tools.validate.rules.edge import EdgeClearanceRule, _CLEARANCE_EPSILON_MM
-
+from kicad_tools.validate.rules.edge import _CLEARANCE_EPSILON_MM, EdgeClearanceRule
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -356,6 +355,180 @@ class TestCheckZonesEpsilon:
             results,
         )
         assert len(results.errors) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: _check_pads forward-rotation sign convention (issue #2788)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPadsRotationSignConvention:
+    """Verify that _check_pads applies the canonical CCW-positive rotation.
+
+    Regression coverage for issue #2788: prior code computed
+    ``math.radians(-footprint.rotation)`` which mirrored the pad across the
+    footprint origin for 90°/270° rotations and reflected it about the
+    diagonal for 45°.  Pure 0°/180° tests pass under BOTH sign conventions
+    because cos is even and sin*y_local terms vanish when y_local==0,
+    so the parametrization MUST include {45°, 90°, 270°} to catch the bug.
+
+    The fixture uses ``board_origin = (0, 0)`` to isolate rotation from
+    any origin-offset asymmetries, and the footprint is placed in the
+    interior of the board with a pad offset chosen so the correct and
+    buggy positions differ.
+    """
+
+    @staticmethod
+    def _footprint_with_offset_pad(
+        fp_position: tuple[float, float],
+        rotation: float,
+        pad_local: tuple[float, float],
+        pad_size: float = 0.4,
+    ) -> SimpleNamespace:
+        pad = SimpleNamespace(
+            position=pad_local,
+            size=(pad_size, pad_size),
+            type="smd",
+            number="1",
+        )
+        return SimpleNamespace(
+            position=fp_position,
+            rotation=rotation,
+            layer="F.Cu",
+            reference="U1",
+            pads=[pad],
+        )
+
+    @staticmethod
+    def _expected_pad_position(
+        fp_position: tuple[float, float],
+        rotation_deg: float,
+        pad_local: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Canonical forward transform (CCW-positive, matches schema/pcb.py)."""
+        import math
+
+        rot_rad = math.radians(rotation_deg)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+        px, py = pad_local
+        return (
+            fp_position[0] + px * cos_r - py * sin_r,
+            fp_position[1] + px * sin_r + py * cos_r,
+        )
+
+    def test_negative_control_buggy_vs_canonical_differ(self):
+        """Sanity check: the fixture coordinates DO differ between the two
+        sign conventions at each chosen rotation, so the parametrized
+        tests below can actually distinguish a correct fix from the bug.
+        """
+        import math
+
+        pad_local = (3.0, 1.0)
+        fp_pos = (10.0, 15.0)
+
+        for rot in (45.0, 90.0, 270.0):
+            rot_rad = math.radians(rot)
+            cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+            correct = (
+                fp_pos[0] + pad_local[0] * cos_r - pad_local[1] * sin_r,
+                fp_pos[1] + pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            # Buggy (negated angle) → cos same, sin flipped sign
+            buggy = (
+                fp_pos[0] + pad_local[0] * cos_r + pad_local[1] * sin_r,
+                fp_pos[1] - pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            # At least one coordinate must differ by a meaningful amount
+            dx = abs(correct[0] - buggy[0])
+            dy = abs(correct[1] - buggy[1])
+            assert max(dx, dy) > 0.5, (
+                f"rotation={rot}°: fixture too symmetric — correct={correct}, "
+                f"buggy={buggy}; choose pad_local with nonzero, distinct "
+                f"x/y components"
+            )
+
+    # Per-rotation fixtures: footprint x-position chosen so that, under
+    # the CANONICAL CCW-positive transform, the pad lands close enough
+    # to the left board edge (x=0) to violate (or not violate) the
+    # 0.3mm copper-to-edge minimum, while under the BUGGY negated
+    # rotation the pad lands somewhere else with the OPPOSITE violation
+    # status.  This makes the violation *count* a clean discriminator
+    # between the two sign conventions.
+    #
+    # pad_local = (3.0, 1.0) — nonzero, distinct x/y so 0°/180°
+    # symmetries do not paper over the bug.
+    #
+    # Pre-computed pad positions (see negative-control test below for
+    # proof that canonical and buggy diverge at these rotations):
+    #   rot=45°,  fp_x=-1.9: canonical pad_x ~ -0.486 (violates),
+    #                        buggy     pad_x ~  0.928 (clears)
+    #   rot=90°,  fp_x= 0.6: canonical pad_x = -0.4   (violates),
+    #                        buggy     pad_x =  1.6   (clears)
+    #   rot=270°, fp_x= 0.6: canonical pad_x =  1.6   (clears),
+    #                        buggy     pad_x = -0.4   (violates)
+    @pytest.mark.parametrize(
+        "rotation, fp_x, expect_canonical_violation",
+        [
+            (45.0,  -1.9, True),
+            (90.0,   0.6, True),
+            (270.0,  0.6, False),
+        ],
+    )
+    def test_violation_count_matches_canonical_convention(
+        self, rotation, fp_x, expect_canonical_violation
+    ):
+        """Drive ``_check_pads`` with per-rotation fixtures where the
+        canonical (CCW-positive) and buggy (negated) sign conventions
+        disagree on whether the pad violates edge clearance.
+
+        Under the bug, two of these three parametrized cases fail
+        (violation count does not match canonical expectation).  Under
+        the correct fix, all three pass.
+        """
+        min_clearance = 0.3
+        pad_local = (3.0, 1.0)
+        fp_pos = (fp_x, 15.0)
+
+        fp = self._footprint_with_offset_pad(fp_pos, rotation, pad_local)
+        expected_pad = self._expected_pad_position(fp_pos, rotation, pad_local)
+
+        rule = EdgeClearanceRule()
+        from kicad_tools.validate.violations import DRCResults
+        results = DRCResults()
+        rule._check_pads(
+            _make_pcb(footprints=[fp]),
+            _outline_segments(),
+            _design_rules(copper_edge=min_clearance),
+            results,
+        )
+
+        if expect_canonical_violation:
+            assert len(results.errors) >= 1, (
+                f"rotation={rotation} fp_x={fp_x}: expected canonical "
+                f"violation at pad={expected_pad}, but rule reported "
+                f"{len(results.errors)} errors -- likely the rule still "
+                f"uses the buggy negated rotation."
+            )
+            # The reported violation location must match the canonical
+            # pad world position to 1e-9.
+            v = results.errors[0]
+            loc_x, loc_y = v.location
+            assert abs(loc_x - expected_pad[0]) < 1e-9, (
+                f"rotation={rotation}: violation x={loc_x} differs "
+                f"from canonical {expected_pad[0]}."
+            )
+            assert abs(loc_y - expected_pad[1]) < 1e-9, (
+                f"rotation={rotation}: violation y={loc_y} differs "
+                f"from canonical {expected_pad[1]}."
+            )
+        else:
+            assert len(results.errors) == 0, (
+                f"rotation={rotation} fp_x={fp_x}: canonical pad at "
+                f"{expected_pad} is well inside the board (no violation "
+                f"expected), but rule reported {len(results.errors)} "
+                f"errors -- likely the rule still uses the buggy "
+                f"negated rotation, placing the pad off-board."
+            )
 
 
 # ---------------------------------------------------------------------------
