@@ -41,6 +41,7 @@ class BuildStep(str, Enum):
     SCHEMATIC = "schematic"
     ERC = "erc"
     PCB = "pcb"
+    SYNC = "sync"
     OUTLINE = "outline"
     PLACEMENT = "placement"
     ZONES = "zones"
@@ -1642,6 +1643,187 @@ def _run_step_erc(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _print_sync_analysis_detail(analysis, console: Console) -> None:
+    """Print per-category sync analysis detail.
+
+    Mirrors :func:`pipeline_cmd._print_sync_analysis_detail` so the build
+    command surfaces the same actionable detail as ``kct pipeline``.
+    """
+    if analysis.value_mismatches:
+        console.print(f"    Value mismatches ({len(analysis.value_mismatches)}):")
+        for mm in analysis.value_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_value']} pcb={mm['pcb_value']}"
+            )
+
+    if analysis.footprint_mismatches:
+        console.print(f"    Footprint mismatches ({len(analysis.footprint_mismatches)}):")
+        for mm in analysis.footprint_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_footprint']}"
+                f" pcb={mm['pcb_footprint']}"
+            )
+
+    if analysis.add_footprint_actions:
+        console.print(f"    Add footprint ({len(analysis.add_footprint_actions)}):")
+        for action in analysis.add_footprint_actions:
+            ref = action["reference"]
+            fp = action.get("footprint", "")
+            val = action.get("value", "")
+            console.print(f"      {ref}: {fp} ({val})")
+
+    if analysis.schematic_orphans:
+        console.print(f"    Schematic-only ({len(analysis.schematic_orphans)}):")
+        for ref in analysis.schematic_orphans:
+            console.print(f"      {ref} - missing from PCB")
+
+    if analysis.pcb_orphans:
+        console.print(f"    PCB-only ({len(analysis.pcb_orphans)}):")
+        for ref in analysis.pcb_orphans:
+            console.print(f"      {ref} - not in schematic")
+
+
+def _run_step_sync(ctx: BuildContext, console: Console) -> BuildResult:
+    """Reconcile schematic <-> PCB component sets in-process.
+
+    Uses :class:`kicad_tools.sync.reconciler.Reconciler` to analyse drift
+    between the schematic and PCB right after the PCB write — before any
+    expensive downstream work (placement, zones, routing) is performed
+    and well before manufacturing artefacts are produced.
+
+    Mirrors :func:`pipeline_cmd._run_step_sync`'s blocking semantics:
+
+    - In sync: success with a one-line "sync: in sync" message.
+    - Schematic orphans (refs missing from PCB): blocking failure.
+      ``ctx.force`` converts this into a non-blocking warning so the user
+      can deliberately bypass the gate.
+    - Value/footprint mismatches or PCB-only refs without schematic
+      orphans: warning, build continues with ``success=True``.
+    - No schematic available: skipped (``success=True``).
+
+    Note: unlike :func:`pipeline_cmd._run_step_sync`, this implementation
+    does NOT expose a ``--apply-sync`` flag.  ``kct build --force`` is the
+    only escape hatch.  Auto-fixing drift belongs to ``kct pipeline`` /
+    ``kct sync --apply``.
+    """
+    # Skip if no schematic file available
+    if ctx.schematic_file is None or not ctx.schematic_file.exists():
+        return BuildResult(
+            step="sync",
+            success=True,
+            message=(
+                "sync: no schematic available — skipped"
+                " (use 'kct build --step schematic' or supply a schematic)"
+            ),
+        )
+
+    # Find the PCB to reconcile (prefer routed version when available,
+    # but typically SYNC runs right after PCB write so ctx.pcb_file is set
+    # and ctx.routed_pcb_file is still None).
+    pcb_to_check = ctx.routed_pcb_file or ctx.pcb_file
+    if not pcb_to_check or not pcb_to_check.exists():
+        return BuildResult(
+            step="sync",
+            success=False,
+            message="sync: no PCB file found to reconcile",
+        )
+
+    # Dry-run mode: preview without instantiating Reconciler
+    if ctx.dry_run:
+        return BuildResult(
+            step="sync",
+            success=True,
+            message=(
+                f"[dry-run] Would reconcile {ctx.schematic_file.name}"
+                f" <-> {pcb_to_check.name}"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Reconciling {ctx.schematic_file.name} <-> {pcb_to_check.name}...")
+
+    # Instantiate Reconciler in-process (no subprocess overhead)
+    try:
+        from kicad_tools.sync.reconciler import Reconciler
+
+        reconciler = Reconciler(
+            schematic=ctx.schematic_file,
+            pcb=pcb_to_check,
+        )
+        analysis = reconciler.analyze()
+    except Exception as e:
+        logger.warning("sync: failed to analyze: %s", e)
+        return BuildResult(
+            step="sync",
+            success=False,
+            message=f"sync: failed to analyze — {e}",
+        )
+
+    # Clean pass
+    if analysis.is_in_sync:
+        return BuildResult(
+            step="sync",
+            success=True,
+            message="sync: in sync",
+        )
+
+    # Print the summary plus per-category detail
+    if not ctx.quiet:
+        for line in analysis.summary().splitlines():
+            console.print(f"    {line}")
+        _print_sync_analysis_detail(analysis, console)
+
+    schematic_orphans = list(analysis.schematic_orphans)
+    value_mismatch_count = len(analysis.value_mismatches)
+    footprint_mismatch_count = len(analysis.footprint_mismatches)
+    pcb_orphan_count = len(analysis.pcb_orphans)
+
+    # Schematic orphans are blocking (parallels ERC's blocking semantics).
+    # --force lets the user bypass; otherwise the build halts here so no
+    # downstream BOM/manufacturing artefacts are produced.
+    if schematic_orphans:
+        if ctx.force:
+            if not ctx.quiet:
+                console.print(
+                    f"  [yellow]sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)[/yellow]"
+                )
+            return BuildResult(
+                step="sync",
+                success=True,
+                message=(
+                    f"sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)"
+                ),
+            )
+
+        return BuildResult(
+            step="sync",
+            success=False,
+            message=(
+                f"sync: {len(schematic_orphans)} schematic-only ref(s) missing"
+                " from PCB (use --force to continue, or 'kct sync --apply' to fix)"
+            ),
+        )
+
+    # No blocking schematic orphans, but other drift exists -> warn, success=True
+    parts = []
+    if value_mismatch_count:
+        parts.append(f"{value_mismatch_count} value mismatch(es)")
+    if footprint_mismatch_count:
+        parts.append(f"{footprint_mismatch_count} footprint mismatch(es)")
+    if pcb_orphan_count:
+        parts.append(f"{pcb_orphan_count} PCB-only ref(s)")
+
+    return BuildResult(
+        step="sync",
+        success=True,
+        message=(
+            "sync: drift detected — " + (", ".join(parts) if parts else "non-blocking issues")
+        ),
+    )
+
+
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
     """Run verification step (DRC + audit)."""
     # Find the PCB to verify (prefer routed version)
@@ -1992,6 +2174,7 @@ Examples:
             "schematic",
             "erc",
             "pcb",
+            "sync",
             "outline",
             "placement",
             "zones",
@@ -2152,6 +2335,7 @@ Examples:
             BuildStep.SCHEMATIC,
             BuildStep.ERC,
             BuildStep.PCB,
+            BuildStep.SYNC,
             BuildStep.OUTLINE,
             BuildStep.PLACEMENT,
             BuildStep.ZONES,
@@ -2188,6 +2372,9 @@ Examples:
                 result = _run_step_pcb(ctx, console)
                 if result.output_file:
                     ctx.pcb_file = result.output_file
+
+            elif step == BuildStep.SYNC:
+                result = _run_step_sync(ctx, console)
 
             elif step == BuildStep.OUTLINE:
                 result = _run_step_outline(ctx, console)
