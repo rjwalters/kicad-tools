@@ -1885,11 +1885,12 @@ def _add_footprint_parser(subparsers) -> None:
         dest="footprint_command", help="Footprint commands"
     )
 
-    # footprint generate - delegates to footprint_generate.py for subcommands
+    # footprint generate - dispatched in cli/__init__.py to footprint_generate.main,
+    # which owns its own subparser tree (soic/qfp/qfn/chip/sot/dip/pin-header).
     footprint_subparsers.add_parser(
         "generate",
         help="Generate parametric footprints",
-        add_help=False,  # Let footprint_generate handle help
+        add_help=False,  # Let footprint_generate handle --help itself
     )
 
 
