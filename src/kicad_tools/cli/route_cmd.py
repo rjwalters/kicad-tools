@@ -1636,6 +1636,7 @@ def route_with_layer_escalation(
                 router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -2310,6 +2311,7 @@ def route_with_rule_relaxation(
                 router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -2829,6 +2831,7 @@ def route_with_combined_escalation(
                     router.route_with_escape(
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=args.timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                 elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
@@ -4919,6 +4922,7 @@ def main(argv: list[str] | None = None) -> int:
                 return router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
 
             # Progressive clearance relaxation mode
