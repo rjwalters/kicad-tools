@@ -39,6 +39,7 @@ or the equivalent inline forward transform (the two are identical).
 
 from __future__ import annotations
 
+import contextlib
 import math
 from pathlib import Path
 
@@ -251,15 +252,11 @@ class TestRouteNetRotation:
         # The route_net result will be "no routes" (because we mocked
         # the routing call), but pad collection still ran.  Best-effort
         # invocation — assertions are on captured.
-        try:
+        with contextlib.suppress(Exception):
             route_net(pcb_path=str(pcb_file), net_name="SIG1")
-        except Exception:
-            pass
 
         u1_pads = captured.get("U1")
-        assert u1_pads is not None, (
-            f"rotation={rotation}°: route_net did not load U1's pad"
-        )
+        assert u1_pads is not None, f"rotation={rotation}°: route_net did not load U1's pad"
         assert len(u1_pads) == 1
         pad = u1_pads[0]
 
@@ -287,9 +284,7 @@ class TestBuildPadPositionsRotation:
     """
 
     @pytest.mark.parametrize("rotation", ROTATIONS)
-    def test_world_position_matches_get_pad_position(
-        self, tmp_path: Path, rotation: float
-    ) -> None:
+    def test_world_position_matches_get_pad_position(self, tmp_path: Path, rotation: float) -> None:
         pytest.importorskip("pydantic")
         from kicad_tools.mcp.tools.routing import _build_pad_positions
         from kicad_tools.schema.pcb import PCB
@@ -307,16 +302,13 @@ class TestBuildPadPositionsRotation:
         # Find U1's by closeness to expected.
         u1_actual = min(
             sig1_positions,
-            key=lambda p: (p[0] - expected_u1[0]) ** 2
-            + (p[1] - expected_u1[1]) ** 2,
+            key=lambda p: (p[0] - expected_u1[0]) ** 2 + (p[1] - expected_u1[1]) ** 2,
         )
         assert abs(u1_actual[0] - expected_u1[0]) < EPS, (
-            f"rotation={rotation}°: x mismatch — got {u1_actual[0]}, "
-            f"expected {expected_u1[0]}"
+            f"rotation={rotation}°: x mismatch — got {u1_actual[0]}, expected {expected_u1[0]}"
         )
         assert abs(u1_actual[1] - expected_u1[1]) < EPS, (
-            f"rotation={rotation}°: y mismatch — got {u1_actual[1]}, "
-            f"expected {expected_u1[1]}"
+            f"rotation={rotation}°: y mismatch — got {u1_actual[1]}, expected {expected_u1[1]}"
         )
 
 
@@ -384,12 +376,10 @@ class TestEstimateRoutabilityRotation:
 
         expected = _canonical_world(FP_POS, rotation, PAD_LOCAL)
         assert abs(pad["x"] - expected[0]) < EPS, (
-            f"rotation={rotation}°: U1 pad x={pad['x']} differs from "
-            f"canonical {expected[0]}"
+            f"rotation={rotation}°: U1 pad x={pad['x']} differs from canonical {expected[0]}"
         )
         assert abs(pad["y"] - expected[1]) < EPS, (
-            f"rotation={rotation}°: U1 pad y={pad['y']} differs from "
-            f"canonical {expected[1]}"
+            f"rotation={rotation}°: U1 pad y={pad['y']} differs from canonical {expected[1]}"
         )
 
 
@@ -425,12 +415,10 @@ class TestReasoningStatePadRotation:
 
         expected = _canonical_world(FP_POS, rotation, PAD_LOCAL)
         assert abs(pad.x - expected[0]) < EPS, (
-            f"rotation={rotation}°: U1.1 PadState.x={pad.x} differs "
-            f"from canonical {expected[0]}"
+            f"rotation={rotation}°: U1.1 PadState.x={pad.x} differs from canonical {expected[0]}"
         )
         assert abs(pad.y - expected[1]) < EPS, (
-            f"rotation={rotation}°: U1.1 PadState.y={pad.y} differs "
-            f"from canonical {expected[1]}"
+            f"rotation={rotation}°: U1.1 PadState.y={pad.y} differs from canonical {expected[1]}"
         )
 
 
@@ -464,9 +452,7 @@ class TestRoutePcbRotation:
         def fake_route_all(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003
             return []
 
-        monkeypatch.setattr(
-            "kicad_tools.router.core.Autorouter.route_all", fake_route_all
-        )
+        monkeypatch.setattr("kicad_tools.router.core.Autorouter.route_all", fake_route_all)
         monkeypatch.setattr(
             "kicad_tools.router.core.Autorouter.cleanup_artifacts",
             lambda self: None,
@@ -518,17 +504,15 @@ class TestRoutePcbRotation:
         ]
         net_map = {"SIG1": 1}
 
-        try:
+        # The patched route_all() returns an empty list; we only care
+        # that pad collection ran first.
+        with contextlib.suppress(Exception):
             route_pcb(
                 board_width=80,
                 board_height=60,
                 components=components,
                 net_map=net_map,
             )
-        except Exception:
-            # The patched route() may return an unexpected shape; we
-            # only care that pad collection ran first.
-            pass
 
         u1_pads = captured.get("U1")
         assert u1_pads is not None, "U1 not loaded into router"
@@ -537,12 +521,10 @@ class TestRoutePcbRotation:
 
         expected = _canonical_world(FP_POS, rotation, PAD_LOCAL)
         assert abs(pad["x"] - expected[0]) < EPS, (
-            f"rotation={rotation}°: route_pcb pad x={pad['x']} "
-            f"differs from canonical {expected[0]}"
+            f"rotation={rotation}°: route_pcb pad x={pad['x']} differs from canonical {expected[0]}"
         )
         assert abs(pad["y"] - expected[1]) < EPS, (
-            f"rotation={rotation}°: route_pcb pad y={pad['y']} "
-            f"differs from canonical {expected[1]}"
+            f"rotation={rotation}°: route_pcb pad y={pad['y']} differs from canonical {expected[1]}"
         )
 
 
@@ -628,9 +610,7 @@ class TestPlaceRouteOptimizerLoadRotation:
     """
 
     @pytest.mark.parametrize("rotation", ROTATIONS)
-    def test_pad_world_position_matches_canonical(
-        self, tmp_path: Path, rotation: float
-    ) -> None:
+    def test_pad_world_position_matches_canonical(self, tmp_path: Path, rotation: float) -> None:
         from kicad_tools.optim.place_route import PlaceRouteOptimizer
         from kicad_tools.schema.pcb import PCB
 
