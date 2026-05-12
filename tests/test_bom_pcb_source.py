@@ -16,7 +16,9 @@ from kicad_tools.schema.bom import BOM, BOMItem, extract_bom_from_pcb
 # ---------------------------------------------------------------------------
 
 BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
-VOLTAGE_DIVIDER_PCB = BOARDS_DIR / "01-voltage-divider" / "output" / "voltage_divider_routed.kicad_pcb"
+VOLTAGE_DIVIDER_PCB = (
+    BOARDS_DIR / "01-voltage-divider" / "output" / "voltage_divider_routed.kicad_pcb"
+)
 VOLTAGE_DIVIDER_SCH = BOARDS_DIR / "01-voltage-divider" / "output" / "voltage_divider.kicad_sch"
 
 
@@ -73,9 +75,7 @@ class TestExtractBomFromPcb:
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(vdiv_pcb_path))
-        excluded_refs = {
-            fp.reference for fp in pcb.footprints if fp.exclude_from_bom
-        }
+        excluded_refs = {fp.reference for fp in pcb.footprints if fp.exclude_from_bom}
 
         bom = extract_bom_from_pcb(str(vdiv_pcb_path))
         bom_refs = {item.reference for item in bom.items}
@@ -200,10 +200,7 @@ class TestAssemblyPackageBomSource:
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(vdiv_pcb_path))
-        expected_refs = {
-            fp.reference for fp in pcb.footprints
-            if not fp.exclude_from_bom
-        }
+        expected_refs = {fp.reference for fp in pcb.footprints if not fp.exclude_from_bom}
 
         config = AssemblyConfig(
             bom_source="pcb",
@@ -223,8 +220,14 @@ class TestAssemblyPackageBomSource:
             assert ref in content, f"Expected reference {ref} in BOM CSV"
 
     def test_schematic_source_without_schematic_raises(self, vdiv_pcb_path: Path, tmp_path: Path):
-        """bom_source='schematic' without schematic should raise ValidationError."""
-        from kicad_tools.exceptions import ValidationError
+        """bom_source='schematic' without a discoverable schematic should fail fast.
+
+        ``AssemblyPackage.__init__`` raises ``KiCadFileNotFoundError`` so that
+        no partial package is written to disk (regression: see issue #2741).
+        """
+        import pytest
+
+        from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
 
         config = AssemblyConfig(
@@ -232,14 +235,15 @@ class TestAssemblyPackageBomSource:
             auto_lcsc=False,
             no_spec=True,
         )
-        pkg = AssemblyPackage(
-            pcb_path=vdiv_pcb_path,
-            schematic_path="/nonexistent/path.kicad_sch",
-            config=config,
-        )
-        # The error is caught by export() and stored in result.errors
-        result = pkg.export(tmp_path)
-        assert any("BOM generation failed" in e for e in result.errors)
+        with pytest.raises(KiCadFileNotFoundError) as excinfo:
+            AssemblyPackage(
+                pcb_path=vdiv_pcb_path,
+                schematic_path="/nonexistent/path.kicad_sch",
+                config=config,
+            )
+        msg = str(excinfo.value)
+        assert "Schematic file not found" in msg
+        assert "--sch" in msg or "--bom-source pcb" in msg
 
     def test_auto_source_with_matching_refs(
         self, vdiv_pcb_path: Path, vdiv_sch_path: Path, tmp_path: Path
@@ -262,9 +266,7 @@ class TestAssemblyPackageBomSource:
         assert result.bom_path is not None
         assert result.bom_path.exists()
 
-    def test_auto_source_without_schematic_uses_pcb(
-        self, vdiv_pcb_path: Path, tmp_path: Path
-    ):
+    def test_auto_source_without_schematic_uses_pcb(self, vdiv_pcb_path: Path, tmp_path: Path):
         """auto mode should fall back to PCB when no schematic is available."""
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
 
@@ -410,7 +412,9 @@ class TestCliBomSourceArg:
 
         parser = argparse.ArgumentParser()
         parser.add_argument("pcb")
-        parser.add_argument("--bom-source", default="schematic", choices=["schematic", "pcb", "auto"])
+        parser.add_argument(
+            "--bom-source", default="schematic", choices=["schematic", "pcb", "auto"]
+        )
 
         args = parser.parse_args(["test.kicad_pcb", "--bom-source", "pcb"])
         assert args.bom_source == "pcb"
@@ -420,7 +424,9 @@ class TestCliBomSourceArg:
 
         parser = argparse.ArgumentParser()
         parser.add_argument("pcb")
-        parser.add_argument("--bom-source", default="schematic", choices=["schematic", "pcb", "auto"])
+        parser.add_argument(
+            "--bom-source", default="schematic", choices=["schematic", "pcb", "auto"]
+        )
 
         args = parser.parse_args(["test.kicad_pcb", "--bom-source", "auto"])
         assert args.bom_source == "auto"
@@ -430,7 +436,9 @@ class TestCliBomSourceArg:
 
         parser = argparse.ArgumentParser()
         parser.add_argument("pcb")
-        parser.add_argument("--bom-source", default="schematic", choices=["schematic", "pcb", "auto"])
+        parser.add_argument(
+            "--bom-source", default="schematic", choices=["schematic", "pcb", "auto"]
+        )
 
         args = parser.parse_args(["test.kicad_pcb"])
         assert args.bom_source == "schematic"

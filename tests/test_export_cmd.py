@@ -131,6 +131,9 @@ class TestExportCmdIntegration:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        # Sibling schematic is required for the default schematic-sourced
+        # BOM path -- AssemblyPackage now fails fast without it.
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -351,6 +354,9 @@ class TestExportCmdIncludeTHT:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        # Sibling schematic is required for the default schematic-sourced
+        # BOM path -- AssemblyPackage now fails fast without it.
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -391,6 +397,9 @@ class TestExportCmdIncludeTHT:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        # Sibling schematic is required for the default schematic-sourced
+        # BOM path -- AssemblyPackage now fails fast without it.
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -575,15 +584,14 @@ class TestExportCmdKeepVersions:
 
         def fake_export(self, output_dir=None, *, dry_run=False):
             from kicad_tools.export.manufacturing import ManufacturingResult
+
             od = Path(output_dir) if output_dir else self.config.output_dir
             return ManufacturingResult(output_dir=od)
 
         monkeypatch.setattr(ManufacturingPackage, "__init__", spy_init)
         monkeypatch.setattr(ManufacturingPackage, "export", fake_export)
 
-        rc = export_main(
-            [str(pcb), "--no-report", "--skip-preflight", "-o", str(tmp_path / "out")]
-        )
+        rc = export_main([str(pcb), "--no-report", "--skip-preflight", "-o", str(tmp_path / "out")])
         assert rc == 0
         assert captured_config["latest_report_only"] is True
 
@@ -596,7 +604,9 @@ class TestExportCmdKeepGerberFiles:
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
 
-        rc = export_main([str(pcb), "--keep-gerber-files", "--dry-run", "-o", str(tmp_path / "out")])
+        rc = export_main(
+            [str(pcb), "--keep-gerber-files", "--dry-run", "-o", str(tmp_path / "out")]
+        )
         assert rc == 0
 
     def test_keep_gerber_files_sets_gerber_config(self, tmp_path, monkeypatch):
@@ -618,6 +628,7 @@ class TestExportCmdKeepGerberFiles:
 
         def fake_export(self, output_dir=None, *, dry_run=False):
             from kicad_tools.export.manufacturing import ManufacturingResult
+
             od = Path(output_dir) if output_dir else self.config.output_dir
             return ManufacturingResult(output_dir=od)
 
@@ -638,3 +649,189 @@ class TestExportCmdKeepGerberFiles:
         assert captured_config["gerber_config"] is not None
         assert captured_config["gerber_config"].clean_after_zip is False
 
+
+class TestExportCmdSchematicAutoDiscovery:
+    """Regression tests for issue #2741 -- sibling .kicad_sch discovery.
+
+    The original symptom was 'absolute --pcb path yields 6/8 files instead
+    of 8'.  The curator narrowed the real bug to two underlying gaps:
+
+    1. ``find_schematic`` was assumed to be CWD-sensitive (it is not).
+       This test confirms an absolute PCB path resolves the sibling
+       schematic identically whether the CWD is the board dir or not.
+
+    2. When the schematic genuinely cannot be auto-discovered (e.g. the
+       PCB was copied to a directory with no sibling schematic), the old
+       code silently wrote a partial package (Gerbers/CPL/Report/etc.) to
+       disk and then surfaced a BOM error in stderr.  The fix makes
+       ``AssemblyPackage.__init__`` fail fast, so nothing is written.
+    """
+
+    def test_absolute_pcb_path_outside_cwd_produces_full_package(self, tmp_path, monkeypatch):
+        """Running kct export with an absolute --pcb path from an unrelated
+        CWD must still discover the sibling .kicad_sch and produce a full
+        package (no missing BOM).
+        """
+        # Project lives in board_dir; we will run from cwd_dir (different).
+        board_dir = tmp_path / "boards" / "stm32_devboard" / "output"
+        board_dir.mkdir(parents=True)
+        # _routed suffix exercises the SCHEMATIC_STRIP_SUFFIXES path.
+        pcb = board_dir / "stm32_devboard_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = board_dir / "stm32_devboard.kicad_sch"
+        sch.write_text("(kicad_sch)")
+
+        cwd_dir = tmp_path / "elsewhere"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+
+        from kicad_tools.export import assembly
+
+        captured_schematic = {}
+
+        original_init = assembly.AssemblyPackage.__init__
+
+        def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+            original_init(self, pcb_path, schematic_path, manufacturer, config)
+            captured_schematic["value"] = self.schematic_path
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            cpl_path = od / "cpl_jlcpcb.csv"
+            cpl_path.write_text("Designator\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+                pnp_path=cpl_path,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "__init__", spy_init)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        out_dir = tmp_path / "out_abs"
+        rc = export_main(
+            [
+                str(pcb.resolve()),  # absolute, outside CWD
+                "--no-report",
+                "--skip-preflight",
+                "-o",
+                str(out_dir),
+            ]
+        )
+
+        assert rc == 0
+        # The schematic was auto-discovered via _routed stripping
+        assert captured_schematic["value"] == sch
+        # Manifest contains the BOM (the original missing artefact)
+        assert (out_dir / "bom_jlcpcb.csv").exists()
+        assert (out_dir / "manifest.json").exists()
+
+    def test_missing_sibling_schematic_fails_fast(self, tmp_path, capsys):
+        """When a .kicad_pcb has no discoverable sibling .kicad_sch and
+        the default schematic-sourced BOM is selected, kct export must:
+
+        - return a non-zero exit code,
+        - print an error naming the PCB stem and suggesting --sch /
+          --bom-source pcb, and
+        - leave no partial package on disk (no Gerbers, no CPL, no
+          manifest, no project zip, no README).
+        """
+        orphan_dir = tmp_path / "orphan"
+        orphan_dir.mkdir()
+        pcb = orphan_dir / "orphan_pcb.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        # No sibling .kicad_sch, no .kicad_pro -- discovery cannot succeed.
+
+        out_dir = tmp_path / "out"
+        rc = export_main(
+            [
+                str(pcb),
+                "--no-report",
+                "--skip-preflight",
+                "-o",
+                str(out_dir),
+            ]
+        )
+
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        # Error names the PCB stem and the remediation hints
+        assert "Schematic file not found" in combined
+        assert "orphan_pcb" in combined
+        assert ("--sch" in combined) or ("--bom-source pcb" in combined)
+
+        # No partial package on disk: AssemblyPackage construction failed
+        # before mkdir, so nothing should have been written.
+        if out_dir.exists():
+            written = list(out_dir.iterdir())
+            assert written == [], (
+                f"Expected no partial package on disk, found: {[p.name for p in written]}"
+            )
+
+    def test_missing_schematic_with_bom_source_pcb_succeeds(self, tmp_path, monkeypatch):
+        """``--bom-source pcb`` is the documented escape hatch for the
+        missing-schematic case.  It must not fail in AssemblyPackage.__init__.
+        """
+        orphan_dir = tmp_path / "orphan"
+        orphan_dir.mkdir()
+        pcb = orphan_dir / "orphan_pcb.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        out_dir = tmp_path / "out"
+        rc = export_main(
+            [
+                str(pcb),
+                "--bom-source",
+                "pcb",
+                "--no-report",
+                "--no-project-zip",
+                "--skip-preflight",
+                "-o",
+                str(out_dir),
+            ]
+        )
+        assert rc == 0
+
+    def test_missing_schematic_with_no_bom_succeeds(self, tmp_path, monkeypatch):
+        """``--no-bom`` should likewise bypass the schematic requirement."""
+        orphan_dir = tmp_path / "orphan"
+        orphan_dir.mkdir()
+        pcb = orphan_dir / "orphan_pcb.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        out_dir = tmp_path / "out"
+        rc = export_main(
+            [
+                str(pcb),
+                "--no-bom",
+                "--no-report",
+                "--no-project-zip",
+                "--skip-preflight",
+                "-o",
+                str(out_dir),
+            ]
+        )
+        assert rc == 0

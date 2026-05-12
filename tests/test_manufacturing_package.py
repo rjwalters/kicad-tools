@@ -393,6 +393,7 @@ class TestManufacturingPackageExport:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -449,6 +450,7 @@ class TestManufacturingPackageExport:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -509,6 +511,7 @@ class TestManufacturingPackageExport:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 
@@ -563,6 +566,7 @@ class TestManufacturingPackageExport:
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
 
         from kicad_tools.export import assembly
 

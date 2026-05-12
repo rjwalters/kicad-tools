@@ -12,6 +12,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+#: Suffixes stripped from a PCB stem when looking for a sibling schematic.
+#: Exposed at module scope so error reporters (e.g. AssemblyPackage) can
+#: surface the exact candidates that were tried.
+SCHEMATIC_STRIP_SUFFIXES: tuple[str, ...] = ("_routed", "_fixed", "_v2", "_final")
+
 
 def find_schematic(pcb_path: Path) -> Path | None:
     """Locate the root .kicad_sch file for a given .kicad_pcb.
@@ -42,9 +47,8 @@ def find_schematic(pcb_path: Path) -> Path | None:
         return candidate
 
     # Step 1.5: strip known suffixes (_routed, _fixed, etc.) from the PCB stem
-    _STRIP_SUFFIXES = ("_routed", "_fixed", "_v2", "_final")
     stem = pcb_path.stem
-    for suffix in _STRIP_SUFFIXES:
+    for suffix in SCHEMATIC_STRIP_SUFFIXES:
         if stem.endswith(suffix):
             stripped = directory / (stem[: -len(suffix)] + ".kicad_sch")
             if stripped.exists():
@@ -76,6 +80,46 @@ def find_schematic(pcb_path: Path) -> Path | None:
 
     # Step 4: no candidates at all
     return None
+
+
+def schematic_candidate_paths(pcb_path: Path) -> list[Path]:
+    """Enumerate the schematic paths considered by :func:`find_schematic`.
+
+    Returns the list of concrete candidate paths (not just suffixes) that
+    auto-discovery checks for a given PCB.  Useful for error messages when
+    discovery fails -- the caller can show the user every path that was
+    probed, so they can diagnose why none matched.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+
+    Returns:
+        Ordered list of :class:`~pathlib.Path` objects in the same order
+        :func:`find_schematic` consults them.  Includes the direct stem
+        match, each ``_routed`` / ``_fixed`` / ``_v2`` / ``_final``
+        suffix-stripped candidate, and any project-file-derived candidates.
+    """
+    directory = pcb_path.parent
+    candidates: list[Path] = [pcb_path.with_suffix(".kicad_sch")]
+
+    stem = pcb_path.stem
+    for suffix in SCHEMATIC_STRIP_SUFFIXES:
+        if stem.endswith(suffix):
+            candidates.append(directory / (stem[: -len(suffix)] + ".kicad_sch"))
+            break
+
+    for pro in sorted(directory.glob("*.kicad_pro")):
+        project_stem = _project_stem(pro)
+        candidates.append(directory / (project_stem + ".kicad_sch"))
+
+    # De-duplicate while preserving order
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
 
 
 def _project_stem(pro_path: Path) -> str:
