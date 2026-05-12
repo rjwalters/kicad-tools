@@ -13,6 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
 
 def _find_pcb_for_export(directory: Path) -> Path | None:
     """Find a .kicad_pcb file in the given directory for export.
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         "--mfr",
         "-m",
         default="jlcpcb",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed", "generic"],
+        choices=[*get_all_manufacturer_names(), "generic"],
         help="Target manufacturer (default: jlcpcb)",
     )
     parser.add_argument(

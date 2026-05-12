@@ -53,6 +53,7 @@ __all__ = [
     "get_profile",
     "list_manufacturers",
     "get_manufacturer_ids",
+    "get_all_manufacturer_names",
     "load_design_rules_from_yaml",
     "load_rotation_corrections",
     "match_rotation_correction",
@@ -146,6 +147,28 @@ def get_manufacturer_ids() -> list[str]:
         List of manufacturer ID strings
     """
     return sorted(_PROFILES.keys())
+
+
+def get_all_manufacturer_names() -> list[str]:
+    """
+    Get every name accepted by ``get_profile`` -- canonical IDs and aliases.
+
+    Returns the union of ``_PROFILES`` keys (canonical names) and
+    ``_ALIASES`` keys (alternate spellings such as ``jlc``, ``lcsc``,
+    ``jlcpcb_tier1``, ``jlcpcb-capabilityplus``, ...). This is the
+    correct ``choices=`` source for argparse ``--mfr`` flags: it accepts
+    every spelling the registry resolves, mirroring the router's CLI
+    behaviour.
+
+    See issue #2793 for why ``get_manufacturer_ids()`` alone is not
+    sufficient (it returns canonicals only, silently rejecting valid
+    aliases such as ``jlcpcb_tier1`` at argparse-time before
+    ``get_profile()`` is ever called).
+
+    Returns:
+        Sorted list of every manufacturer name and alias.
+    """
+    return sorted(set(_PROFILES.keys()) | set(_ALIASES.keys()))
 
 
 def compare_design_rules(

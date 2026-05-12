@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
 if TYPE_CHECKING:
     from kicad_tools.spec.schema import ProjectSpec
 
@@ -2331,7 +2333,7 @@ Examples:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer for verification (default: jlcpcb)",
     )

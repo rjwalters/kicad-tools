@@ -47,6 +47,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["main"]
@@ -2153,7 +2155,7 @@ Examples:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
