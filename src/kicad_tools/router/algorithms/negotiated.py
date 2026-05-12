@@ -612,6 +612,15 @@ class NegotiatedRouter:
         # progress, rather than blanket retry.
         self._last_via_blocking_nets: set[tuple[int, int]] = set()
 
+        # Issue #2769: Set of net ids whose RSMT edge loop was aborted
+        # because the cumulative per_net_timeout budget was exhausted
+        # mid-loop.  Distinct from per-edge BLOCKED_PATH or VIA_BLOCKED
+        # failures -- these nets ran out of wall-clock budget while still
+        # progressing.  Drained by the outer loop via
+        # :meth:`get_and_clear_timeout_failures` so audit logs can
+        # differentiate "couldn't find path" from "ran out of net budget".
+        self._last_timeout_failures: set[int] = set()
+
     def route_net_negotiated(
         self,
         pad_objs: list[Pad],
@@ -626,14 +635,25 @@ class NegotiatedRouter:
             pad_objs: List of Pad objects to connect
             present_cost_factor: Multiplier for present sharing cost
             mark_route_callback: Callback to mark a route on the grid
-            per_net_timeout: Optional wall-clock timeout in seconds for each
-                A* search within this net (Issue #1605)
+            per_net_timeout: Optional wall-clock timeout in seconds that
+                brackets THIS WHOLE NET (Issue #1605, fixed in Issue #2769).
+                For multi-pin nets the budget is shared across all RSMT
+                edges: edges run sequentially against a cumulative
+                ``time.monotonic()`` deadline, and each edge receives the
+                REMAINING budget.  Once exhausted, the remaining edges are
+                short-circuited as ``_FAILURE_TIMEOUT`` (drainable via
+                :meth:`get_and_clear_timeout_failures`).  For 2-pin nets
+                the budget caps the single A* search.
             failure_callback: Optional callback to record routing failures.
                 Called with (source_pad, target_pad) when routing fails
-                (Issue #2425).
+                (Issue #2425).  Also fired for edges short-circuited by
+                cumulative-timeout exhaustion (Issue #2769) so the
+                rip-up/retry layer in Issue #2476 sees them.
 
         Returns:
-            List of routes created
+            List of routes created.  Partial nets are preserved: routes
+            produced before a cumulative-timeout abort are NOT discarded
+            (Issue #2769 acceptance criterion).
 
         Notes:
             Issue #2476: After every failed sub-route (RSMT edge or 2-pin
@@ -645,6 +665,11 @@ class NegotiatedRouter:
             uses that list (via :meth:`get_and_clear_via_blocking_nets`) to
             target rip-up at the specific blockers rather than blanket
             retry.
+
+            Issue #2769: Cumulative-timeout aborts (whole-net budget
+            exhausted) are tracked separately in
+            ``self._last_timeout_failures`` so audit logs can differentiate
+            "ran out of net budget" from "no path / via-blocked".
         """
         if len(pad_objs) < 2:
             return []
@@ -689,15 +714,51 @@ class NegotiatedRouter:
             # full-grid searches for high-fanout nets like GNDD.
             routed_cells: set[tuple[int, int, int]] = set()
 
+            # Issue #2769: ``per_net_timeout`` brackets the WHOLE net, not
+            # each RSMT edge.  Compute a single cumulative deadline before
+            # the loop and pass each edge the REMAINING budget so that:
+            #   - the last edge sees per_net_timeout >= remaining          (<=
+            #     per_net_timeout for an individual A* search invariant), and
+            #   - sum of all edge wall-times <= per_net_timeout             (<=
+            #     per_net_timeout for the whole-net invariant).
+            # When the budget is exhausted mid-loop we short-circuit the
+            # remaining edges, record them as timeout failures (distinct
+            # from BLOCKED_PATH / VIA_VIA_BLOCKED), and ``continue`` so each
+            # skipped edge still surfaces via ``failure_callback`` for the
+            # rip-up / retry layer (Issue #2476).
+            net_deadline = (
+                time.monotonic() + per_net_timeout
+                if per_net_timeout is not None
+                else None
+            )
+
             for i, j in rsmt_edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
+
+                if net_deadline is not None:
+                    remaining = net_deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Cumulative net-budget exhausted before this edge
+                        # could be attempted.  Classify as _FAILURE_TIMEOUT
+                        # (Issue #2610) so audit logs can differentiate this
+                        # from a genuine BLOCKED_PATH, and ``continue`` so
+                        # every skipped edge is still surfaced to the
+                        # rip-up/retry layer via ``failure_callback``.
+                        self._last_timeout_failures.add(source_pad.net)
+                        if failure_callback is not None:
+                            failure_callback(source_pad, target_pad)
+                        continue
+                    edge_timeout: float | None = remaining
+                else:
+                    edge_timeout = None
+
                 route = self.router.route(
                     source_pad,
                     target_pad,
                     negotiated_mode=True,
                     present_cost_factor=present_cost_factor,
-                    per_net_timeout=per_net_timeout,
+                    per_net_timeout=edge_timeout,
                     extra_goal_cells=routed_cells if routed_cells else None,
                 )
                 if route:
@@ -838,6 +899,26 @@ class NegotiatedRouter:
         """
         result = self._last_via_blocking_nets
         self._last_via_blocking_nets = set()
+        return result
+
+    def get_and_clear_timeout_failures(self) -> set[int]:
+        """Drain and return the set of net ids that hit a cumulative
+        per-net timeout during the most recent ``route_net_negotiated``
+        invocation(s).
+
+        Issue #2769: When the cumulative ``per_net_timeout`` budget is
+        exhausted mid-RSMT-loop, the remaining edges are short-circuited
+        and the net id is recorded here so the negotiated outer loop can
+        distinguish "ran out of net budget" from "found no path" in audit
+        logs.  After draining, the internal set is cleared so subsequent
+        iterations only see fresh diagnostics.
+
+        Returns:
+            A set of net ids.  Empty if no cumulative-timeout failures
+            have been recorded since the last drain.
+        """
+        result = self._last_timeout_failures
+        self._last_timeout_failures = set()
         return result
 
     def _collect_route_cells(
