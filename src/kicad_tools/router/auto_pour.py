@@ -37,6 +37,25 @@ automatically by the layer/priority allocator in
 a 2-layer stackup each ground gets a distinct priority on ``B.Cu`` to
 avoid the "zero copper" override that occurs when zones share both
 layer and priority.  See that function's docstring for the full rule.
+
+Geometric outline partition (#2771)
+-----------------------------------
+
+The layer/priority allocator alone is not sufficient when N≥2 zones
+share a single layer (the common case on 2-layer stackups, and the
+fallback path on 4-layer stackups with 3+ power nets).  Distinct
+priorities prevent the explicit zero-copper warning, but KiCad's fill
+resolver still awards the entire overlapping region to the highest
+priority zone, so siblings receive zero usable copper.
+
+To make every zone produce real copper, this module delegates to
+``kicad_tools.zones.generator.auto_create_zones_for_pour_nets``, which
+runs the **outline allocator** (``_compute_pour_outlines``) after layer
+assignment.  Zones that share a layer with one or more siblings get a
+per-net bounding-box outline (default 1.5 mm margin around the net's
+pads, clipped to the board outline), while zones that are the only zone
+on their layer keep the full board outline so return-path planes stay
+continuous.  See that function's docstring for the contract.
 """
 
 from __future__ import annotations

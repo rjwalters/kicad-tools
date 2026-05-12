@@ -758,3 +758,393 @@ class TestRouteStepPostcondition:
         nonexistent = tmp_path / "ghost.kicad_pcb"
         result = _check_route_postcondition(input_pcb=nonexistent, routed_pcb=nonexistent)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Geometric outline allocator (issue #2771)
+# ---------------------------------------------------------------------------
+
+
+def _aabb(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+    """Return axis-aligned bounding box (x_min, y_min, x_max, y_max)."""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _aabbs_overlap(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    """Return True iff the two AABBs overlap (touching edges allowed)."""
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+class TestAutoPourGeometricOutlines:
+    """Tests for the outline allocator added in issue #2771.
+
+    When two or more pour zones land on the same layer, they must use
+    *disjoint per-net bounding outlines* rather than the full board
+    outline.  Otherwise KiCad's fill resolver awards the entire shared
+    region to the highest-priority zone and the siblings receive zero
+    copper -- the exact failure mode on board 05 documented in #2771.
+
+    These tests cover the three scenarios called out in the issue's
+    acceptance criteria:
+      * 2-layer board with 4 power nets on F.Cu + GND on B.Cu
+      * 4-layer board with the same pour set (GND on In1.Cu full-outline)
+      * Edge case: power net with a single pad (fall back to a small
+        default square, not a zero-area polygon)
+    """
+
+    # ----- fixtures -----------------------------------------------------
+
+    @staticmethod
+    def _make_pcb(tmp_path: Path, layers_block: str, footprints_block: str) -> Path:
+        """Build a minimal PCB with the given layers and footprints.
+
+        The board 05 pour set has 5 nets (VMOTOR / +5V / +3.3V / GND /
+        PWR_LED).  Footprints are laid out in disjoint clusters along the
+        x axis so each net's bounding box is geometrically separated --
+        this mirrors the way real boards arrange their power
+        sub-circuits and lets the test assert that the bbox allocator
+        produces disjoint outlines.
+        """
+        pcb_text = f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+{layers_block}
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VMOTOR")
+  (net 3 "+5V")
+  (net 4 "+3.3V")
+  (net 5 "PWR_LED")
+  (gr_rect
+    (start 0 0)
+    (end 100 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+{footprints_block}
+)
+"""
+        p = tmp_path / "board.kicad_pcb"
+        p.write_text(pcb_text)
+        return p
+
+    @staticmethod
+    def _footprints_for_board05_layout() -> str:
+        """Footprints arranged so each power net has a disjoint pad cluster.
+
+        Layout (x positions, all on F.Cu):
+          VMOTOR  cluster: x = 10, 12      (with U1, U2)
+          +5V     cluster: x = 30, 32      (U3, U4)
+          +3.3V   cluster: x = 50, 52      (U5, U6)
+          PWR_LED cluster: x = 70, 72      (U7, U8)
+          GND     pads at every footprint (return-path style)
+        """
+        rows = []
+
+        def fp(ref: str, x: float, pwr_net: str) -> str:
+            return f"""  (footprint "Test:{ref}"
+    (layer "F.Cu")
+    (at {x} 25)
+    (uuid "fp-{ref}-uuid")
+    (property "Reference" "{ref}"
+      (at 0 -2 0)
+      (layer "F.SilkS")
+      (uuid "prop-{ref}-ref-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "TEST"
+      (at 0 2 0)
+      (layer "F.Fab")
+      (uuid "prop-{ref}-val-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net {pwr_net} ))
+  )"""
+
+        # The board 05 pour set: 4 distinct power nets + GND.
+        rows.append(fp("U1", 10, '2 "VMOTOR"'))
+        rows.append(fp("U2", 12, '2 "VMOTOR"'))
+        rows.append(fp("U3", 30, '3 "+5V"'))
+        rows.append(fp("U4", 32, '3 "+5V"'))
+        rows.append(fp("U5", 50, '4 "+3.3V"'))
+        rows.append(fp("U6", 52, '4 "+3.3V"'))
+        rows.append(fp("U7", 70, '5 "PWR_LED"'))
+        rows.append(fp("U8", 72, '5 "PWR_LED"'))
+        return "\n".join(rows)
+
+    @pytest.fixture
+    def two_layer_board05_pcb(self, tmp_path: Path) -> Path:
+        layers = '    (0 "F.Cu" signal)\n    (31 "B.Cu" signal)'
+        fps = self._footprints_for_board05_layout()
+        return self._make_pcb(tmp_path, layers, fps)
+
+    @pytest.fixture
+    def four_layer_board05_pcb(self, tmp_path: Path) -> Path:
+        layers = (
+            '    (0 "F.Cu" signal)\n'
+            '    (1 "In1.Cu" signal)\n'
+            '    (2 "In2.Cu" signal)\n'
+            '    (31 "B.Cu" signal)'
+        )
+        fps = self._footprints_for_board05_layout()
+        return self._make_pcb(tmp_path, layers, fps)
+
+    @pytest.fixture
+    def single_pad_power_pcb(self, tmp_path: Path) -> Path:
+        """PCB where +3.3V has exactly one pad on the whole board.
+
+        Exercises the single-pad fallback in ``_bbox_polygon`` (a
+        zero-extent pad cluster must produce a non-degenerate square,
+        not a zero-area polygon).
+        """
+        layers = '    (0 "F.Cu" signal)\n    (31 "B.Cu" signal)'
+        fps = """  (footprint "Test:U1"
+    (layer "F.Cu")
+    (at 10 10)
+    (uuid "fp-u1-uuid")
+    (property "Reference" "U1"
+      (at 0 -2 0) (layer "F.SilkS") (uuid "prop-u1-ref-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "TEST"
+      (at 0 2 0) (layer "F.Fab") (uuid "prop-u1-val-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 4 "+3.3V"))
+    (pad "3" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 3 "+5V"))
+  )
+  (footprint "Test:U2"
+    (layer "F.Cu")
+    (at 40 10)
+    (uuid "fp-u2-uuid")
+    (property "Reference" "U2"
+      (at 0 -2 0) (layer "F.SilkS") (uuid "prop-u2-ref-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "TEST"
+      (at 0 2 0) (layer "F.Fab") (uuid "prop-u2-val-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 3 "+5V"))
+  )"""
+        return self._make_pcb(tmp_path, layers, fps)
+
+    # ----- tests --------------------------------------------------------
+
+    def test_2layer_power_nets_have_disjoint_bboxes(
+        self, two_layer_board05_pcb: Path, capsys: pytest.CaptureFixture
+    ):
+        """Board 05 pour set on 2-layer: 4 power F.Cu zones must be disjoint."""
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pour_nets = [
+            ("VMOTOR", NetClass.POWER),
+            ("+5V", NetClass.POWER),
+            ("+3.3V", NetClass.POWER),
+            ("GND", NetClass.GROUND),
+            ("PWR_LED", NetClass.POWER),
+        ]
+        count = auto_create_zones_for_pour_nets(two_layer_board05_pcb, pour_nets)
+        assert count == 5
+
+        # Every power-net zone must have a distinct AABB on F.Cu.
+        pcb = PCB.load(str(two_layer_board05_pcb))
+        f_cu_zones = [z for z in pcb.zones if z.layer == "F.Cu"]
+        assert len(f_cu_zones) == 4, (
+            f"Expected 4 power-net zones on F.Cu, got {[z.net_name for z in f_cu_zones]}"
+        )
+
+        boxes = {z.net_name: _aabb(z.polygon) for z in f_cu_zones}
+
+        # All 4 AABBs must be pairwise distinct (no two nets share an outline).
+        unique_boxes = {tuple(round(v, 3) for v in box) for box in boxes.values()}
+        assert len(unique_boxes) == 4, f"AABBs not unique: {boxes}"
+
+        # No two AABBs may overlap (this is the fix's core invariant).
+        names = list(boxes)
+        for i, name_a in enumerate(names):
+            for name_b in names[i + 1 :]:
+                assert not _aabbs_overlap(boxes[name_a], boxes[name_b]), (
+                    f"AABBs for {name_a} and {name_b} overlap: {boxes[name_a]} vs {boxes[name_b]}"
+                )
+
+        # No overlap warnings should have been emitted to stderr by
+        # ``_check_overlap`` -- the whole point of the geometric
+        # partition is to silence them on legitimate multi-power boards.
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err, (
+            f"Unexpected overlap warning(s) from _check_overlap:\n{captured.err}"
+        )
+
+    def test_2layer_gnd_retains_full_outline(self, two_layer_board05_pcb: Path):
+        """GND on B.Cu is the only zone on its layer -> full board outline."""
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pour_nets = [
+            ("VMOTOR", NetClass.POWER),
+            ("+5V", NetClass.POWER),
+            ("+3.3V", NetClass.POWER),
+            ("GND", NetClass.GROUND),
+            ("PWR_LED", NetClass.POWER),
+        ]
+        auto_create_zones_for_pour_nets(two_layer_board05_pcb, pour_nets)
+
+        pcb = PCB.load(str(two_layer_board05_pcb))
+        gnd_zones = [z for z in pcb.zones if z.net_name == "GND"]
+        assert len(gnd_zones) == 1
+        assert gnd_zones[0].layer == "B.Cu"
+
+        # GND must span the full 100x50 board (allow 1mm slop for rounding).
+        x_min, y_min, x_max, y_max = _aabb(gnd_zones[0].polygon)
+        assert x_min <= 1.0
+        assert y_min <= 1.0
+        assert x_max >= 99.0
+        assert y_max >= 49.0
+
+    def test_4layer_gnd_keeps_full_inner_plane(
+        self, four_layer_board05_pcb: Path, capsys: pytest.CaptureFixture
+    ):
+        """4-layer: GND on In1.Cu sole-zone -> full board outline preserved.
+
+        On 4-layer boards the GROUND return-path plane *must* span the
+        full board so signals can cross over it without gaps.  This is
+        the core of the "hybrid" strategy: only zones that share a layer
+        get per-net bounding regions; sole-layer zones (GND) keep the
+        full outline.
+        """
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pour_nets = [
+            ("VMOTOR", NetClass.POWER),
+            ("+5V", NetClass.POWER),
+            ("+3.3V", NetClass.POWER),
+            ("GND", NetClass.GROUND),
+            ("PWR_LED", NetClass.POWER),
+        ]
+        count = auto_create_zones_for_pour_nets(four_layer_board05_pcb, pour_nets)
+        assert count == 5
+
+        pcb = PCB.load(str(four_layer_board05_pcb))
+
+        # GND should be on In1.Cu and span the full board.
+        gnd = next(z for z in pcb.zones if z.net_name == "GND")
+        assert gnd.layer == "In1.Cu"
+        x_min, y_min, x_max, y_max = _aabb(gnd.polygon)
+        assert x_min <= 1.0 and y_min <= 1.0
+        assert x_max >= 99.0 and y_max >= 49.0, (
+            f"GND on In1.Cu should be full-outline, got AABB ({x_min}, {y_min})-({x_max}, {y_max})"
+        )
+
+        # The first-priority power net (VMOTOR) is sole on In2.Cu --
+        # should also keep the full outline so it acts as a power plane.
+        vmotor = next(z for z in pcb.zones if z.net_name == "VMOTOR")
+        assert vmotor.layer == "In2.Cu"
+        x_min, y_min, x_max, y_max = _aabb(vmotor.polygon)
+        assert x_max - x_min > 50.0  # spans most of the board
+        assert y_max - y_min > 25.0
+
+        # The remaining three power nets share F.Cu -- they must use
+        # disjoint per-net bounding outlines.
+        f_cu_zones = [z for z in pcb.zones if z.layer == "F.Cu"]
+        assert len(f_cu_zones) == 3, (
+            f"Expected 3 F.Cu zones (+5V/+3.3V/PWR_LED), got {[z.net_name for z in f_cu_zones]}"
+        )
+        boxes = {z.net_name: _aabb(z.polygon) for z in f_cu_zones}
+        names = list(boxes)
+        for i, name_a in enumerate(names):
+            for name_b in names[i + 1 :]:
+                assert not _aabbs_overlap(boxes[name_a], boxes[name_b]), (
+                    f"F.Cu zones {name_a}/{name_b} overlap: {boxes[name_a]} vs {boxes[name_b]}"
+                )
+
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err, f"Unexpected overlap warning(s):\n{captured.err}"
+
+    def test_single_pad_net_uses_fallback_square(self, single_pad_power_pcb: Path):
+        """Power net with one pad: outline is a small square, not zero-area.
+
+        ``+3.3V`` has exactly one pad on the board.  The bbox allocator
+        must produce a non-degenerate polygon (default 4 mm square)
+        rather than a zero-extent point that KiCad would silently drop.
+        """
+        from kicad_tools.zones.generator import (
+            SINGLE_PAD_FALLBACK_SIDE_MM,
+            auto_create_zones_for_pour_nets,
+        )
+
+        pour_nets = [
+            ("+5V", NetClass.POWER),
+            ("+3.3V", NetClass.POWER),
+            ("GND", NetClass.GROUND),
+        ]
+        count = auto_create_zones_for_pour_nets(single_pad_power_pcb, pour_nets)
+        assert count == 3
+
+        pcb = PCB.load(str(single_pad_power_pcb))
+        # Both power zones land on F.Cu (shared) so both must get per-net
+        # bounding outlines.
+        threev_zones = [z for z in pcb.zones if z.net_name == "+3.3V"]
+        assert len(threev_zones) == 1
+        polygon = threev_zones[0].polygon
+        x_min, y_min, x_max, y_max = _aabb(polygon)
+        width = x_max - x_min
+        height = y_max - y_min
+
+        # The polygon must have non-zero area (the failure mode the test
+        # guards against is a zero-area polygon that KiCad drops).
+        assert width > 0.5, f"+3.3V polygon collapsed: width={width}"
+        assert height > 0.5, f"+3.3V polygon collapsed: height={height}"
+
+        # The polygon must be smaller than the full board (the whole
+        # point is to NOT use the full outline when sharing a layer).
+        assert width < 90.0
+        assert height < 40.0
+
+        # And the fallback square is at least roughly the configured size.
+        # (Bbox allocator with one pad emits the default square, possibly
+        # clipped to the board outline.)
+        assert width <= SINGLE_PAD_FALLBACK_SIDE_MM + 0.1
+        assert height <= SINGLE_PAD_FALLBACK_SIDE_MM + 0.1
+
+    def test_compute_pour_outlines_returns_none_for_sole_layer(self, two_layer_board05_pcb: Path):
+        """Direct unit test: sole-layer zones (GND) get ``None`` outline."""
+        from kicad_tools.zones import ZoneGenerator
+        from kicad_tools.zones.generator import (
+            _assign_layers_for_pour_nets,
+            _compute_pour_outlines,
+        )
+
+        pour_nets = [
+            ("VMOTOR", NetClass.POWER),
+            ("+5V", NetClass.POWER),
+            ("+3.3V", NetClass.POWER),
+            ("GND", NetClass.GROUND),
+            ("PWR_LED", NetClass.POWER),
+        ]
+        gen = ZoneGenerator.from_pcb(two_layer_board05_pcb)
+        pcb = gen.pcb
+
+        assignments = _assign_layers_for_pour_nets(2, pour_nets)
+        outlines = _compute_pour_outlines(pcb, assignments, gen.board_outline)
+
+        # GND is the only zone on B.Cu -> None (use full board outline)
+        assert outlines["GND"] is None
+        # Every shared-layer zone (F.Cu) -> concrete polygon
+        for net in ("VMOTOR", "+5V", "+3.3V", "PWR_LED"):
+            assert outlines[net] is not None, f"{net} should have a per-net outline"
+            assert len(outlines[net]) >= 3, f"{net} polygon must have >=3 vertices"

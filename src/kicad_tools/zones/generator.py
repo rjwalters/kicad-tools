@@ -3,10 +3,29 @@ Zone generator for creating copper pour zones on PCBs.
 
 This module provides a high-level API for generating copper pour zones,
 with automatic board outline detection and sensible defaults for power nets.
+
+Outline allocator (#2771)
+-------------------------
+
+In addition to the layer/priority allocator (:func:`_assign_layers_for_pour_nets`),
+this module owns the *outline* allocator (:func:`_compute_pour_outlines`).
+The outline allocator runs after layer assignment and decides whether each
+zone should use the full board outline (when it is the only zone on its
+layer) or a per-net bounding region derived from that net's pads (when it
+shares a layer with another zone).
+
+This is the fix for the "all power nets share F.Cu with identical board
+outlines, so the highest-priority zone wins everything" failure documented
+in #2771.  Earlier issues #2410 / #2041 / #2593 made the priorities
+distinct, which silenced the warning, but distinct priorities alone do not
+produce real copper for the losing zones -- the outlines have to be
+geometrically disjoint for KiCad's fill resolver to award copper to more
+than one zone on a shared layer.
 """
 
 from __future__ import annotations
 
+import math
 import sys
 import uuid as uuid_module
 from collections.abc import Sequence
@@ -915,6 +934,244 @@ def _assign_layers_for_pour_nets(
     return assignments
 
 
+# ---------------------------------------------------------------------------
+# Outline allocator (#2771)
+# ---------------------------------------------------------------------------
+
+# Default per-net margin around the pad bounding box, in mm.  1.5 mm gives
+# enough copper around each pad cluster for thermal relief and trace exits
+# without aggressively encroaching on neighbouring nets.  Empirically chosen
+# during the curator analysis of board 05.
+DEFAULT_POUR_BBOX_MARGIN_MM = 1.5
+
+# Default side length of the fallback square emitted when a net has only a
+# single pad (or all its pads coincide).  Slightly larger than the margin
+# alone so single-pad nets still receive a usable copper patch.
+SINGLE_PAD_FALLBACK_SIDE_MM = 4.0
+
+
+def _net_pad_positions_absolute(
+    pcb: PCB,
+    net_name: str,
+) -> list[tuple[float, float]]:
+    """Return sheet-absolute (x, y) positions of every pad on ``net_name``.
+
+    ``Footprint.position`` is board-relative after :meth:`PCB._detect_board_origin`,
+    so we add the board origin back to produce coordinates in the same frame
+    as :pyattr:`ZoneGenerator.board_outline` (which is the frame expected by
+    ``add_zone(boundary=)``).
+
+    Pads with ``net_number == 0`` (the implicit "no net" pad) are skipped
+    even if they happen to share a name with the requested net.  Footprints
+    whose reference designator is empty or begins with ``#`` (KiCad's
+    convention for power-symbol stand-ins like ``#PWR01``) are also skipped
+    because they have no physical pads on the board.
+    """
+    ox, oy = pcb.board_origin
+    positions: list[tuple[float, float]] = []
+
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+
+        fp_x, fp_y = fp.position
+        rot_rad = math.radians(-fp.rotation)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        for pad in fp.pads:
+            # ``Pad.net_name`` is authoritative (matches the netlist exactly);
+            # ``net_number`` may be zero on freshly-imported PCBs that have
+            # not been routed yet, so name comparison is the safe predicate.
+            if pad.net_name != net_name:
+                continue
+            # Skip the implicit no-net pad (net_number 0 with empty name).
+            if not pad.net_name:
+                continue
+
+            px, py = pad.position
+            rx = px * cos_r - py * sin_r
+            ry = px * sin_r + py * cos_r
+            # Footprint position is board-relative -> add board origin to get
+            # sheet-absolute coordinates.
+            positions.append((fp_x + rx + ox, fp_y + ry + oy))
+
+    return positions
+
+
+def _bbox_polygon(
+    positions: list[tuple[float, float]],
+    margin_mm: float,
+) -> list[tuple[float, float]] | None:
+    """Build an axis-aligned bounding box polygon around ``positions``.
+
+    Returns ``None`` if ``positions`` is empty.  When all positions
+    coincide (e.g. a single-pad net), returns a small square of side
+    :data:`SINGLE_PAD_FALLBACK_SIDE_MM` centered on the point so the
+    resulting zone still has non-zero area.
+
+    The returned polygon is in the same coordinate frame as ``positions``.
+    """
+    if not positions:
+        return None
+
+    xs = [p[0] for p in positions]
+    ys = [p[1] for p in positions]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+
+    # Single-pad (or zero-extent) fallback: emit a small square centered on
+    # the pad cluster so the zone is non-degenerate.
+    if x_max - x_min < 1e-6 and y_max - y_min < 1e-6:
+        half = SINGLE_PAD_FALLBACK_SIDE_MM / 2.0
+        cx, cy = x_min, y_min
+        return [
+            (round(cx - half, 6), round(cy - half, 6)),
+            (round(cx + half, 6), round(cy - half, 6)),
+            (round(cx + half, 6), round(cy + half, 6)),
+            (round(cx - half, 6), round(cy + half, 6)),
+        ]
+
+    x_min -= margin_mm
+    x_max += margin_mm
+    y_min -= margin_mm
+    y_max += margin_mm
+
+    return [
+        (round(x_min, 6), round(y_min, 6)),
+        (round(x_max, 6), round(y_min, 6)),
+        (round(x_max, 6), round(y_max, 6)),
+        (round(x_min, 6), round(y_max, 6)),
+    ]
+
+
+def _clip_polygon_to_outline(
+    polygon: list[tuple[float, float]],
+    outline: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Clip ``polygon`` to the interior of ``outline``.
+
+    Both polygons are in the same coordinate frame (sheet-absolute).  Uses
+    Shapely if available for an exact intersection; falls back to a pure
+    AABB clip when Shapely is missing or the intersection collapses.  When
+    everything fails, returns the original polygon unchanged -- KiCad
+    happily ignores zone copper that lands outside the board edge, so an
+    unclipped polygon still produces correct fills (just with a larger
+    bounding region on disk than necessary).
+    """
+    if not polygon or not outline:
+        return polygon
+
+    # Try Shapely first for accurate intersection with arbitrary outlines.
+    try:
+        from shapely.geometry import Polygon
+
+        clipped = Polygon(polygon).intersection(Polygon(outline))
+        if clipped.is_empty:
+            return polygon
+        if clipped.geom_type == "MultiPolygon":
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+        if clipped.geom_type != "Polygon":
+            return polygon
+        coords = list(clipped.exterior.coords)
+        if len(coords) > 1 and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) < 3:
+            return polygon
+        return [(round(x, 6), round(y, 6)) for x, y in coords]
+    except ImportError:
+        pass
+
+    # Pure-Python fallback: AABB clip (correct for rectangular outlines,
+    # conservative for everything else).
+    out_xs = [p[0] for p in outline]
+    out_ys = [p[1] for p in outline]
+    ox_min, ox_max = min(out_xs), max(out_xs)
+    oy_min, oy_max = min(out_ys), max(out_ys)
+
+    poly_xs = [p[0] for p in polygon]
+    poly_ys = [p[1] for p in polygon]
+    px_min = max(min(poly_xs), ox_min)
+    px_max = min(max(poly_xs), ox_max)
+    py_min = max(min(poly_ys), oy_min)
+    py_max = min(max(poly_ys), oy_max)
+
+    if px_min >= px_max or py_min >= py_max:
+        return polygon
+
+    return [
+        (round(px_min, 6), round(py_min, 6)),
+        (round(px_max, 6), round(py_min, 6)),
+        (round(px_max, 6), round(py_max, 6)),
+        (round(px_min, 6), round(py_max, 6)),
+    ]
+
+
+def _compute_pour_outlines(
+    pcb: PCB,
+    assignments: list[tuple[str, str, int]],
+    board_outline: list[tuple[float, float]],
+    margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
+) -> dict[str, list[tuple[float, float]] | None]:
+    """Compute per-net pour outlines for the given layer assignments.
+
+    For each ``(net_name, layer, priority)`` in ``assignments``:
+
+    * If this is the only zone on its layer, return ``None`` so the caller
+      uses the default ``board_outline``.  This preserves the GND
+      return-path plane on 4-layer stackups (where GND sits alone on
+      ``In1.Cu``) and on 2-layer stackups (where GND sits alone on
+      ``B.Cu``).
+    * If two or more zones share a layer, compute a bounding-box outline
+      around the net's pads, inflated by ``margin_mm``, then clip to
+      ``board_outline`` so the zone never extends past the board edge.
+
+    The returned polygons are in the same coordinate frame as
+    ``board_outline`` -- sheet-absolute, which is the frame expected by
+    :meth:`ZoneGenerator.add_zone`'s ``boundary=`` argument (post-PR-#2753).
+
+    Args:
+        pcb: Loaded PCB object (used to look up pad positions).
+        assignments: Output of :func:`_assign_layers_for_pour_nets`.
+        board_outline: Sheet-absolute board outline polygon.  Used as the
+            clipping mask and returned as ``None`` for sole-zone layers
+            (the caller falls back to ``board_outline`` via
+            :pyattr:`ZoneGenerator.board_outline`).
+        margin_mm: Margin around the pad bounding box, in mm.  Defaults to
+            :data:`DEFAULT_POUR_BBOX_MARGIN_MM` (1.5 mm).
+
+    Returns:
+        Dict mapping ``net_name`` -> polygon (or ``None`` for default).
+    """
+    # Count zones per layer so we know which assignments share a layer.
+    layer_counts: dict[str, int] = {}
+    for _, layer, _ in assignments:
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+
+    outlines: dict[str, list[tuple[float, float]] | None] = {}
+
+    for net_name, layer, _ in assignments:
+        if layer_counts[layer] < 2:
+            # Sole zone on its layer -- keep the full board outline so
+            # ground/return planes stay continuous.
+            outlines[net_name] = None
+            continue
+
+        positions = _net_pad_positions_absolute(pcb, net_name)
+        bbox = _bbox_polygon(positions, margin_mm)
+        if bbox is None:
+            # No pads found for this net.  Fall back to the full board
+            # outline -- it will still overlap siblings, but at least the
+            # zone is created.  This path is unusual (net classified as
+            # power/ground but has no physical pads) and only happens for
+            # ERC-marker leakage that the upstream filter missed.
+            outlines[net_name] = None
+            continue
+
+        outlines[net_name] = _clip_polygon_to_outline(bbox, board_outline)
+
+    return outlines
+
+
 def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
     pour_nets: list[tuple[str, NetClass]],
@@ -952,13 +1209,38 @@ def auto_create_zones_for_pour_nets(
 
     See ``_assign_layers_for_pour_nets`` for full assignment rules.
 
+    Geometric outline partition (#2771)
+    -----------------------------------
+
+    After the layer/priority allocator runs, the **outline allocator**
+    (:func:`_compute_pour_outlines`) decides whether each zone uses the
+    full board outline or a per-net bounding region:
+
+    * Zones that are the *only* zone on their layer (e.g. ``GND`` on
+      ``B.Cu`` for a single-ground 2-layer board, or ``GND`` on
+      ``In1.Cu`` for a 4-layer board) keep the full board outline.  This
+      preserves the return-path plane that signals need to cross without
+      gaps.
+    * Zones that *share* a layer with one or more other zones (e.g. the
+      ``+5V`` / ``+3.3V`` / ``PWR_LED`` cluster on F.Cu of a 2-layer
+      board) get a bounding box around their own pads (with a 1.5 mm
+      default margin), clipped to the board outline.
+
+    Without this geometric partition, distinct priorities (added in
+    #2410) are insufficient -- KiCad's fill resolver awards the entire
+    shared region to the highest-priority zone, so siblings receive zero
+    copper despite the file containing a zone definition for each
+    (see #2771 for the board 05 reproduction).
+
     Args:
         pcb_path: Path to .kicad_pcb file (modified in place)
         pour_nets: List of (net_name, NetClass) tuples identifying
             which nets need zones
         edge_clearance: Optional edge clearance in mm.  When set, the
             auto-derived board outline is inset by this distance so that
-            zone copper does not extend to the board edge.
+            zone copper does not extend to the board edge.  The same
+            inset is applied to the per-net bounding outlines so they
+            also stay inside the inset board.
 
     Returns:
         Number of zones created
@@ -969,9 +1251,20 @@ def auto_create_zones_for_pour_nets(
     copper_layer_count = len(gen.pcb.copper_layers)
     assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets)
 
+    # Outline allocator (#2771): compute per-net bounding outlines for any
+    # layer that hosts more than one zone.  Sole-layer zones (typically
+    # ground) get ``None`` so :meth:`ZoneGenerator.add_zone` falls back to
+    # the full ``board_outline`` and keeps the return-path plane continuous.
+    pour_outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
+
     count = 0
     for net_name, layer, priority in assignments:
-        gen.add_zone(net=net_name, layer=layer, priority=priority)
+        gen.add_zone(
+            net=net_name,
+            layer=layer,
+            priority=priority,
+            boundary=pour_outlines.get(net_name),
+        )
         count += 1
 
     if count > 0:
