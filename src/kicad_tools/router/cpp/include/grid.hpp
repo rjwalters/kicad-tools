@@ -61,6 +61,11 @@ public:
     // Route marking with clearance buffer using Bresenham
     void mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                       int clearance_cells);
+    // Issue #2709: ``mark_via`` does NOT consult the corridor reservation
+    // map that Python's ``RoutingGrid._mark_via`` enforces (Issue #2677).
+    // Safe today because the escape phase never marks vias through the
+    // C++ backend; see ``cpp/src/grid.cpp`` for the full rationale and
+    // ``tests/test_grid_cpp_parity.py`` for the contract-locking test.
     void mark_via(int x, int y, int net, int radius_cells);
 
     // Unmark route (rip-up)

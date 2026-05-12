@@ -1846,6 +1846,25 @@ class RoutingGrid:
         non-matching nets are blocked as normal on layers WHERE the cell
         is not reserved, and skipped on layers where it IS reserved.
 
+        Issue #2709 (Python-only reservation contract): the corridor
+        reservation map (``self._reserved_for_nets``) is consulted ONLY by
+        this Python implementation.  The C++ sibling
+        ``router::Grid3D::mark_via`` (``cpp/src/grid.cpp``) deliberately
+        ignores reservations because the escape phase is Python-grid-only
+        today -- ``EscapeRouter`` calls ``Grid.mark_route`` /
+        ``Grid._mark_via`` directly and never routes via marking through
+        the C++ backend during the paired pre-pass.  The C++ grid does
+        receive partner-net vias indirectly (via
+        ``RoutingCore._mark_route_on_cpp_grid`` after the escape pass),
+        but that path runs AFTER the corridor reservation has served its
+        purpose, so cell-block parity does not matter for board 06's
+        USB3_TX1+/- fix today.  If/when the escape pass moves into C++
+        (likely tied to Epic #2661 Phase 2's group-of-pairs serpentine),
+        the C++ ``mark_via`` MUST grow an equivalent reservation check
+        or board 06 (and DDR-style boards using the same primitive) will
+        regress.  See ``tests/test_grid_cpp_parity.py`` for a regression
+        test that pins the current contract.
+
         Args:
             via: The via to mark.
             max_trace_width: Maximum trace width across all net classes.

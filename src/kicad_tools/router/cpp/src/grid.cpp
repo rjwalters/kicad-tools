@@ -99,6 +99,24 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
     }
 }
 
+// Issue #2709: Python-only reservation contract.
+//
+// The Python sibling ``RoutingGrid._mark_via`` (src/kicad_tools/router/grid.py)
+// consults a ``_reserved_for_nets`` map (introduced by Issue #2677 / PR #2686)
+// to skip cells reserved for paired-escape continuation corridors when the
+// via's net is not in the reservation owner set.  This C++ implementation
+// deliberately omits that check because the escape phase is Python-grid-only
+// today: ``EscapeRouter`` calls ``Grid.mark_route`` / ``Grid._mark_via``
+// directly and never reaches this C++ ``mark_via`` during the paired pre-pass
+// when reservations matter.
+//
+// If/when escape routing moves into C++ (likely with Epic #2661 Phase 2's
+// group-of-pairs serpentine), this method MUST grow an equivalent
+// reservation map + skip check or board 06's USB3_TX1+/- escape fix --
+// and DDR-style boards using the same primitive -- will silently regress.
+// A contract-locking regression test lives in
+// ``tests/test_grid_cpp_parity.py`` and is expected to fail (deliberately,
+// signalling the port is needed) at that point.
 void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
     for (int layer = 0; layer < layers_; ++layer) {
         for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
