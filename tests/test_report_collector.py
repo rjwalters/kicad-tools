@@ -99,6 +99,7 @@ class TestCollectBoardSummary:
             "footprint_tht",
             "footprint_other",
             "net_count",
+            "declared_net_count",
             "segment_count",
             "via_count",
             "board_width_mm",

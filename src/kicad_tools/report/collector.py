@@ -237,6 +237,21 @@ class ReportDataCollector:
         # Board dimensions via Edge.Cuts parsing (same pattern as ManufacturingAudit)
         board_width, board_height = self._get_board_dimensions(pcb)
 
+        # Net count consistency (issue #2731): use NetStatusAnalyzer.total_nets
+        # so the report agrees with `kct net-status` and the pipeline route
+        # skip message.  ``len(pcb.nets)`` includes net 0 and unnamed nets
+        # which are not real signal/plane nets; expose that as
+        # ``declared_net_count`` for diagnostics/backward compatibility.
+        declared_net_count = len(pcb.nets)
+        try:
+            from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+            net_count = NetStatusAnalyzer(pcb).analyze().total_nets
+        except Exception:
+            # Fall back to the declared count when analysis fails; keep the
+            # report from erroring out on the board-summary path.
+            net_count = declared_net_count
+
         return {
             "layer_count": len(copper_layers),
             "layer_names": layer_names,
@@ -244,7 +259,8 @@ class ReportDataCollector:
             "footprint_smd": smd_count,
             "footprint_tht": tht_count,
             "footprint_other": other_count,
-            "net_count": len(pcb.nets),
+            "net_count": net_count,
+            "declared_net_count": declared_net_count,
             "segment_count": pcb.segment_count,
             "via_count": pcb.via_count,
             "board_width_mm": round(board_width, 2),
