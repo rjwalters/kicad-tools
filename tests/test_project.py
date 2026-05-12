@@ -247,6 +247,167 @@ class TestProjectLoad:
         with pytest.raises(FileNotFoundError):
             Project.load(pro_path)
 
+    def test_load_basename_pcb_missing_single_sibling(self, tmp_path, caplog):
+        """When canonical PCB missing but one sibling exists, use sibling with warning."""
+        import logging
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        sibling_pcb = tmp_path / "foo_v2.kicad_pcb"
+
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        sibling_pcb.write_text("")
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.project"):
+            project = Project.load(pro_path)
+
+        assert project._pcb_path == sibling_pcb
+        assert project._schematic_path == sch_path
+        # A warning naming the sibling should be emitted.
+        assert any("foo_v2.kicad_pcb" in rec.message for rec in caplog.records)
+
+    def test_load_basename_pcb_missing_multiple_siblings_raises(self, tmp_path):
+        """When canonical PCB missing and 2+ siblings exist, raise listing all."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        sib1 = tmp_path / "foo_v1.kicad_pcb"
+        sib2 = tmp_path / "foo_v2.kicad_pcb"
+
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        sib1.write_text("")
+        sib2.write_text("")
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            Project.load(pro_path)
+
+        msg = str(exc_info.value)
+        assert "foo_v1.kicad_pcb" in msg
+        assert "foo_v2.kicad_pcb" in msg
+        assert "foo.kicad_pro" in msg
+        assert "--pcb" in msg
+
+    def test_load_no_pcb_files_at_all(self, tmp_path, caplog):
+        """Preserve current behavior: no PCB files found -> _pcb_path is None (with warning)."""
+        import logging
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.project"):
+            project = Project.load(pro_path)
+
+        assert project._pcb_path is None
+        assert project._schematic_path == sch_path
+        # Warning naming the project dir should be emitted.
+        assert any("No .kicad_pcb" in rec.message for rec in caplog.records)
+
+    def test_load_with_boards_array_in_pro(self, tmp_path):
+        """When .kicad_pro has a non-empty boards[] array, honor it over basename."""
+        import json as _json
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        # Both canonical AND explicit-boards-file exist; explicit should win.
+        canonical_pcb = tmp_path / "foo.kicad_pcb"
+        explicit_pcb = tmp_path / "explicit.kicad_pcb"
+
+        pro_path.write_text(_json.dumps({"boards": [{"file": "explicit.kicad_pcb"}]}))
+        sch_path.write_text("")
+        canonical_pcb.write_text("")
+        explicit_pcb.write_text("")
+
+        project = Project.load(pro_path)
+
+        assert project._pcb_path == explicit_pcb.resolve()
+
+    def test_load_with_boards_array_empty_uses_basename(self, tmp_path):
+        """Empty boards[] (the typical single-board case) falls through to basename."""
+        import json as _json
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        canonical_pcb = tmp_path / "foo.kicad_pcb"
+
+        pro_path.write_text(_json.dumps({"boards": []}))
+        sch_path.write_text("")
+        canonical_pcb.write_text("")
+
+        project = Project.load(pro_path)
+
+        assert project._pcb_path == canonical_pcb
+
+    def test_load_with_boards_array_missing_file_falls_through(self, tmp_path):
+        """If boards[] entry's file doesn't exist, fall through to basename heuristic."""
+        import json as _json
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        canonical_pcb = tmp_path / "foo.kicad_pcb"
+
+        pro_path.write_text(_json.dumps({"boards": [{"file": "ghost.kicad_pcb"}]}))
+        sch_path.write_text("")
+        canonical_pcb.write_text("")
+
+        project = Project.load(pro_path)
+
+        # boards[] entry didn't resolve; fall back to canonical basename.
+        assert project._pcb_path == canonical_pcb
+
+    def test_load_malformed_pro_falls_back_to_basename(self, tmp_path, caplog):
+        """Corrupt JSON in .kicad_pro should not crash; basename heuristic still works."""
+        import logging
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        pcb_path = tmp_path / "foo.kicad_pcb"
+
+        pro_path.write_text("{not valid json")
+        sch_path.write_text("")
+        pcb_path.write_text("")
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.project"):
+            project = Project.load(pro_path)
+
+        assert project._pcb_path == pcb_path
+        assert project._schematic_path == sch_path
+        assert any("Could not parse" in rec.message for rec in caplog.records)
+
+    def test_load_empty_pro_does_not_crash(self, tmp_path):
+        """A zero-byte .kicad_pro file must not crash the loader."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        pcb_path = tmp_path / "foo.kicad_pcb"
+
+        pro_path.write_text("")  # zero-byte
+        sch_path.write_text("")
+        pcb_path.write_text("")
+
+        project = Project.load(pro_path)
+
+        assert project._pcb_path == pcb_path
+        assert project._schematic_path == sch_path
+
+    def test_load_pro_with_unrelated_keys_falls_through(self, tmp_path):
+        """Pro file with no boards key (or unrelated keys) uses basename heuristic."""
+        import json as _json
+
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        pcb_path = tmp_path / "foo.kicad_pcb"
+
+        pro_path.write_text(_json.dumps({"meta": {"filename": "foo.kicad_pro"}}))
+        sch_path.write_text("")
+        pcb_path.write_text("")
+
+        project = Project.load(pro_path)
+
+        assert project._pcb_path == pcb_path
+
 
 class TestProjectFromPCB:
     """Tests for Project.from_pcb() class method."""

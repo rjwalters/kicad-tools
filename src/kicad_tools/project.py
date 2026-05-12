@@ -186,6 +186,23 @@ class Project:
         """
         Load a KiCad project from .kicad_pro file.
 
+        Resolution order for the PCB and schematic files:
+
+        1. Parse ``.kicad_pro`` JSON. If the top-level ``boards`` array is
+           non-empty (KiCad multi-board project), each entry's ``file`` key
+           is resolved relative to the project directory. The first existing
+           ``.kicad_pcb`` wins.
+        2. Otherwise, fall back to the basename convention
+           (``<project_name>.kicad_pcb`` / ``.kicad_sch``).
+        3. If the basename PCB does not exist, scan the project directory
+           for ``*.kicad_pcb`` siblings:
+
+           - 0 siblings: ``_pcb_path`` is left as ``None`` and a warning is
+             logged naming the project dir.
+           - 1 sibling: that file is used and a warning is logged.
+           - 2+ siblings: a :class:`FileNotFoundError` is raised listing
+             every candidate so the caller can pick one explicitly.
+
         Args:
             project_path: Path to .kicad_pro file
 
@@ -193,19 +210,77 @@ class Project:
             Project instance
 
         Raises:
-            FileNotFoundError: If project file doesn't exist
+            FileNotFoundError: If the project file itself does not exist, or
+                if the canonical PCB is missing AND multiple ``*.kicad_pcb``
+                siblings exist (ambiguous resolution).
         """
         project_path = Path(project_path)
         if not project_path.exists():
             raise FileNotFoundError(f"Project file not found: {project_path}")
 
-        # Parse project file to find related files
         project_dir = project_path.parent
         project_name = project_path.stem
 
-        # Look for schematic and PCB
+        # 1. Try to honor an explicit boards[] array in .kicad_pro (multi-board).
+        pcb_from_pro: Path | None = None
+        try:
+            pro_text = project_path.read_text()
+            pro_data: dict[str, Any] = json.loads(pro_text) if pro_text.strip() else {}
+            boards = pro_data.get("boards", [])
+            if isinstance(boards, list) and boards:
+                for entry in boards:
+                    if not isinstance(entry, dict):
+                        continue
+                    file_field = entry.get("file") or entry.get("filename")
+                    if not file_field:
+                        continue
+                    candidate = (project_dir / file_field).resolve()
+                    if candidate.exists() and candidate.suffix == ".kicad_pcb":
+                        pcb_from_pro = candidate
+                        logger.info(
+                            "Using PCB %s from boards[] entry in %s",
+                            candidate.name,
+                            project_path.name,
+                        )
+                        break
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Could not parse %s as JSON (%s); falling back to basename convention.",
+                project_path,
+                exc,
+            )
+
+        # 2. Basename convention for schematic; PCB falls through to scan if missing.
         schematic_path = project_dir / f"{project_name}.kicad_sch"
-        pcb_path = project_dir / f"{project_name}.kicad_pcb"
+        pcb_path = pcb_from_pro or (project_dir / f"{project_name}.kicad_pcb")
+
+        # 3. If basename PCB is missing, scan for siblings.
+        if not pcb_path.exists():
+            siblings = sorted(project_dir.glob("*.kicad_pcb"))
+            if len(siblings) == 1:
+                logger.warning(
+                    "Canonical PCB %s not found in %s; using %s instead. "
+                    "Pass --pcb explicitly to silence this warning.",
+                    pcb_path.name,
+                    project_dir,
+                    siblings[0].name,
+                )
+                pcb_path = siblings[0]
+            elif len(siblings) > 1:
+                names = ", ".join(p.name for p in siblings)
+                raise FileNotFoundError(
+                    f"Project {project_path.name} loaded, but canonical "
+                    f"{pcb_path.name} not found and multiple .kicad_pcb "
+                    f"candidates exist in {project_dir}: {names}. "
+                    f"Pass --pcb explicitly to disambiguate."
+                )
+            else:
+                logger.warning(
+                    "No .kicad_pcb files found in %s (canonical %s missing). "
+                    "Project loaded without a PCB path.",
+                    project_dir,
+                    pcb_path.name,
+                )
 
         return cls(
             schematic=schematic_path if schematic_path.exists() else None,
