@@ -410,9 +410,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         optimized_routes.append(optimizer.optimize_route(route))
     router.routes = optimized_routes
 
+    # Issue #2757: Run the DRC verify-and-nudge pass after trace optimisation.
+    # The optimiser can produce chamfered diagonals that graze BGA / QFN /
+    # USB-C pads on skipped pour nets (GND, +3V3, +1V2); the in-memory
+    # ``drc_verify_and_nudge`` pass surfaces those as ``clearance_pad_segment``
+    # candidates and nudges segments perpendicular to repair them.  Without
+    # this call the post-route ``kct check`` is the first thing that sees
+    # the violations -- by which point the routed PCB is already serialised.
+    # See also the equivalent invocations in ``kct route`` (route_cmd.py:1985
+    # and 2511) and ``kct optimize`` (route_cmd.py:5184).
+    from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+    print("\n6. DRC verify-and-nudge pass...")
+    nudge_result = drc_verify_and_nudge(router)
+    if nudge_result.initial_violations:
+        print(f"   {nudge_result.summary()}")
+    else:
+        print("   No in-router DRC violations detected")
+
     stats = router.get_statistics()
     print(
-        f"\n6. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"
+        f"\n7. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"
     )
     print(f"   Total length: {stats['total_length_mm']:.2f}mm")
     print(f"   Nets routed: {stats['nets_routed']}")
@@ -431,7 +449,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print("   Warning: No routes generated!")
 
     output_path.write_text(output_content)
-    print(f"\n7. Routed PCB: {output_path}")
+    print(f"\n8. Routed PCB: {output_path}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets

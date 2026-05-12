@@ -131,6 +131,22 @@ class GridCollisionChecker:
                 if cell.is_obstacle:
                     return False  # Hard obstacle (pad, keepout) -- always block
 
+                # Issue #2757: A pad on a skipped pour net (e.g. GND, +3V3)
+                # has ``pad_blocked=True`` but ``is_obstacle=False`` and
+                # ``cell.net=0`` because ``load_pcb_for_routing`` rewrites
+                # skip-net pad nets to 0 (so they aren't routable) but still
+                # registers the pad as a copper obstacle in the grid.  Before
+                # this fix the optimizer's chamfer / collinear-merge passes
+                # walked straight through those cells, producing post-route
+                # ``clearance_pad_segment`` violations on every BGA/QFN edge
+                # the new diagonal grazed (15 violations on board 06).
+                # Treating pad-metal cells as hard obstacles -- except where
+                # the cell already belongs to the optimised route's own net
+                # (e.g. the route's destination pad) -- closes that hole
+                # without affecting normal own-net pad anchoring.
+                if cell.pad_blocked and cell.net != exclude_net:
+                    return False
+
                 # Cell is occupied by another net's route (soft block).
                 # When ignore_overflow is set, skip this check so the
                 # optimizer does not fragment routes through overused cells.
@@ -377,10 +393,18 @@ class VectorCollisionChecker:
                     ):
                         continue
                     cell = self.grid.grid[layer_idx][check_y][check_x]
-                    if cell.blocked and cell.is_obstacle:
-                        # Hard obstacle -- check if it belongs to our net
+                    if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
+                        # Hard obstacle (cross-net pad) OR pad-copper cell
+                        # (Issue #2757: pads on skipped pour nets have
+                        # pad_blocked=True but is_obstacle=False because
+                        # their net was rewritten to 0 by
+                        # load_pcb_for_routing; treat them as obstacles
+                        # too so the optimizer doesn't chamfer through
+                        # BGA GND / power pads).
                         if cell.net != 0 and cell.net == exclude_net:
                             continue  # Own-net pad is OK
+                        if cell.pad_blocked and cell.net == exclude_net:
+                            continue  # Own-net pad-metal cell (net match)
                         return False
 
             if gx == gx2 and gy == gy2:
