@@ -409,6 +409,26 @@ class TestSymbolPropertyNode:
         hide_node = effects_node.get("hide")
         assert hide_node is not None
 
+    def test_symbol_property_value_numeric_string_serializes_quoted(self):
+        """Regression test for issue #2780.
+
+        A symbol property with a numeric-looking value like ``"330"`` (the
+        resistor value) must serialize as a quoted string, not a bare
+        numeric.  KiCad 10's ``kicad-cli sch erc`` rejects a schematic with
+        ``(property "Value" 330)`` with "Failed to load schematic".
+        """
+        node = symbol_property_node("Value", "330", 100, 200)
+        serialized = node.to_string(compact=True)
+        assert '"Value" "330"' in serialized
+        # The bare-numeric form would break kicad-cli load:
+        assert '"Value" 330' not in serialized or '"Value" "330"' in serialized
+
+    def test_symbol_property_value_quoted_for_all_inputs(self):
+        """Property value always serializes quoted, even non-numeric."""
+        node = symbol_property_node("Value", "PWR", 100, 200)
+        serialized = node.to_string(compact=True)
+        assert '"Value" "PWR"' in serialized
+
 
 class TestPinUuidNode:
     """Tests for the pin_uuid_node() builder."""
@@ -471,6 +491,19 @@ class TestSheetInstances:
 
         path_node = node.get("path")
         assert path_node is not None
+
+    def test_sheet_instances_page_serializes_quoted(self):
+        """Regression test for issue #2780.
+
+        The ``page`` value inside ``sheet_instances`` must serialize as a
+        quoted string ``"1"``, not the bare numeric ``1``.  KiCad 10's
+        ``kicad-cli sch erc`` rejects ``(page 1)`` with "Failed to load
+        schematic".
+        """
+        node = sheet_instances("/", "1")
+        serialized = node.to_string()
+        assert '(page "1")' in serialized
+        assert "(page 1)" not in serialized
 
 
 class TestSegmentNode:

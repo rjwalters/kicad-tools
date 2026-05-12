@@ -191,3 +191,107 @@ class TestRunStepERC:
             result = _run_step_erc(ctx, Console(quiet=True))
         assert result.success is True
         assert "kicad-cli" in result.message.lower()
+
+
+class TestRunErcLoadFailure:
+    """Regression tests for issue #2780 — ``run_erc`` must not return
+    ``success=True`` when ``kicad-cli sch erc`` fails to load the schematic.
+
+    The original Bug 2: ``runner.run_erc`` pre-created an empty tempfile
+    via ``tempfile.mkstemp`` and then checked ``output_path.exists()`` to
+    decide success.  When kicad-cli failed with exit 3 ("Failed to load
+    schematic"), it wrote nothing — but the empty tempfile from the
+    ``mkstemp`` call still existed, so ``run_erc`` returned ``success=True``
+    and ``ERCReport.load`` parsed the 0-byte file as "0 errors, 0 warnings".
+    """
+
+    def test_load_failure_in_stderr_returns_success_false(self, tmp_path: Path) -> None:
+        """``kicad-cli`` printing "Failed to load schematic" must surface
+        as ``success=False`` even when the pre-created tempfile exists."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import run_erc
+
+        sch = tmp_path / "broken.kicad_sch"
+        sch.write_text("(invalid (kicad_sch))")
+
+        fake_result = MagicMock(
+            returncode=3,
+            stdout="",
+            stderr="Failed to load schematic\n",
+        )
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch("kicad_tools.cli.runner.subprocess.run", return_value=fake_result),
+        ):
+            result = run_erc(sch)
+
+        assert result.success is False
+        assert "Failed to load" in (result.stderr or "")
+
+    def test_empty_output_with_nonzero_exit_returns_success_false(
+        self, tmp_path: Path
+    ) -> None:
+        """Even without the magic stderr text, an empty output file paired
+        with a non-zero exit code must be treated as failure."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import run_erc
+
+        sch = tmp_path / "broken.kicad_sch"
+        sch.write_text("(invalid (kicad_sch))")
+
+        # subprocess.run returns non-zero and writes nothing
+        fake_result = MagicMock(
+            returncode=3,
+            stdout="",
+            stderr="some other unrelated error\n",
+        )
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch("kicad_tools.cli.runner.subprocess.run", return_value=fake_result),
+        ):
+            result = run_erc(sch)
+
+        assert result.success is False
+
+    def test_violations_with_zero_exit_still_succeeds(self, tmp_path: Path) -> None:
+        """An ERC run that finds violations (non-zero only with
+        --exit-code-violations, but we don't pass that) still returns
+        ``success=True`` when the report file is properly written."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import run_erc
+
+        sch = tmp_path / "good.kicad_sch"
+        sch.write_text("(kicad_sch (version 20231120))\n")
+
+        # Simulate kicad-cli writing a non-empty report and exiting 0.
+        def fake_subprocess(cmd, capture_output, text):
+            # Find --output arg
+            i = cmd.index("--output")
+            out = Path(cmd[i + 1])
+            out.write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch(
+                "kicad_tools.cli.runner.subprocess.run",
+                side_effect=fake_subprocess,
+            ),
+        ):
+            result = run_erc(sch)
+
+        assert result.success is True
+        assert result.output_path is not None
+        assert result.output_path.exists()

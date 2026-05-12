@@ -243,6 +243,14 @@ def symbol_property_node(
 ) -> SExp:
     """Build a complete property block for symbols.
 
+    Both ``name`` and ``value`` are emitted as quoted-atom strings because
+    KiCad treats symbol property name/value fields as strict-typed strings:
+    a numeric-looking value (e.g. a resistor with ``value="330"``) must
+    serialize as ``"330"`` rather than the bare numeric ``330``. Without
+    the quoted-atom flag, the SExp serializer's textual heuristic would
+    emit a bare numeric, which causes ``kicad-cli sch erc`` to reject the
+    file with "Failed to load schematic" under KiCad 10.
+
     Args:
         name: Property name (e.g., "Reference", "Value")
         value: Property value
@@ -250,7 +258,13 @@ def symbol_property_node(
         rotation: Text rotation in degrees
         hide: Whether to hide the property
     """
-    prop = SExp.list("property", name, value, at(x, y, rotation), effects(hide=hide))
+    prop = SExp.list(
+        "property",
+        SExp.quoted_atom(str(name)),
+        SExp.quoted_atom(str(value)),
+        at(x, y, rotation),
+        effects(hide=hide),
+    )
     return prop
 
 
@@ -298,8 +312,18 @@ def title_block(
 
 
 def sheet_instances(sheet_path: str, page: str) -> SExp:
-    """Build a sheet_instances S-expression."""
-    return SExp.list("sheet_instances", SExp.list("path", sheet_path, SExp.list("page", page)))
+    """Build a sheet_instances S-expression.
+
+    ``page`` is emitted as a quoted-atom string because KiCad treats the
+    sheet page field as a strict-typed string. A numeric-looking page
+    value like ``"1"`` must serialize as ``"1"`` rather than the bare
+    numeric ``1``; otherwise ``kicad-cli sch erc`` rejects the schematic
+    with "Failed to load schematic" under KiCad 10.
+    """
+    return SExp.list(
+        "sheet_instances",
+        SExp.list("path", sheet_path, SExp.list("page", SExp.quoted_atom(str(page)))),
+    )
 
 
 # =============================================================================

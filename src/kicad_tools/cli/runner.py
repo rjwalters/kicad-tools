@@ -116,7 +116,28 @@ def run_erc(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        # ERC returns non-zero if there are violations, but still produces output
+        # ERC returns non-zero when violations are found but still produces a
+        # report.  However, when kicad-cli fails to LOAD the schematic it
+        # also returns non-zero (exit 3) while writing nothing — yet the
+        # tempfile pre-created above continues to exist with zero bytes.
+        # Treat a load failure (recognised by either explicit stderr text or
+        # an empty output file paired with a non-zero exit code) as a
+        # genuine failure so the caller doesn't false-pass a broken
+        # schematic.  See issue #2780.
+        load_failed = (
+            "Failed to load schematic" in (result.stderr or "")
+            or "Failed to load" in (result.stderr or "")
+        )
+        empty_output = not output_path.exists() or output_path.stat().st_size == 0
+        kicad_cli_errored = result.returncode != 0 and empty_output
+
+        if load_failed or kicad_cli_errored:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "ERC failed to load schematic",
+                return_code=result.returncode,
+            )
+
         if output_path.exists():
             return KiCadCLIResult(
                 success=True,
