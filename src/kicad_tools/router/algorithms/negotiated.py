@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..congestion_estimator import CongestionEstimator
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from ..pathfinder import Router
     from ..primitives import Pad, Route, Via
     from ..rules import DesignRules, NetClassRouting
+
+# Issue #2795: progress callback signature for visibility into long-running
+# rip-up operations.  Callback receives a phase string and a metadata dict.
+ProgressCallback = Callable[[str, dict], None]
 
 
 # =========================================================================
@@ -1144,6 +1148,8 @@ class NegotiatedRouter:
         ripup_history: dict[int, int] | None = None,
         max_ripups_per_net: int = 3,
         per_net_timeout: float | None = None,
+        progress_callback: ProgressCallback | None = None,
+        net_names: dict[int, str] | None = None,
     ) -> bool:
         """Perform targeted rip-up of blocking nets and re-route.
 
@@ -1164,6 +1170,19 @@ class NegotiatedRouter:
             max_ripups_per_net: Maximum times a net can be ripped up (prevents loops)
             per_net_timeout: Optional wall-clock timeout in seconds for each
                 A* search (Issue #1605)
+            progress_callback: Optional callback invoked before each
+                ``route_net_negotiated`` call (failed net + each sibling).
+                Receives ``(phase_label, info_dict)`` where ``info_dict``
+                contains ``phase`` ("failed_net" or "sibling"), ``net``
+                (net id), ``net_name`` (resolved via ``net_names``), ``index``
+                (1-indexed position), ``total`` (failed net + siblings count),
+                and ``elapsed`` (seconds since this call started).  Issue #2795:
+                used by ``_attempt_blocked_component_ripup_negotiated`` to
+                surface progress during what would otherwise be a silent
+                multi-minute operation.
+            net_names: Optional net-id-to-name mapping used to resolve human
+                readable net names for the ``progress_callback`` payload.
+                Falls back to ``Net_<id>`` when missing or absent.
 
         Returns:
             True if re-routing succeeded for all affected nets, False otherwise
@@ -1187,10 +1206,39 @@ class NegotiatedRouter:
         # Rip up only the blocking nets
         self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
 
+        # Issue #2795: emit progress before each long-running A* invocation.
+        # Total work units = 1 (failed net) + N siblings, so index runs 1..total.
+        total_steps = 1 + len(nets_to_ripup)
+        start_time = time.time()
+
+        def _emit_progress(phase: str, net_id: int, index: int) -> None:
+            if progress_callback is None:
+                return
+            if net_names is not None:
+                resolved_name = net_names.get(net_id, f"Net_{net_id}")
+            else:
+                resolved_name = f"Net_{net_id}"
+            try:
+                progress_callback(
+                    "ripup_phase",
+                    {
+                        "phase": phase,
+                        "net": net_id,
+                        "net_name": resolved_name,
+                        "index": index,
+                        "total": total_steps,
+                        "elapsed": time.time() - start_time,
+                    },
+                )
+            except Exception:
+                # Never let a buggy progress callback abort the rip-up.
+                pass
+
         # Re-route the failed net first (it now has priority with cleared path)
         failed_pads = pads_by_net.get(failed_net, [])
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
+            _emit_progress("failed_net", failed_net, 1)
             routes = self.route_net_negotiated(
                 failed_pads, present_cost_factor, mark_route_callback,
                 per_net_timeout=per_net_timeout,
@@ -1204,9 +1252,12 @@ class NegotiatedRouter:
 
         # Re-route the displaced nets
         success = failed_net_success  # Issue #858: Start with failed net success
-        for net in nets_to_ripup:
+        # Sort for deterministic progress ordering (set iteration is unordered).
+        sibling_order = sorted(nets_to_ripup)
+        for sibling_index, net in enumerate(sibling_order, start=2):
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                _emit_progress("sibling", net, sibling_index)
                 routes = self.route_net_negotiated(
                     net_pads, present_cost_factor, mark_route_callback,
                     per_net_timeout=per_net_timeout,

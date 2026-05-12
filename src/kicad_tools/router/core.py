@@ -3706,6 +3706,29 @@ class Autorouter:
         # whether targeted_ripup actually placed new routes for it.
         pre_failed_routes = len(net_routes.get(failed_net, []))
 
+        # Issue #2795: emit per-sibling progress so users can distinguish a
+        # stuck router from one making slow progress.  Previously the whole
+        # targeted_ripup invocation could silently consume (1+N)*per_net_timeout
+        # wall-clock seconds with zero output between the entry banner and
+        # the exit line.
+        def _progress(phase_label: str, info: dict) -> None:
+            phase = info.get("phase", "")
+            net_name_info = info.get("net_name", "?")
+            idx = info.get("index", 0)
+            total = info.get("total", 0)
+            elapsed = info.get("elapsed", 0.0)
+            if phase == "failed_net":
+                action = f"routing failed net {failed_name}"
+            else:
+                action = f"routing sibling {net_name_info}"
+            flush_print(
+                f"    rip-up [{idx}/{total}] for {failed_name}: "
+                f"{action} (elapsed {elapsed:.1f}s)"
+            )
+
+        import time
+
+        ripup_start = time.time()
         try:
             success = neg_router.targeted_ripup(
                 failed_net=failed_net,
@@ -3718,6 +3741,8 @@ class Autorouter:
                 ripup_history=ripup_history,
                 max_ripups_per_net=max_ripups_per_net,
                 per_net_timeout=per_net_timeout,
+                progress_callback=_progress,
+                net_names=self.net_names,
             )
         except Exception as exc:  # pragma: no cover - defensive
             flush_print(
@@ -3725,6 +3750,8 @@ class Autorouter:
                 f"{type(exc).__name__}: {exc}"
             )
             return False
+
+        total_elapsed = time.time() - ripup_start
 
         # Did targeted_ripup actually attach new routes for the failed net?
         post_failed_routes = len(net_routes.get(failed_net, []))
@@ -3736,10 +3763,14 @@ class Autorouter:
             self.routing_failures = [
                 f for f in self.routing_failures if f.net != failed_net
             ]
+            flush_print(
+                f"  BLOCKED_BY_COMPONENT rip-up (negotiated) for {failed_name}: "
+                f"rescued in {total_elapsed:.1f}s"
+            )
         elif not success:
             flush_print(
                 f"  BLOCKED_BY_COMPONENT rip-up (negotiated) for {failed_name}: "
-                f"reroute did not converge"
+                f"reroute did not converge (elapsed {total_elapsed:.1f}s)"
             )
         return rescued
 
