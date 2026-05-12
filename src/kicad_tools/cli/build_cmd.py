@@ -1734,8 +1734,7 @@ def _run_step_sync(ctx: BuildContext, console: Console) -> BuildResult:
             step="sync",
             success=True,
             message=(
-                f"[dry-run] Would reconcile {ctx.schematic_file.name}"
-                f" <-> {pcb_to_check.name}"
+                f"[dry-run] Would reconcile {ctx.schematic_file.name} <-> {pcb_to_check.name}"
             ),
         )
 
