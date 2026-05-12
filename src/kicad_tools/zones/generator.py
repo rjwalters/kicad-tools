@@ -184,6 +184,18 @@ class ZoneGenerator:
         Zone boundaries written to the PCB file must be in sheet-absolute
         coordinates. ``get_board_outline()`` returns board-relative coords,
         so we add the board origin back.
+
+        .. note::
+            **Coord-space mismatch with ``existing.polygon`` (deferred -- #2759):**
+            After PR #2753 normalized ``Zone.polygon`` to board-relative
+            coordinates during ``PCB.load()``, ``_check_overlap()`` at line
+            431 compares this sheet-absolute boundary against
+            ``existing.polygon`` (board-relative). For boards with a
+            non-zero ``Edge.Cuts`` origin the bounding-box overlap test
+            will silently report "no overlap" for actually-overlapping
+            zones. The zone-writeout path is correct (it needs sheet-absolute
+            for the sexp tree); the bug is confined to the overlap-warning
+            heuristic. Tracked in #2759.
         """
         if self._board_outline is None:
             outline = self._pcb.get_board_outline()
@@ -313,10 +325,7 @@ class ZoneGenerator:
         # Extract exterior coordinates (Shapely repeats the first point
         # at the end; drop the duplicate).
         exterior_coords = list(inset.exterior.coords)
-        if (
-            len(exterior_coords) > 1
-            and exterior_coords[0] == exterior_coords[-1]
-        ):
+        if len(exterior_coords) > 1 and exterior_coords[0] == exterior_coords[-1]:
             exterior_coords = exterior_coords[:-1]
 
         return [(round(x, 6), round(y, 6)) for x, y in exterior_coords]
@@ -428,6 +437,11 @@ class ZoneGenerator:
             if existing.net_name == net:
                 continue  # Same net on same layer is fine (e.g. re-run)
 
+            # TODO(#2759): mixed coord-space comparison. After PR #2753
+            # `existing.polygon` is board-relative while `boundary` (derived
+            # from `self.board_outline`) is sheet-absolute. For non-zero
+            # `Edge.Cuts` origin this silently misses real overlaps. Fix
+            # is deferred to keep PR #2753's blast radius bounded.
             existing_boundary = existing.polygon
             if self._boundaries_overlap(boundary, existing_boundary):
                 if priority <= existing.priority:
@@ -443,12 +457,14 @@ class ZoneGenerator:
                         f"existing zone '{existing.net_name}' (priority {existing.priority}). "
                         f"The existing zone will get zero copper."
                     )
-                warnings.append(ZoneOverlapWarning(
-                    new_net=net,
-                    existing_net=existing.net_name,
-                    layer=layer,
-                    message=msg,
-                ))
+                warnings.append(
+                    ZoneOverlapWarning(
+                        new_net=net,
+                        existing_net=existing.net_name,
+                        layer=layer,
+                        message=msg,
+                    )
+                )
 
         # Check against queued zones in this generator
         for queued in self._zones:
@@ -471,12 +487,14 @@ class ZoneGenerator:
                         f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
                         f"The other zone will get zero copper."
                     )
-                warnings.append(ZoneOverlapWarning(
-                    new_net=net,
-                    existing_net=queued.config.net,
-                    layer=layer,
-                    message=msg,
-                ))
+                warnings.append(
+                    ZoneOverlapWarning(
+                        new_net=net,
+                        existing_net=queued.config.net,
+                        layer=layer,
+                        message=msg,
+                    )
+                )
 
         return warnings
 
