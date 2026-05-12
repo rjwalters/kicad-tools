@@ -1,0 +1,134 @@
+[
+  {
+    "board": "01-voltage-divider",
+    "algorithm": "input (as-shipped)",
+    "components": 4,
+    "nets": 3,
+    "wall_clock_s": 0.0,
+    "total_wirelength_mm": 58.0,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "01-voltage-divider",
+    "algorithm": "bottom-up",
+    "components": 4,
+    "nets": 3,
+    "wall_clock_s": 0.00011412519961595535,
+    "total_wirelength_mm": 611.27,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "01-voltage-divider",
+    "algorithm": "ga (gen=20, pop=20)",
+    "components": 4,
+    "nets": 3,
+    "wall_clock_s": 0.2638425410259515,
+    "total_wirelength_mm": 5.588000000000008,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 20
+  },
+  {
+    "board": "01-voltage-divider",
+    "algorithm": "ga (gen=50, pop=50)",
+    "components": 4,
+    "nets": 3,
+    "wall_clock_s": 0.3215949998702854,
+    "total_wirelength_mm": 4.953000000000003,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 20
+  },
+  {
+    "board": "02-charlieplex-led",
+    "algorithm": "input (as-shipped)",
+    "components": 14,
+    "nets": 10,
+    "wall_clock_s": 0.0,
+    "total_wirelength_mm": 262.0,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "02-charlieplex-led",
+    "algorithm": "bottom-up",
+    "components": 14,
+    "nets": 10,
+    "wall_clock_s": 0.0005303749348968267,
+    "total_wirelength_mm": 252.58000000000004,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "02-charlieplex-led",
+    "algorithm": "ga (gen=20, pop=20)",
+    "components": 14,
+    "nets": 10,
+    "wall_clock_s": 0.3018022091127932,
+    "total_wirelength_mm": 365.252,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 20
+  },
+  {
+    "board": "02-charlieplex-led",
+    "algorithm": "ga (gen=50, pop=50)",
+    "components": 14,
+    "nets": 10,
+    "wall_clock_s": 0.6308056248817593,
+    "total_wirelength_mm": 381.381,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 50
+  },
+  {
+    "board": "03-usb-joystick",
+    "algorithm": "input (as-shipped)",
+    "components": 12,
+    "nets": 16,
+    "wall_clock_s": 0.0,
+    "total_wirelength_mm": 523.0,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "03-usb-joystick",
+    "algorithm": "bottom-up",
+    "components": 12,
+    "nets": 16,
+    "wall_clock_s": 0.0005875418428331614,
+    "total_wirelength_mm": 2259.020000000001,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": null
+  },
+  {
+    "board": "03-usb-joystick",
+    "algorithm": "ga (gen=20, pop=20)",
+    "components": 12,
+    "nets": 16,
+    "wall_clock_s": 0.42720562499016523,
+    "total_wirelength_mm": 355.727,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 20
+  },
+  {
+    "board": "03-usb-joystick",
+    "algorithm": "ga (gen=50, pop=50)",
+    "components": 12,
+    "nets": 16,
+    "wall_clock_s": 0.7664169168565422,
+    "total_wirelength_mm": 294.76699999999994,
+    "overlap_pairs": 0,
+    "overlap_area_mm2": 0.0,
+    "converged_generations": 46
+  }
+]
