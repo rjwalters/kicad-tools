@@ -8287,6 +8287,7 @@ class Autorouter:
         use_negotiated: bool = True,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route with automatic escape routing for dense packages.
 
@@ -8300,7 +8301,11 @@ class Autorouter:
         Args:
             use_negotiated: Use negotiated congestion routing
             progress_callback: Optional callback for progress updates
-            timeout: Optional timeout in seconds
+            timeout: Optional board-level timeout in seconds
+            per_net_timeout: Optional wall-clock timeout per A* search.
+                Forwarded to ``route_all_two_phase`` so dense-package nets
+                cannot consume an unbounded share of the board-level budget
+                (Issue #2768; part of board 05 BLDC regression #2746).
 
         Returns:
             List of all routes (escapes + regular routing)
@@ -8353,6 +8358,7 @@ class Autorouter:
                 corridor_width_factor=2.0,
                 progress_callback=progress_callback,
                 timeout=timeout,
+                per_net_timeout=per_net_timeout,
             )
         else:
             main_routes = self.route_all(

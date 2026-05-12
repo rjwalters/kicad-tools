@@ -1482,6 +1482,82 @@ class TestEscapeRouteRipupEligibility:
             call_kwargs = mock_two_phase.call_args[1]
             assert "initial_routes" not in call_kwargs
 
+    def test_route_with_escape_forwards_per_net_timeout(self, autorouter):
+        """route_with_escape must forward per_net_timeout to route_all_two_phase.
+
+        Issue #2768 (board 05 BLDC regression #2746): the escape-routing path
+        previously dropped the CLI's ``--per-net-timeout`` value because
+        ``route_with_escape`` did not accept the parameter. With the fix, the
+        value must be forwarded through to ``route_all_two_phase`` (and from
+        there to the A* pathfinder) so dense-package nets cannot consume an
+        unbounded share of the board-level budget.
+        """
+        from unittest.mock import MagicMock, patch
+
+        autorouter.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+
+        fake_escape = MagicMock(net=1, segments=[], vias=[])
+
+        with (
+            patch.object(autorouter, "_run_subgrid_prepass", return_value=[]),
+            patch.object(
+                autorouter, "generate_escape_routes", return_value=[fake_escape]
+            ),
+            patch.object(
+                autorouter, "detect_dense_packages", return_value=[MagicMock()]
+            ),
+            patch.object(
+                autorouter, "route_all_two_phase", return_value=[]
+            ) as mock_two_phase,
+        ):
+            autorouter.route_with_escape(per_net_timeout=42.0)
+            mock_two_phase.assert_called_once()
+            call_kwargs = mock_two_phase.call_args[1]
+            assert call_kwargs["per_net_timeout"] == 42.0
+
+    def test_route_with_escape_defaults_per_net_timeout_to_none(self, autorouter):
+        """When per_net_timeout is not provided, the forwarded value is None.
+
+        Ensures backwards compatibility: callers that previously used
+        ``route_with_escape(timeout=...)`` continue to work, and the
+        downstream router receives ``per_net_timeout=None`` (its existing
+        default semantics: no per-net cap).
+        """
+        from unittest.mock import MagicMock, patch
+
+        autorouter.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+
+        fake_escape = MagicMock(net=1, segments=[], vias=[])
+
+        with (
+            patch.object(autorouter, "_run_subgrid_prepass", return_value=[]),
+            patch.object(
+                autorouter, "generate_escape_routes", return_value=[fake_escape]
+            ),
+            patch.object(
+                autorouter, "detect_dense_packages", return_value=[MagicMock()]
+            ),
+            patch.object(
+                autorouter, "route_all_two_phase", return_value=[]
+            ) as mock_two_phase,
+        ):
+            autorouter.route_with_escape()
+            mock_two_phase.assert_called_once()
+            call_kwargs = mock_two_phase.call_args[1]
+            assert call_kwargs["per_net_timeout"] is None
+
     def test_two_phase_initial_routes_seeded_into_net_routes(self, rules):
         """Initial routes are seeded into the negotiated router's net_routes."""
         from unittest.mock import MagicMock
