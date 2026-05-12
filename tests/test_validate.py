@@ -1166,10 +1166,7 @@ class TestBoardOutline:
             assert len(seg_start) == 2
             assert len(seg_end) == 2
 
-
-    def test_get_board_outline_nonzero_origin_returns_board_relative(
-        self, tmp_path: Path
-    ):
+    def test_get_board_outline_nonzero_origin_returns_board_relative(self, tmp_path: Path):
         """Outline coordinates must be board-relative when origin != (0,0).
 
         When the Edge.Cuts rect starts at e.g. (100, 80), _detect_board_origin
@@ -1205,9 +1202,7 @@ class TestBoardOutline:
         assert max(xs) == pytest.approx(50.0, abs=0.01)
         assert max(ys) == pytest.approx(30.0, abs=0.01)
 
-    def test_get_board_outline_segments_nonzero_origin_returns_board_relative(
-        self, tmp_path: Path
-    ):
+    def test_get_board_outline_segments_nonzero_origin_returns_board_relative(self, tmp_path: Path):
         """Outline segments must be board-relative when origin != (0,0)."""
         from kicad_tools.schema.pcb import PCB
 
@@ -1401,7 +1396,6 @@ class TestEdgeClearanceRule:
             assert v.actual_value is not None
             assert v.required_value is not None
             assert v.actual_value < v.required_value
-
 
     def test_nonzero_origin_trace_close_to_edge_detected(self, tmp_path: Path):
         """Trace near edge is still detected when board origin is non-zero.

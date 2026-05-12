@@ -89,17 +89,24 @@ class EdgeClearanceRule(DRCRule):
         results: DRCResults,
         origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Check trace segment clearances to board edge."""
+        """Check trace segment clearances to board edge.
+
+        ``segment.start`` / ``segment.end`` are board-relative after
+        :meth:`PCB.load` (see ``_detect_board_origin`` docstring), so we
+        compare them directly against the board-relative outline.  The
+        ``origin`` parameter is retained for API stability but is no
+        longer used to translate segment endpoints.
+        """
         min_clearance = design_rules.min_copper_to_edge_mm
-        ox, oy = origin
+        del origin  # board-relative invariant: no per-call translation needed
 
         for segment in pcb.segments:
             # Check both endpoints and consider trace width
             half_width = segment.width / 2
 
             for point in [segment.start, segment.end]:
-                # Convert from sheet-absolute to board-relative
-                board_point = (point[0] - ox, point[1] - oy)
+                # Segment endpoints are already in board-relative space.
+                board_point = point
                 distance = self._min_distance_to_outline(board_point, outline_segments)
                 # Actual clearance from trace edge (not centerline)
                 actual_clearance = distance - half_width
@@ -134,13 +141,16 @@ class EdgeClearanceRule(DRCRule):
         """Check via clearances to board edge.
 
         Vias use min_hole_to_edge_mm which is typically stricter than copper clearance.
+
+        ``via.position`` is board-relative after :meth:`PCB.load`; the
+        ``origin`` parameter is retained for API stability.
         """
         min_clearance = design_rules.min_hole_to_edge_mm
-        ox, oy = origin
+        del origin  # board-relative invariant: no per-call translation needed
 
         for via in pcb.vias:
-            # Convert from sheet-absolute to board-relative
-            board_pos = (via.position[0] - ox, via.position[1] - oy)
+            # Via position is already in board-relative space.
+            board_pos = via.position
             distance = self._min_distance_to_outline(board_pos, outline_segments)
             # Via edge is at position - size/2
             half_size = via.size / 2
@@ -238,9 +248,12 @@ class EdgeClearanceRule(DRCRule):
         """Check zone copper clearances to board edge.
 
         Checks the filled polygon vertices of each zone.
+
+        Zone polygon vertices are board-relative after :meth:`PCB.load`;
+        the ``origin`` parameter is retained for API stability.
         """
         min_clearance = design_rules.min_copper_to_edge_mm
-        ox, oy = origin
+        del origin  # board-relative invariant: no per-call translation needed
 
         for zone in pcb.zones:
             # Check filled polygons (actual copper) rather than boundary
@@ -248,8 +261,8 @@ class EdgeClearanceRule(DRCRule):
 
             for polygon in polygons_to_check:
                 for point in polygon:
-                    # Convert from sheet-absolute to board-relative
-                    board_point = (point[0] - ox, point[1] - oy)
+                    # Zone polygon vertices are already in board-relative space.
+                    board_point = point
                     distance = self._min_distance_to_outline(board_point, outline_segments)
 
                     if distance < min_clearance - _CLEARANCE_EPSILON_MM:
@@ -312,4 +325,6 @@ class EdgeClearanceRule(DRCRule):
         Returns:
             Distance from point to the closest point on the segment
         """
-        return _core_pt_seg_dist(point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1])
+        return _core_pt_seg_dist(
+            point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1]
+        )

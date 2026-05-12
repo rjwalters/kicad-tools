@@ -4,17 +4,17 @@ Build command implementation for end-to-end workflow from spec to manufacturable
 Orchestrates the full build pipeline:
 1. Load project spec (.kct file)
 2. Run schematic generator (if exists)
-3. Run PCB generator (if exists)
-4. Run autorouter
-5. Run verification (DRC, audit)
-6. Export manufacturing package (Gerbers, BOM, CPL)
+3. Run ERC on the schematic and persist ``erc_report.json``
+4. Run PCB generator (if exists)
+5. Run autorouter
+6. Run verification (DRC, audit)
+7. Export manufacturing package (Gerbers, BOM, CPL)
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import math
 import re
 import subprocess
 import sys
@@ -39,6 +39,7 @@ class BuildStep(str, Enum):
     """Build pipeline steps."""
 
     SCHEMATIC = "schematic"
+    ERC = "erc"
     PCB = "pcb"
     OUTLINE = "outline"
     PLACEMENT = "placement"
@@ -1530,6 +1531,117 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
+def _run_step_erc(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run ERC (Electrical Rules Check) on the schematic.
+
+    Invokes ``kicad-cli sch erc`` to produce ``erc_report.json`` adjacent
+    to the schematic (or in ``ctx.output_dir`` when set), so that the
+    export-time preflight (``export/preflight.py:_check_erc``) finds the
+    report instead of emitting a "No ERC report found" warning.
+
+    Failures are surfaced as a non-success ``BuildResult`` but do not
+    halt the pipeline unconditionally; the same "stop on failure unless
+    VERIFY/EXPORT" rule as DRC applies, mirroring ``_run_step_verify``.
+    """
+    if not ctx.schematic_file or not ctx.schematic_file.exists():
+        return BuildResult(
+            step="erc",
+            success=False,
+            message="No schematic file found to run ERC against",
+        )
+
+    # Choose where to write the report. Mirror DRC: prefer ctx.output_dir,
+    # otherwise drop the report next to the schematic so the export
+    # preflight's auto-discovery picks it up.
+    if ctx.output_dir:
+        ctx.output_dir.mkdir(parents=True, exist_ok=True)
+        erc_report_path = ctx.output_dir / "erc_report.json"
+    else:
+        erc_report_path = ctx.schematic_file.parent / "erc_report.json"
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="erc",
+            success=True,
+            message=f"[dry-run] Would run: kicad-cli sch erc {ctx.schematic_file.name}",
+            output_file=erc_report_path,
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running ERC on {ctx.schematic_file.name}...")
+
+    try:
+        from kicad_tools.cli.runner import find_kicad_cli, run_erc
+
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            # ERC is best-effort: when kicad-cli is unavailable we
+            # warn but do not block the pipeline. The export preflight
+            # will subsequently see "no report" and emit its own warning.
+            if not ctx.quiet:
+                console.print(
+                    "  [yellow]WARN[/yellow] kicad-cli not found; "
+                    "skipping ERC (export preflight will warn)"
+                )
+            return BuildResult(
+                step="erc",
+                success=True,
+                message="ERC skipped: kicad-cli not found",
+            )
+
+        result = run_erc(
+            ctx.schematic_file,
+            output_path=erc_report_path,
+            format="json",
+            severity_all=True,
+            kicad_cli=kicad_cli,
+        )
+
+        if not result.success:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=f"ERC failed: {result.stderr or 'kicad-cli returned no output'}",
+            )
+
+        # Parse the report to surface error/warning counts.
+        try:
+            from kicad_tools.erc.report import ERCReport
+
+            report = ERCReport.load(erc_report_path)
+            error_count = report.error_count
+            warning_count = report.warning_count
+        except Exception as exc:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=f"Could not parse ERC report: {exc}",
+                output_file=erc_report_path,
+            )
+
+        if error_count > 0:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=(f"ERC found {error_count} error(s), {warning_count} warning(s)"),
+                output_file=erc_report_path,
+            )
+
+        return BuildResult(
+            step="erc",
+            success=True,
+            message=f"ERC: 0 errors, {warning_count} warning(s)",
+            output_file=erc_report_path,
+        )
+
+    except Exception as e:  # pragma: no cover - defensive
+        return BuildResult(
+            step="erc",
+            success=False,
+            message=f"ERC step failed: {e}",
+        )
+
+
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
     """Run verification step (DRC + audit)."""
     # Find the PCB to verify (prefer routed version)
@@ -1878,6 +1990,7 @@ Examples:
         "-s",
         choices=[
             "schematic",
+            "erc",
             "pcb",
             "outline",
             "placement",
@@ -2037,6 +2150,7 @@ Examples:
     if args.step == "all":
         steps = [
             BuildStep.SCHEMATIC,
+            BuildStep.ERC,
             BuildStep.PCB,
             BuildStep.OUTLINE,
             BuildStep.PLACEMENT,
@@ -2066,6 +2180,9 @@ Examples:
                 result = _run_step_schematic(ctx, console)
                 if result.output_file:
                     ctx.schematic_file = result.output_file
+
+            elif step == BuildStep.ERC:
+                result = _run_step_erc(ctx, console)
 
             elif step == BuildStep.PCB:
                 result = _run_step_pcb(ctx, console)
@@ -2112,7 +2229,11 @@ Examples:
                 console.print(f"  [{status}] {step.value}: {result.message}")
 
             # Stop on failure unless verifying or exporting
-            if not result.success and step not in (BuildStep.VERIFY, BuildStep.EXPORT):
+            if not result.success and step not in (
+                BuildStep.ERC,
+                BuildStep.VERIFY,
+                BuildStep.EXPORT,
+            ):
                 break
 
             # Smoke-check: after every successful PCB-write step, ask

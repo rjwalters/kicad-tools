@@ -463,7 +463,9 @@ class Footprint:
     properties: dict[str, str] = field(default_factory=dict)
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
-        default=(0.0, 0.0), repr=False, compare=False,
+        default=(0.0, 0.0),
+        repr=False,
+        compare=False,
     )
 
     # ------------------------------------------------------------------
@@ -1546,8 +1548,30 @@ class PCB:
         Sets self._board_origin to the start position of the first gr_rect
         found on Edge.Cuts, or (0, 0) if none found.
 
-        Also converts footprint positions from sheet-absolute to board-relative
-        coordinates so that the optimizer can work with board-relative positions.
+        Coordinate-space invariant
+        --------------------------
+        After ``_detect_board_origin()`` runs:
+
+        * ``Footprint.position`` (and pad-derived coordinates such as those
+          returned by :meth:`get_pad_position`) are in **board-relative**
+          coordinates -- i.e. relative to ``self._board_origin``.
+        * ``Segment.start`` / ``Segment.end``, ``Via.position``, and the
+          ``Zone.polygon`` / ``Zone.filled_polygons`` vertex lists are also
+          in **board-relative** coordinates after this method runs.
+
+        Storing every consumer-visible coordinate in the same (board-relative)
+        space means analyzers such as :class:`NetStatusAnalyzer` and
+        :mod:`kicad_tools.validate.connectivity` can compare pad positions
+        directly against segment endpoints and zone polygons without
+        coordinate-space conversion -- fixing the off-by-``board_origin``
+        bug that previously caused every signal net on a centered board to
+        be reported as ``incomplete``.
+
+        The underlying S-expression tree (``self._sexp``) is left in
+        sheet-absolute coordinates as required by the KiCad file format.
+        :meth:`add_trace`, :meth:`add_via`, and :meth:`save` are responsible
+        for adding ``self._board_origin`` back when writing new copper
+        primitives to the tree.
         """
         origin = (0.0, 0.0)
 
@@ -1567,13 +1591,38 @@ class PCB:
 
         self._board_origin = origin
 
-        # Convert footprint positions from sheet-absolute to board-relative
-        # This ensures the optimizer works with board-relative coordinates,
-        # and update_footprint_position() will correctly add the origin back
+        # Convert all copper primitives from sheet-absolute to board-relative
+        # coordinates so consumers (analyzers, validators, optimizers) see a
+        # consistent coordinate space.  The S-expression tree retains the
+        # original sheet-absolute values; new primitives appended through
+        # add_trace()/add_via() add the origin back when writing to the tree.
         if origin != (0.0, 0.0):
+            ox, oy = origin
+            # Footprints: existing behavior (preserved for backward compat).
             for fp in self._footprints:
                 abs_x, abs_y = fp.position
-                fp.position = (abs_x - origin[0], abs_y - origin[1])
+                fp.position = (abs_x - ox, abs_y - oy)
+
+            # Segments: convert both endpoints.
+            for seg in self._segments:
+                sx, sy = seg.start
+                ex, ey = seg.end
+                seg.start = (sx - ox, sy - oy)
+                seg.end = (ex - ox, ey - oy)
+
+            # Vias: convert position.
+            for via in self._vias:
+                vx, vy = via.position
+                via.position = (vx - ox, vy - oy)
+
+            # Zones: convert boundary polygon AND every filled polygon.
+            for zone in self._zones:
+                if zone.polygon:
+                    zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
+                if zone.filled_polygons:
+                    zone.filled_polygons = [
+                        [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
+                    ]
 
     def _link_footprint_sexp_nodes(self) -> None:
         """Attach S-expression back-references to parsed Footprint objects.
@@ -1827,12 +1876,8 @@ class PCB:
                 continue
             for seg in self.segments_in_net(pad.net_number):
                 tolerance = 0.01  # mm
-                start_dist = math.sqrt(
-                    (seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2
-                )
-                end_dist = math.sqrt(
-                    (seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2
-                )
+                start_dist = math.sqrt((seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2)
+                end_dist = math.sqrt((seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2)
                 if start_dist < tolerance or end_dist < tolerance:
                     return True
 
@@ -1863,15 +1908,25 @@ class PCB:
 
         # Build lookup sets for fast matching
         uuids_to_remove: set[str] = set()
-        # Fallback: match by (start, end, layer) for segments without UUIDs
+        # Fallback: match by (start, end, layer) for segments without UUIDs.
+        # Segment coordinates are board-relative, but the S-expression tree
+        # stores them in sheet-absolute form, so offset by board_origin when
+        # building the lookup key.
         coords_to_remove: set[tuple[float, float, float, float, str]] = set()
+        ox, oy = self._board_origin
 
         for seg in segments:
             if seg.uuid:
                 uuids_to_remove.add(seg.uuid)
             else:
                 coords_to_remove.add(
-                    (seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.layer)
+                    (
+                        seg.start[0] + ox,
+                        seg.start[1] + oy,
+                        seg.end[0] + ox,
+                        seg.end[1] + oy,
+                        seg.layer,
+                    )
                 )
 
         # Remove from S-expression tree
@@ -2064,9 +2119,7 @@ class PCB:
         edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
         edge_arcs = [arc for arc in self._graphic_arcs if arc.layer == "Edge.Cuts"]
         edge_rects = [
-            g
-            for g in self._graphics
-            if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
+            g for g in self._graphics if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
         ]
 
         if not edge_lines and not edge_arcs and not edge_rects:
@@ -2170,10 +2223,7 @@ class PCB:
         # converted to board-relative in _detect_board_origin).
         ox, oy = self._board_origin
         if ox != 0.0 or oy != 0.0:
-            segments = [
-                ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy))
-                for (x1, y1), (x2, y2) in segments
-            ]
+            segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
 
         return segments
 
@@ -2353,15 +2403,9 @@ class PCB:
                     target_uuids.add(u)
 
         if target_uuids:
-            self._graphic_lines = [
-                gl for gl in self._graphic_lines if gl.uuid not in target_uuids
-            ]
-            self._graphic_arcs = [
-                ga for ga in self._graphic_arcs if ga.uuid not in target_uuids
-            ]
-            self._graphics = [
-                g for g in self._graphics if g.uuid not in target_uuids
-            ]
+            self._graphic_lines = [gl for gl in self._graphic_lines if gl.uuid not in target_uuids]
+            self._graphic_arcs = [ga for ga in self._graphic_arcs if ga.uuid not in target_uuids]
+            self._graphics = [g for g in self._graphics if g.uuid not in target_uuids]
         else:
             # Fallback: re-parse the in-memory lists from sexp
             self._graphic_lines = []
@@ -2455,7 +2499,9 @@ class PCB:
         so the result always reflects the actual file content, even if the
         in-memory ``_segments`` list has drifted.
         """
-        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "segment")
+        return sum(
+            1 for child in self._sexp.children if not child.is_atom and child.name == "segment"
+        )
 
     @property
     def via_count(self) -> int:
@@ -3678,7 +3724,11 @@ class PCB:
             points.extend(waypoints)
         points.append(end_pos)
 
-        # Create segments between consecutive points
+        # Create segments between consecutive points.  Inputs are in
+        # board-relative coordinates (see _detect_board_origin docstring);
+        # the underlying S-expression must store sheet-absolute coords, so
+        # we add the board origin offset when constructing the sexp node.
+        ox, oy = self._board_origin
         segments = []
         for i in range(len(points) - 1):
             seg = Segment(
@@ -3691,7 +3741,18 @@ class PCB:
             )
             segments.append(seg)
             self._segments.append(seg)
-            self._sexp.append(seg.to_sexp())
+            if ox != 0.0 or oy != 0.0:
+                # Build sheet-absolute sexp without mutating the Python object.
+                seg_sexp = SExp.list("segment")
+                seg_sexp.append(SExp.list("start", seg.start[0] + ox, seg.start[1] + oy))
+                seg_sexp.append(SExp.list("end", seg.end[0] + ox, seg.end[1] + oy))
+                seg_sexp.append(SExp.list("width", seg.width))
+                seg_sexp.append(SExp.list("layer", seg.layer))
+                seg_sexp.append(SExp.list("net", seg.net_number))
+                seg_sexp.append(SExp.list("uuid", seg.uuid))
+                self._sexp.append(seg_sexp)
+            else:
+                self._sexp.append(seg.to_sexp())
 
         return segments
 
@@ -3740,7 +3801,21 @@ class PCB:
             uuid=str(uuid.uuid4()),
         )
         self._vias.append(via)
-        self._sexp.append(via.to_sexp())
+
+        # Input position is board-relative (matches Footprint.position and
+        # add_trace inputs); the S-expression form requires sheet-absolute.
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            via_sexp = SExp.list("via")
+            via_sexp.append(SExp.list("at", via.position[0] + ox, via.position[1] + oy))
+            via_sexp.append(SExp.list("size", via.size))
+            via_sexp.append(SExp.list("drill", via.drill))
+            via_sexp.append(SExp.list("layers", *via.layers))
+            via_sexp.append(SExp.list("net", via.net_number))
+            via_sexp.append(SExp.list("uuid", via.uuid))
+            self._sexp.append(via_sexp)
+        else:
+            self._sexp.append(via.to_sexp())
 
         return via
 
@@ -4223,9 +4298,7 @@ class PCB:
                             if isinstance(layers_node.values[i], str)
                         ]
                         # Via is orphan if NONE of its layers have a segment endpoint at its position
-                        connected = any(
-                            (vx, vy, vl) in remaining_endpoints for vl in via_layers
-                        )
+                        connected = any((vx, vy, vl) in remaining_endpoints for vl in via_layers)
                         if not connected:
                             removed_orphan_vias += 1
                             removed_vias += 1
@@ -4265,11 +4338,7 @@ class PCB:
             return False
 
         # Apply filtering helpers
-        has_any_filter = (
-            net_numbers_to_strip is not None
-            or layer_set is not None
-            or exclude_power
-        )
+        has_any_filter = net_numbers_to_strip is not None or layer_set is not None or exclude_power
         if has_any_filter:
             self._segments = [seg for seg in self._segments if _seg_matches(seg)]
             self._vias = [via for via in self._vias if _via_matches(via)]
@@ -4288,9 +4357,12 @@ class PCB:
                 remaining_ep_set.add((round(seg.start[0], 4), round(seg.start[1], 4), seg.layer))
                 remaining_ep_set.add((round(seg.end[0], 4), round(seg.end[1], 4), seg.layer))
             self._vias = [
-                v for v in self._vias
-                if any((round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
-                       for vl in v.layers)
+                v
+                for v in self._vias
+                if any(
+                    (round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
+                    for vl in v.layers
+                )
             ]
 
         return {
@@ -4464,7 +4536,8 @@ class PCB:
             >>> # JLCPCB format
             >>> pcb.export_bom("bom_jlcpcb.csv", format="jlcpcb")
         """
-        from ..export import BOMExportConfig, export_bom as _export_bom
+        from ..export import BOMExportConfig
+        from ..export import export_bom as _export_bom
         from ..schema.bom import extract_bom
 
         # Find schematic
@@ -4525,7 +4598,8 @@ class PCB:
             >>> # JLCPCB format
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
-        from ..export import PnPExportConfig, export_pnp as _export_pnp
+        from ..export import PnPExportConfig
+        from ..export import export_pnp as _export_pnp
 
         footprints = list(self.footprints)
 
