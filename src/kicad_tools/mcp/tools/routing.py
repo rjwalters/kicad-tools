@@ -271,7 +271,11 @@ def route_net(
 
         fp_x, fp_y = fp.position
         rotation = fp.rotation
-        rot_rad = math.radians(-rotation)
+        # NOTE: positive sign matches PCB.get_pad_position (the canonical
+        # local->world transform used throughout the codebase).  KiCad
+        # stores rotation in degrees, positive = counter-clockwise, and
+        # the standard 2D rotation matrix applies directly (no negation).
+        rot_rad = math.radians(rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:
@@ -590,7 +594,11 @@ def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:
 
         fp_x, fp_y = fp.position
         rotation = fp.rotation
-        rot_rad = math.radians(-rotation)
+        # NOTE: positive sign matches PCB.get_pad_position (the canonical
+        # local->world transform used throughout the codebase).  KiCad
+        # stores rotation in degrees, positive = counter-clockwise, and
+        # the standard 2D rotation matrix applies directly (no negation).
+        rot_rad = math.radians(rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:

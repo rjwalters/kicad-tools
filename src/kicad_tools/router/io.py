@@ -2239,9 +2239,12 @@ def route_pcb(
         cx, cy = comp["x"], comp["y"]
         rotation = comp.get("rotation", 0)
 
-        # Transform pad positions based on component placement
-        # KiCad uses CLOCKWISE rotation (negative angle in standard math)
-        rot_rad = math.radians(-rotation)
+        # Transform pad positions based on component placement.
+        # KiCad stores rotation in degrees, positive = counter-clockwise;
+        # the standard 2D rotation matrix applies directly (no negation).
+        # See PCB.get_pad_position (schema/pcb.py) and the canonical
+        # implementation later in this file (~line 2661) for reference.
+        rot_rad = math.radians(rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         pads: list[dict] = []
