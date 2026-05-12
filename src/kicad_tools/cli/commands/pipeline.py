@@ -58,6 +58,10 @@ def run_pipeline_command(args) -> int:
     if getattr(args, "pipeline_sch", None):
         sub_argv.extend(["--sch", args.pipeline_sch])
 
+    # Apply sync drift in the sync step
+    if getattr(args, "pipeline_apply_sync", False):
+        sub_argv.append("--apply-sync")
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
