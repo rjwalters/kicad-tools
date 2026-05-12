@@ -13,9 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-from kicad_tools.cli.parser import create_parser
 from kicad_tools.cli.commands.pipeline import run_pipeline_command
-
+from kicad_tools.cli.parser import create_parser
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -133,26 +132,50 @@ class TestForwarding:
 
     def test_no_cache_forwarded(self):
         argv = self._capture_argv(
-            {"pipeline_input": "b.kicad_pcb", "pipeline_no_cache": True, "pipeline_clear_cache": False, "pipeline_sch": None, "global_quiet": False}
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_no_cache": True,
+                "pipeline_clear_cache": False,
+                "pipeline_sch": None,
+                "global_quiet": False,
+            }
         )
         assert "--no-cache" in argv
 
     def test_clear_cache_forwarded(self):
         argv = self._capture_argv(
-            {"pipeline_input": "b.kicad_pcb", "pipeline_no_cache": False, "pipeline_clear_cache": True, "pipeline_sch": None, "global_quiet": False}
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_no_cache": False,
+                "pipeline_clear_cache": True,
+                "pipeline_sch": None,
+                "global_quiet": False,
+            }
         )
         assert "--clear-cache" in argv
 
     def test_both_cache_flags_forwarded(self):
         argv = self._capture_argv(
-            {"pipeline_input": "b.kicad_pcb", "pipeline_no_cache": True, "pipeline_clear_cache": True, "pipeline_sch": None, "global_quiet": False}
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_no_cache": True,
+                "pipeline_clear_cache": True,
+                "pipeline_sch": None,
+                "global_quiet": False,
+            }
         )
         assert "--no-cache" in argv
         assert "--clear-cache" in argv
 
     def test_sch_forwarded(self):
         argv = self._capture_argv(
-            {"pipeline_input": "b.kicad_pcb", "pipeline_no_cache": False, "pipeline_clear_cache": False, "pipeline_sch": "my.kicad_sch", "global_quiet": False}
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_no_cache": False,
+                "pipeline_clear_cache": False,
+                "pipeline_sch": "my.kicad_sch",
+                "global_quiet": False,
+            }
         )
         assert "--sch" in argv
         idx = argv.index("--sch")
@@ -160,8 +183,93 @@ class TestForwarding:
 
     def test_no_flags_when_defaults(self):
         argv = self._capture_argv(
-            {"pipeline_input": "b.kicad_pcb", "pipeline_no_cache": False, "pipeline_clear_cache": False, "pipeline_sch": None, "global_quiet": False}
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_no_cache": False,
+                "pipeline_clear_cache": False,
+                "pipeline_sch": None,
+                "global_quiet": False,
+            }
         )
         assert "--no-cache" not in argv
         assert "--clear-cache" not in argv
         assert "--sch" not in argv
+
+
+# ---------------------------------------------------------------------------
+# --route-skip-threshold parsing + forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestRouteSkipThresholdParsing:
+    """Verify --route-skip-threshold is exposed by the top-level CLI parser."""
+
+    def test_default_is_95(self):
+        ns = _parse_pipeline_args(["board.kicad_pcb"])
+        assert ns.pipeline_route_skip_threshold == 95.0
+
+    def test_custom_value_parsed(self):
+        ns = _parse_pipeline_args(["board.kicad_pcb", "--route-skip-threshold", "80.0"])
+        assert ns.pipeline_route_skip_threshold == 80.0
+
+    def test_value_is_float(self):
+        ns = _parse_pipeline_args(["board.kicad_pcb", "--route-skip-threshold", "50"])
+        assert isinstance(ns.pipeline_route_skip_threshold, float)
+        assert ns.pipeline_route_skip_threshold == 50.0
+
+
+class TestRouteSkipThresholdForwarding:
+    """Verify commands/pipeline.py forwards --route-skip-threshold into sub_argv."""
+
+    def _capture_argv(self, args_dict: dict) -> list[str]:
+        ns = SimpleNamespace(**args_dict)
+        captured: list[str] = []
+
+        def _fake_main(argv):
+            captured.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", _fake_main):
+            run_pipeline_command(ns)
+        return captured
+
+    def test_default_threshold_not_forwarded(self):
+        """When threshold equals 95.0 default, the flag is omitted from sub_argv."""
+        argv = self._capture_argv(
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_route_skip_threshold": 95.0,
+                "global_quiet": False,
+            }
+        )
+        assert "--route-skip-threshold" not in argv
+
+    def test_custom_threshold_forwarded(self):
+        argv = self._capture_argv(
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_route_skip_threshold": 80.0,
+                "global_quiet": False,
+            }
+        )
+        assert "--route-skip-threshold" in argv
+        idx = argv.index("--route-skip-threshold")
+        assert argv[idx + 1] == "80.0"
+
+    def test_round_trip_parser_to_main(self):
+        """Full chain: top-level parser -> shim -> pipeline_cmd.main argv."""
+        ns = _parse_pipeline_args(["board.kicad_pcb", "--route-skip-threshold", "75.0"])
+        # Forwarding picks up the parsed namespace value.
+        captured: list[str] = []
+
+        def _fake_main(argv):
+            captured.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", _fake_main):
+            # The top-level namespace lacks `global_quiet` by default; supply it.
+            ns.global_quiet = False
+            run_pipeline_command(ns)
+        assert "--route-skip-threshold" in captured
+        idx = captured.index("--route-skip-threshold")
+        assert captured[idx + 1] == "75.0"

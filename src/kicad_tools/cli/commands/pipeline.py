@@ -44,6 +44,11 @@ def run_pipeline_command(args) -> int:
     if max_disp is not None and max_disp != 2.0:
         sub_argv.extend(["--max-displacement", str(max_disp)])
 
+    # Route skip threshold (signal-net completion percent gating the route skip)
+    route_skip_threshold = getattr(args, "pipeline_route_skip_threshold", None)
+    if route_skip_threshold is not None and route_skip_threshold != 95.0:
+        sub_argv.extend(["--route-skip-threshold", str(route_skip_threshold)])
+
     # Best-effort mode
     if getattr(args, "pipeline_best_effort", False):
         sub_argv.append("--best-effort")

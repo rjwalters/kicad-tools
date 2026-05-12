@@ -4789,6 +4789,19 @@ def _add_pipeline_parser(subparsers) -> None:
         ),
     )
     pipeline_parser.add_argument(
+        "--route-skip-threshold",
+        dest="pipeline_route_skip_threshold",
+        type=float,
+        default=95.0,
+        metavar="PERCENT",
+        help=(
+            "Minimum signal-net completion percentage required to skip the "
+            "route step (default: 95.0). Single-pad nets and zone-fillable "
+            "plane nets are excluded from the signal-net subset and never "
+            "block the skip."
+        ),
+    )
+    pipeline_parser.add_argument(
         "--best-effort",
         dest="pipeline_best_effort",
         action="store_true",

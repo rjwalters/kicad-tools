@@ -130,6 +130,7 @@ class PipelineContext:
     clear_cache: bool = False
     max_displacement: float = 2.0
     apply_sync: bool = False
+    route_skip_threshold: float = 95.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
 
@@ -150,26 +151,30 @@ class PipelineContext:
             return 2
 
 
-def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
-    """Detect whether a PCB has been routed by counting top-level segments and nets.
+def _has_routing_segments(pcb_file: Path) -> tuple[bool, int]:
+    """Detect whether a PCB has any top-level routed traces.
 
     Reads the PCB file and counts ``(segment ...)`` and ``(arc ...)`` nodes that
     are direct children of the root ``(kicad_pcb ...)`` node (depth 1).  Segments
     and arcs nested inside ``(zone ...)`` or ``(filled_polygon ...)`` blocks are
     excluded so that zone fill polygons are not mistaken for routed traces.
 
+    This is a fast probe used as a precondition for routing-completeness
+    assessment -- it is NOT a connectivity oracle.  Use
+    :func:`_assess_routing_completeness` for skip/route decisions.
+
     Args:
         pcb_file: Path to .kicad_pcb file
 
     Returns:
-        Tuple of (is_routed, segment_count, net_count) where is_routed
-        is True if the board has top-level routing segments.
+        Tuple of (is_routed, segment_count) where is_routed is True if the
+        board has any top-level routing segments or arcs.
     """
     try:
         content = pcb_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         logger.warning("Could not read PCB file %s: %s", pcb_file, e)
-        return False, 0, 0
+        return False, 0
 
     # Count only top-level (segment ...) and (arc ...) entries.
     # In KiCad s-expression format, routed traces live at depth 1 (direct
@@ -198,12 +203,191 @@ def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
 
     total_traces = segment_count + arc_count
 
-    # Count nets (excluding net 0 which is the unconnected net)
-    net_count = content.count("(net ") - content.count("(net 0 ")
+    return total_traces > 0, total_traces
 
-    is_routed = total_traces > 0
 
-    return is_routed, total_traces, net_count
+@dataclass
+class RoutingAssessment:
+    """Per-net connectivity assessment with a skip recommendation.
+
+    Produced by :func:`_assess_routing_completeness`, which delegates to
+    :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` so the
+    pipeline always agrees with ``kct net-status`` on the same board.
+
+    Routing-required subset rules (mirroring the issue #2731 acceptance
+    criteria):
+
+    * **Single-pad nets** are not counted as signal nets -- they have no
+      possible trace topology and cannot block a skip.  See
+      :attr:`NetStatus.status <kicad_tools.analysis.net_status.NetStatus.status>`
+      lines 98-114 for the underlying rule.
+    * **Zone-fillable plane nets** (``is_plane_net`` with the zone closing
+      the remaining unconnected pads) are likewise excluded from the
+      signal-net total -- the stitch + zone-fill steps close those.
+
+    Attributes:
+        total_signal_nets: Number of nets that need traces (excludes
+            single-pad nets and plane nets).
+        complete_signal_nets: Subset of ``total_signal_nets`` whose
+            connectivity status is "complete".
+        incomplete_signal_nets: Signal nets that are not "complete".
+        zone_fillable_nets: Names of plane nets handled by zones.
+        single_pad_nets: Names of single-pad nets (always complete).
+        signal_completion_percent: ``complete_signal_nets / total_signal_nets``
+            as a percent (or 100.0 when ``total_signal_nets == 0``).
+        recommend_skip: True iff the pipeline should skip the route step.
+        summary: Human-readable summary suitable for the skip message.
+        trace_count: Top-level segment+arc count (for diagnostics).
+    """
+
+    total_signal_nets: int = 0
+    complete_signal_nets: int = 0
+    incomplete_signal_nets: int = 0
+    zone_fillable_nets: list[str] = None  # type: ignore[assignment]
+    single_pad_nets: list[str] = None  # type: ignore[assignment]
+    signal_completion_percent: float = 0.0
+    recommend_skip: bool = False
+    summary: str = ""
+    trace_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.zone_fillable_nets is None:
+            self.zone_fillable_nets = []
+        if self.single_pad_nets is None:
+            self.single_pad_nets = []
+
+
+def _assess_routing_completeness(
+    pcb_file: Path,
+    threshold_percent: float = 95.0,
+) -> RoutingAssessment:
+    """Return per-net connectivity status with a skip recommendation.
+
+    Uses :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` -- the
+    same engine ``kct net-status`` uses -- so the pipeline never disagrees
+    with the net-status command on the same board.
+
+    The recommendation logic (issue #2731):
+
+    1. Compute the **routing-required subset**: nets that need traces.
+       Excluded from this subset:
+
+       * Single-pad nets (``net.total_pads <= 1``) -- they are always
+         "complete" by definition (``NetStatus.status`` at
+         ``net_status.py:108-109``).
+       * Pure plane nets where the zone closes connectivity
+         (``net.is_plane_net`` and ``net.status == "complete"``).  The
+         zone-fill step handles those.
+
+    2. Skip iff:
+
+       * The board has at least one top-level routing segment, AND
+       * The routing-required subset (signal nets only -- single-pad
+         and plane nets are bucketed out per step 1) is at least
+         ``threshold_percent`` complete.
+
+       Any remaining incomplete plane nets are tracked separately in
+       ``incomplete_zone_fillable`` and do NOT block the skip; the
+       stitch + zone-fill steps close those connections.
+
+    Args:
+        pcb_file: Path to .kicad_pcb file.
+        threshold_percent: Minimum percentage of signal nets that must
+            be complete for the skip to be recommended.  Defaults to
+            95.0 to match the issue's recommended threshold.
+
+    Returns:
+        RoutingAssessment carrying counts, names, and the boolean
+        ``recommend_skip`` decision plus a human-readable ``summary``.
+    """
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    is_routed, trace_count = _has_routing_segments(pcb_file)
+
+    try:
+        result = NetStatusAnalyzer(pcb_file).analyze()
+    except Exception as exc:
+        # If we cannot analyze, fall back to "do not skip" so the router runs.
+        logger.warning("Could not analyze net connectivity for %s: %s", pcb_file, exc)
+        summary = f"net-status unavailable ({exc.__class__.__name__}); routing required"
+        return RoutingAssessment(
+            recommend_skip=False,
+            summary=summary,
+            trace_count=trace_count,
+        )
+
+    # Bucket nets according to the issue rules.
+    single_pad_nets: list[str] = []
+    zone_fillable_nets: list[str] = []
+    incomplete_zone_fillable: list[str] = []
+    signal_nets_total = 0
+    signal_nets_complete = 0
+
+    for net in result.nets:
+        # Single-pad: never a routing candidate.
+        if net.total_pads <= 1:
+            single_pad_nets.append(net.net_name)
+            continue
+        # Plane nets: handled by zone fill / stitching.  Track them so we
+        # can mention them in the skip summary, but they do NOT count
+        # toward the signal-net totals (they cannot block a skip).
+        if net.is_plane_net:
+            zone_fillable_nets.append(net.net_name)
+            if net.status != "complete":
+                incomplete_zone_fillable.append(net.net_name)
+            continue
+        # Everything else is a signal net.
+        signal_nets_total += 1
+        if net.status == "complete":
+            signal_nets_complete += 1
+
+    incomplete_signal = signal_nets_total - signal_nets_complete
+    if signal_nets_total > 0:
+        percent = 100.0 * signal_nets_complete / signal_nets_total
+    else:
+        # Empty signal subset (board has only plane/single-pad nets):
+        # nothing to route, treat as 100%.
+        percent = 100.0
+
+    threshold_ok = percent >= threshold_percent
+
+    # Recommend skip only when:
+    # - top-level segments exist (so a router has actually run before), AND
+    # - signal-net completion meets the threshold.
+    # Zone-fillable plane nets that are still incomplete do NOT block the
+    # skip -- the stitch + zone-fill steps will close those connections.
+    recommend_skip = is_routed and threshold_ok
+
+    # Build a human-readable summary matching `kct net-status` numbers.
+    parts: list[str] = []
+    parts.append(f"{signal_nets_complete}/{signal_nets_total} signal nets complete")
+    if zone_fillable_nets:
+        parts.append(f"{len(zone_fillable_nets)} plane nets zone-fillable")
+    if single_pad_nets:
+        parts.append(f"{len(single_pad_nets)} single-pad nets")
+
+    detail = ", ".join(parts)
+    if recommend_skip:
+        summary = f"route: skipped ({detail})"
+    elif not is_routed:
+        summary = f"route: no top-level segments -- routing required ({detail})"
+    else:
+        summary = (
+            f"route: signal completion {percent:.1f}% below threshold "
+            f"{threshold_percent:.1f}% -- routing required ({detail})"
+        )
+
+    return RoutingAssessment(
+        total_signal_nets=signal_nets_total,
+        complete_signal_nets=signal_nets_complete,
+        incomplete_signal_nets=incomplete_signal,
+        zone_fillable_nets=zone_fillable_nets,
+        single_pad_nets=single_pad_nets,
+        signal_completion_percent=percent,
+        recommend_skip=recommend_skip,
+        summary=summary,
+        trace_count=trace_count,
+    )
 
 
 def _resolve_pcb_from_project(project_file: Path) -> Path | None:
@@ -762,14 +946,23 @@ def _run_subprocess_step(
 
 
 def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
-    """Run routing step if board is unrouted."""
-    is_routed, trace_count, net_count = _detect_routing_status(ctx.pcb_file)
+    """Run routing step if the board is not yet sufficiently routed.
 
-    if is_routed and not ctx.force:
+    Skip semantics (issue #2731): the route step is skipped only when
+    :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` reports the
+    routing-required signal-net subset as at least
+    ``ctx.route_skip_threshold`` percent complete.  Single-pad nets and
+    zone-fillable plane nets do not block the skip -- those are handled by
+    other pipeline steps (or are inherently complete).  ``--force`` always
+    re-runs the router.
+    """
+    assessment = _assess_routing_completeness(ctx.pcb_file, ctx.route_skip_threshold)
+
+    if assessment.recommend_skip and not ctx.force:
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,
-            message=f"route: Board already routed ({trace_count} traces, {net_count} nets) - skipped",
+            message=assessment.summary,
             skipped=True,
         )
 
@@ -781,7 +974,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             cache_flags += " --no-cache"
         if ctx.clear_cache:
             cache_flags += " --clear-cache"
-        if is_routed:
+        if assessment.recommend_skip:
             return PipelineResult(
                 step=PipelineStep.ROUTE,
                 success=True,
@@ -1630,15 +1823,15 @@ def _build_commit_message(
     routed_nets: int | None = None
     total_nets: int | None = None
 
-    # Try to get routing status from the final PCB file
+    # Pull routing status from NetStatusAnalyzer so the commit message
+    # matches the numbers ``kct net-status`` would print (issue #2731).
     try:
-        _, _, net_count = _detect_routing_status(ctx.pcb_file)
-        if net_count > 0:
-            # The net count from _detect_routing_status is a rough count.
-            # Use it as both routed and total since the pipeline aims for
-            # full routing.
-            routed_nets = net_count
-            total_nets = net_count
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        net_result = NetStatusAnalyzer(ctx.pcb_file).analyze()
+        if net_result.total_nets > 0:
+            routed_nets = net_result.complete_count
+            total_nets = net_result.total_nets
     except Exception:
         pass
 
@@ -2001,6 +2194,18 @@ Examples:
         help="Force all steps (e.g., re-route even if already routed)",
     )
     parser.add_argument(
+        "--route-skip-threshold",
+        type=float,
+        default=95.0,
+        metavar="PERCENT",
+        help=(
+            "Minimum signal-net completion percentage required to skip the "
+            "route step (default: 95.0). Single-pad nets and zone-fillable "
+            "plane nets are excluded from the signal-net subset and never "
+            "block the skip."
+        ),
+    )
+    parser.add_argument(
         "--commit",
         action="store_true",
         default=False,
@@ -2139,6 +2344,7 @@ Examples:
         clear_cache=args.clear_cache,
         max_displacement=args.max_displacement,
         apply_sync=args.apply_sync,
+        route_skip_threshold=args.route_skip_threshold,
     )
 
     # Determine steps to run

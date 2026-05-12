@@ -13,9 +13,10 @@ from kicad_tools.cli.pipeline_cmd import (
     PipelineContext,
     PipelineResult,
     PipelineStep,
+    _assess_routing_completeness,
     _build_commit_message,
-    _detect_routing_status,
     _fetch_check_results,
+    _has_routing_segments,
     _is_git_repo,
     _print_final_summary,
     _resolve_pcb_from_project,
@@ -238,51 +239,205 @@ def project_with_pcb(tmp_path: Path) -> tuple[Path, Path]:
     return pro_file, pcb_file
 
 
-class TestDetectRoutingStatus:
-    """Tests for _detect_routing_status helper."""
+class TestHasRoutingSegments:
+    """Tests for _has_routing_segments helper (replaces _detect_routing_status)."""
 
     def test_routed_board_detected(self, routed_pcb: Path):
         """A PCB with segments is detected as routed."""
-        is_routed, trace_count, net_count = _detect_routing_status(routed_pcb)
+        is_routed, trace_count = _has_routing_segments(routed_pcb)
         assert is_routed is True
         assert trace_count == 2
-        assert net_count > 0
 
     def test_unrouted_board_detected(self, unrouted_pcb: Path):
         """A PCB without segments is detected as unrouted."""
-        is_routed, trace_count, net_count = _detect_routing_status(unrouted_pcb)
+        is_routed, trace_count = _has_routing_segments(unrouted_pcb)
         assert is_routed is False
         assert trace_count == 0
 
     def test_empty_board(self, empty_pcb: Path):
         """An empty PCB is detected as unrouted."""
-        is_routed, trace_count, net_count = _detect_routing_status(empty_pcb)
+        is_routed, trace_count = _has_routing_segments(empty_pcb)
         assert is_routed is False
         assert trace_count == 0
-        assert net_count == 0
 
     def test_zone_fill_only_not_routed(self, zone_fill_only_pcb: Path):
         """A PCB with only zone fills (no top-level segments) is unrouted (#1835)."""
-        is_routed, trace_count, net_count = _detect_routing_status(zone_fill_only_pcb)
+        is_routed, trace_count = _has_routing_segments(zone_fill_only_pcb)
         assert is_routed is False
         assert trace_count == 0
-        assert net_count > 0
 
     def test_zone_fill_with_traces_detected(self, zone_fill_with_traces_pcb: Path):
         """A PCB with zone fills AND top-level segments is detected as routed."""
-        is_routed, trace_count, net_count = _detect_routing_status(zone_fill_with_traces_pcb)
+        is_routed, trace_count = _has_routing_segments(zone_fill_with_traces_pcb)
         assert is_routed is True
         assert trace_count == 1
-        assert net_count > 0
 
     def test_nonexistent_file(self, tmp_path: Path):
         """Non-existent file returns unrouted with zero counts."""
-        is_routed, trace_count, net_count = _detect_routing_status(
+        is_routed, trace_count = _has_routing_segments(
             tmp_path / "nonexistent.kicad_pcb"
         )
         assert is_routed is False
         assert trace_count == 0
-        assert net_count == 0
+
+
+class TestAssessRoutingCompleteness:
+    """Tests for _assess_routing_completeness (the new connectivity-based gate).
+
+    Validates the issue #2731 contract:
+
+    * Skip decision is based on NetStatusAnalyzer, not on the bogus
+      (net N) token count.
+    * Single-pad nets do not block the skip.
+    * Zone-fillable plane nets do not block the skip.
+    * Threshold is respected (default 95%, configurable).
+    """
+
+    def test_routed_board_recommends_skip(self, routed_pcb: Path):
+        """A board with traces and only single-pad nets recommends skip."""
+        assessment = _assess_routing_completeness(routed_pcb)
+        assert assessment.recommend_skip is True
+        # ROUTED_PCB has 3 named nets, all single-pad (VIN, NET1) or empty
+        # (GND).  None are signal nets that need routing.
+        assert assessment.total_signal_nets == 0
+        assert assessment.summary.startswith("route: skipped")
+
+    def test_unrouted_board_does_not_recommend_skip(self, unrouted_pcb: Path):
+        """A board with no top-level segments does not recommend skip."""
+        assessment = _assess_routing_completeness(unrouted_pcb)
+        assert assessment.recommend_skip is False
+        # Summary should explain why
+        assert "routing required" in assessment.summary
+
+    def test_empty_board_does_not_recommend_skip(self, empty_pcb: Path):
+        """An empty board does not skip (no segments to indicate prior routing)."""
+        assessment = _assess_routing_completeness(empty_pcb)
+        assert assessment.recommend_skip is False
+
+    def test_single_pad_nets_do_not_block_skip(self, tmp_path: Path):
+        """Single-pad nets must not count toward signal-net totals (#2731)."""
+        # Board with one trace and a single-pad net that should NOT block.
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SINGLE")
+  (net 2 "ROUTED")
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r1") (at 100 50)
+    (property "Reference" "R1" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "SINGLE"))
+  )
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r2") (at 100 60)
+    (property "Reference" "R2" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "ROUTED"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "ROUTED"))
+  )
+  (segment (start 99.2 60) (end 100.8 60) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+)
+"""
+        pcb_file = tmp_path / "single_pad.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        assessment = _assess_routing_completeness(pcb_file)
+        # SINGLE has 1 pad -> single-pad bucket; ROUTED has 2 pads, both at
+        # the segment endpoints -> 1/1 signal nets complete.
+        assert "SINGLE" in assessment.single_pad_nets
+        assert assessment.total_signal_nets == 1
+        assert assessment.complete_signal_nets == 1
+        assert assessment.recommend_skip is True
+
+    def test_threshold_blocks_skip_when_signal_incomplete(self, tmp_path: Path):
+        """When signal nets are below threshold, do not skip."""
+        # Two 2-pad signal nets; one is routed, the other is not.
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r1") (at 100 50)
+    (property "Reference" "R1" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "A"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "A"))
+  )
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r2") (at 100 60)
+    (property "Reference" "R2" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "B"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "B"))
+  )
+  (segment (start 99.2 50) (end 100.8 50) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+        pcb_file = tmp_path / "half_routed.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        # Default threshold (95%): 1/2 = 50% -> route
+        assessment = _assess_routing_completeness(pcb_file)
+        assert assessment.total_signal_nets == 2
+        assert assessment.complete_signal_nets == 1
+        assert assessment.recommend_skip is False
+        assert "below threshold" in assessment.summary
+
+        # 50% threshold: 50% meets it -> skip
+        assessment_low = _assess_routing_completeness(pcb_file, threshold_percent=50.0)
+        assert assessment_low.recommend_skip is True
+
+    def test_zone_fillable_plane_does_not_block_skip(self, tmp_path: Path):
+        """An incomplete plane net must NOT block the skip (#2731).
+
+        Construct a PCB with one routed signal net plus a GND plane net
+        where the GND pads are unconnected (no segments, no via in
+        zone).  Without the issue #2731 fix, the incomplete GND would
+        block the skip; with the fix, the route step skips because GND
+        is zone-fillable.
+        """
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r1") (at 100 50)
+    (property "Reference" "R1" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (uuid "fp-r2") (at 110 50)
+    (property "Reference" "R2" (at 0 -1 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 2 "SIG"))
+    (pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 100.8 50) (end 109.2 50) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone-1") (hatch edge 0.5)
+    (connect_pads (clearance 0.2)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 40) (xy 120 40) (xy 120 60) (xy 90 60)))
+  )
+)
+"""
+        pcb_file = tmp_path / "zone_plane.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        assessment = _assess_routing_completeness(pcb_file)
+        # GND has a zone -> plane net, bucketed as zone-fillable
+        assert "GND" in assessment.zone_fillable_nets
+        # SIG is a 2-pad signal net with the routing segment between the
+        # two pad positions -> complete signal net.
+        assert assessment.total_signal_nets == 1
+        assert assessment.complete_signal_nets == 1
+        # Even though GND is incomplete (no copper connecting its pads
+        # apart from the zone, which is on B.Cu while the pads are F.Cu),
+        # the skip must still be recommended because GND is zone-fillable.
+        assert assessment.recommend_skip is True
 
 
 class TestResolveProjectPcb:
@@ -389,16 +544,18 @@ class TestRoutingSkip:
     """Tests for automatic routing detection and skip."""
 
     def test_routing_skipped_when_routed(self, routed_pcb: Path):
-        """Pipeline skips routing when board already has traces."""
+        """Pipeline skips routing when board has traces and signal nets are complete."""
         ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
         results = run_pipeline(ctx, [PipelineStep.ROUTE])
 
         assert len(results) == 1
         assert results[0].success is True
         assert results[0].skipped is True
-        assert "already routed" in results[0].message
+        assert "skipped" in results[0].message
         # Verify message uses "route: " prefix convention
         assert results[0].message.startswith("route: ")
+        # Message should mention signal nets (matches kct net-status numbers)
+        assert "signal nets" in results[0].message
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_routing_invoked_when_unrouted(self, mock_run, unrouted_pcb: Path):
