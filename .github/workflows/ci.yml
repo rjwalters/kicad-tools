@@ -403,3 +403,103 @@ jobs:
             "${{ matrix.board }}" \
             --seed 42
 
+  matchgroup-routing-regression:
+    # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
+    # N-trace match-group testbench, #2724 Phase 3L) from scratch on
+    # every PR and verify that
+    #   (a) the resulting DRC error count is within the allowlist baseline
+    #       in .github/routed-drc-tolerance.yml; AND
+    #   (b) the match_group_length_skew DRC rule (#2702, Phase 2G; producer
+    #       wiring #2710 Phase 2.5G) was actually exercised against a
+    #       declared group -- i.e., the per-rule counter in the DRC
+    #       summary is non-zero for rule_id "match_group_length_skew".
+    #
+    # This job is a SIBLING to diffpair-routing-regression (board 06),
+    # not a matrix-extension.  Per the issue #2726 curator decision
+    # (2026-05-11), sibling structure was chosen because:
+    #
+    #   1. Minimal blast radius -- a match-group regression PR cannot
+    #      accidentally break the diff-pair gate and vice versa.
+    #   2. The diff-pair coverage script's DIFFPAIR_RULE_IDS tuple is
+    #      hardcoded to three rule_ids; the match-group gate asserts a
+    #      different (currently single) rule_id.  A dedicated script
+    #      (check_matchgroup_coverage.py) is cleaner than parametrising
+    #      check_diffpair_coverage.py with a --rules flag.
+    #   3. Per-job timeout budgets are independent (each gets a fresh
+    #      10-min ceiling -- matrix-extension would share the budget).
+    #   4. The existing job name "Diff-Pair Routing Regression" is a
+    #      branch-protection check name; renaming requires repo-admin
+    #      action.  A sibling job is purely additive to branch protection.
+    #
+    # This job is the algorithmic-regression counterpart to the
+    # routed-pcb-drc-check job above for the match-group rule, mirroring
+    # what diffpair-routing-regression does for the diff-pair rules.
+    #
+    # Determinism: the gate uses `--seed 42` (Issue #2589 / Phase 3X.2)
+    # forwarded into `generate_design.py --seed` so the re-route is
+    # reproducible.  Without `--seed` the router uses os.urandom-derived
+    # entropy and produces different output run-to-run, which would
+    # generate false-positive failures on a loaded CI runner.
+    #
+    # Sidecar: check_matchgroup_coverage.py threads the board's
+    # output/net_class_map.json (emitted by generate_design.write_sidecar
+    # in Phase 3L scaffolding) into `kct check --net-class-map` per the
+    # #2692 pattern.  Without the sidecar the match_group_length_skew
+    # rule degrades to a no-op and the assertion-of-engagement check
+    # would fail with "rule not exercised".
+    #
+    # Allowlist:
+    #   .github/routed-drc-tolerance.yml currently has
+    #   boards/07-matchgroup-test/.../matchgroup_test_routed.kicad_pcb: 80
+    #   (55x impedance per #2672 + 4x diffpair_length_skew + 4x
+    #   diffpair_routing_continuity + 1x match_group_length_skew, with
+    #   ~25% headroom over the empirical 64).  The gate respects the
+    #   allowlist so it doesn't fail immediately; the floor will tighten
+    #   iteratively as match-group tuning (Phase 3H #2723) lands and
+    #   reduces skew.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on `main` is a separate repo-admin action.
+    # The PR landing this job calls that out explicitly so the human
+    # approver can flip the GitHub setting after merge.  Until then the
+    # job runs on every PR but is advisory -- its failure does not block
+    # the merge button.
+    name: Match-Group Routing Regression
+    runs-on: ubuntu-latest
+    # Issue #2660 acceptance criterion #5 (mirrored for #2726): wall-clock
+    # <= 5 min on ubuntu-latest.  The 10-minute limit here is a safety
+    # net for slow runners; if the typical run creeps above 5 minutes,
+    # move to a nightly schedule per the epic's runtime guidance.
+    timeout-minutes: 10
+    strategy:
+      # Don't abort the matrix on a single board failure -- each board
+      # is independent and reviewers want all annotations at once.
+      fail-fast: false
+      matrix:
+        board:
+          - boards/07-matchgroup-test
+        # Future: additional N-trace testbenches (e.g., a board with
+        # only the cascade-budget edge case, or a board exercising
+        # length_match_reference=pace-car semantics) can be added
+        # cheaply once they exist.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Re-route board + check match-group coverage
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_matchgroup_coverage.py \
+            "${{ matrix.board }}" \
+            --seed 42
+
