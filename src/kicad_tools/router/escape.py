@@ -1805,6 +1805,10 @@ class EscapeRouter:
                     surface_seg = escape.segments[0]
                     if self._segment_violates_pad_clearance(
                         surface_seg, i, pads, effective_clearance,
+                        # Issue #2755: Also check against pads on the OTHER
+                        # edges of this QFP plus plane-net pads (net==0)
+                        # that were filtered out of ``pads`` above.
+                        extra_pads=self._other_footprint_pads(package, pads),
                     ):
                         in_pad_route = self._try_in_pad_escape(
                             pad=pad,
@@ -2123,6 +2127,10 @@ class EscapeRouter:
                 # segment against neighboring pads before committing.
                 if self._segment_violates_pad_clearance(
                     surface_seg, i, pads, effective_clearance,
+                    # Issue #2755: Also check pads on the OTHER rows/edges
+                    # of this footprint plus plane-net pads that were
+                    # filtered out of the row-grouping step.
+                    extra_pads=self._other_footprint_pads(package, pads),
                 ):
                     # Issue #2605: Attempt in-pad via escape as a fallback
                     # before deferring to the main router.  Only enabled
@@ -2204,6 +2212,10 @@ class EscapeRouter:
                 # Issue #2319: Check segment-to-pad clearance before committing.
                 if self._segment_violates_pad_clearance(
                     segment, i, pads, effective_clearance,
+                    # Issue #2755: Also check pads on the OTHER rows/edges
+                    # of this footprint plus plane-net pads that were
+                    # filtered out of the row-grouping step.
+                    extra_pads=self._other_footprint_pads(package, pads),
                 ):
                     # Issue #2605: Attempt in-pad via escape as a fallback
                     # before deferring to the main router.
@@ -2298,14 +2310,38 @@ class EscapeRouter:
         # Edge-to-edge gap = centre-to-rect distance minus half-segment-width
         return rect_dist - seg.width / 2
 
+    @staticmethod
+    def _other_footprint_pads(
+        package: PackageInfo,
+        row_pads: list[Pad],
+    ) -> list[Pad]:
+        """Return pads on the same footprint that are NOT in ``row_pads``.
+
+        Issue #2755: The escape generators group pads into per-edge
+        (or per-row) buckets and drop plane-net pads (``net == 0``) before
+        running the clearance check.  When a segment from the north edge of
+        a TQFP escapes laterally, it can still land on a VCC/GND pad (which
+        was filtered out) or an east-edge pad (which is in a different
+        bucket).  This helper returns the complement -- every pad on the
+        footprint that the row-level check would otherwise miss -- so the
+        caller can pass it to ``_segment_violates_pad_clearance`` as
+        ``extra_pads``.
+
+        Identification is by object identity, so callers can re-use the
+        original ``package.pads`` list (which includes plane-net pads).
+        """
+        row_ids = {id(p) for p in row_pads}
+        return [p for p in package.pads if id(p) not in row_ids]
+
     def _segment_violates_pad_clearance(
         self,
         seg: Segment,
         pad_index: int,
         pads: list[Pad],
         min_clearance: float,
+        extra_pads: list[Pad] | None = None,
     ) -> bool:
-        """Check whether *seg* violates clearance against pads in the row.
+        """Check whether *seg* violates clearance against neighbouring pads.
 
         Issue #2350: Checks ALL pads in the row, not just immediate neighbors.
         On fine-pitch packages (e.g. 20-pin SSOP), a lateral escape may
@@ -2313,8 +2349,25 @@ class EscapeRouter:
         checked.  The segment's own pad (at pad_index) is skipped because the
         segment originates from it.
 
-        Returns True if any pad in the row is violated.
+        Issue #2755: Optionally checks ``extra_pads`` (typically the OTHER
+        pads on the same footprint -- the ones not in the current edge/row
+        ``pads`` list).  Per-edge escape generation previously only checked
+        against pads on the SAME edge of a QFP, missing collisions where an
+        escape stub from the north edge ran across a pad on the east edge
+        (or a plane-net pad that was filtered out of ``pads`` because its
+        net was 0).  ``extra_pads`` are checked in addition to ``pads``;
+        the source pad is identified by object identity to avoid index
+        collisions across the two lists.
+
+        Returns True if any pad in either list violates clearance.
         """
+        # Source pad identity for skipping (when in either list).
+        source_pad: Pad | None = (
+            pads[pad_index]
+            if 0 <= pad_index < len(pads)
+            else None
+        )
+
         for neighbor_idx in range(len(pads)):
             if neighbor_idx == pad_index:
                 continue
@@ -2325,6 +2378,20 @@ class EscapeRouter:
             gap = self._segment_to_pad_edge_gap(seg, neighbor)
             if gap < min_clearance - 1e-6:
                 return True
+
+        # Issue #2755: Check the additional pads (other edges of the
+        # same footprint, plane-net pads, etc.).  Skip the source pad
+        # by identity in case the caller accidentally included it.
+        if extra_pads:
+            for neighbor in extra_pads:
+                if source_pad is not None and neighbor is source_pad:
+                    continue
+                if neighbor.layer != seg.layer:
+                    continue
+                gap = self._segment_to_pad_edge_gap(seg, neighbor)
+                if gap < min_clearance - 1e-6:
+                    return True
+
         return False
 
     @staticmethod
