@@ -940,7 +940,10 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
                 ref = fp.reference
                 cx, cy = fp.position
                 rotation = fp.rotation
-                rot_rad = math.radians(-rotation)
+                # NOTE: positive sign matches PCB.get_pad_position (the
+                # canonical local->world transform used throughout the
+                # codebase).  KiCad rotation is positive counter-clockwise.
+                rot_rad = math.radians(rotation)
                 cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
                 pads = []

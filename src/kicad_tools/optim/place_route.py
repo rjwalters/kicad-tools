@@ -299,8 +299,10 @@ class PlaceRouteOptimizer:
             cx, cy = fp.position
             rotation = fp.rotation
 
-            # Transform pad positions
-            rot_rad = math.radians(-rotation)  # KiCad uses clockwise
+            # Transform pad positions.  KiCad rotation is positive
+            # counter-clockwise; the standard 2D rotation matrix applies
+            # directly (no negation).  Matches PCB.get_pad_position.
+            rot_rad = math.radians(rotation)
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
             pads = []
