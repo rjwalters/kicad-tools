@@ -35,6 +35,7 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 | 03 | [USB Joystick](03-usb-joystick/) | ⚠️ Complex routing | ~20 | 13 | Mixed signals, may not complete all routes on 2-layer |
 | 04 | [STM32 Dev Board](04-stm32-devboard/) | 🚧 Schematic only | ~30 | - | Layout pending, demonstrates programmatic schematic generation |
 | 06 | [Diff-Pair Test](06-diffpair-test/) | ⚠️ Scaffold | 7 | 26 | Epic [#2556] Phase 4L regression bench --- USB 2.0/3.0, PCIe, MIPI on 4-layer; exercises Phase 1-3 features (intra_pair_clearance, coupled_routing, coupled_continuity_threshold, target_diff_impedance, skew_tolerance_mm) |
+| 07 | [Match-Group Test](07-matchgroup-test/) | ⚠️ Scaffold | 8 | 33 | Epic [#2661] Phase 3L regression bench --- DDR data byte, MIPI CSI, HDMI TMDS, address bus on 4-layer; exercises Phase 1A-2G match-group features (length_match_group, length_match_reference, length_match_tolerance_mm) |
 
 **Status Legend:**
 - ✅ Working - Generates manufacturable output
@@ -177,6 +178,23 @@ Multi-protocol HSDI regression testbench:
 Not a working device --- synthetic sinks drive routing exercise only.
 
 [#2556]: https://github.com/rjwalters/kicad-tools/issues/2556
+
+### 07 - Match-Group Test (Routing Testbench)
+
+Multi-protocol N-trace match-group regression testbench:
+- DDR data byte (10 nets: DQ0-7 + DM0 + DQS_P/N pair) -- N-trace + diff-pair group composition
+- MIPI CSI lanes (3 pairs: CLK + DAT0 + DAT1)
+- HDMI TMDS lanes (3 pairs: D0 + D1 + D2)
+- Address bus A0-A7 (single-ended N-trace group)
+- 4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu)
+
+**Demonstrates**: Epic [#2661] Phase 1-2 match-group routing subsystem
+(per-class `length_match_group`, `length_match_reference`,
+`length_match_tolerance_mm` + diff-pair `skew_tolerance_mm` for pair
+members within a group).  Not a working device --- synthetic
+sources/sinks drive routing exercise only.
+
+[#2661]: https://github.com/rjwalters/kicad-tools/issues/2661
 
 ## See Also
 
