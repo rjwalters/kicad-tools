@@ -148,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
     )
     parser.add_argument(
+        "--allow-unbuildable-bom",
+        action="store_true",
+        help=(
+            "Allow export to proceed when the BOM contains refs with no PCB "
+            "footprint (default: block, since the package would be unbuildable). "
+            "Use only for partial/debug exports."
+        ),
+    )
+    parser.add_argument(
         "--skip-drc",
         action="store_true",
         help="Skip DRC check in pre-flight validation",
@@ -271,6 +280,7 @@ def run_export(args: argparse.Namespace) -> int:
         bom_source=getattr(args, "bom_source", "schematic"),
         preflight=preflight_cfg,
         strict_preflight=getattr(args, "strict_preflight", False),
+        block_on_unbuildable_bom=not getattr(args, "allow_unbuildable_bom", False),
         pnp_config=pnp_config,
         gerber_config=gerber_config,
         latest_report_only=not getattr(args, "keep_versions", False),

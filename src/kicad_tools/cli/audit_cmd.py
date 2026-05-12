@@ -221,6 +221,43 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
         if drc.details:
             print(f"    Details: {drc.details}")
 
+    # Sync drift (schematic <-> PCB)
+    sync = result.sync
+    if sync.skipped:
+        print("\n[--] Sync (Schematic <-> PCB): SKIPPED")
+        if sync.details:
+            print(f"    Note: {sync.details}")
+    else:
+        sync_status = "PASS" if sync.passed else "FAIL"
+        sync_icon = "OK" if sync.passed else "X"
+        print(f"\n[{sync_icon}] Sync (Schematic <-> PCB): {sync_status}")
+        if sync.details:
+            print(f"    {sync.details}")
+        if sync.schematic_only_count > 0:
+            refs = ", ".join(sync.schematic_only_refs[:5])
+            print(
+                f"    Schematic-only ({sync.schematic_only_count}): {refs}"
+                + ("..." if sync.schematic_only_count > 5 else "")
+            )
+        if sync.pcb_only_count > 0:
+            refs = ", ".join(sync.pcb_only_refs[:5])
+            print(
+                f"    PCB-only ({sync.pcb_only_count}): {refs}"
+                + ("..." if sync.pcb_only_count > 5 else "")
+            )
+        if sync.value_mismatch_count > 0:
+            refs = ", ".join(sync.value_mismatch_refs[:5])
+            print(
+                f"    Value mismatches ({sync.value_mismatch_count}): {refs}"
+                + ("..." if sync.value_mismatch_count > 5 else "")
+            )
+        if sync.footprint_mismatch_count > 0:
+            refs = ", ".join(sync.footprint_mismatch_refs[:5])
+            print(
+                f"    Footprint mismatches ({sync.footprint_mismatch_count}): {refs}"
+                + ("..." if sync.footprint_mismatch_count > 5 else "")
+            )
+
     # Connectivity
     conn = result.connectivity
     conn_status = "PASS" if conn.passed else "FAIL"
@@ -333,6 +370,19 @@ def output_summary(result: AuditResult) -> None:
     print(f"  Verdict: {summary['verdict'].upper()}")
     print(f"  ERC errors: {summary['erc_errors']}")
     print(f"  DRC violations: {summary['drc_violations']} ({summary['drc_blocking']} blocking)")
+    sync_axes = (
+        summary["sync_schematic_only"]
+        + summary["sync_pcb_only"]
+        + summary["sync_value_mismatches"]
+        + summary["sync_footprint_mismatches"]
+    )
+    if sync_axes > 0:
+        print(
+            f"  Sync drift: {summary['sync_schematic_only']} schematic-only, "
+            f"{summary['sync_pcb_only']} PCB-only, "
+            f"{summary['sync_value_mismatches']} value, "
+            f"{summary['sync_footprint_mismatches']} footprint"
+        )
     print(f"  Net completion: {summary['net_completion']:.0f}%")
     print(f"  Manufacturer compatible: {'Yes' if summary['manufacturer_compatible'] else 'No'}")
     if summary["estimated_cost"] > 0:

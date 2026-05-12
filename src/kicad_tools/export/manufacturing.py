@@ -48,6 +48,15 @@ class ManufacturingConfig(AssemblyConfig):
     # export proceeds to generate output files.
     strict_preflight: bool = False
 
+    # When True (default), the export refuses to proceed when the BOM
+    # contains references with no matching PCB footprint -- the package
+    # would be unbuildable because the fab cannot place components that
+    # are not on the board.  This gates only the ``bom_pcb_match``
+    # preflight check independently of ``strict_preflight``; users who
+    # explicitly want to ship a partial package can opt out via
+    # ``--allow-unbuildable-bom`` (which sets this to False).
+    block_on_unbuildable_bom: bool = True
+
     # When True (default), flatten the latest vN/ report directory into a
     # ``report/`` subdirectory and remove all vN/ directories from the output.
     # When False, versioned directories are preserved as-is.
@@ -163,9 +172,7 @@ def _create_project_zip(
     project_files.extend(
         f
         for f in project_dir.iterdir()
-        if f.is_file()
-        and f.suffix in sch_pro_extensions
-        and "_backup_" not in f.stem
+        if f.is_file() and f.suffix in sch_pro_extensions and "_backup_" not in f.stem
     )
 
     if not project_files:
@@ -269,6 +276,22 @@ class ManufacturingPackage:
             preflight_results = self._run_preflight()
             result.preflight_results = preflight_results
 
+            # The bom_pcb_match check returns FAIL when the BOM references
+            # parts with no matching PCB footprint -- an unbuildable
+            # package.  This is a targeted block that fires even when
+            # ``strict_preflight`` is False, because it's the only check
+            # whose failure mode is "the fab literally cannot make this".
+            unbuildable_bom_failure: PreflightResult | None = None
+            if self.config.block_on_unbuildable_bom:
+                for pr in preflight_results:
+                    if pr.name == "bom_pcb_match" and pr.status == "FAIL":
+                        # Only treat as unbuildable if the schematic-only
+                        # axis is involved (refs in BOM not on PCB).  PCB
+                        # orphans are only a WARN, so we won't get here for
+                        # them.
+                        unbuildable_bom_failure = pr
+                        break
+
             if PreflightChecker.has_failures(preflight_results):
                 # Collect failure messages
                 for pr in preflight_results:
@@ -276,13 +299,19 @@ class ManufacturingPackage:
                         msg = f"Preflight FAIL [{pr.name}]: {pr.message}"
                         if pr.details:
                             msg += f" ({pr.details})"
-                        if self.config.strict_preflight:
+                        # bom_pcb_match failures escalate to errors when
+                        # block_on_unbuildable_bom is set; other preflight
+                        # failures behave per strict_preflight.
+                        is_unbuildable = (
+                            unbuildable_bom_failure is not None and pr is unbuildable_bom_failure
+                        )
+                        if self.config.strict_preflight or is_unbuildable:
                             result.errors.append(msg)
                         else:
                             result.warnings.append(msg)
 
-                # In strict mode, block export on preflight failures
-                if self.config.strict_preflight:
+                # Block export on strict mode OR on unbuildable BOM
+                if self.config.strict_preflight or unbuildable_bom_failure is not None:
                     return result
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -391,8 +420,7 @@ class ManufacturingPackage:
             from ..report.models import ReportData
         except ImportError:
             logger.warning(
-                "Report generation skipped: required dependency not installed "
-                "(e.g. jinja2)"
+                "Report generation skipped: required dependency not installed (e.g. jinja2)"
             )
             return
 
@@ -498,8 +526,7 @@ class ManufacturingPackage:
             result["schematic_sheets"] = sch_sheets
 
         logger.info(
-            f"Generated {len(entries)} figure(s): "
-            f"{len(pcb_figs)} PCB, {len(sch_sheets)} schematic"
+            f"Generated {len(entries)} figure(s): {len(pcb_figs)} PCB, {len(sch_sheets)} schematic"
         )
         return result or None
 
@@ -519,16 +546,14 @@ class ManufacturingPackage:
             from ..report.renderers import pdf_renderer_available
         except ImportError:
             logger.warning(
-                "PDF report rendering skipped: install 'kicad-tools[report]' "
-                "for PDF output"
+                "PDF report rendering skipped: install 'kicad-tools[report]' for PDF output"
             )
             return
 
         renderer = pdf_renderer_available()
         if renderer is None:
             logger.warning(
-                "PDF report rendering skipped: install weasyprint or pandoc+TeX "
-                "for PDF output"
+                "PDF report rendering skipped: install weasyprint or pandoc+TeX for PDF output"
             )
             return
 
@@ -699,10 +724,19 @@ class ManufacturingPackage:
 
         file_descriptions = {
             "bom": ("BOM (Bill of Materials)", "Component list for PCB assembly ordering"),
-            "pnp": ("CPL (Component Placement List)", "Pick-and-place coordinates for SMT assembly"),
-            "gerber": ("Gerber files", "PCB fabrication data (copper layers, silkscreen, solder mask, drill)"),
+            "pnp": (
+                "CPL (Component Placement List)",
+                "Pick-and-place coordinates for SMT assembly",
+            ),
+            "gerber": (
+                "Gerber files",
+                "PCB fabrication data (copper layers, silkscreen, solder mask, drill)",
+            ),
             "report": ("Design report", "Manufacturing readiness report with DRC/ERC results"),
-            "project_zip": ("KiCad project archive", "Source KiCad project files (.kicad_pcb, .kicad_sch, .kicad_pro)"),
+            "project_zip": (
+                "KiCad project archive",
+                "Source KiCad project files (.kicad_pcb, .kicad_sch, .kicad_pro)",
+            ),
             "manifest": ("Manifest", "SHA256 checksums for all output files"),
         }
 

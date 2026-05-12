@@ -77,6 +77,53 @@ class DRCStatus:
 
 
 @dataclass
+class SyncStatus:
+    """Schematic <-> PCB synchronization check results.
+
+    Captures all four axes of drift between schematic and PCB:
+    - schematic_only_count: refs in schematic but missing from PCB
+      (unbuildable BOM - hard fail).
+    - pcb_only_count: refs on PCB but missing from schematic
+      (orphan footprints - warning).
+    - value_mismatch_count: same ref in both with different values.
+    - footprint_mismatch_count: same ref with different footprints.
+
+    See ``kicad_tools.sync.reconciler.SyncAnalysis`` for the underlying
+    source of truth.
+    """
+
+    schematic_only_count: int = 0
+    pcb_only_count: int = 0
+    value_mismatch_count: int = 0
+    footprint_mismatch_count: int = 0
+    passed: bool = True
+    skipped: bool = False
+    details: str = ""
+    # Up to ~10 example refs per axis (for surfacing in reports). Kept
+    # small so JSON manifest does not balloon for boards with hundreds
+    # of mismatches.
+    schematic_only_refs: list[str] = field(default_factory=list)
+    pcb_only_refs: list[str] = field(default_factory=list)
+    value_mismatch_refs: list[str] = field(default_factory=list)
+    footprint_mismatch_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "schematic_only_count": self.schematic_only_count,
+            "pcb_only_count": self.pcb_only_count,
+            "value_mismatch_count": self.value_mismatch_count,
+            "footprint_mismatch_count": self.footprint_mismatch_count,
+            "passed": self.passed,
+            "skipped": self.skipped,
+            "details": self.details,
+            "schematic_only_refs": list(self.schematic_only_refs),
+            "pcb_only_refs": list(self.pcb_only_refs),
+            "value_mismatch_refs": list(self.value_mismatch_refs),
+            "footprint_mismatch_refs": list(self.footprint_mismatch_refs),
+        }
+
+
+@dataclass
 class ConnectivityStatus:
     """Net connectivity check results."""
 
@@ -228,6 +275,7 @@ class AuditResult:
     # Check results
     erc: ERCStatus = field(default_factory=ERCStatus)
     drc: DRCStatus = field(default_factory=DRCStatus)
+    sync: SyncStatus = field(default_factory=SyncStatus)
     connectivity: ConnectivityStatus = field(default_factory=ConnectivityStatus)
     compatibility: ManufacturerCompatibility = field(default_factory=ManufacturerCompatibility)
     layers: LayerUtilization = field(default_factory=LayerUtilization)
@@ -247,6 +295,12 @@ class AuditResult:
         if not self.compatibility.passed:
             return AuditVerdict.NOT_READY
 
+        # Schematic refs missing from PCB == unbuildable BOM == hard fail.
+        # The CPL/BOM that gets shipped to the fab will reference parts
+        # that have no pads on the board, so the assembly cannot succeed.
+        if self.sync.schematic_only_count > 0:
+            return AuditVerdict.NOT_READY
+
         # Connectivity: advisory when core checks pass and board has zones.
         # Zone fills cannot be verified without running KiCad's zone filler,
         # so incomplete nets on a board with zone definitions are treated as
@@ -258,6 +312,14 @@ class AuditResult:
 
         # Warnings
         if self.drc.warning_count > 0 or self.erc.warning_count > 0:
+            return AuditVerdict.WARNING
+        # Sync drift other than schematic-only: value/footprint mismatches
+        # and PCB-only orphans are reviewable, not blocking.
+        if (
+            self.sync.value_mismatch_count > 0
+            or self.sync.footprint_mismatch_count > 0
+            or self.sync.pcb_only_count > 0
+        ):
             return AuditVerdict.WARNING
 
         return AuditVerdict.READY
@@ -279,6 +341,10 @@ class AuditResult:
             "manufacturer_compatible": self.compatibility.passed,
             "estimated_cost": self.cost.total_cost,
             "action_items": len(self.action_items),
+            "sync_schematic_only": self.sync.schematic_only_count,
+            "sync_pcb_only": self.sync.pcb_only_count,
+            "sync_value_mismatches": self.sync.value_mismatch_count,
+            "sync_footprint_mismatches": self.sync.footprint_mismatch_count,
         }
 
     def to_dict(self) -> dict:
@@ -293,6 +359,7 @@ class AuditResult:
             "summary": self.summary(),
             "erc": self.erc.to_dict(),
             "drc": self.drc.to_dict(),
+            "sync": self.sync.to_dict(),
             "connectivity": self.connectivity.to_dict(),
             "compatibility": self.compatibility.to_dict(),
             "layers": self.layers.to_dict(),
@@ -547,14 +614,20 @@ class ManufacturingAudit:
             result.layers = self._check_layer_utilization(pcb)
             result.cost = self._estimate_cost(pcb)
 
+        # Run schematic <-> PCB sync drift check before generating action
+        # items so the action-item generator can read result.sync and emit
+        # sync-related items with correct priorities.
+        if self.pcb_path.exists() and self.schematic_path.exists():
+            result.sync = self._check_sync_drift()
+        else:
+            result.sync.skipped = True
+            if not self.schematic_path.exists():
+                result.sync.details = "Sync check skipped (no schematic available)"
+            else:
+                result.sync.details = "Sync check skipped (no PCB available)"
+
         # Generate action items from check results
         result.action_items = self._generate_action_items(result)
-
-        # Check for orphaned footprints (PCB refs not in schematic BOM)
-        if self.pcb_path.exists() and self.schematic_path.exists():
-            result.action_items.extend(self._check_orphaned_footprints())
-            # Re-sort after adding orphan items
-            result.action_items.sort(key=lambda x: x.priority)
 
         return result
 
@@ -962,16 +1035,76 @@ class ManufacturingAudit:
 
         return estimate
 
-    def _check_orphaned_footprints(self) -> list[ActionItem]:
-        """Check for PCB footprints that are not in the schematic BOM.
+    def _check_sync_drift(self) -> SyncStatus:
+        """Run schematic <-> PCB sync analysis via the Reconciler.
 
-        Compares PCB footprint references against schematic BOM references
-        to detect orphaned footprints (on PCB but not in schematic). DNP
-        items are included in the BOM reference set since they should still
-        have footprints.
+        Reuses :class:`kicad_tools.sync.reconciler.Reconciler` rather than
+        re-implementing set logic so ``kct audit`` and ``kct sync --analyze``
+        always agree on the four sync axes (schematic-only, PCB-only, value
+        mismatch, footprint mismatch).
 
         Returns:
-            List of ActionItems for any orphaned footprints found.
+            SyncStatus populated with the four counts, example refs (up to
+            10 per axis), and a human-readable details string.
+        """
+        status = SyncStatus()
+
+        try:
+            from kicad_tools.sync.reconciler import Reconciler
+
+            reconciler = Reconciler(
+                schematic=self.schematic_path,
+                pcb=self.pcb_path,
+            )
+            analysis = reconciler.analyze()
+
+            status.schematic_only_count = len(analysis.schematic_orphans)
+            status.pcb_only_count = len(analysis.pcb_orphans)
+            status.value_mismatch_count = len(analysis.value_mismatches)
+            status.footprint_mismatch_count = len(analysis.footprint_mismatches)
+
+            status.schematic_only_refs = list(analysis.schematic_orphans[:10])
+            status.pcb_only_refs = list(analysis.pcb_orphans[:10])
+            status.value_mismatch_refs = [m["reference"] for m in analysis.value_mismatches[:10]]
+            status.footprint_mismatch_refs = [
+                m["reference"] for m in analysis.footprint_mismatches[:10]
+            ]
+
+            # passed == every axis clean
+            status.passed = (
+                status.schematic_only_count == 0
+                and status.pcb_only_count == 0
+                and status.value_mismatch_count == 0
+                and status.footprint_mismatch_count == 0
+            )
+
+            parts: list[str] = []
+            if status.schematic_only_count:
+                parts.append(f"{status.schematic_only_count} schematic-only")
+            if status.pcb_only_count:
+                parts.append(f"{status.pcb_only_count} PCB-only")
+            if status.value_mismatch_count:
+                parts.append(f"{status.value_mismatch_count} value mismatch(es)")
+            if status.footprint_mismatch_count:
+                parts.append(f"{status.footprint_mismatch_count} footprint mismatch(es)")
+            if parts:
+                status.details = "; ".join(parts)
+            else:
+                status.details = "Schematic and PCB are in sync"
+
+        except Exception as e:
+            logger.debug(f"Sync drift check skipped: {e}")
+            status.skipped = True
+            status.details = f"Sync check failed: {e}"
+
+        return status
+
+    def _check_orphaned_footprints(self) -> list[ActionItem]:
+        """Legacy: orphan-footprint-only check kept for backward compatibility.
+
+        New code should consult :meth:`_check_sync_drift` which surfaces
+        all four sync axes.  This method still works against the schematic
+        BOM directly so existing tests continue to pass.
         """
         items: list[ActionItem] = []
 
@@ -1010,6 +1143,80 @@ class ManufacturingAudit:
     def _generate_action_items(self, result: AuditResult) -> list[ActionItem]:
         """Generate prioritized action items from results."""
         items: list[ActionItem] = []
+
+        # Schematic <-> PCB sync drift.  Schematic-only refs are a hard
+        # fail (priority 1) because they produce an unbuildable BOM: the
+        # CPL/BOM shipped to the fab references parts with no pads on the
+        # board.  Value/footprint mismatches and PCB-only orphans are
+        # priority 2 (important).
+        sync = result.sync
+        if sync.schematic_only_count > 0:
+            refs = ", ".join(sync.schematic_only_refs[:10])
+            suffix = (
+                f" (and {sync.schematic_only_count - 10} more)"
+                if sync.schematic_only_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=1,
+                    description=(
+                        f"{sync.schematic_only_count} component(s) in schematic "
+                        f"missing from PCB -- BOM will be unbuildable: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.pcb_only_count > 0:
+            refs = ", ".join(sync.pcb_only_refs[:10])
+            suffix = f" (and {sync.pcb_only_count - 10} more)" if sync.pcb_only_count > 10 else ""
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.pcb_only_count} orphaned footprint(s) on PCB "
+                        f"but not in schematic: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.value_mismatch_count > 0:
+            refs = ", ".join(sync.value_mismatch_refs[:10])
+            suffix = (
+                f" (and {sync.value_mismatch_count - 10} more)"
+                if sync.value_mismatch_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.value_mismatch_count} component(s) have different "
+                        f"values in schematic vs PCB: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.footprint_mismatch_count > 0:
+            refs = ", ".join(sync.footprint_mismatch_refs[:10])
+            suffix = (
+                f" (and {sync.footprint_mismatch_count - 10} more)"
+                if sync.footprint_mismatch_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.footprint_mismatch_count} component(s) have different "
+                        f"footprints in schematic vs PCB: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
 
         # Blocking ERC errors (electrical issues)
         if result.erc.blocking_error_count > 0:

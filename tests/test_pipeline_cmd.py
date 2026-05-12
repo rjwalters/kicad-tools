@@ -211,6 +211,7 @@ def empty_pcb(tmp_path: Path) -> Path:
     pcb_file.write_text(EMPTY_PCB)
     return pcb_file
 
+
 @pytest.fixture
 def zone_fill_only_pcb(tmp_path: Path) -> Path:
     """Create a PCB with zone fills but no routed traces."""
@@ -225,7 +226,6 @@ def zone_fill_with_traces_pcb(tmp_path: Path) -> Path:
     pcb_file = tmp_path / "zone_fill_with_traces.kicad_pcb"
     pcb_file.write_text(ZONE_FILL_WITH_TRACES_PCB)
     return pcb_file
-
 
 
 @pytest.fixture
@@ -261,7 +261,6 @@ class TestDetectRoutingStatus:
         assert trace_count == 0
         assert net_count == 0
 
-
     def test_zone_fill_only_not_routed(self, zone_fill_only_pcb: Path):
         """A PCB with only zone fills (no top-level segments) is unrouted (#1835)."""
         is_routed, trace_count, net_count = _detect_routing_status(zone_fill_only_pcb)
@@ -271,9 +270,7 @@ class TestDetectRoutingStatus:
 
     def test_zone_fill_with_traces_detected(self, zone_fill_with_traces_pcb: Path):
         """A PCB with zone fills AND top-level segments is detected as routed."""
-        is_routed, trace_count, net_count = _detect_routing_status(
-            zone_fill_with_traces_pcb
-        )
+        is_routed, trace_count, net_count = _detect_routing_status(zone_fill_with_traces_pcb)
         assert is_routed is True
         assert trace_count == 1
         assert net_count > 0
@@ -1835,9 +1832,7 @@ class TestSchematicFlag:
         sch_file = tmp_path / "other.kicad_sch"
         sch_file.write_text("(kicad_sch)")
 
-        result = main(
-            ["--step", "erc", "--dry-run", "--schematic", str(sch_file), str(pcb_file)]
-        )
+        result = main(["--step", "erc", "--dry-run", "--schematic", str(sch_file), str(pcb_file)])
         assert result == 0
 
 
@@ -2475,6 +2470,33 @@ class TestExportStep:
         cmd_args = mock_run.call_args[0][0]
         o_idx = cmd_args.index("-o")
         assert cmd_args[o_idx + 1] == str(routed_pcb.parent / "manufacturing")
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_step_forwards_sch_when_available(self, mock_run, routed_pcb: Path):
+        """Export step passes --sch to the export subprocess when a schematic
+        is available, so PreflightChecker._check_bom_footprint_match can run
+        and detect schematic-only refs (issue #2729).
+        """
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        # Create a schematic next to the routed PCB so _resolve_schematic
+        # discovers it.
+        sch_path = routed_pcb.with_suffix(".kicad_sch")
+        if not sch_path.exists():
+            sch_path.write_text("(kicad_sch)")
+
+        ctx = PipelineContext(
+            pcb_file=routed_pcb,
+            schematic_file=sch_path,
+            quiet=True,
+            mfr="jlcpcb",
+        )
+        run_pipeline(ctx, [PipelineStep.EXPORT])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--sch" in cmd_args
+        sch_idx = cmd_args.index("--sch")
+        assert cmd_args[sch_idx + 1] == str(sch_path)
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_step_export_accepted_by_argparse(self, mock_run, routed_pcb: Path):
@@ -3572,6 +3594,111 @@ class TestPrintFinalSummary:
         assert "unknown -- could not determine DRC status" in output
         assert "Silkscreen: 0 warnings" in output
 
+    def test_sync_schematic_only_forces_not_ready(self, routed_pcb: Path):
+        """Schematic-only refs in audit_data trump DRC pass -> NOT READY.
+
+        Issue #2729: an unbuildable BOM (refs in schematic missing from
+        the PCB) must produce NOT READY regardless of DRC/ERC state.
+        """
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        audit_data = {
+            "sync": {
+                "schematic_only_count": 36,
+                "pcb_only_count": 0,
+                "value_mismatch_count": 0,
+                "footprint_mismatch_count": 0,
+            },
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(step=PipelineStep.AUDIT, success=False, message="audit: not ready"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
+
+        _print_final_summary(ctx, results, console, check_data=check_data, audit_data=audit_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "36 schematic-only refs" in output
+        assert "unbuildable BOM" in output
+
+    def test_sync_pcb_only_drives_warning_when_audit_passes(self, routed_pcb: Path):
+        """PCB-only orphans surface as WARNING in the verdict line."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        audit_data = {
+            "sync": {
+                "schematic_only_count": 0,
+                "pcb_only_count": 3,
+                "value_mismatch_count": 0,
+                "footprint_mismatch_count": 0,
+            },
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(step=PipelineStep.AUDIT, success=True, message="audit: passed"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
+
+        _print_final_summary(ctx, results, console, check_data=check_data, audit_data=audit_data)
+        output = buf.getvalue()
+
+        assert "WARNING" in output
+        assert "sync drift" in output
+
+    def test_sync_line_displays_drift_summary(self, routed_pcb: Path):
+        """The new Sync: line summarizes all four axes."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        audit_data = {
+            "sync": {
+                "schematic_only_count": 5,
+                "pcb_only_count": 2,
+                "value_mismatch_count": 1,
+                "footprint_mismatch_count": 3,
+            },
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(step=PipelineStep.AUDIT, success=False, message="audit: not ready"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
+
+        _print_final_summary(ctx, results, console, check_data=check_data, audit_data=audit_data)
+        output = buf.getvalue()
+
+        assert "Sync:" in output
+        assert "5 schematic-only" in output
+        assert "2 PCB-only" in output
+
+    def test_sync_line_when_audit_data_missing(self, routed_pcb: Path):
+        """When audit_data is None, the sync line is rendered as skipped."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
+
+        _print_final_summary(ctx, results, console, check_data=check_data, audit_data=None)
+        output = buf.getvalue()
+
+        assert "Sync:" in output
+        assert "skipped" in output
+
 
 class TestVerdictMatchesAudit:
     """Tests that the pipeline verdict uses the audit step result when available.
@@ -4055,6 +4182,7 @@ class TestBestEffort:
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_best_effort_does_not_affect_non_route_failures(self, mock_run, unrouted_pcb: Path):
         """--best-effort only applies to ROUTE failures; other step failures still abort."""
+
         # FIX_DRC fails
         def side_effect(cmd, **kwargs):
             if "fix-drc" in cmd:
@@ -4194,9 +4322,7 @@ class TestStitchStep:
         """Stitch step invokes kct stitch as a subprocess on multi-layer boards."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
         console = MagicMock()
-        ctx = PipelineContext(
-            pcb_file=four_layer_pcb_with_zones, layers="4", quiet=True
-        )
+        ctx = PipelineContext(pcb_file=four_layer_pcb_with_zones, layers="4", quiet=True)
         result = _run_step_stitch(ctx, console)
         assert result.success is True
         assert result.skipped is False
@@ -4259,8 +4385,11 @@ class TestStitchStep:
         """Stitch dry-run message includes via size and drill from manufacturer."""
         console = MagicMock()
         ctx = PipelineContext(
-            pcb_file=four_layer_pcb_with_zones, layers="4", mfr="seeed",
-            dry_run=True, quiet=True,
+            pcb_file=four_layer_pcb_with_zones,
+            layers="4",
+            mfr="seeed",
+            dry_run=True,
+            quiet=True,
         )
         result = _run_step_stitch(ctx, console)
         assert result.success is True
@@ -4325,9 +4454,7 @@ class TestCacheFlagForwarding:
         """Both --no-cache and --clear-cache flags forwarded together."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-        ctx = PipelineContext(
-            pcb_file=unrouted_pcb, quiet=True, no_cache=True, clear_cache=True
-        )
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, no_cache=True, clear_cache=True)
         results = run_pipeline(ctx, [PipelineStep.ROUTE])
 
         assert len(results) == 1
@@ -4339,9 +4466,7 @@ class TestCacheFlagForwarding:
 
     def test_dry_run_includes_no_cache(self, unrouted_pcb: Path):
         """--dry-run output includes --no-cache when set."""
-        ctx = PipelineContext(
-            pcb_file=unrouted_pcb, quiet=True, dry_run=True, no_cache=True
-        )
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, dry_run=True, no_cache=True)
         results = run_pipeline(ctx, [PipelineStep.ROUTE])
 
         assert len(results) == 1
@@ -4350,9 +4475,7 @@ class TestCacheFlagForwarding:
 
     def test_dry_run_includes_clear_cache(self, unrouted_pcb: Path):
         """--dry-run output includes --clear-cache when set."""
-        ctx = PipelineContext(
-            pcb_file=unrouted_pcb, quiet=True, dry_run=True, clear_cache=True
-        )
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, dry_run=True, clear_cache=True)
         results = run_pipeline(ctx, [PipelineStep.ROUTE])
 
         assert len(results) == 1
@@ -4361,9 +4484,7 @@ class TestCacheFlagForwarding:
 
     def test_cache_flags_ignored_when_route_skipped(self, routed_pcb: Path):
         """Cache flags cause no error when route step is skipped (already routed)."""
-        ctx = PipelineContext(
-            pcb_file=routed_pcb, quiet=True, no_cache=True, clear_cache=True
-        )
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, no_cache=True, clear_cache=True)
         results = run_pipeline(ctx, [PipelineStep.ROUTE])
 
         assert len(results) == 1
@@ -4382,7 +4503,5 @@ class TestCacheFlagForwarding:
 
     def test_both_cache_flags_cli_parsed(self, unrouted_pcb: Path):
         """Both --no-cache and --clear-cache accepted together via CLI."""
-        result = main(
-            ["--no-cache", "--clear-cache", "--dry-run", "--quiet", str(unrouted_pcb)]
-        )
+        result = main(["--no-cache", "--clear-cache", "--dry-run", "--quiet", str(unrouted_pcb)])
         assert result == 0

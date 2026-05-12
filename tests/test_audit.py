@@ -2123,6 +2123,329 @@ class TestOrphanedFootprints:
 
 
 # ---------------------------------------------------------------------------
+# Test: schematic <-> PCB sync drift (issue #2729)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncDriftStatus:
+    """SyncStatus dataclass and AuditResult.sync wiring."""
+
+    def test_sync_status_defaults(self):
+        from kicad_tools.audit.auditor import SyncStatus
+
+        s = SyncStatus()
+        assert s.schematic_only_count == 0
+        assert s.pcb_only_count == 0
+        assert s.value_mismatch_count == 0
+        assert s.footprint_mismatch_count == 0
+        assert s.passed is True
+        assert s.skipped is False
+
+    def test_sync_status_to_dict_keys(self):
+        from kicad_tools.audit.auditor import SyncStatus
+
+        s = SyncStatus(
+            schematic_only_count=3,
+            pcb_only_count=2,
+            value_mismatch_count=1,
+            footprint_mismatch_count=4,
+            schematic_only_refs=["R99", "C42"],
+        )
+        d = s.to_dict()
+        assert d["schematic_only_count"] == 3
+        assert d["pcb_only_count"] == 2
+        assert d["value_mismatch_count"] == 1
+        assert d["footprint_mismatch_count"] == 4
+        assert d["schematic_only_refs"] == ["R99", "C42"]
+
+    def test_audit_result_to_dict_includes_sync_key(self):
+        from kicad_tools.audit.auditor import AuditResult
+
+        r = AuditResult()
+        d = r.to_dict()
+        assert "sync" in d
+        # Summary should include the four sync counts
+        assert "sync_schematic_only" in d["summary"]
+        assert "sync_pcb_only" in d["summary"]
+        assert "sync_value_mismatches" in d["summary"]
+        assert "sync_footprint_mismatches" in d["summary"]
+
+
+class TestSyncDriftVerdict:
+    """AuditResult.verdict reacts to sync drift counts."""
+
+    def test_schematic_only_forces_not_ready(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.schematic_only_count = 1
+        assert r.verdict == AuditVerdict.NOT_READY
+
+    def test_pcb_only_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.pcb_only_count = 2
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_value_mismatch_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.value_mismatch_count = 5
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_footprint_mismatch_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.footprint_mismatch_count = 3
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_clean_sync_is_ready(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        # All zero
+        assert r.verdict == AuditVerdict.READY
+
+    def test_schematic_only_overrides_drc_warnings(self):
+        """An unbuildable BOM is a NOT_READY hard fail regardless of DRC."""
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.schematic_only_count = 36
+        r.drc.warning_count = 0
+        r.erc.warning_count = 0
+        assert r.verdict == AuditVerdict.NOT_READY
+
+
+class TestSyncDriftCheck:
+    """ManufacturingAudit._check_sync_drift uses Reconciler."""
+
+    def test_check_sync_drift_reuses_reconciler(self, tmp_path: Path):
+        """Verify _check_sync_drift wraps Reconciler.analyze()."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        mock_analysis = SyncAnalysis(
+            schematic_orphans=["U99", "R42"],
+            pcb_orphans=["TP1"],
+            value_mismatches=[{"reference": "R1", "schematic_value": "10k", "pcb_value": "1k"}],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "C_0402",
+                    "pcb_footprint": "C_0603",
+                }
+            ],
+        )
+
+        mock_reconciler = MagicMock()
+        mock_reconciler.analyze.return_value = mock_analysis
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            return_value=mock_reconciler,
+        ):
+            status = audit._check_sync_drift()
+
+        assert status.schematic_only_count == 2
+        assert status.pcb_only_count == 1
+        assert status.value_mismatch_count == 1
+        assert status.footprint_mismatch_count == 1
+        assert status.schematic_only_refs == ["U99", "R42"]
+        assert status.pcb_only_refs == ["TP1"]
+        assert status.value_mismatch_refs == ["R1"]
+        assert status.footprint_mismatch_refs == ["C1"]
+        assert status.passed is False
+
+    def test_check_sync_drift_graceful_on_reconciler_failure(self, tmp_path: Path):
+        """A Reconciler exception must not crash the audit."""
+        from unittest.mock import patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            side_effect=RuntimeError("boom"),
+        ):
+            status = audit._check_sync_drift()
+
+        assert status.skipped is True
+        assert "boom" in status.details
+
+    def test_check_sync_drift_truncates_to_10_refs(self, tmp_path: Path):
+        """Only the first 10 refs per axis are recorded (for manifest brevity)."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        many_refs = [f"R{i}" for i in range(20)]
+        mock_analysis = SyncAnalysis(schematic_orphans=many_refs)
+
+        mock_reconciler = MagicMock()
+        mock_reconciler.analyze.return_value = mock_analysis
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            return_value=mock_reconciler,
+        ):
+            status = audit._check_sync_drift()
+
+        assert status.schematic_only_count == 20
+        assert len(status.schematic_only_refs) == 10
+
+
+class TestSyncDriftActionItems:
+    """Action items emitted from _generate_action_items() based on sync drift."""
+
+    def test_schematic_only_creates_priority1_item(self, tmp_path: Path):
+        """Schematic-only refs produce a priority-1 action item mentioning unbuildable BOM."""
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(
+            schematic_only_count=3,
+            schematic_only_refs=["U1", "U2", "U3"],
+        )
+        items = audit._generate_action_items(r)
+
+        # Find the schematic-only item
+        sch_only = [i for i in items if "schematic" in i.description and "missing" in i.description]
+        assert len(sch_only) == 1
+        assert sch_only[0].priority == 1
+        assert "unbuildable" in sch_only[0].description.lower()
+        assert "U1" in sch_only[0].description
+
+    def test_pcb_only_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(pcb_only_count=2, pcb_only_refs=["TP1", "TP2"])
+        items = audit._generate_action_items(r)
+
+        orphan = [i for i in items if "orphaned footprint" in i.description]
+        assert len(orphan) == 1
+        assert orphan[0].priority == 2
+
+    def test_value_mismatch_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(value_mismatch_count=4, value_mismatch_refs=["R1"])
+        items = audit._generate_action_items(r)
+
+        vm = [i for i in items if "different values" in i.description]
+        assert len(vm) == 1
+        assert vm[0].priority == 2
+
+    def test_footprint_mismatch_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(footprint_mismatch_count=1, footprint_mismatch_refs=["C2"])
+        items = audit._generate_action_items(r)
+
+        fm = [i for i in items if "different footprints" in i.description]
+        assert len(fm) == 1
+        assert fm[0].priority == 2
+
+
+# ---------------------------------------------------------------------------
 # Test: assembly mode / --no-assembly flag
 # ---------------------------------------------------------------------------
 
