@@ -841,10 +841,7 @@ def _run_auto_fix(
     if args is not None and _deadline_expired(args):
         if not quiet:
             print("\n--- Auto-Fix DRC Violations ---")
-            print(
-                "  Skipping: total wall-clock deadline reached "
-                "(--timeout, issue #2802)"
-            )
+            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
         return 1
 
     if not quiet:
@@ -1003,10 +1000,7 @@ def _run_placement_feedback(
     if _deadline_expired(args):
         if not quiet:
             print("\n--- Placement-Routing Feedback ---")
-            print(
-                "  Skipping: total wall-clock deadline reached "
-                "(--timeout, issue #2802)"
-            )
+            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
         return None
 
     if not quiet:

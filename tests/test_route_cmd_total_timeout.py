@@ -29,7 +29,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # =============================================================================
 # Unit tests: the helper functions themselves
 # =============================================================================
@@ -382,7 +381,9 @@ def test_route_cli_respects_total_timeout(tmp_path):
     import shutil
     import subprocess
 
-    fixture = Path(__file__).parent.parent / "boards" / "01-voltage-divider" / "voltage_divider.kicad_pcb"
+    fixture = (
+        Path(__file__).parent.parent / "boards" / "01-voltage-divider" / "voltage_divider.kicad_pcb"
+    )
     if not fixture.exists():
         pytest.skip(f"fixture not present: {fixture}")
 
