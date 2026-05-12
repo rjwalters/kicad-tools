@@ -159,14 +159,61 @@ replaced with the actual call.
 
 ## CI Gate (Phase 3N, #2726)
 
-This board is consumed by the **Phase 3N CI gate** (issue #2726)
-which will be wired into `.github/workflows/ci.yml` once both this
-board scaffold and Phase 3H (#2723) land.  The gate's contract
-mirrors the diffpair-routing-regression job (board 06):
+This board is consumed by the **Phase 3N CI gate** (issue #2726),
+which lives at `.github/workflows/ci.yml::matchgroup-routing-regression`.
+The gate is a sibling of the `diffpair-routing-regression` job (board
+06) and runs on every PR to `main`.  Contract:
 
-1. Re-routes from scratch on every PR with `--seed 42`.
-2. Asserts DRC error count within the per-board allowlist.
-3. Asserts each match-group DRC rule_id was actually exercised.
+1. Re-routes board 07 from scratch with
+   `python boards/07-matchgroup-test/generate_design.py --step route --seed 42`.
+2. Asserts the resulting DRC error count is within the per-board
+   allowlist in `.github/routed-drc-tolerance.yml` (currently 80).
+3. Asserts the `match_group_length_skew` DRC rule was actually
+   exercised --- i.e., `rules_checked_by_rule["match_group_length_skew"] >= 1`
+   in the `DRCChecker` summary.  Without this assertion a regression
+   that disables match-group detection (e.g., a future change that
+   breaks `derive_group_skew_data` or unwires `length_match_group`
+   from the net classes) would silently produce a 0-violation report
+   and hide the defect.
+
+### Interpreting a failure
+
+- **`Match-group rule(s) NOT exercised`** -- the rule short-circuited
+  because no declared groups were detected with measurable skew.
+  Likely causes: `length_match_group` field unwired from one or more
+  net classes in `build_net_class_map`, `derive_group_skew_data`
+  broken (e.g., `detect_match_groups` returning empty), or the
+  routed PCB has no traces matching any declared group's members.
+  See `src/kicad_tools/validate/match_group_skew.py` and
+  `src/kicad_tools/validate/rules/match_group_length_skew.py` for
+  the engagement conditions.
+- **`DRC regression on re-routed ...`** -- the routing algorithm
+  produced more errors than the allowlist value.  Fix the router
+  regression OR (with reviewer sign-off) raise the allowlist value
+  in the same PR.
+- **Job times out (> 10 min)** -- routing wall-clock crept above
+  the budget.  File a follow-up to move the gate to a nightly
+  schedule per Epic #2661's runtime guidance.
+
+### Reproducing the gate locally
+
+```bash
+# Full re-route + check (CI semantic, ~30-90s on a developer laptop)
+python scripts/ci/check_matchgroup_coverage.py boards/07-matchgroup-test --seed 42
+
+# Fast iteration against the committed routed PCB (skips the route step)
+python scripts/ci/check_matchgroup_coverage.py boards/07-matchgroup-test \
+  --seed 42 --skip-route
+```
+
+### Branch-protection (admin action required post-merge)
+
+Per the precedent set by `diffpair-routing-regression` (PR #2679),
+adding `Match-Group Routing Regression` to the list of *required*
+status checks on `main` is a separate repo-admin action in GitHub
+Settings -> Rules -> Rulesets.  Until that flip happens the job
+runs on every PR but is advisory --- its failure does not block
+the merge button.
 
 ## Out of Scope
 
