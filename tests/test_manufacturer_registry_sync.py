@@ -22,6 +22,8 @@ from __future__ import annotations
 import contextlib
 import io
 
+import pytest
+
 from kicad_tools.manufacturers import (
     _ALIASES as DRC_ALIASES,
 )
@@ -29,6 +31,7 @@ from kicad_tools.manufacturers import (
     _PROFILES as DRC_PROFILES,
 )
 from kicad_tools.manufacturers import (
+    get_all_manufacturer_names,
     get_profile,
 )
 from kicad_tools.router.mfr_limits import (
@@ -265,3 +268,153 @@ class TestJLCPCBTier1DRCProfile:
         assert "Capability" in profile.name or "Plus" in profile.name, (
             f"jlcpcb-tier1 profile name should reference Capability Plus, got {profile.name!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CLI <-> registry parity (issue #2793)
+# ---------------------------------------------------------------------------
+#
+# Each entry below is one ``--mfr`` site in the top-level argparse tree:
+#
+# - ``argv``: the argv prefix needed to reach that subcommand's parser
+#   (positional args use dummy paths; argparse only needs the right shape).
+# - ``mfr_attr``: the attribute name on the parsed Namespace that carries
+#   the manufacturer value (most are ``mfr``; some have unique dest names
+#   to avoid collisions in the shared top-level Namespace).
+#
+# When adding a new ``--mfr`` site to the top-level parser, append it here
+# so the parametrised parity tests cover it.  See ``parser.py`` and the
+# Curator analysis in issue #2793 for the full inventory.
+CLI_MFR_SITES: list[tuple[str, list[str], str]] = [
+    ("drc", ["drc", "dummy.rpt"], "mfr"),
+    ("check", ["check", "dummy.kicad_pcb"], "mfr"),
+    ("fix-vias", ["fix-vias", "dummy.kicad_pcb"], "mfr"),
+    ("fix-silkscreen", ["fix-silkscreen", "dummy.kicad_pcb"], "mfr"),
+    ("repair-clearance", ["repair-clearance", "dummy.kicad_pcb"], "mfr"),
+    ("estimate cost", ["estimate", "cost", "dummy.kicad_pcb"], "mfr"),
+    ("audit", ["audit", "dummy.kicad_pro"], "audit_mfr"),
+    ("pipeline", ["pipeline", "dummy.kicad_pcb"], "pipeline_mfr"),
+    ("build", ["build", "dummy.kicad_pcb"], "build_mfr"),
+    ("export", ["export", "dummy.kicad_pcb"], "export_mfr"),
+]
+
+
+class TestCLIRegistryParity:
+    """CLI argparse <-> manufacturer registry parity (issue #2793).
+
+    Every ``--mfr`` argparse site in the top-level kicad-tools parser must
+    accept every name and alias the manufacturer registry resolves.  This
+    is the drift-prevention test that would have caught the #2793 bug
+    (e.g. ``kct check --mfr jlcpcb-tier1`` rejected at argparse time even
+    though ``get_profile('jlcpcb-tier1')`` works).
+    """
+
+    @pytest.mark.parametrize(
+        "label, argv_prefix, mfr_attr",
+        CLI_MFR_SITES,
+        ids=[label for label, _, _ in CLI_MFR_SITES],
+    )
+    @pytest.mark.parametrize(
+        "name",
+        sorted(set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())),
+    )
+    def test_every_cli_site_accepts_every_registered_name(self, label, argv_prefix, mfr_attr, name):
+        """Every registered manufacturer name parses on every CLI ``--mfr`` site."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        argv = [*argv_prefix, "--mfr", name]
+        try:
+            ns = parser.parse_args(argv)
+        except SystemExit as exc:  # argparse calls sys.exit(2) on choice mismatch
+            pytest.fail(
+                f"CLI site {label!r} rejected registered manufacturer "
+                f"name {name!r} (argv={argv!r}, SystemExit({exc.code})). "
+                f"This is the #2793 / #2622 class of bug: top-level argparse "
+                f"choices= list drifted from the registry."
+            )
+
+        actual = getattr(ns, mfr_attr, None)
+        assert actual == name, (
+            f"CLI site {label!r} parsed --mfr {name!r} but Namespace.{mfr_attr} "
+            f"was {actual!r}.  Either the dest changed or argparse swallowed the value."
+        )
+
+    @pytest.mark.parametrize(
+        "label, argv_prefix, mfr_attr",
+        CLI_MFR_SITES,
+        ids=[label for label, _, _ in CLI_MFR_SITES],
+    )
+    def test_every_cli_site_rejects_bogus_manufacturer(self, label, argv_prefix, mfr_attr):
+        """An unknown manufacturer name still raises SystemExit on every site."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        argv = [*argv_prefix, "--mfr", "completely-bogus-mfr-name-xyz"]
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(argv)
+        # argparse uses exit code 2 for argument errors.
+        assert excinfo.value.code == 2, (
+            f"CLI site {label!r} did not raise SystemExit(2) for a bogus "
+            f"--mfr value (got code={excinfo.value.code!r})."
+        )
+
+    def test_export_still_accepts_generic(self):
+        """The ``export`` subcommand keeps its ``generic`` sentinel alongside registry names."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        ns = parser.parse_args(["export", "dummy.kicad_pcb", "--mfr", "generic"])
+        assert ns.export_mfr == "generic", (
+            "kct export --mfr generic must still parse: 'generic' is a "
+            "non-registry sentinel for vendor-agnostic gerber export."
+        )
+
+    def test_get_all_manufacturer_names_covers_profiles_and_aliases(self):
+        """``get_all_manufacturer_names()`` returns canonicals UNION aliases."""
+        names = set(get_all_manufacturer_names())
+        expected = set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())
+        assert names == expected, (
+            f"get_all_manufacturer_names() drifted from "
+            f"_PROFILES | _ALIASES.\n  missing:  {sorted(expected - names)}\n"
+            f"  extra:    {sorted(names - expected)}"
+        )
+
+    def test_flashpcb_is_selectable_from_cli(self):
+        """``flashpcb`` is callable from every CLI site that has a ``--mfr`` flag.
+
+        Curator note from issue #2793: ``flashpcb`` was silently inaccessible
+        from the CLI before this fix despite being a fully registered profile.
+        """
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        for label, argv_prefix, mfr_attr in CLI_MFR_SITES:
+            ns = parser.parse_args([*argv_prefix, "--mfr", "flashpcb"])
+            assert getattr(ns, mfr_attr) == "flashpcb", (
+                f"CLI site {label!r} did not surface --mfr flashpcb on Namespace.{mfr_attr}"
+            )
+
+    def test_tier1_aliases_parse_on_every_cli_site(self):
+        """All four jlcpcb-tier1 aliases parse on every CLI ``--mfr`` site.
+
+        This is the direct regression test for the user-visible #2793 symptom:
+        ``kct check board.kicad_pcb --mfr jlcpcb-tier1`` was rejected before
+        this fix.
+        """
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        tier1_names = [
+            "jlcpcb-tier1",
+            "jlcpcb_tier1",
+            "jlcpcb-capabilityplus",
+            "jlcpcb_capabilityplus",
+            "jlcpcb-capability-plus",
+        ]
+        for label, argv_prefix, mfr_attr in CLI_MFR_SITES:
+            for name in tier1_names:
+                ns = parser.parse_args([*argv_prefix, "--mfr", name])
+                assert getattr(ns, mfr_attr) == name, (
+                    f"CLI site {label!r} did not surface --mfr {name!r} on Namespace.{mfr_attr}"
+                )

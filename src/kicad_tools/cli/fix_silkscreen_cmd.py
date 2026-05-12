@@ -34,6 +34,7 @@ from kicad_tools.drc.repair_silkscreen import (
     SilkscreenRepairResult,
     TextHeightRepairResult,
 )
+from kicad_tools.manufacturers import get_all_manufacturer_names
 from kicad_tools.manufacturers.base import load_design_rules_from_yaml
 
 
@@ -270,7 +271,7 @@ Examples:
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Manufacturer to use for design rules (default: jlcpcb)",
     )

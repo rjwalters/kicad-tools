@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kicad_tools.core.sexp_file import save_pcb
+from kicad_tools.manufacturers import get_all_manufacturer_names
 from kicad_tools.manufacturers.base import load_design_rules_from_yaml
 from kicad_tools.sexp.parser import SExp, parse_file
 
@@ -744,7 +745,7 @@ Examples:
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Manufacturer to use for design rules (default: jlcpcb)",
     )

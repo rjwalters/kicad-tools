@@ -8,6 +8,7 @@ The parser is organized into subparsers for each major command category.
 import argparse
 
 from kicad_tools import __version__
+from kicad_tools.manufacturers import get_all_manufacturer_names
 
 __all__ = ["create_parser"]
 
@@ -351,7 +352,7 @@ def _add_drc_parser(subparsers) -> None:
     drc_parser.add_argument("--net", help="Filter by net name")
     drc_parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         help="Check against manufacturer design rules",
     )
     drc_parser.add_argument("--layers", type=int, default=2, help="Number of copper layers")
@@ -387,7 +388,7 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument(
         "--mfr",
         "-m",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -2709,7 +2710,7 @@ def _add_fix_vias_parser(subparsers) -> None:
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Manufacturer to use for design rules (default: jlcpcb)",
     )
@@ -2770,7 +2771,7 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
     fix_silk_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_silk_parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Manufacturer to use for design rules (default: jlcpcb)",
     )
@@ -2821,7 +2822,7 @@ def _add_repair_clearance_parser(subparsers) -> None:
     )
     repair_parser.add_argument(
         "--mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         help="Target manufacturer (for context)",
     )
     repair_parser.add_argument(
@@ -3916,7 +3917,7 @@ def _add_estimate_parser(subparsers) -> None:
     estimate_cost.add_argument(
         "--mfr",
         "-m",
-        choices=["jlcpcb", "pcbway", "seeed", "oshpark"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -3984,7 +3985,7 @@ def _add_audit_parser(subparsers) -> None:
         "--mfr",
         "-m",
         dest="audit_mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -4745,7 +4746,7 @@ def _add_pipeline_parser(subparsers) -> None:
         "--mfr",
         "-m",
         dest="pipeline_mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -4984,7 +4985,7 @@ def _add_build_parser(subparsers) -> None:
         "--mfr",
         "-m",
         dest="build_mfr",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer for verification (default: jlcpcb)",
     )
@@ -5803,7 +5804,7 @@ def _add_export_parser(subparsers) -> None:
         "-m",
         dest="export_mfr",
         default="jlcpcb",
-        choices=["jlcpcb", "pcbway", "oshpark", "seeed", "generic"],
+        choices=[*get_all_manufacturer_names(), "generic"],
         help="Target manufacturer (default: jlcpcb)",
     )
     export_parser.add_argument(
