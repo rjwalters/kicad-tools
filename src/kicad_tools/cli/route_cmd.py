@@ -61,6 +61,7 @@ import shutil
 import signal
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,6 +70,81 @@ if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Issue #2802: Total wall-clock deadline helpers
+# =============================================================================
+#
+# ``--timeout`` is intended to be a *total* wall-clock budget for the whole
+# routing invocation, but historically the orchestration layer re-used it as a
+# per-stage budget: every layer-escalation attempt, every placement-feedback
+# iteration, and every auto-fix pass received its own fresh copy of the same
+# ``args.timeout`` value, so worst-case wall-clock for a single ``kct route``
+# invocation could exceed 10x the configured budget.
+#
+# The fix is a single monotonic deadline computed once in ``main()`` and
+# threaded through every outer-loop site via these helpers.  The deadline is
+# stored on the parsed ``args`` namespace as ``_wall_clock_deadline`` so it
+# travels naturally with the other CLI parameters.  When ``--timeout`` is not
+# set the deadline is ``None`` and these helpers preserve legacy unbounded
+# behaviour.
+
+
+def _set_wall_clock_deadline(args) -> None:
+    """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
+
+    Called once near the start of ``main()`` (after argparse).  If
+    ``args.timeout`` is falsy (None, 0, or negative) the deadline is set
+    to ``None`` so the rest of the orchestration treats the run as
+    unbounded.
+    """
+    timeout = getattr(args, "timeout", None)
+    if timeout and timeout > 0:
+        args._wall_clock_deadline = time.monotonic() + float(timeout)
+    else:
+        args._wall_clock_deadline = None
+
+
+def _remaining_budget(args) -> float | None:
+    """Return seconds remaining vs the total wall-clock deadline.
+
+    Returns ``None`` when no deadline is configured (legacy unbounded
+    behaviour).  Returns a non-negative float otherwise; callers should
+    treat zero as "deadline expired."
+    """
+    deadline = getattr(args, "_wall_clock_deadline", None)
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _deadline_expired(args) -> bool:
+    """True iff a deadline is configured and has been reached or passed."""
+    rem = _remaining_budget(args)
+    return rem is not None and rem <= 0.0
+
+
+def _budgeted_timeout(args) -> float | None:
+    """Return the per-call timeout to pass into inner router routines.
+
+    When a deadline is configured this is the smaller of the original
+    ``--timeout`` (preserving per-stage semantics for the *first* stage)
+    and the remaining wall-clock budget (so the *final* stage shortens
+    naturally as time runs out).  When no deadline is configured this
+    returns ``args.timeout`` unchanged so existing behaviour is preserved
+    for users who never passed ``--timeout``.
+    """
+    timeout = getattr(args, "timeout", None)
+    remaining = _remaining_budget(args)
+    if remaining is None:
+        return timeout
+    if timeout is None:
+        # ``_wall_clock_deadline`` is derived from ``args.timeout`` so this
+        # branch is unreachable in practice; guard against future refactors
+        # that decouple the two.
+        return remaining
+    return min(float(timeout), remaining)
 
 
 def _emit_single_pad_net_warning(
@@ -3420,7 +3496,14 @@ def main(argv: list[str] | None = None) -> int:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help=(
+            "Total wall-clock timeout in seconds for the whole routing "
+            "invocation (default: no timeout).  This is a TOTAL budget: "
+            "auto-layer escalation, placement-routing feedback, auto-fix "
+            "passes, and inner negotiated/two-phase/escape calls all share "
+            "the same deadline.  The command returns the best partial "
+            "result available when the deadline fires (issue #2802)."
+        ),
     )
     parser.add_argument(
         "--per-net-timeout",
@@ -4061,6 +4144,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #2802: Stamp a single monotonic wall-clock deadline derived from
+    # ``--timeout`` onto ``args`` so every orchestration site (layer-escalation
+    # loop, rule-relaxation tiers, combined-escalation 2D search, placement
+    # feedback, auto-fix passes, inner negotiated/two-phase/escape calls)
+    # shares the same budget rather than receiving a fresh per-stage copy of
+    # ``args.timeout``.  See ``_set_wall_clock_deadline`` / ``_remaining_budget``
+    # / ``_deadline_expired`` for the helpers that consume it.
+    _set_wall_clock_deadline(args)
 
     # Issue #2589: Seed the global ``random`` module for reproducible runs.
     # When ``--seed`` is supplied, all unseeded ``random.shuffle`` /
