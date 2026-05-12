@@ -4,17 +4,18 @@ Pipeline command for end-to-end repair workflow on existing PCBs.
 Orchestrates the full repair pipeline:
 0. ERC check (schematic validation)
 1. Fix ERC violations (auto-remediation when errors detected)
-2. Fix silkscreen (manufacturer line-width compliance)
-3. Fix vias (manufacturer compliance)
-4. [Optional] Route (if board is unrouted)
-5. Stitch (add stitching vias for plane connections on multi-layer boards)
-6. Optimize traces
-7. Zone fill (requires kicad-cli)
-8. Fix DRC violations
-9. Zone refill (recompute zones after trace nudges)
-10. Audit / check
-11. Report generation (manufacturing report)
-12. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
+2. Sync schematic <-> PCB (reconcile component sets before routing)
+3. Fix silkscreen (manufacturer line-width compliance)
+4. Fix vias (manufacturer compliance)
+5. [Optional] Route (if board is unrouted)
+6. Stitch (add stitching vias for plane connections on multi-layer boards)
+7. Optimize traces
+8. Zone fill (requires kicad-cli)
+9. Fix DRC violations
+10. Zone refill (recompute zones after trace nudges)
+11. Audit / check
+12. Report generation (manufacturing report)
+13. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
 
 The stitch step must run AFTER route (so traces exist) and BEFORE zones
 (so zone fill respects via clearances).  On 2-layer boards or boards
@@ -56,6 +57,7 @@ class PipelineStep(str, Enum):
 
     ERC = "erc"
     FIX_ERC = "fix-erc"
+    SYNC = "sync"
     FIX_SILKSCREEN = "fix-silkscreen"
     ROUTE = "route"
     STITCH = "stitch"
@@ -82,6 +84,7 @@ class PipelineStep(str, Enum):
 ALL_STEPS = [
     PipelineStep.ERC,
     PipelineStep.FIX_ERC,
+    PipelineStep.SYNC,
     PipelineStep.FIX_SILKSCREEN,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
@@ -126,6 +129,7 @@ class PipelineContext:
     no_cache: bool = False
     clear_cache: bool = False
     max_displacement: float = 2.0
+    apply_sync: bool = False
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
 
@@ -513,6 +517,205 @@ def _run_step_fix_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
         step=PipelineStep.FIX_ERC,
         success=success,
         message=f"fix-erc: {message}",
+    )
+
+
+def _print_sync_analysis_detail(analysis, console: Console) -> None:
+    """Print per-category sync analysis detail (mirrors sync_cmd._output_table)."""
+    if analysis.value_mismatches:
+        console.print(f"    Value mismatches ({len(analysis.value_mismatches)}):")
+        for mm in analysis.value_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_value']} pcb={mm['pcb_value']}"
+            )
+
+    if analysis.footprint_mismatches:
+        console.print(f"    Footprint mismatches ({len(analysis.footprint_mismatches)}):")
+        for mm in analysis.footprint_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_footprint']}"
+                f" pcb={mm['pcb_footprint']}"
+            )
+
+    if analysis.add_footprint_actions:
+        console.print(f"    Add footprint ({len(analysis.add_footprint_actions)}):")
+        for action in analysis.add_footprint_actions:
+            ref = action["reference"]
+            fp = action.get("footprint", "")
+            val = action.get("value", "")
+            console.print(f"      {ref}: {fp} ({val})")
+
+    if analysis.schematic_orphans:
+        console.print(f"    Schematic-only ({len(analysis.schematic_orphans)}):")
+        for ref in analysis.schematic_orphans:
+            console.print(f"      {ref} - missing from PCB")
+
+    if analysis.pcb_orphans:
+        console.print(f"    PCB-only ({len(analysis.pcb_orphans)}):")
+        for ref in analysis.pcb_orphans:
+            console.print(f"      {ref} - not in schematic")
+
+
+def _run_step_sync(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Reconcile schematic <-> PCB component sets in-process.
+
+    Uses :class:`kicad_tools.sync.reconciler.Reconciler` to analyse drift
+    between the schematic and PCB before routing.  Behaviour matches the
+    ERC step's blocking semantics:
+
+    - In sync: success with a one-line "sync: in sync" message.
+    - Schematic orphans (refs missing from PCB): blocking.  Halts the
+      pipeline unless ``--force`` (continue past drift) or ``--apply-sync``
+      (auto-add missing footprints and apply high-confidence corrections)
+      is set.
+    - Value/footprint mismatches or PCB-only refs without schematic
+      orphans: warning, pipeline continues.
+
+    Skips gracefully when no schematic is available.
+    """
+    # Skip if no schematic file available
+    if ctx.schematic_file is None:
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=True,
+            message="sync: no .kicad_sch found alongside PCB — skipped (use --sch to specify)",
+            skipped=True,
+        )
+
+    # Dry-run mode: preview without instantiating Reconciler
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct sync --analyze {ctx.schematic_file.name}"
+                f" --pcb {ctx.pcb_file.name}"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Reconciling {ctx.schematic_file.name} <-> {ctx.pcb_file.name}...")
+
+    # Instantiate Reconciler in-process (no subprocess)
+    try:
+        from ..sync.reconciler import Reconciler
+
+        reconciler = Reconciler(
+            schematic=ctx.schematic_file,
+            pcb=ctx.pcb_file,
+        )
+        analysis = reconciler.analyze()
+    except Exception as e:
+        logger.warning("sync: failed to analyze: %s", e)
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=False,
+            message=f"sync: failed to analyze — {e}",
+        )
+
+    # Clean pass
+    if analysis.is_in_sync:
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=True,
+            message="sync: in sync",
+        )
+
+    # Print the summary plus per-category detail
+    if not ctx.quiet:
+        for line in analysis.summary().splitlines():
+            console.print(f"    {line}")
+        _print_sync_analysis_detail(analysis, console)
+
+    schematic_orphans = list(analysis.schematic_orphans)
+    value_mismatch_count = len(analysis.value_mismatches)
+    footprint_mismatch_count = len(analysis.footprint_mismatches)
+    pcb_orphan_count = len(analysis.pcb_orphans)
+
+    # --apply-sync: invoke Reconciler.apply() to auto-add missing footprints
+    # and apply high-confidence value/footprint corrections.
+    if ctx.apply_sync:
+        try:
+            changes = reconciler.apply(
+                analysis,
+                dry_run=False,
+                min_confidence="high",
+                remove_orphans=False,
+            )
+        except Exception as e:
+            logger.warning("sync: apply failed: %s", e)
+            return PipelineResult(
+                step=PipelineStep.SYNC,
+                success=False,
+                message=f"sync: apply failed — {e}",
+            )
+
+        applied = [c for c in changes if c.applied]
+        if not ctx.quiet:
+            console.print(f"    Applied {len(applied)} change(s) (of {len(changes)} proposed)")
+
+        # Re-run analyze() so the user sees the residual drift
+        try:
+            post_analysis = reconciler.analyze()
+        except Exception as e:
+            logger.warning("sync: post-apply analyze failed: %s", e)
+            post_analysis = None
+
+        if post_analysis is not None and not ctx.quiet:
+            console.print("    Post-apply summary:")
+            for line in post_analysis.summary().splitlines():
+                console.print(f"      {line}")
+
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=True,
+            message=(f"sync: applied {len(applied)} change(s) (min_confidence=high)"),
+            warning=bool(post_analysis is not None and not post_analysis.is_in_sync),
+        )
+
+    # Schematic orphans are blocking (parallels ERC's blocking semantics)
+    if schematic_orphans:
+        if ctx.force:
+            if not ctx.quiet:
+                console.print(
+                    f"  [yellow]sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)[/yellow]"
+                )
+            return PipelineResult(
+                step=PipelineStep.SYNC,
+                success=True,
+                message=(
+                    f"sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)"
+                ),
+                warning=True,
+            )
+
+        return PipelineResult(
+            step=PipelineStep.SYNC,
+            success=False,
+            message=(
+                f"sync: {len(schematic_orphans)} schematic-only ref(s) missing"
+                " from PCB (use --apply-sync to add, or --force to continue)"
+            ),
+        )
+
+    # No blocking schematic orphans, but other drift exists -> WARN, success=True
+    parts = []
+    if value_mismatch_count:
+        parts.append(f"{value_mismatch_count} value mismatch(es)")
+    if footprint_mismatch_count:
+        parts.append(f"{footprint_mismatch_count} footprint mismatch(es)")
+    if pcb_orphan_count:
+        parts.append(f"{pcb_orphan_count} PCB-only ref(s)")
+
+    return PipelineResult(
+        step=PipelineStep.SYNC,
+        success=True,
+        message=(
+            "sync: drift detected — " + (", ".join(parts) if parts else "non-blocking issues")
+        ),
+        warning=True,
     )
 
 
@@ -1436,6 +1639,7 @@ def _git_commit_result(
 STEP_RUNNERS = {
     PipelineStep.ERC: _run_step_erc,
     PipelineStep.FIX_ERC: _run_step_fix_erc,
+    PipelineStep.SYNC: _run_step_sync,
     PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
     PipelineStep.ROUTE: _run_step_route,
     PipelineStep.STITCH: _run_step_stitch,
@@ -1724,6 +1928,17 @@ Examples:
         default=None,
         help="Path to root .kicad_sch file (overrides auto-discovery)",
     )
+    parser.add_argument(
+        "--apply-sync",
+        action="store_true",
+        default=False,
+        help=(
+            "In the sync step, auto-add missing footprints and apply"
+            " high-confidence value/footprint corrections in place."
+            " Without this flag, sync drift is blocking (use --force to"
+            " continue past drift without modification)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     input_path = Path(args.input).resolve()
@@ -1807,6 +2022,7 @@ Examples:
         no_cache=args.no_cache,
         clear_cache=args.clear_cache,
         max_displacement=args.max_displacement,
+        apply_sync=args.apply_sync,
     )
 
     # Determine steps to run
@@ -1823,8 +2039,7 @@ Examples:
     #   1 = hard failure
     all_succeeded = all(r.success for r in results)
     has_route_warning = any(
-        r.step == PipelineStep.ROUTE and not r.success and r.warning
-        for r in results
+        r.step == PipelineStep.ROUTE and not r.success and r.warning for r in results
     )
 
     if not all_succeeded and not has_route_warning:

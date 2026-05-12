@@ -4712,6 +4712,7 @@ def _add_pipeline_parser(subparsers) -> None:
         choices=[
             "erc",
             "fix-erc",
+            "sync",
             "fix-silkscreen",
             "route",
             "stitch",
@@ -4814,6 +4815,16 @@ def _add_pipeline_parser(subparsers) -> None:
         dest="pipeline_sch",
         default=None,
         help="Path to root .kicad_sch file (overrides auto-discovery)",
+    )
+    pipeline_parser.add_argument(
+        "--apply-sync",
+        dest="pipeline_apply_sync",
+        action="store_true",
+        default=False,
+        help=(
+            "In the sync step, auto-add missing footprints and apply"
+            " high-confidence value/footprint corrections in place."
+        ),
     )
 
 

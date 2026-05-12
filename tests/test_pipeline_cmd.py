@@ -820,10 +820,11 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: stitch after route, zones before fix-drc."""
+        """Steps execute in the correct order: sync after fix-erc, stitch after route, zones before fix-drc."""
         expected = [
             PipelineStep.ERC,
             PipelineStep.FIX_ERC,
+            PipelineStep.SYNC,
             PipelineStep.FIX_SILKSCREEN,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
@@ -2096,10 +2097,11 @@ class TestERCStep:
         assert results[1].success is True  # FIX_VIAS runs
 
     def test_erc_is_first_step(self):
-        """ERC is the first step in ALL_STEPS, followed by FIX_ERC, then FIX_SILKSCREEN."""
+        """ERC is the first step in ALL_STEPS, followed by FIX_ERC, SYNC, then FIX_SILKSCREEN."""
         assert ALL_STEPS[0] == PipelineStep.ERC
         assert ALL_STEPS[1] == PipelineStep.FIX_ERC
-        assert ALL_STEPS[2] == PipelineStep.FIX_SILKSCREEN
+        assert ALL_STEPS[2] == PipelineStep.SYNC
+        assert ALL_STEPS[3] == PipelineStep.FIX_SILKSCREEN
 
     @patch("kicad_tools.cli.runner.find_kicad_cli")
     @patch("kicad_tools.cli.runner.run_erc")
