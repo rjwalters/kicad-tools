@@ -282,10 +282,13 @@ def _assess_routing_completeness(
     2. Skip iff:
 
        * The board has at least one top-level routing segment, AND
-       * The routing-required subset is at least ``threshold_percent``
-         complete, AND
-       * Any remaining incomplete nets are zone-fillable plane nets
-         only (the stitch + zone-fill steps will close those).
+       * The routing-required subset (signal nets only -- single-pad
+         and plane nets are bucketed out per step 1) is at least
+         ``threshold_percent`` complete.
+
+       Any remaining incomplete plane nets are tracked separately in
+       ``incomplete_zone_fillable`` and do NOT block the skip; the
+       stitch + zone-fill steps close those connections.
 
     Args:
         pcb_file: Path to .kicad_pcb file.
@@ -953,9 +956,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     other pipeline steps (or are inherently complete).  ``--force`` always
     re-runs the router.
     """
-    assessment = _assess_routing_completeness(
-        ctx.pcb_file, ctx.route_skip_threshold
-    )
+    assessment = _assess_routing_completeness(ctx.pcb_file, ctx.route_skip_threshold)
 
     if assessment.recommend_skip and not ctx.force:
         return PipelineResult(
