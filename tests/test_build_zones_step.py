@@ -1148,3 +1148,170 @@ class TestAutoPourGeometricOutlines:
         for net in ("VMOTOR", "+5V", "+3.3V", "PWR_LED"):
             assert outlines[net] is not None, f"{net} should have a per-net outline"
             assert len(outlines[net]) >= 3, f"{net} polygon must have >=3 vertices"
+
+
+# ---------------------------------------------------------------------------
+# Rotation-sign drift-prevention (issue #2778)
+# ---------------------------------------------------------------------------
+
+
+class TestNetPadPositionsRotationConvention:
+    """Regression guard for #2778.
+
+    ``_net_pad_positions_absolute`` must use the same rotation-sign
+    convention as the canonical :meth:`PCB.get_pad_position` (positive
+    ``math.radians(fp.rotation)``).  A previous implementation used the
+    negative sign, which silently produced mirrored pad positions for
+    rotated footprints.  Existing fixtures in
+    :class:`TestAutoPourGeometricOutlines` all use ``rotation=0`` and
+    therefore did not catch the drift.
+
+    These tests parametrize a rotation set that includes 45/90/270 --
+    angles where the sign of ``math.radians(...)`` actually matters
+    (0 and 180 alone would be insufficient because the rotation matrix
+    is sign-symmetric there).
+    """
+
+    @staticmethod
+    def _make_rotated_pcb(tmp_path: Path, rotation: float) -> Path:
+        """Build a minimal one-footprint PCB at the given rotation.
+
+        The pad is placed at a non-origin offset ``(1, 0)`` so the
+        rotation transform is visible in the resulting absolute pad
+        position.  The board outline starts at ``(0, 0)`` which means
+        ``PCB.board_origin`` will be ``(0, 0)`` after detection -- this
+        is critical because :func:`_net_pad_positions_absolute` adds
+        ``board_origin`` to its output while :meth:`PCB.get_pad_position`
+        does not, so they only agree directly when ``board_origin`` is
+        the origin.  See the test below for the explicit assertion.
+        """
+        pcb_text = f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG")
+  (gr_rect
+    (start 0 0)
+    (end 100 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+  (footprint "Test:U1"
+    (layer "F.Cu")
+    (at 20 30 {rotation})
+    (uuid "fp-u1-uuid")
+    (property "Reference" "U1"
+      (at 0 -2 0)
+      (layer "F.SilkS")
+      (uuid "prop-u1-ref-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "T"
+      (at 0 2 0)
+      (layer "F.Fab")
+      (uuid "prop-u1-val-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))
+  )
+)
+"""
+        p = tmp_path / "rot.kicad_pcb"
+        p.write_text(pcb_text)
+        return p
+
+    @pytest.mark.parametrize("rotation", [0.0, 45.0, 90.0, 180.0, 270.0])
+    def test_agrees_with_get_pad_position(self, tmp_path: Path, rotation: float):
+        """Drift guard: zone-pad positions must equal ``PCB.get_pad_position``.
+
+        Must include at least one rotation in {45, 90, 270}.  Pure 0/180
+        cases are sign-symmetric and would pass even with the buggy
+        ``math.radians(-fp.rotation)`` implementation.
+        """
+        import math
+
+        from kicad_tools.zones.generator import _net_pad_positions_absolute
+
+        pcb_file = self._make_rotated_pcb(tmp_path, rotation)
+        pcb = PCB.load(pcb_file)
+
+        # Fixture invariant: board_origin must be (0, 0) so that the two
+        # functions can be compared without subtracting the origin.
+        # _net_pad_positions_absolute adds board_origin to its result;
+        # get_pad_position does not.
+        assert pcb.board_origin == (0.0, 0.0), (
+            f"fixture invariant broken: board_origin={pcb.board_origin} "
+            f"(test compares pad positions in the same frame and requires (0, 0))"
+        )
+
+        canonical = pcb.get_pad_position("U1", "1")
+        assert canonical is not None, "U1 pad 1 not found via get_pad_position"
+
+        zone_positions = _net_pad_positions_absolute(pcb, "SIG")
+        assert len(zone_positions) == 1, (
+            f"expected exactly 1 pad on SIG, got {len(zone_positions)}"
+        )
+
+        zx, zy = zone_positions[0]
+        cx, cy = canonical
+        assert math.isclose(zx, cx, abs_tol=1e-9), (
+            f"x mismatch at rotation={rotation}°: zone={zx} canonical={cx}"
+        )
+        assert math.isclose(zy, cy, abs_tol=1e-9), (
+            f"y mismatch at rotation={rotation}°: zone={zy} canonical={cy}"
+        )
+
+    def test_negative_control_buggy_sign_disagrees_at_90deg(self, tmp_path: Path):
+        """Negative control: confirm the 90° fixture is sensitive to the sign.
+
+        If a future refactor reintroduces the inverted sign, the
+        ``test_agrees_with_get_pad_position[90.0]`` case must fail.  This
+        test documents that by computing what the buggy expression
+        would produce and asserting it differs from the canonical result.
+        It is *not* asserting on the production code path -- it's an
+        invariant about the test fixture itself.
+        """
+        import math
+
+        pcb_file = self._make_rotated_pcb(tmp_path, 90.0)
+        pcb = PCB.load(pcb_file)
+
+        canonical = pcb.get_pad_position("U1", "1")
+        assert canonical is not None
+
+        # Manually compute what the pre-fix code (negative sign) would have
+        # produced for the single rotated pad.
+        fp = pcb.get_footprint("U1")
+        assert fp is not None
+        fp_x, fp_y = fp.position
+        ox, oy = pcb.board_origin
+        rot_rad_buggy = math.radians(-fp.rotation)
+        cos_b, sin_b = math.cos(rot_rad_buggy), math.sin(rot_rad_buggy)
+        pad = fp.pads[0]
+        px, py = pad.position
+        buggy_x = fp_x + (px * cos_b - py * sin_b) + ox
+        buggy_y = fp_y + (px * sin_b + py * cos_b) + oy
+
+        # Sanity: at 90°, the buggy and canonical results must disagree.
+        # If this assertion ever passes (buggy ~ canonical) the fixture has
+        # lost its discriminating power and the parametrized test above
+        # would no longer protect against the bug.
+        cx, cy = canonical
+        disagrees = (
+            not math.isclose(buggy_x, cx, abs_tol=1e-6)
+            or not math.isclose(buggy_y, cy, abs_tol=1e-6)
+        )
+        assert disagrees, (
+            "fixture failed to discriminate: buggy and canonical 90° transforms "
+            "produced the same result -- the regression test would not catch "
+            "a reintroduction of the inverted-sign bug"
+        )
