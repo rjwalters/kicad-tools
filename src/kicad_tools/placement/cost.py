@@ -28,6 +28,16 @@ class CostMode(Enum):
     LEXICOGRAPHIC = "lexicographic"
 
 
+# Score offset added to any infeasible placement when running in
+# :class:`CostMode.LEXICOGRAPHIC` mode. Used as a feasibility sentinel:
+# any total score below this value indicates a feasible placement; any
+# total score >= this value indicates an infeasible placement.
+#
+# Consumers like the CMA-ES convergence check can use this to decide
+# whether the optimizer is still in the infeasible region.
+INFEASIBILITY_OFFSET: float = 1e12
+
+
 @dataclass(frozen=True)
 class PlacementCostConfig:
     """Configuration for the composite cost function.
@@ -631,8 +641,7 @@ def _lexicographic_score(
         # Large offset ensures any infeasible score > any feasible score.
         # The infeasibility components are added so the optimizer can still
         # differentiate between "slightly infeasible" and "very infeasible".
-        infeasibility_offset = 1e12
-        return infeasibility_offset + (
+        return INFEASIBILITY_OFFSET + (
             config.overlap_weight * breakdown.overlap
             + config.drc_weight * breakdown.drc
             + config.boundary_weight * breakdown.boundary

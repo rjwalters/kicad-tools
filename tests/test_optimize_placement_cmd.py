@@ -956,7 +956,6 @@ def anchored_pcb(tmp_path: Path) -> Path:
   (setup
     (pad_to_mask_clearance 0.05)
   )
-  (net 0 "")
   (net 1 "NET_ANCHOR")
   (net 2 "NET_INTERIOR")
   (footprint "Conn_J1" (layer "F.Cu")
@@ -992,6 +991,70 @@ def anchored_pcb(tmp_path: Path) -> Path:
 )
 """
     pcb_file = tmp_path / "anchored_board.kicad_pcb"
+    pcb_file.write_text(pcb_content)
+    return pcb_file
+
+
+# ---------------------------------------------------------------------------
+# Feasibility-gated exit-code tests (issue #2821)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pathological_pcb(tmp_path: Path) -> Path:
+    """A PCB where 4 large footprints cannot fit on a tiny board.
+
+    Each footprint is roughly 10x10mm; the board is 12x12mm. There is
+    no legal placement, so any optimizer outcome is infeasible.
+    """
+    pcb_content = """\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (footprint "U_big" (layer "F.Cu")
+    (at 6.0 6.0 0)
+    (property "Reference" "U1")
+    (fp_text reference "U1" (at 0 -5.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -4.5 -4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 4.5 4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+  )
+  (footprint "U_big" (layer "F.Cu")
+    (at 6.0 6.0 0)
+    (property "Reference" "U2")
+    (fp_text reference "U2" (at 0 -5.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -4.5 -4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 4.5 4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+  )
+  (footprint "U_big" (layer "F.Cu")
+    (at 6.0 6.0 0)
+    (property "Reference" "U3")
+    (fp_text reference "U3" (at 0 -5.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -4.5 -4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 4.5 4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+  )
+  (footprint "U_big" (layer "F.Cu")
+    (at 6.0 6.0 0)
+    (property "Reference" "U4")
+    (fp_text reference "U4" (at 0 -5.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -4.5 -4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+    (pad "2" smd rect (at 4.5 4.5) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1"))
+  )
+  (gr_line (start 0 0) (end 12 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 12 0) (end 12 12) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 12 12) (end 0 12) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 12) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+    pcb_file = tmp_path / "pathological.kicad_pcb"
     pcb_file.write_text(pcb_content)
     return pcb_file
 
@@ -1143,3 +1206,187 @@ class TestAnchorWeightCLI:
             ["optimize-placement", "board.kicad_pcb", "--anchor-weight", "3.5"],
         )
         assert args.anchor_weight == pytest.approx(3.5)
+
+
+class TestFeasibilityGatedExitCode:
+    """Issue #2821: exit code must reflect ``final_score.is_feasible``."""
+
+    def test_returns_nonzero_when_infeasible(self, pathological_pcb, tmp_path, capsys):
+        """A pathological board yields infeasible result -> exit 1 + FATAL stderr.
+
+        Acceptance criterion: ``run_optimize_placement`` returns exit
+        code 1 (not 0) and prints a ``FATAL:`` message on stderr when
+        the final placement is infeasible.
+        """
+        output = tmp_path / "infeasible_out.kicad_pcb"
+        result = run_optimize_placement(
+            str(pathological_pcb),
+            max_iterations=10,
+            output_path=str(output),
+            time_budget=5.0,
+            quiet=True,
+        )
+        captured = capsys.readouterr()
+        assert result == 1, (
+            f"Expected exit 1 for infeasible placement, got {result}. "
+            f"stderr={captured.err!r}"
+        )
+        assert "FATAL" in captured.err, (
+            f"Expected 'FATAL' in stderr, got {captured.err!r}"
+        )
+        # Output is still written so callers can inspect.
+        assert output.exists()
+
+    def test_returns_zero_on_feasible_solution(self, tmp_pcb, tmp_path):
+        """A feasible board must return exit 0 with the new defaults.
+
+        Acceptance criterion: backwards-compatible behaviour for boards
+        that the optimizer can actually solve.
+        """
+        output = tmp_path / "feasible_out.kicad_pcb"
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=10,
+            output_path=str(output),
+            quiet=True,
+        )
+        assert result == 0, f"Expected exit 0 for feasible board, got {result}"
+        assert output.exists()
+
+    def test_allow_infeasible_flag_restores_zero_exit(
+        self, pathological_pcb, tmp_path, capsys,
+    ):
+        """``--allow-infeasible`` opt-in restores legacy exit-0 behaviour."""
+        output = tmp_path / "allow_infeasible_out.kicad_pcb"
+        result = run_optimize_placement(
+            str(pathological_pcb),
+            max_iterations=10,
+            output_path=str(output),
+            time_budget=5.0,
+            quiet=True,
+            allow_infeasible=True,
+        )
+        captured = capsys.readouterr()
+        assert result == 0, (
+            f"Expected exit 0 with --allow-infeasible, got {result}. "
+            f"stderr={captured.err!r}"
+        )
+        # No FATAL on stderr in opt-in mode.
+        assert "FATAL" not in captured.err
+        assert output.exists()
+
+    def test_wall_clock_budget_caps_runtime(self, pathological_pcb, tmp_path):
+        """``time_budget`` bounds wall-clock time on a pathological board.
+
+        Acceptance criterion: the new "keep going past plateau while
+        infeasible" loop cannot hang forever -- a wall-clock cap forces
+        graceful exit. With the pathological board the result will be
+        infeasible (exit 1), but it must still respect the budget.
+        """
+        import time as _time
+
+        output = tmp_path / "budget_out.kicad_pcb"
+        budget = 2.0
+        start = _time.monotonic()
+        result = run_optimize_placement(
+            str(pathological_pcb),
+            max_iterations=100000,  # would hang without time budget
+            output_path=str(output),
+            time_budget=budget,
+            quiet=True,
+        )
+        elapsed = _time.monotonic() - start
+        # Generous slack: budget is checked once per generation; one
+        # generation evaluation + post-pass slide-off can add overhead.
+        assert elapsed < budget + 10.0, (
+            f"Wall-clock {elapsed:.1f}s exceeded budget {budget:.1f}s + 10s slack"
+        )
+        # Either feasible-and-exit-0 or infeasible-and-exit-1; never
+        # silently exit 0 with an infeasible result.
+        assert result in (0, 1), f"Expected exit 0 or 1, got {result}"
+
+    def test_fatal_message_names_failing_components(
+        self, pathological_pcb, tmp_path, capsys,
+    ):
+        """The FATAL message lists which cost components failed.
+
+        Acceptance criterion: the FATAL line names overlap / drc /
+        boundary as appropriate so users know what went wrong.
+        """
+        output = tmp_path / "fatal_msg.kicad_pcb"
+        run_optimize_placement(
+            str(pathological_pcb),
+            max_iterations=5,
+            output_path=str(output),
+            time_budget=3.0,
+            quiet=True,
+        )
+        captured = capsys.readouterr()
+        # Must mention at least one of the failure components by name.
+        # On the pathological board overlap is guaranteed to be > 0.
+        assert "overlap" in captured.err, (
+            f"Expected FATAL to name 'overlap', got {captured.err!r}"
+        )
+
+    def test_default_cost_mode_is_lexicographic(self):
+        """Issue #2821: default cost mode for optimize-placement is LEXICOGRAPHIC.
+
+        Required for the feasibility-gated convergence in
+        ``CMAESStrategy._check_convergence`` to take effect (the gate
+        keys off scores >= 1e12 produced by lexicographic scoring).
+        """
+        from kicad_tools.placement.cost import CostMode
+
+        config = _parse_weights(None)
+        assert config.mode == CostMode.LEXICOGRAPHIC
+
+    def test_weights_json_can_override_cost_mode(self):
+        """Callers can opt back in to weighted-sum scoring via the JSON."""
+        from kicad_tools.placement.cost import CostMode
+
+        config = _parse_weights('{"mode": "weighted_sum"}')
+        assert config.mode == CostMode.WEIGHTED_SUM
+
+        config2 = _parse_weights('{"mode": "lexicographic"}')
+        assert config2.mode == CostMode.LEXICOGRAPHIC
+
+    def test_weights_json_invalid_mode_raises(self):
+        """A bad ``mode`` value produces a clear error and SystemExit."""
+        with pytest.raises(SystemExit):
+            _parse_weights('{"mode": "not-a-real-mode"}')
+
+
+class TestCLIFlagsForFeasibilityGate:
+    """Verify the new --time-budget and --allow-infeasible CLI flags."""
+
+    def test_parser_accepts_time_budget(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            ["optimize-placement", "board.kicad_pcb", "--time-budget", "30"]
+        )
+        assert args.time_budget == 30.0
+
+    def test_parser_default_time_budget_is_none(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb"])
+        assert args.time_budget is None
+
+    def test_parser_accepts_allow_infeasible(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            ["optimize-placement", "board.kicad_pcb", "--allow-infeasible"]
+        )
+        assert args.allow_infeasible is True
+
+    def test_parser_default_allow_infeasible_is_false(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb"])
+        assert args.allow_infeasible is False
