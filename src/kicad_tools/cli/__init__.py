@@ -503,6 +503,10 @@ def _run_stitch_command(args) -> int:
         sub_argv.extend(["-o", args.stitch_output])
     if hasattr(args, "stitch_drc") and args.stitch_drc:
         sub_argv.append("--drc")
+    if hasattr(args, "stitch_mfr") and args.stitch_mfr is not None:
+        sub_argv.extend(["--mfr", str(args.stitch_mfr)])
+    if hasattr(args, "stitch_copper") and args.stitch_copper != 1.0:
+        sub_argv.extend(["--copper", str(args.stitch_copper)])
 
     return stitch_cmd(sub_argv)
 

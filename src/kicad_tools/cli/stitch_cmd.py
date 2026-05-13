@@ -34,6 +34,105 @@ from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
 
 
+def _count_copper_layers(pcb_path: Path) -> int:
+    """Count the number of copper layers in the PCB.
+
+    Inspects the ``(layers ...)`` block of the .kicad_pcb file via the
+    PCB schema parser and returns the count of layers whose type is
+    ``signal`` or ``power``.  Falls back to ``2`` if the PCB cannot be
+    parsed (e.g., missing/malformed file); the caller is expected to
+    surface any read errors separately.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+
+    Returns:
+        Number of copper layers; defaults to ``2`` on parse failure.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_path)
+        detected = len(pcb.copper_layers)
+        return detected if detected > 0 else 2
+    except Exception:
+        return 2
+
+
+def _resolve_mfr_via_dimensions(
+    mfr: str, layers: int, copper: float = 1.0
+) -> tuple[float, float]:
+    """Resolve via diameter and drill from a manufacturer YAML profile.
+
+    Looks up the manufacturer's design rules for the actual stackup
+    (``{layers}layer_{copper}oz``) and returns the minimum via diameter
+    and drill required to satisfy both the published via geometry minima
+    AND the minimum annular ring constraint
+    (``effective_diameter = max(min_via_diameter, drill + 2 * min_annular_ring)``).
+
+    This mirrors the resolution logic in
+    :func:`kicad_tools.cli.fix_vias_cmd.get_design_rules` so that
+    ``kct stitch --mfr X`` and ``kct fix-vias --mfr X`` produce vias
+    that satisfy the same DRC profile.
+
+    Args:
+        mfr: Manufacturer identifier (e.g., ``"jlcpcb-tier1"``).
+        layers: Actual copper layer count of the target PCB.
+        copper: Outer copper weight in oz (default: 1.0).
+
+    Returns:
+        Tuple of ``(via_diameter_mm, drill_mm)``.
+
+    Raises:
+        FileNotFoundError: If no YAML profile exists for ``mfr``.
+    """
+    from kicad_tools.manufacturers.base import load_design_rules_from_yaml
+
+    # Try the user-supplied id first, then fall back to underscored
+    # variants for manufacturer registries whose YAML filenames use ``_``
+    # while the canonical alias uses ``-`` (e.g. ``jlcpcb-tier1`` vs
+    # ``jlcpcb_tier1.yaml``).
+    candidates = [mfr]
+    if "-" in mfr:
+        candidates.append(mfr.replace("-", "_"))
+    if "_" in mfr:
+        candidates.append(mfr.replace("_", "-"))
+
+    rules_dict = None
+    last_error: FileNotFoundError | None = None
+    for candidate in candidates:
+        try:
+            rules_dict = load_design_rules_from_yaml(candidate)
+            break
+        except FileNotFoundError as e:
+            last_error = e
+            continue
+    if rules_dict is None:
+        # Re-raise the last error so callers get a meaningful message.
+        assert last_error is not None
+        raise last_error
+
+    key = f"{layers}layer_{int(copper)}oz"
+    if key in rules_dict:
+        rules = rules_dict[key]
+    else:
+        # Fall back to the 1oz variant for this layer count.
+        fallback_key = f"{layers}layer_1oz"
+        if fallback_key in rules_dict:
+            rules = rules_dict[fallback_key]
+        else:
+            # Final fallback: first entry in the YAML so we still produce
+            # a usable answer rather than crashing.
+            rules = next(iter(rules_dict.values()))
+
+    drill = rules.min_via_drill_mm
+    min_annular_ring = rules.min_annular_ring_mm
+    mfr_min_diameter = rules.min_via_diameter_mm
+    annular_ring_min_diameter = drill + 2 * min_annular_ring
+    diameter = max(mfr_min_diameter, annular_ring_min_diameter)
+    return diameter, drill
+
+
 @dataclass
 class PadInfo:
     """Information about a pad."""
@@ -3288,6 +3387,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run DRC after stitching (fills zones automatically via kicad-cli)",
     )
+    parser.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="mfr",
+        default=None,
+        help=(
+            "Manufacturer profile (e.g., 'jlcpcb', 'jlcpcb-tier1'). When set, "
+            "stitch via dimensions are resolved from the manufacturer's YAML "
+            "design rules using the board's actual copper layer count, "
+            "overriding --via-size and --drill defaults. When omitted, the "
+            "existing CLI defaults are used."
+        ),
+    )
+    parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help=(
+            "Outer copper weight in oz (default: 1.0). Used together with --mfr "
+            "to select the correct design-rules row from the manufacturer YAML "
+            "(e.g., '2layer_1oz')."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -3318,6 +3440,32 @@ def main(argv: list[str] | None = None) -> int:
 
         pcb_path = output_path
 
+    # Resolve via dimensions from manufacturer profile when --mfr is set.
+    # This overrides the CLI --via-size / --drill defaults so the stitch
+    # output satisfies the manufacturer's per-stackup via geometry minima.
+    # When --mfr is not provided, the existing --via-size / --drill
+    # defaults are preserved (no behavior change).
+    via_size = args.via_size
+    drill = args.drill
+    if args.mfr is not None:
+        try:
+            detected_layers = _count_copper_layers(pcb_path)
+            mfr_via_size, mfr_drill = _resolve_mfr_via_dimensions(
+                args.mfr, detected_layers, args.copper
+            )
+        except FileNotFoundError:
+            print(
+                f"Error: No configuration found for manufacturer '{args.mfr}'",
+                file=sys.stderr,
+            )
+            return 1
+        via_size = mfr_via_size
+        drill = mfr_drill
+        print(
+            f"Manufacturer profile '{args.mfr}' ({detected_layers}-layer, "
+            f"{args.copper:g}oz): via_size={via_size:.3f}mm, drill={drill:.3f}mm"
+        )
+
     # Auto-detect power plane nets if none specified
     net_names = args.nets
     if not net_names:
@@ -3337,8 +3485,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_blanket_stitch(
                 pcb_path=pcb_path,
                 net_names=net_names,
-                via_size=args.via_size,
-                drill=args.drill,
+                via_size=via_size,
+                drill=drill,
                 clearance=args.clearance,
                 spacing=args.spacing,
                 target_layer=args.target_layer,
@@ -3348,8 +3496,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_stitch(
                 pcb_path=pcb_path,
                 net_names=net_names,
-                via_size=args.via_size,
-                drill=args.drill,
+                via_size=via_size,
+                drill=drill,
                 clearance=args.clearance,
                 offset=args.offset,
                 target_layer=args.target_layer,
