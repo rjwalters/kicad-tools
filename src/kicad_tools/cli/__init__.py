@@ -60,6 +60,7 @@ from .commands import (
     run_decisions_command,
     run_estimate_command,
     run_fix_footprints_command,
+    run_fleet_command,
     run_footprint_command,
     run_impedance_command,
     run_init_command,
@@ -389,6 +390,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "sync":
         return run_sync_command(args)
+
+    elif args.command == "fleet":
+        return run_fleet_command(args)
 
     elif args.command == "net-status":
         from .net_status_cmd import main as net_status_cmd

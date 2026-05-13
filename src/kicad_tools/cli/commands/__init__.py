@@ -23,6 +23,7 @@ from .create_pcb import run_create_pcb_command
 from .datasheet import run_datasheet_command
 from .decisions import run_decisions_command
 from .estimate import run_estimate_command
+from .fleet import run_fleet_command
 from .footprint import run_footprint_command
 from .impedance import run_impedance_command
 from .ipc import run_ipc_command
@@ -100,6 +101,8 @@ __all__ = [
     "run_datasheet_command",
     # Decisions
     "run_decisions_command",
+    # Fleet
+    "run_fleet_command",
     # Reasoning
     "run_reason_command",
     # Placement
