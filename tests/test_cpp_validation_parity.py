@@ -320,6 +320,84 @@ class TestSegmentPadClearanceParity:
         )
         assert result.valid is True
 
+    def test_exclude_ref_hash_preserves_signal_pad_escape(self):
+        """Issue #1764 regression guard: signal pads (net != 0) on a
+        component in the exclude set MUST still be skipped so the chip's
+        own signal-pin escape can be routed.
+
+        This is a named regression guard formalising the original Issue
+        #1764 reachability fix; it must continue to pass after the
+        Issue #2871 narrowing (only plane-net pads are re-engaged in the
+        validator).
+        """
+        from kicad_tools.router import router_cpp
+
+        grid, rules = _make_grid_and_rules(trace_clearance=0.25)
+        # Signal pad (net != 0) on R1 -- this is the path Issue #1764
+        # protects: a signal-pin escape on the same component must
+        # remain reachable when its ref is in the exclude set.
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=2,
+                  net_name="SIG", layer=Layer.F_CU, ref="R1")
+        grid.add_pad(pad)
+        cpp_grid = CppGrid.from_routing_grid(grid)
+
+        cs = router_cpp.Segment()
+        cs.x1, cs.y1 = 4.0, 5.0
+        cs.x2, cs.y2 = 6.0, 5.0
+        cs.width = 0.25
+        cs.layer = 0
+        cs.net = 1
+
+        # Exclude R1's ref hash; signal pad is skipped, segment passes.
+        r1_hash = router_cpp.fnv1a_hash("R1")
+        result = cpp_grid._impl.validate_route(
+            [cs], [], 1, [r1_hash], 0.25, 0.25, 0.102
+        )
+        assert result.valid is True
+
+    def test_exclude_ref_hash_blocks_plane_net_pad(self):
+        """Issue #2871: plane-net pads (net == 0) on a component in the
+        exclude set MUST still participate in pad-vs-segment validation.
+
+        This is the new behaviour the patch adds. Before the fix the
+        broad ref-exclusion at grid.cpp:376 would skip every pad on the
+        excluded component, letting signal traces clip the chip's own
+        plane-net (GND / +3.3V) pads. After the fix the validator
+        re-engages for plane-net pads and reports a seg-pad violation
+        when the segment is closer than trace_clearance.
+        """
+        from kicad_tools.router import router_cpp
+
+        grid, rules = _make_grid_and_rules(trace_clearance=0.25)
+        # Plane-net pad (net == 0, the SKIPPED-net convention threaded
+        # through cpp_backend.py:596-605) on U2 -- e.g. a GND or +3.3V
+        # pad on an LQFP-48 chip whose signal traces are also being
+        # routed.
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=0,
+                  net_name="GND", layer=Layer.F_CU, ref="U2")
+        grid.add_pad(pad)
+        cpp_grid = CppGrid.from_routing_grid(grid)
+
+        # Segment passes through the pad center on the same layer --
+        # well inside the trace_clearance band of any non-zero pad.
+        cs = router_cpp.Segment()
+        cs.x1, cs.y1 = 4.0, 5.0
+        cs.x2, cs.y2 = 6.0, 5.0
+        cs.width = 0.25
+        cs.layer = 0
+        cs.net = 1
+
+        # Exclude U2's ref hash (mirrors what _validate_route_clearance
+        # does when routing a net rooted at U2).
+        u2_hash = router_cpp.fnv1a_hash("U2")
+        result = cpp_grid._impl.validate_route(
+            [cs], [], 1, [u2_hash], 0.25, 0.25, 0.102
+        )
+        # The plane-net pad must be enforced even though U2 is in the
+        # exclude set -- this is the bug Issue #2871 closes.
+        assert result.valid is False
+        assert result.violation_type == 1  # seg-pad
+
 
 @requires_cpp
 class TestSegmentSegmentClearanceParity:
