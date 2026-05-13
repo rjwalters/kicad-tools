@@ -1,0 +1,18 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+C1,10uF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,18.0000mm,0.0,Top
+C10,20pF,Capacitor_SMD:C_0805_2012Metric,19.0000mm,16.0000mm,0.0,Top
+C11,20pF,Capacitor_SMD:C_0805_2012Metric,25.0000mm,16.0000mm,0.0,Top
+C12,100nF,Capacitor_SMD:C_0805_2012Metric,26.0000mm,32.0000mm,0.0,Top
+C13,100nF,Capacitor_SMD:C_0805_2012Metric,31.0000mm,32.0000mm,0.0,Top
+C14,100nF,Capacitor_SMD:C_0805_2012Metric,36.0000mm,32.0000mm,0.0,Top
+C15,100nF,Capacitor_SMD:C_0805_2012Metric,26.0000mm,36.0000mm,0.0,Top
+C16,4.7uF,Capacitor_SMD:C_0805_2012Metric,31.0000mm,36.0000mm,0.0,Top
+C2,10uF,Capacitor_SMD:C_0805_2012Metric,15.0000mm,10.0000mm,0.0,Top
+C3,100nF,Capacitor_SMD:C_0805_2012Metric,15.0000mm,16.0000mm,0.0,Top
+D1,LED,LED_SMD:LED_0805_2012Metric,47.0000mm,12.0000mm,0.0,Top
+J1,SWD,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,55.0000mm,22.0000mm,0.0,Top
+R1,330R,Resistor_SMD:R_0805_2012Metric,47.0000mm,8.0000mm,0.0,Top
+R2,10k,Resistor_SMD:R_0805_2012Metric,47.0000mm,22.0000mm,0.0,Top
+U1,AMS1117-3.3,Package_TO_SOT_SMD:SOT-223-3_TabPin2,8.0000mm,10.0000mm,0.0,Top
+U2,STM32F103C8T6,Package_QFP:LQFP-48_7x7mm_P0.5mm,31.0000mm,22.0000mm,0.0,Top
+Y1,8MHz,Crystal:Crystal_HC49-4H_Vertical,22.0000mm,10.0000mm,0.0,Top
