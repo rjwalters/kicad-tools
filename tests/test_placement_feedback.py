@@ -1226,3 +1226,357 @@ class TestPlacementFeedbackLoopBuilderHandoff:
         # the diagonals.  South / West / SE / SW must all appear.
         assert "W0" in all_quadrants and "0S" in all_quadrants
         assert "WS" in all_quadrants and "ES" in all_quadrants
+
+
+class _RoutingFakeRouter:
+    """Fake Autorouter that mutates ``self.routes`` per iteration.
+
+    Used by Issue #2840 rollback tests.  Each call to
+    ``route_all_negotiated`` consumes the next entry in ``routes_per_call``
+    and populates ``self.routes`` accordingly so:
+
+    - ``_reset_for_new_trial()`` clears ``self.routes`` (mirroring real
+      :class:`Autorouter` behavior).
+    - ``route_all_negotiated()`` appends the configured routes for the
+      current call index.
+    - ``get_failed_nets()`` derives strictly from ``self.routes`` membership
+      (mirroring real :meth:`Autorouter.get_failed_nets` at
+      ``core.py:8320``), so the loop's monotonicity logic operates against
+      a state model identical to the real router.
+
+    The ``Route`` objects are real ``router.primitives.Route`` instances so
+    ``copy.deepcopy`` in the loop's snapshot path exercises the real
+    ``Route`` deep-copy semantics.
+    """
+
+    def __init__(self, total_nets: int, routes_per_call: list[list]):
+        # ``nets`` len = total_nets + 1 so the loop's ``-1 for net 0``
+        # math yields ``total_nets``.
+        self.nets: dict[int, list] = {i: [] for i in range(total_nets + 1)}
+        self.routes: list = []
+        self._routes_per_call = routes_per_call
+        self._call_index = 0
+
+    def route_all_negotiated(self, **_kwargs):
+        idx = min(self._call_index, len(self._routes_per_call) - 1)
+        # Caller expects route_all_negotiated to populate self.routes
+        # with the iteration's results (real router does this via the
+        # per-iteration append loop).
+        for r in self._routes_per_call[idx]:
+            self.routes.append(r)
+        self._call_index += 1
+        return list(self.routes)
+
+    def route_all(self, **_kwargs):
+        return self.route_all_negotiated()
+
+    def get_failed_nets(self) -> list[int]:
+        """Derive failed_nets from self.routes -- mirrors core.py:8320."""
+        routed_nets = {r.net for r in self.routes}
+        all_nets = {n for n in self.nets if n != 0}
+        return list(all_nets - routed_nets)
+
+    def _reset_for_new_trial(self) -> None:
+        """Clear routes -- mirrors core.py:6683."""
+        self.routes = []
+
+    def analyze_routing_failure(self, _net_id):
+        return None
+
+
+def _make_test_route(net_id: int) -> "object":
+    """Construct a minimal ``Route`` carrying just enough state for tests.
+
+    The route's ``net`` field is what ``get_failed_nets`` keys on, so
+    that's all that matters for rollback verification.  Segments and vias
+    can be empty lists; deep-copy still exercises the dataclass clone path.
+    """
+    from kicad_tools.router.primitives import Route
+
+    return Route(net=net_id, net_name=f"NET_{net_id}", segments=[], vias=[])
+
+
+class TestPlacementFeedbackLoopRollback:
+    """Issue #2840: PlacementFeedbackLoop must restore best-known state.
+
+    The placement-feedback loop is non-monotonic by construction -- each
+    iteration clears all routes and re-routes from scratch.  Without an
+    explicit best-state snapshot, a later iteration that regresses
+    leaves ``self.router.routes`` worse than a prior pass produced, and
+    the final ``PlacementFeedbackResult`` reports the regression.
+
+    These tests exercise the snapshot/restore path added in #2840 by
+    driving a fake router through scripted sequences of routed-state
+    transitions and asserting the loop returns the best-observed state.
+    """
+
+    def _strategy_always_applies(self, loop):
+        """Patch the strategy pipeline so the loop iterates max_adjustments+1 times.
+
+        Mirrors ``_AlwaysApplyLoop.patch`` above: a dummy strategy that
+        always 'succeeds' (moves nothing) so the loop never short-circuits
+        on "no suitable placement strategy found".
+        """
+        dummy_strategy = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=0.99,
+            actions=[Action(type="move", target="C1", params={"x": 0.0, "y": 0.0})],
+        )
+
+        def _dummy_find(_failed, _conf):
+            return dummy_strategy
+
+        class _DummyApplicator:
+            def apply_strategy(self, _pcb, _strategy):
+                return ApplicationResult(
+                    success=True,
+                    components_moved=[],
+                    message="(dummy: no-op move)",
+                )
+
+            def is_safe_to_apply(self, _strategy, _pcb):
+                return True
+
+        loop._find_best_placement_strategy = _dummy_find  # type: ignore[method-assign]
+        loop._strategy_applicator = _DummyApplicator()
+        return loop
+
+    def test_regression_after_best_iteration_restores_best_state(self):
+        """Pass 1 fails connectivity -> post-rollback state == pre-pass-1 state.
+
+        Three iterations with routed counts [3, 1, 2] across 4 total
+        nets.  Without #2840 the loop returns iteration 2's state
+        (2 routed, 2 failed); WITH #2840 the loop must restore to
+        iteration 0's snapshot (3 routed, 1 failed).
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # iteration-0 routes nets 1,2,3 (3 routed); iteration-1 routes
+        # only net 1 (1 routed); iteration-2 routes nets 1,2 (2 routed).
+        # total_nets = 4 so failed_nets = {4} / {2,3,4} / {3,4} respectively.
+        iter0_routes = [_make_test_route(1), _make_test_route(2), _make_test_route(3)]
+        iter1_routes = [_make_test_route(1)]
+        iter2_routes = [_make_test_route(1), _make_test_route(2)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes, iter2_routes],
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,  # disable stagnation so we run the full budget
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=2)  # 3 iterations total
+
+        # Acceptance: the loop must NOT return the live last-iteration
+        # state (iteration 2 = 2 routed).  It must restore iteration 0's
+        # snapshot (3 routed) because that was the best observed.
+        assert len(result.routes) == 3, (
+            f"Issue #2840 rollback: expected 3 routes from iteration 0's "
+            f"snapshot, got {len(result.routes)} (loop returned the live "
+            f"final-iteration state instead of the best-known)"
+        )
+        # Failed nets must reflect the restored state too.
+        assert sorted(result.failed_nets) == [4], (
+            f"Issue #2840 rollback: failed_nets must match the restored "
+            f"snapshot (iteration 0 -> net 4 failed), got {result.failed_nets}"
+        )
+        # The router's own state must also be restored so post-loop
+        # callers reading self.router.routes see the best snapshot.
+        assert len(router.routes) == 3
+        assert sorted(r.net for r in router.routes) == [1, 2, 3]
+
+    def test_route_by_route_equivalence_after_rollback(self):
+        """Post-rollback routes are deep copies of the pre-pass-1 snapshot.
+
+        Construct distinct ``Route`` objects per iteration so equivalence
+        must hold on the routes' contents (net id + net_name), not on
+        Python identity.  After rollback, the restored routes must:
+
+        - Have the same ``(net, net_name)`` tuples as iter-0's routes.
+        - NOT be the same Python objects (``id()``) as iter-0's originals
+          -- the loop took a deep copy on iter-0 capture and a deep copy
+          again on restoration.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # iter-0 = 3/4 (best); iter-1 regresses to 1/4; iter-2 stays low.
+        # Avoid 4/4 on iter-0 so the success short-circuit does not fire.
+        iter0_routes = [_make_test_route(i) for i in (10, 20, 30)]
+        iter1_routes = [_make_test_route(10)]
+        iter2_routes = [_make_test_route(10)]
+        iter0_ids = {id(r) for r in iter0_routes}
+        expected_signatures = sorted((r.net, r.net_name) for r in iter0_routes)
+
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes, iter2_routes],
+        )
+        # Bind nets so get_failed_nets() returns the singleton {40} after
+        # restoration (10/20/30 routed, 40 unrouted, plus net 0 ignored).
+        # Total nets = 4 (excluding net 0) so len(self.nets) - 1 = 4
+        # which matches the loop's ``total_nets`` math.
+        router.nets = {0: [], 10: [], 20: [], 30: [], 40: []}
+        assert len(router.nets) - 1 == 4
+
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=2)
+
+        # Route-by-route equivalence on (net, net_name).
+        restored_signatures = sorted((r.net, r.net_name) for r in result.routes)
+        assert restored_signatures == expected_signatures, (
+            f"Issue #2840 rollback: restored routes do not match iter-0 "
+            f"snapshot.\n  expected: {expected_signatures}\n  got:      "
+            f"{restored_signatures}"
+        )
+        # Deep-copy semantics: no shared object identities with iter-0.
+        for r in result.routes:
+            assert id(r) not in iter0_ids, (
+                "Issue #2840: rollback returned routes by reference; "
+                "expected deep copies so future mutation of "
+                "self.router.routes does not corrupt the result"
+            )
+
+    def test_first_iteration_best_no_rollback_needed_success(self):
+        """First iteration converges -> success short-circuit, no rollback log.
+
+        Iteration 0 routes all nets (failed = []).  The loop returns via
+        the ``pf_converged`` short-circuit at line 391-403, which predates
+        #2840 and is unchanged.  No "Restoring best snapshot" log emitted.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # iter-0 routes all 4 nets -> failed_nets = [] -> short-circuit.
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3, 4)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes],
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        result = loop.run(max_adjustments=3)
+
+        # Success short-circuit fires; no rollback path executed.
+        assert result.exit_reason == "pf_converged"
+        assert result.success is True
+        assert result.iterations == 1
+        assert len(result.routes) == 4
+        assert result.failed_nets == []
+
+    def test_no_regression_returns_last_iteration_state(self):
+        """Monotonically improving routed_count -> no restore needed.
+
+        All iterations strictly improve (3 -> 4 -> 4).  The "best" is the
+        final iteration, so the restore branch is not taken.  Result must
+        be the live final state.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        # iter-0: 3 routed (net 4 failed); iter-1: 4 routed (success).
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        iter1_routes = [_make_test_route(i) for i in (1, 2, 3, 4)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes],
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=2)
+
+        # iter-1 short-circuits via pf_converged.
+        assert result.exit_reason == "pf_converged"
+        assert result.success is True
+        assert len(result.routes) == 4
+
+    def test_trajectory_log_emits_per_iteration_progress(self, capsys):
+        """Verbose mode emits ``[iter N] ... improved|reverted|tied`` per pass.
+
+        Iterates [3, 1, 2] across 3 iterations.  Captured stdout must
+        contain iter-0 marked improved, iter-1 marked reverted, iter-2
+        marked reverted (still below best), and a "Restoring best
+        snapshot" line at the end.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3)]  # 3 routed
+        iter1_routes = [_make_test_route(1)]  # 1 routed
+        iter2_routes = [_make_test_route(1), _make_test_route(2)]  # 2 routed
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes, iter2_routes],
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        loop.run(max_adjustments=2)
+        captured = capsys.readouterr().out
+
+        # Trajectory log lines.
+        assert "[iter 0]" in captured
+        assert "improved" in captured
+        assert "[iter 1]" in captured
+        assert "reverted" in captured
+        # End-of-loop restore log line.
+        assert "Restoring best snapshot" in captured
+        # Restoration target points back at iteration 0.
+        assert "iter 0" in captured
+
+    def test_tied_iteration_does_not_replace_snapshot(self):
+        """Strict-improvement semantics: a tied iteration keeps the earlier snapshot.
+
+        iter-0 routes 3 nets, iter-1 routes the SAME 3 nets (same count,
+        same identity).  ``best_iteration`` must stay at 0; the snapshot
+        must not be replaced (so a later regression rolls back to iter 0,
+        not iter 1).
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        iter1_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        iter2_routes = [_make_test_route(1)]  # regression
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes, iter2_routes],
+        )
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=2)
+
+        # 3 routes restored from the best-known snapshot.
+        assert len(result.routes) == 3
+        # The exit_reason is pf_max_iter (we ran all 3 iterations without
+        # success), confirming no early break.
+        assert result.exit_reason == "pf_max_iter"
