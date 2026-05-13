@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from kicad_tools.explain.decisions import DecisionStore
@@ -4298,6 +4299,7 @@ class Autorouter:
         congestion_auto_tune: bool = False,
         hotset_only: bool = False,
         perturbation: bool = True,
+        checkpoint_callback: "Callable[[list[Route], IterationMetrics], None] | None" = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -4373,6 +4375,15 @@ class Autorouter:
             perturbation: If True (default), enable stochastic cost perturbation
                 when oscillation is detected (Issue #2334). Adds random noise to
                 per-net priority scores to break symmetry and escape local minima.
+            checkpoint_callback: Optional callable invoked whenever the
+                best-so-far snapshot is replaced (Issue #2808). Receives the
+                deep-copied ``best_routes`` list and the matching
+                ``IterationMetrics``. Default: None (no checkpoint hook).
+                The callback is responsible for its own throttling (e.g.
+                time-based gating) and any persistence semantics. CRITICAL:
+                the callback receives the snapshot (``best_routes``) -- NOT
+                ``self.routes`` (which may be the current, possibly-worse
+                iteration state).
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -4826,6 +4837,19 @@ class Autorouter:
                 best_net_routes = copy.deepcopy(net_routes)
                 best_iteration = iter_index
 
+                # Issue #2808: notify the checkpoint hook AFTER the deep-copy
+                # replacement so the callback gets the just-snapshotted
+                # ``best_routes`` (NOT ``self.routes``, which is the live
+                # state and may regress mid-iteration on the next rip-up).
+                if checkpoint_callback is not None:
+                    try:
+                        checkpoint_callback(best_routes, best_metrics)
+                    except Exception as exc:  # noqa: BLE001
+                        # Checkpoint persistence failures must not abort
+                        # routing -- the in-memory best snapshot is still
+                        # intact and the terminal save can still succeed.
+                        flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
+
             # Canonical per-iteration log line.  Suffix shows whether this
             # iteration replaced the best snapshot or what the running best
             # still is — makes the regression visible at runtime.
@@ -4873,6 +4897,19 @@ class Autorouter:
                     best_routes = copy.deepcopy(list(self.routes))
                     best_net_routes = copy.deepcopy(net_routes)
                     best_iteration = iteration - 1
+
+                    # Issue #2808: fire checkpoint hook from the iteration-top
+                    # snapshot site too, not just _capture_iteration_end --
+                    # the pre-rip-up snapshot can replace ``best_routes`` if
+                    # the prior iteration's stable state ended up strictly
+                    # better than what we had tracked.
+                    if checkpoint_callback is not None:
+                        try:
+                            checkpoint_callback(best_routes, best_metrics)
+                        except Exception as exc:  # noqa: BLE001
+                            flush_print(
+                                f"  checkpoint: write failed ({exc!r}); continuing"
+                            )
 
                 # Adaptive early termination check (Issue #633)
                 # Issue #2334: When perturbation is enabled, activate it
