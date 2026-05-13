@@ -184,8 +184,7 @@ class TestRunAutoFix:
         )
         # Must point the user at the documented escape hatch.
         assert "--no-connectivity-check" in captured.out, (
-            f"Expected '--no-connectivity-check' guidance in output, "
-            f"got: {captured.out!r}"
+            f"Expected '--no-connectivity-check' guidance in output, got: {captured.out!r}"
         )
 
     @patch("kicad_tools.cli.fix_drc_cmd.main")
@@ -554,3 +553,468 @@ class TestAutoFixViaCentralizedCLI:
         )
         # Both flags should be accepted; --skip-drc suppresses auto-fix behavior
         assert result == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #2852: --auto-fix rollback (exit 3) propagation tests.
+#
+# When fix_drc_cmd.main returns exit 3 (connectivity rollback), the surrounding
+# ``kct route`` process must propagate that as exit 3 -- not 0.  Four call
+# sites must agree:
+#   1. route_with_layer_escalation (route_cmd.py call site ~L2533)
+#   2. route_with_rule_relaxation  (route_cmd.py call site ~L3073)
+#   3. route_with_combined_escalation (route_cmd.py call site ~L3662)
+#   4. main() single-shot flow     (route_cmd.py call site ~L6168)
+#
+# Tests below force each function to reach its return statement with the
+# auto-fix path engaged, then assert exit code 3 on rollback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_routing_args(**overrides):
+    """Build a minimal args namespace that drives the auto-fix path.
+
+    Returns args with ``dry_run=False``, ``skip_drc=False``, and
+    ``auto_fix=True`` so that ``_should_auto_fix(args)`` returns True
+    and the DRC + auto-fix block actually runs.
+    """
+    defaults = {
+        # Routing engine
+        "grid": 0.25,
+        "trace_width": 0.2,
+        "clearance": 0.15,
+        "via_drill": 0.3,
+        "via_diameter": 0.6,
+        "fine_pitch_clearance": None,
+        "manufacturer": "jlcpcb",
+        "min_trace": None,
+        "min_clearance_floor": None,
+        "strategy": "negotiated",
+        "iterations": 3,
+        "timeout": 60,
+        "skip_nets": None,
+        "edge_clearance": 0.25,
+        "force": False,
+        "backend": "python",
+        "verbose": False,
+        "min_completion": 0.95,
+        "no_optimize": True,
+        "no_early_stop": False,
+        "multi_resolution": False,
+        "two_phase": False,
+        "per_net_timeout": None,
+        "two_phase_iterations": None,
+        "batch_routing": False,
+        "high_performance": False,
+        "hierarchical": False,
+        "perturbation": True,
+        "mc_trials": 10,
+        "escape_routing": None,
+        "no_escape_routing": False,
+        "diagnostics": False,
+        "layers": "auto",
+        "max_layers": 6,
+        "pcb": "test.kicad_pcb",
+        "auto_pour": False,
+        "format": "text",
+        "export_failed_nets": None,
+        "strict": False,
+        # Critical: trigger the auto-fix branch
+        "dry_run": False,
+        "skip_drc": False,
+        "auto_fix": True,
+        "auto_fix_passes": 1,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_success_router(nets_routed: int = 3, nets_to_route: int = 3):
+    """Mock router that reports a 100% successful routing run."""
+    router = MagicMock()
+    router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
+    router.grid.width = 50.0
+    router.grid.height = 40.0
+    router.grid.get_total_overflow.return_value = 0
+    router.get_statistics.return_value = {
+        "nets_routed": nets_routed,
+        "segments": 10,
+        "vias": 2,
+    }
+    router.power_stall_abort = False
+    router._pour_nets_without_zones = set()
+    router.routes = []
+    router.rules.via_diameter = 0.6
+    router.rules.min_drill_clearance = 0.0
+    router.rules.trace_width = 0.2
+    router.rules.trace_clearance = 0.15
+    router.net_class_map = None
+    return router
+
+
+def _patch_routing_engine_for_success(stack, router):
+    """Apply common patches so a routing function reaches the auto-fix path.
+
+    Returns the ExitStack with patches already entered.  Caller should
+    use this within ``with`` so cleanup runs on test exit.
+    """
+
+    def mock_load(*args, **kwargs):
+        return router, {}
+
+    stack.enter_context(patch("kicad_tools.router.load_pcb_for_routing", side_effect=mock_load))
+    stack.enter_context(patch("kicad_tools.router.is_cpp_available", return_value=False))
+    stack.enter_context(patch("kicad_tools.router.show_routing_summary"))
+    stack.enter_context(patch("kicad_tools.cli.route_cmd._write_routed_pcb"))
+    stack.enter_context(patch("kicad_tools.cli.route_cmd._fill_zones_after_route"))
+    stack.enter_context(
+        patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    )
+    stack.enter_context(
+        patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    )
+    stack.enter_context(
+        patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    )
+    return stack
+
+
+class TestAutoFixRollbackPropagation:
+    """Issue #2852: ``--auto-fix`` rollback (exit 3) must surface as exit 3.
+
+    Before #2852, three of the four routing flows discarded the return
+    value of ``_run_auto_fix``, so a connectivity rollback (fix-drc exit
+    3) silently became exit 0 from ``kct route``.  CI / shell scripts
+    that inspect ``$?`` could not detect the rollback.
+
+    After #2852, all four flows propagate ``fix_result == 3`` as exit
+    code 3 -- the same code the documented exit-code table already
+    reserves for "routing met threshold but DRC is dirty."
+    """
+
+    def test_rollback_propagates_in_layer_escalation(self, tmp_path):
+        """route_with_layer_escalation must return 3 when --auto-fix rolls back."""
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            # DRC reports violations -> auto-fix is invoked.
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            # Auto-fix rolls back (connectivity regression).
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=3))
+            result = route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        assert result == 3, (
+            f"Expected exit 3 on --auto-fix rollback in route_with_layer_escalation, got {result}"
+        )
+
+    def test_rollback_propagates_in_rule_relaxation(self, tmp_path):
+        """route_with_rule_relaxation must return 3 when --auto-fix rolls back."""
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_rule_relaxation
+        from kicad_tools.router import LayerStack
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        # One trivial "user" tier so the rule-relaxation loop exits after one
+        # attempt that succeeds at 100%.
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeTier:
+            tier: int
+            description: str
+            trace_width: float
+            clearance: float
+            via_drill: float = 0.3
+            via_diameter: float = 0.6
+
+        tiers = [FakeTier(0, "user", 0.2, 0.15)]
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            stack.enter_context(
+                patch("kicad_tools.router.get_relaxation_tiers", return_value=tiers)
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.router.io.detect_layer_stack",
+                    return_value=LayerStack.two_layer(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.router.get_mfr_limits",
+                    return_value=MagicMock(min_trace=0.127, min_clearance=0.127),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=3))
+            result = route_with_rule_relaxation(pcb, out, args, quiet=True)
+
+        assert result == 3, (
+            f"Expected exit 3 on --auto-fix rollback in route_with_rule_relaxation, got {result}"
+        )
+
+    def test_rollback_propagates_in_combined_escalation(self, tmp_path):
+        """route_with_combined_escalation must return 3 when --auto-fix rolls back."""
+        from contextlib import ExitStack
+        from dataclasses import dataclass
+
+        from kicad_tools.cli.route_cmd import route_with_combined_escalation
+
+        @dataclass
+        class FakeTier:
+            tier: int
+            description: str
+            trace_width: float
+            clearance: float
+            via_drill: float = 0.3
+            via_diameter: float = 0.6
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args(max_layers=2)
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+        tiers = [FakeTier(0, "user", 0.2, 0.15)]
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            stack.enter_context(
+                patch("kicad_tools.router.get_relaxation_tiers", return_value=tiers)
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.router.get_mfr_limits",
+                    return_value=MagicMock(min_trace=0.127, min_clearance=0.127),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=3))
+            result = route_with_combined_escalation(pcb, out, args, quiet=True)
+
+        assert result == 3, (
+            f"Expected exit 3 on --auto-fix rollback in "
+            f"route_with_combined_escalation, got {result}"
+        )
+
+    def test_rollback_propagates_in_main_flow(self, tmp_path):
+        """main() single-shot flow must return 3 when --auto-fix rolls back.
+
+        The main flow at L6168 captures ``fix_result`` and (per #2852) returns
+        exit 3 explicitly when rollback fires, instead of relying on the
+        accidentally-correct ``drc_errors`` fall-through path.
+        """
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+
+        with ExitStack() as stack:
+            # DRC reports violations.
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            # Auto-fix rolls back.
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=3))
+            # Drive main() to the auto-fix branch via the centralized CLI in
+            # single-shot mode (no --auto-layers / --auto-rules).  We supply
+            # --skip-* knobs that bypass the heavy machinery while still
+            # letting DRC + auto-fix fire.
+            #
+            # The simplest way is to invoke the function via its argv parser
+            # and mock the routing engine boundary.  Because the single-shot
+            # path's routing-engine setup is not as cleanly mockable as the
+            # multi-attempt paths, we instead patch the routing-stage seam.
+            router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+            def mock_load(*args, **kwargs):
+                return router, {}
+
+            stack.enter_context(
+                patch("kicad_tools.router.load_pcb_for_routing", side_effect=mock_load)
+            )
+            stack.enter_context(patch("kicad_tools.router.is_cpp_available", return_value=False))
+            stack.enter_context(patch("kicad_tools.router.show_routing_summary"))
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._write_routed_pcb"))
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._fill_zones_after_route"))
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd._auto_skip_pour_nets",
+                    return_value=([], []),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd._resolve_escape_routing_flag",
+                    return_value=None,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd._should_use_escape_routing",
+                    return_value=False,
+                )
+            )
+
+            result = route_main(
+                [
+                    str(pcb),
+                    "--auto-fix",
+                    "--quiet",
+                    "--grid",
+                    "0.25",
+                    "--no-optimize",
+                ]
+            )
+
+        assert result == 3, f"Expected exit 3 on --auto-fix rollback in main() flow, got {result}"
+
+
+class TestAutoFixSuccessKeepsZeroExitCode:
+    """Issue #2852: regression guard -- happy path (auto-fix exit 0) keeps exit 0.
+
+    The propagation logic must be rollback-only; it must NOT downgrade
+    a successful auto-fix run to a non-zero exit.
+    """
+
+    def test_layer_escalation_returns_zero_on_auto_fix_success(self, tmp_path):
+        """When --auto-fix returns 0, route_with_layer_escalation still returns 0."""
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=0))
+            result = route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        assert result == 0, (
+            f"Expected exit 0 on --auto-fix success in route_with_layer_escalation, got {result}"
+        )
+
+
+class TestAutoFixNoRegressionForCodes1And2:
+    """Issue #2852: fix-drc exit 1 (no progress) and 2 (partial) must NOT override.
+
+    Only exit 3 (connectivity rollback) triggers the new override.  Exit
+    codes 1 and 2 must preserve the existing routing-driven exit code --
+    i.e. exit 0 for the success-then-DRC-errors-remain path (because the
+    routing flows other than main() don't consult ``drc_errors`` at all).
+
+    Note: ``route_with_layer_escalation`` (and siblings) derive their
+    exit code purely from ``final_result.success`` -- so a successful
+    routing run with fix-drc returning 1 or 2 returns 0.  Only main()
+    has separate DRC bookkeeping that surfaces exit 3 from a positive
+    ``drc_errors`` count.
+    """
+
+    def test_layer_escalation_exit1_preserves_routing_exit_code(self, tmp_path):
+        """fix-drc exit 1 (no progress) does not override route exit code."""
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=1))
+            result = route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # success=True path: fix-drc exit 1 must NOT promote to 3.
+        assert result == 0, (
+            f"fix-drc exit 1 (no progress) must not override route exit "
+            f"in route_with_layer_escalation, got {result}"
+        )
+
+    def test_layer_escalation_exit2_preserves_routing_exit_code(self, tmp_path):
+        """fix-drc exit 2 (partial repair) does not override route exit code."""
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=2))
+            result = route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # success=True path: fix-drc exit 2 must NOT promote to 3.
+        assert result == 0, (
+            f"fix-drc exit 2 (partial) must not override route exit "
+            f"in route_with_layer_escalation, got {result}"
+        )
