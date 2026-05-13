@@ -148,6 +148,89 @@ def _budgeted_timeout(args) -> float | None:
     return min(float(timeout), remaining)
 
 
+# =============================================================================
+# Issue #2823: Per-attempt budget allocation for escalation loops
+# =============================================================================
+#
+# ``_budgeted_timeout`` (above) intentionally preserves "first-stage semantics":
+# the *first* escalation attempt is allowed to consume the full ``--timeout``
+# value as its per-call budget, and only later attempts get a smaller slice as
+# the wall-clock deadline approaches.  This is correct for *single-stage* call
+# sites (placement-feedback iterations, the inner route in
+# ``route_with_strategy``, etc.), but it is *wrong* for the multi-attempt
+# layer-escalation and combined-escalation loops.
+#
+# In ``--auto-layers`` mode the orchestration tries 2L, 4L, 4L-all-sig, then 6L
+# in sequence.  When ``--timeout`` is set tight relative to the natural runtime
+# of the first attempt, the greedy allocation gives the entire budget to the 2L
+# attempt, leaves nothing for 4L, and never starts 6L.  The escalation strategy
+# degenerates to "spend everything on the lowest layer count, give up."
+#
+# The fix is a *per-attempt* helper that divides the remaining wall-clock
+# budget evenly across the remaining attempts, returning the minimum of:
+#   1. ``args.timeout``          - never exceed user's original cap
+#   2. ``remaining_budget``      - never overrun the total deadline
+#   3. ``per_attempt_budget``    - fair slice across remaining attempts
+#
+# When ``--timeout`` is unset, the helper falls through to ``None`` (legacy
+# unbounded behaviour, identical to ``_budgeted_timeout``).  When ``--timeout``
+# is set generously (i.e. larger than the natural per-attempt runtime), the
+# per-attempt cap is an *upper bound* not a target runtime, so the inner
+# router can still finish early on its own.
+
+
+def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -> float | None:
+    """Return the per-call timeout for one attempt of an escalation loop.
+
+    Unlike :func:`_budgeted_timeout` (which lets the first stage consume the
+    full ``--timeout`` value), this helper divides the *remaining* wall-clock
+    budget evenly across the *remaining* attempts and returns the minimum of
+    that fair slice, the original ``--timeout``, and the remaining budget.
+
+    Args:
+        args: Parsed CLI namespace; must carry ``timeout`` and (after
+            ``_set_wall_clock_deadline``) ``_wall_clock_deadline``.
+        attempt_index: 0-based index of the current attempt within the
+            escalation loop.  Determines how many attempts are still
+            outstanding (``max_attempts - attempt_index``).
+        max_attempts: Total number of attempts the escalation loop intends
+            to run.  For 1D layer escalation this is ``len(layer_configs)``;
+            for the 2D combined escalation this is
+            ``len(layer_configs) * len(tiers)``.
+
+    Returns:
+        ``None`` when no wall-clock deadline is configured (legacy unbounded
+        behaviour, matches :func:`_budgeted_timeout`).  Otherwise a positive
+        float bounded by ``args.timeout`` and the remaining wall-clock
+        budget, fairly sliced across remaining attempts so later attempts
+        also get a real chance to run.
+
+    Notes:
+        - When ``max_attempts <= 1`` this collapses to :func:`_budgeted_timeout`
+          (no fair-slicing needed for a single attempt).
+        - Unused budget from a fast-finishing attempt rolls forward
+          automatically: the next call uses the *current* ``remaining_budget``
+          divided by the *new* ``remaining_attempts`` count, so an early
+          completion on attempt N enlarges the slice available to N+1.
+    """
+    timeout = getattr(args, "timeout", None)
+    remaining = _remaining_budget(args)
+    if remaining is None:
+        # No deadline configured -> legacy unbounded behaviour.
+        return timeout
+
+    # Attempts still outstanding *including* the current one.
+    remaining_attempts = max(1, max_attempts - attempt_index)
+    per_attempt_slice = remaining / remaining_attempts
+
+    if timeout is None:
+        # Defensive: ``_wall_clock_deadline`` is derived from ``args.timeout``,
+        # so this branch is unreachable in practice.
+        return per_attempt_slice
+
+    return min(float(timeout), remaining, per_attempt_slice)
+
+
 def _emit_single_pad_net_warning(
     router: "Autorouter",
     single_pad_nets: list[int],
@@ -1968,12 +2051,19 @@ def route_with_layer_escalation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
-        # Issue #2802: shorten this attempt's timeout to the remaining
-        # wall-clock budget so the final layer-stack attempt does not
-        # blow past ``--timeout`` after earlier attempts have already
-        # consumed most of it.  Falls back to ``args.timeout`` when no
-        # deadline is configured.
-        _attempt_timeout = _budgeted_timeout(args)
+        # Issue #2823: divide the remaining wall-clock budget fairly across
+        # the remaining layer-escalation attempts.  Without this, the first
+        # attempt (typically 2L) greedily consumes the entire ``--timeout``,
+        # leaving the higher-layer attempts (4L, 6L) no time to run -- so
+        # the escalation strategy degenerates to "spend everything on the
+        # lowest layer count, give up."  ``attempt_num`` is 1-based; the
+        # helper expects a 0-based index, hence ``attempt_num - 1``.
+        # Falls back to ``args.timeout`` when no deadline is configured.
+        _attempt_timeout = _per_attempt_budgeted_timeout(
+            args,
+            attempt_index=attempt_num - 1,
+            max_attempts=len(layer_configs),
+        )
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -2569,7 +2659,11 @@ def route_with_rule_relaxation(
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
 
-    for tier in tiers:
+    # Issue #2823: precompute total tier count so per-attempt budget can
+    # divide the remaining wall-clock budget fairly across all tiers
+    # rather than letting tier 0 greedily consume the full ``--timeout``.
+    _relaxation_max_attempts = max(1, len(tiers))
+    for _tier_idx, tier in enumerate(tiers):
         # Issue #2802: honor the total wall-clock deadline before starting
         # another rule-relaxation tier.
         if _deadline_expired(args):
@@ -2642,9 +2736,17 @@ def route_with_rule_relaxation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
-        # Issue #2802: shorten this tier's timeout to the remaining
-        # wall-clock budget.
-        _attempt_timeout = _budgeted_timeout(args)
+        # Issue #2823: divide the remaining wall-clock budget fairly across
+        # the remaining rule-relaxation tiers so the looser-rule attempts
+        # also get a real chance to run.  Without this, tier 0 greedily
+        # consumes the full ``--timeout`` and the relaxation strategy
+        # degenerates to "spend everything on the strictest tier, give up."
+        # Falls back to ``args.timeout`` when no deadline is configured.
+        _attempt_timeout = _per_attempt_budgeted_timeout(
+            args,
+            attempt_index=_tier_idx,
+            max_attempts=_relaxation_max_attempts,
+        )
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -3102,8 +3204,12 @@ def route_with_combined_escalation(
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
 
-    # 2D search: prioritize fewer layers first, then stricter rules
-    for layer_count, layer_stack in layer_configs:
+    # 2D search: prioritize fewer layers first, then stricter rules.
+    # Issue #2823: precompute total cell count so per-attempt budget can
+    # divide the remaining wall-clock budget fairly across the entire 2D
+    # matrix (not just within one layer column).
+    _combined_max_attempts = max(1, len(layer_configs) * len(tiers))
+    for _layer_idx, (layer_count, layer_stack) in enumerate(layer_configs):
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack column of the 2D search.
         if _deadline_expired(args):
@@ -3115,7 +3221,7 @@ def route_with_combined_escalation(
             break
 
         best_completion_for_layer: float | None = None
-        for tier in tiers:
+        for _tier_idx, tier in enumerate(tiers):
             # Issue #2802: honor the deadline before each tier within the
             # current layer column.
             if _deadline_expired(args):
@@ -3126,6 +3232,12 @@ def route_with_combined_escalation(
                         "(issue #2802)"
                     )
                 break
+
+            # Issue #2823: linear attempt index across the 2D matrix
+            # (row-major: layers outer, tiers inner) so the per-attempt
+            # budget divides the remaining wall-clock budget across all
+            # remaining cells, not just the cells in this column.
+            _combined_attempt_index = _layer_idx * len(tiers) + _tier_idx
 
             if not quiet:
                 flush_print(
@@ -3179,10 +3291,18 @@ def route_with_combined_escalation(
             # Route
             escape_flag = _resolve_escape_routing_flag(args)
 
-            # Issue #2802: shorten this cell's timeout to the remaining
-            # wall-clock budget so the 2D search degrades gracefully
-            # toward the deadline rather than blowing past it.
-            _attempt_timeout = _budgeted_timeout(args)
+            # Issue #2823: divide the remaining wall-clock budget fairly
+            # across all remaining cells of the 2D combined-escalation
+            # matrix so later (higher-layer or stricter-rule) attempts
+            # also get a real chance to run.  Without this, the first
+            # cell (2L, tier 0) greedily consumes the entire ``--timeout``
+            # and the rest of the matrix is starved.
+            # Falls back to ``args.timeout`` when no deadline is configured.
+            _attempt_timeout = _per_attempt_budgeted_timeout(
+                args,
+                attempt_index=_combined_attempt_index,
+                max_attempts=_combined_max_attempts,
+            )
 
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
