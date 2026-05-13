@@ -2515,6 +2515,7 @@ def route_with_layer_escalation(
         _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped
+    fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -2529,7 +2530,7 @@ def route_with_layer_escalation(
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
-            _run_auto_fix(
+            fix_result = _run_auto_fix(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
@@ -2564,6 +2565,12 @@ def route_with_layer_escalation(
             )
 
     if final_result.success:
+        # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
+        # detect a silent rollback on an otherwise-clean routing run.  The
+        # documented exit-3 contract ("meets threshold but DRC violations
+        # detected") already covers this case semantically.
+        if fix_result == 3:
+            return 3
         return 0
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -3048,6 +3055,7 @@ def route_with_rule_relaxation(
         _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped
+    fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -3062,7 +3070,7 @@ def route_with_rule_relaxation(
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
-            _run_auto_fix(
+            fix_result = _run_auto_fix(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
@@ -3099,6 +3107,10 @@ def route_with_rule_relaxation(
             )
 
     if final_result.success:
+        # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
+        # detect a silent rollback on an otherwise-clean routing run.
+        if fix_result == 3:
+            return 3
         return 0
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -3632,6 +3644,7 @@ def route_with_combined_escalation(
         _fill_zones_after_route(output_path, quiet=quiet)
 
     # Run DRC validation unless skipped
+    fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -3646,7 +3659,7 @@ def route_with_combined_escalation(
 
         # Auto-fix DRC violations if requested
         if drc_errors > 0 and _should_auto_fix(args):
-            _run_auto_fix(
+            fix_result = _run_auto_fix(
                 output_path=output_path,
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
@@ -3685,6 +3698,10 @@ def route_with_combined_escalation(
             )
 
     if final_result.success:
+        # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
+        # detect a silent rollback on an otherwise-clean routing run.
+        if fix_result == 3:
+            return 3
         return 0
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
@@ -6133,6 +6150,7 @@ def main(argv: list[str] | None = None) -> int:
     drc_errors = 0
     drc_warnings = 0
     drc_ran = False
+    fix_result: int | None = None
 
     if not args.dry_run and not args.skip_drc and stats["nets_routed"] > 0:
         drc_ran = True
@@ -6278,7 +6296,11 @@ def main(argv: list[str] | None = None) -> int:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
-    # 3 = Meets threshold but DRC violations detected (includes seg-seg violations)
+    # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
+    #     Issue #2852: also returned when --auto-fix rolled back due to a
+    #     connectivity regression (fix-drc exit 3) — semantically the same
+    #     contract ("routing succeeded but DRC is dirty"); callers cannot
+    #     trust the post-route DRC state.
     # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
     # 6 = Connectivity regression detected (--strict mode only): either
@@ -6294,6 +6316,15 @@ def main(argv: list[str] | None = None) -> int:
     # --strict: output connectivity verification failure is fatal
     if getattr(args, "strict", False) and output_has_disconnected:
         return 6
+
+    # Issue #2852: make the --auto-fix rollback path explicit.  Today this
+    # case already falls through to the ``return 3`` branch below because
+    # ``drc_errors`` is unchanged when fix-drc rolls back -- but that is
+    # accidentally correct, not by design.  Surface it explicitly so the
+    # contract is documented in code and survives future refactors that
+    # might zero out ``drc_errors`` on the fix-drc path.
+    if fix_result == 3:
+        return 3
 
     if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure
