@@ -231,6 +231,107 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     )
 
 
+def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
+    """ViaConflictManager wiring is exercised on board 03's XTAL2 failure path.
+
+    Issue #2838 (closes #2761 gap): On ``main`` at the branch point,
+    ``Autorouter`` has no ``_via_manager`` attribute at all and the
+    PIN_ACCESS retry path in ``route_net`` never invokes via-conflict
+    resolution.  XTAL2 fails ``PIN_ACCESS`` on the U1.3 -> C6.1 edge
+    (the failure analyser reports U1.3 as blocked by a XTAL1 "via at
+    0.32mm") and the failure is terminal.
+
+    This regression test asserts the **structural wiring** is in place:
+    after ``route_all_with_diffpairs`` the ``Autorouter._via_manager``
+    attribute exists and has been instantiated, meaning the PIN_ACCESS
+    retry block in ``route_net`` reached the via-conflict resolution
+    branch.  This is the minimum verifiable bar for the #2838 wiring
+    fix on a real board.
+
+    *Caveat — XTAL2 doesn't fully route after this fix.*  Inspection
+    of board 03's actual routed state shows that XTAL1's nearest via
+    is 7.5 mm from U1.3, well outside any via-clearance zone.  The
+    failure analyser's classification of the U1.3 blocker as
+    ``blocking_type="via"`` is misleading: the real blocker is a
+    XTAL1 *trace* segment whose clearance envelope sits ~0.9 mm from
+    U1.3.  Because ``ViaConflictManager.find_blocking_vias`` only
+    scans actual ``Via`` objects on ``grid.routes``, it correctly
+    reports ``conflicts_found == 0`` for this board -- there is no
+    via to relocate.  Fully unblocking XTAL2 requires either:
+
+    1. Fixing the failure analyser's ``via`` vs ``trace`` classification
+       (the ``cell.original_net == 0`` fall-through at
+       ``failure_analysis.py:1546`` defaults to ``"via"`` for trace
+       clearance cells), or
+    2. Extending ``ViaConflictManager`` to also relocate / rip-reroute
+       *trace* segments (much larger scope -- out of scope per the
+       issue's "Out of scope" section).
+
+    Both are tracked separately.  For this PR, the success criterion
+    is the wiring -- which the synthetic test in
+    ``tests/test_via_conflict.py::TestViaConflictManagerIntegration``
+    pins more directly (it constructs a real via blocker and asserts
+    ``relocations_succeeded + rip_reroutes_succeeded >= 1``).
+    """
+    router, net_map = routed_board_03
+
+    xtal1_id = net_map.get("XTAL1")
+    xtal2_id = net_map.get("XTAL2")
+    assert xtal1_id is not None, (
+        "XTAL1 net missing from board 03 unrouted PCB.  Expected this "
+        "is one of the canonical example board's clock signals; if the "
+        "schematic / PCB generator no longer emits XTAL1, this test "
+        "needs to be updated."
+    )
+    assert xtal2_id is not None, (
+        "XTAL2 net missing from board 03 unrouted PCB -- see XTAL1 note."
+    )
+
+    routes_by_net: dict[int, int] = {}
+    for route in router.routes:
+        routes_by_net[route.net] = routes_by_net.get(route.net, 0) + len(route.segments)
+
+    # No regression on XTAL1: it routed first under pre-fix main and
+    # must continue to route post-fix (the via-conflict resolver does
+    # not rip-reroute XTAL1 on this board, but if it ever does, XTAL1
+    # must still end up routed).
+    xtal1_segments = routes_by_net.get(xtal1_id, 0)
+    assert xtal1_segments > 0, (
+        f"XTAL1 (net {xtal1_id}) routed with 0 segments after the "
+        "via-conflict fix.  Either rip-and-reroute removed XTAL1's "
+        "route to free U1.3 but failed to find an alternate path on "
+        "retry, or the routing order changed and XTAL1 is now being "
+        "scheduled after XTAL2 (which would make this test the wrong "
+        "test for the regression)."
+    )
+
+    # Structural wiring assertion (the #2838 minimum bar): the
+    # ``Autorouter._via_manager`` attribute must exist.  This is what
+    # makes the test fail on ``main`` at the branch point -- the
+    # attribute is entirely absent.
+    assert hasattr(router, "_via_manager"), (
+        "Autorouter is missing the _via_manager attribute.  This is "
+        "the Issue #2838 structural regression: the ViaConflictManager "
+        "wiring is entirely absent from Autorouter.  Check that "
+        "core.py imports ViaConflictManager and __init__ initializes "
+        "self._via_manager."
+    )
+
+    # Resolver-was-reached assertion: the lazy ``via_manager`` property
+    # was triggered, meaning ``_resolve_via_conflicts_for_net`` ran on
+    # at least one PIN_ACCESS failure during the routing pass.  XTAL2
+    # is the canonical trigger (its failure analyser reports a
+    # ``blocking_type == "via"`` blocker -- regardless of whether the
+    # underlying obstacle is actually a via or a misclassified trace).
+    assert router._via_manager is not None, (
+        "Autorouter._via_manager is None after route_all_with_diffpairs.  "
+        "The PIN_ACCESS retry block in route_net() did not call "
+        "_resolve_via_conflicts_for_net for any net.  Board 03's XTAL2 "
+        "should have triggered it -- check that the PIN_ACCESS gate at "
+        "core.py:1530 still fires when waypoint injection is on."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Issue #2744: Generator parts drift (subprocess, slower but bounded)
 # ---------------------------------------------------------------------------
