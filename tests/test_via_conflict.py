@@ -8,6 +8,7 @@ from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.via_conflict import (
     RipRerouteResult,
+    TraceConflict,
     ViaConflict,
     ViaConflictManager,
     ViaConflictStats,
@@ -804,3 +805,331 @@ class TestViaConflictManagerIntegration:
             >= 1
         )
         assert vc_stats["total_resolved"] >= 1
+
+
+class TestTraceConflictResolution:
+    """Tests for trace-blocker resolution in :class:`ViaConflictManager`.
+
+    Issue #2859: ``ViaConflictManager`` originally only handled via-vs-via
+    conflicts -- its ``find_blocking_vias`` / ``try_rip_reroute`` pipeline
+    iterates ``Route.vias`` and never inspects ``Route.segments``.  When the
+    actual blocker at a pad's required via location is a **trace segment
+    from another net** (the board 03 XTAL2 pattern: XTAL1 trace at
+    ~0.065 mm from a U1 pad in this synthetic fixture), the manager found
+    zero conflicts and the PIN_ACCESS retry path silently gave up.
+
+    These tests pin the trace-handling branch: they fail on ``main`` at
+    the issue's branch point (where :meth:`ViaConflictManager.find_blocking_traces`
+    and :meth:`ViaConflictManager.try_trace_rip_reroute` do not exist) and
+    pass after the fix in this PR.
+
+    Depends on #2858's classifier fix for the end-to-end ``route_net``
+    test (the third test in this class); the first two tests exercise the
+    manager directly and are independent of #2858.
+    """
+
+    def _build_trace_blocker_router(self) -> tuple[Autorouter, int, int]:
+        """Construct an XTAL2-like fixture with a *trace* blocker (not a via).
+
+        Mirrors the geometry rationale of
+        :meth:`TestViaConflictManagerIntegration._build_xtal2_like_router`
+        but replaces the blocking via at ``(5.365, 10.065)`` with a
+        long horizontal trace segment running 0.065 mm beside N1's
+        source pad at ``(5.048, 10.065)``.  Perpendicular distance from
+        the segment to the pad is exactly ``0.065`` mm, well inside the
+        via-clearance envelope (``via_diameter / 2 + via_clearance +
+        trace_width / 2 + trace_clearance = 0.8`` mm with the rules
+        below).
+
+        Geometry note: N2's pads are placed far from U1.3 (at
+        ``x = 1.0`` and ``x = 12.0``) so the trace segment -- not the
+        pad clearance halos -- is unambiguously the closest blocker to
+        U1.3.  This makes the failure analyser's
+        ``analyze_pad_access_blockers`` cascade report the XTAL1 blocker
+        as ``blocking_type == "trace"`` rather than ``"pad"``, which is
+        what dispatches the resolver to the new trace branch.
+
+        Returns ``(router, n1_id, n2_id)``.
+        """
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        n1_id = 1
+        n2_id = 2
+
+        # N1: same geometry as the via-blocker fixture so the failure
+        # analyser still tags the source pad as PIN_ACCESS.
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "3",
+                    "x": 5.048,
+                    "y": 10.065,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "XTAL2",
+                },
+                {
+                    "number": "4",
+                    "x": 15.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "XTAL2",
+                },
+            ],
+        )
+        # N2's pads are placed far enough from U1.3 (>= 4 mm) that their
+        # pad clearance halos are outside the analyser's search radius,
+        # so the closest N2 blocker reported back is the trace segment
+        # passing right next to U1.3, not a pad clearance cell.
+        router.add_component(
+            "Y1",
+            [
+                {
+                    "number": "1",
+                    "x": 1.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n2_id,
+                    "net_name": "XTAL1",
+                },
+                {
+                    "number": "2",
+                    "x": 12.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n2_id,
+                    "net_name": "XTAL1",
+                },
+            ],
+        )
+
+        # Pre-existing route for N2: a single long horizontal trace
+        # segment passing 0.065 mm from N1's source pad center.  No via
+        # in this route -- this is the entire point of the fixture
+        # (the trace alone is the blocker; the via-only resolver finds
+        # nothing).
+        blocking_segment = Segment(
+            x1=1.0,
+            y1=10.0,
+            x2=12.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=n2_id,
+            net_name="XTAL1",
+        )
+        n2_route = Route(
+            net=n2_id,
+            net_name="XTAL1",
+            segments=[blocking_segment],
+            vias=[],
+        )
+        router.routes.append(n2_route)
+        router._mark_route(n2_route)
+
+        return router, n1_id, n2_id
+
+    def test_find_blocking_traces_locates_segment(self) -> None:
+        """``find_blocking_traces`` reports the XTAL1 segment near U1.3.
+
+        Pre-fix (branch base): :meth:`ViaConflictManager.find_blocking_traces`
+        doesn't exist; calling it raises :class:`AttributeError`.
+
+        Post-fix: returns at least one :class:`TraceConflict` for the
+        N2 segment, with ``blocking_net == n2_id`` and ``distance`` close
+        to the expected perpendicular distance (0.065 mm).
+        """
+        router, n1_id, n2_id = self._build_trace_blocker_router()
+        manager = ViaConflictManager(grid=router.grid, rules=router.rules)
+
+        # Locate N1's source pad (the off-grid one).
+        n1_source_pad = None
+        for pad_key, pad in router.pads.items():
+            if pad.net == n1_id and abs(pad.x - 5.048) < 1e-6:
+                n1_source_pad = pad
+                break
+        assert n1_source_pad is not None, (
+            "Fixture invariant failure: N1 source pad at (5.048, 10.065) "
+            "missing from router.pads.  Check add_component() pad keying."
+        )
+
+        conflicts = manager.find_blocking_traces(
+            pad=n1_source_pad,
+            pad_net=n1_id,
+            net_names={n1_id: "XTAL2", n2_id: "XTAL1"},
+        )
+
+        assert len(conflicts) >= 1, (
+            f"find_blocking_traces returned no conflicts despite the "
+            f"XTAL1 segment running 0.065mm from U1.3.  Either the "
+            f"perpendicular-distance math is wrong, or the segment is "
+            f"being filtered out by an over-tight envelope.  Envelope "
+            f"radius = via_diameter/2 + via_clearance + trace_width/2 "
+            f"+ trace_clearance = "
+            f"{router.rules.via_diameter / 2 + router.rules.via_clearance + router.rules.trace_width / 2 + router.rules.trace_clearance} mm."
+        )
+
+        conflict = conflicts[0]
+        assert isinstance(conflict, TraceConflict)
+        assert conflict.blocking_net == n2_id, (
+            f"Closest blocker should be N2 (XTAL1, the only other net), "
+            f"got net {conflict.blocking_net}."
+        )
+        # Perpendicular distance from pad (5.048, 10.065) to horizontal
+        # segment y=10.0 is |10.065 - 10.0| = 0.065 mm.  Tolerance 1e-3
+        # accommodates floating-point error in the projection math.
+        assert abs(conflict.distance - 0.065) < 1e-3, (
+            f"Expected perpendicular distance ~0.065 mm, got "
+            f"{conflict.distance:.6f} mm."
+        )
+        # Closest point on segment to the pad should be (5.048, 10.0)
+        # (the perpendicular foot of the pad onto the horizontal segment).
+        assert abs(conflict.segment_position[0] - 5.048) < 1e-3
+        assert abs(conflict.segment_position[1] - 10.0) < 1e-3
+
+        # Stats are updated on each found conflict.
+        assert manager.stats.trace_conflicts_found >= 1
+
+    def test_try_trace_rip_reroute_unblocks_pad(self) -> None:
+        """``try_trace_rip_reroute`` rips the blocker and re-routes both nets.
+
+        Pre-fix (branch base): :meth:`ViaConflictManager.try_trace_rip_reroute`
+        doesn't exist; the method call raises :class:`AttributeError`.
+
+        Post-fix: rips the N2 trace segment, routes N1, and re-routes N2.
+        Both nets must end up with at least one route.  The success
+        counter ``trace_rip_reroutes_succeeded`` must increment.
+        """
+        router, n1_id, n2_id = self._build_trace_blocker_router()
+        manager = ViaConflictManager(grid=router.grid, rules=router.rules)
+
+        # Locate N1's source pad.
+        n1_source_pad = None
+        for pad_key, pad in router.pads.items():
+            if pad.net == n1_id and abs(pad.x - 5.048) < 1e-6:
+                n1_source_pad = pad
+                break
+        assert n1_source_pad is not None
+
+        conflicts = manager.find_blocking_traces(
+            pad=n1_source_pad,
+            pad_net=n1_id,
+            net_names={n1_id: "XTAL2", n2_id: "XTAL1"},
+        )
+        assert len(conflicts) >= 1, "Fixture geometry invariant"
+
+        # Wrap router.route_net for use as the route_net_fn callback.
+        def _route_net_fn(net_id: int):
+            return router.route_net(net_id, _subgrid_retry=True)
+
+        result = manager.try_trace_rip_reroute(
+            conflicts[0],
+            route_net_fn=_route_net_fn,
+        )
+
+        assert isinstance(result, RipRerouteResult)
+        assert result.success, (
+            f"try_trace_rip_reroute did not succeed.  Result fields: "
+            f"blocked_net_routed={result.blocked_net_routed}, "
+            f"ripped_net_rerouted={result.ripped_net_rerouted}, "
+            f"ripped_net={result.ripped_net}, "
+            f"new_blocked_routes_count={len(result.new_blocked_routes)}, "
+            f"new_ripped_routes_count={len(result.new_ripped_routes)}."
+        )
+
+        # N1 must now have at least one route (the previously blocked net).
+        n1_routes = [r for r in router.routes if r.net == n1_id]
+        assert len(n1_routes) >= 1, (
+            "After rip-reroute success, N1 (the originally blocked net) "
+            "should have at least one route in router.routes."
+        )
+
+        # N2 must still have at least one route -- the rip-reroute may
+        # detour N2 but it must not abandon it.
+        n2_routes = [r for r in router.routes if r.net == n2_id]
+        assert len(n2_routes) >= 1, (
+            "After rip-reroute success, N2 (the originally blocking net) "
+            "should have been re-routed, not abandoned."
+        )
+
+        # Issue #2859 canonical acceptance counter: must increment by at
+        # least one when the trace branch fires successfully.
+        assert manager.stats.trace_rip_reroutes_succeeded >= 1, (
+            f"trace_rip_reroutes_succeeded did not increment.  Current "
+            f"value: {manager.stats.trace_rip_reroutes_succeeded}.  "
+            "This is the canonical Issue #2859 observability counter; "
+            "without it the resolver-fired assertion in downstream tests "
+            "cannot discriminate trace handling from via handling."
+        )
+        assert manager.stats.trace_rip_reroutes_attempted >= 1
+
+    def test_route_net_consults_trace_resolver_on_pin_access(self) -> None:
+        """End-to-end: ``route_net`` dispatches to the trace resolver branch.
+
+        This test exercises the full :meth:`Autorouter.route_net` PIN_ACCESS
+        retry flow -- not direct manager calls -- so it depends on Issue
+        #2858's classifier fix correctly emitting
+        ``blocking_type == "trace"`` for the synthetic segment blocker.
+
+        Pre-fix (branch base): even with #2858's classifier fix landed,
+        ``_resolve_via_conflicts_for_net`` early-returns at the
+        ``has_via_blocker`` gate when only trace blockers exist (Issue
+        #2858's test pinned this for board 03).  The trace branch added
+        by this PR makes the call dispatch to ``find_blocking_traces``
+        and ``try_trace_rip_reroute`` instead.
+
+        Post-fix: ``trace_rip_reroutes_succeeded >= 1`` and N1 is no
+        longer in ``router.routing_failures``.
+        """
+        router, n1_id, _n2_id = self._build_trace_blocker_router()
+
+        router.route_net(n1_id)
+
+        # Wiring assertion: the manager was instantiated (the via_manager
+        # lazy property fired during the trace-branch dispatch).
+        assert router._via_manager is not None, (
+            "Autorouter._via_manager was never instantiated.  Either the "
+            "trace branch in _resolve_via_conflicts_for_net is missing, "
+            "or #2858's classifier fix is not producing 'trace' blockers "
+            "for this fixture."
+        )
+
+        stats = router._via_manager.stats
+
+        # Trace channel must have fired (the issue's core acceptance).
+        assert stats.trace_conflicts_found >= 1, (
+            f"find_blocking_traces was not invoked, or invoked with no "
+            f"results.  trace_conflicts_found={stats.trace_conflicts_found}.  "
+            f"Check that the trace branch in "
+            f"_resolve_via_conflicts_for_net is gated on "
+            f"has_trace_blocker (not just has_via_blocker)."
+        )
+        assert stats.trace_rip_reroutes_succeeded >= 1, (
+            f"trace_rip_reroutes_succeeded={stats.trace_rip_reroutes_succeeded}.  "
+            f"The trace resolver fired (trace_conflicts_found="
+            f"{stats.trace_conflicts_found}) but did not succeed.  "
+            f"Check the route_net callback in "
+            f"_resolve_via_conflicts_for_net and the restore-on-failure "
+            f"path in try_trace_rip_reroute."
+        )
+
+        # N1 must no longer be a failed net.
+        n1_failures = [f for f in router.routing_failures if f.net == n1_id]
+        assert not n1_failures, (
+            f"N1 (the originally blocked net) is still in routing_failures "
+            f"after the trace resolver claimed success: {n1_failures!r}."
+        )
