@@ -406,7 +406,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Nets loaded: {len(net_map)}")
 
     print("\n4. Routing nets...")
-    router.route_all()
+    # Issue #2835: pass per-net + outer wall-clock budgets so dense
+    # match-group N-port routing cannot hang in A* heap-key churn
+    # (board 07 with --seed 42 was observed to hang 27+ min without
+    # any timeout bracket).  Mirrors the recommendation in the
+    # Router.route_all() #2794 warning and the bracket semantics added
+    # by PR #2779 / #2775.
+    router.route_all(per_net_timeout=30.0, timeout=240.0)
 
     # _finalize_routing has now populated _match_group_tracker via
     # the Phase 1D producer wiring (#2690).  Capture the skew snapshot
@@ -463,6 +469,34 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     output_path.write_text(output_content)
     print(f"\n7. Routed PCB: {output_path}")
+
+    # Issue #2835: emit copper-pour zones for GND + power nets so the
+    # net-status report doesn't flag pour-net pads (~179 pads on this
+    # board) as "incomplete".  Without zones, PR #2777's per-net
+    # bounding-box partitioning never runs on this board.  Layer
+    # assignment is stackup-aware (4-layer): GND -> In1.Cu (full board
+    # outline), power nets (+1V2 / +1V8) distributed across In2.Cu / F.Cu
+    # with per-net bounding outlines.
+    #
+    # Use the board's authoritative ``skip_nets`` declaration so the
+    # zone-net set matches the router-skip set exactly.
+    print("\n8. Generating copper-pour zones...")
+    try:
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pour_nets_decl: list[tuple[str, NetClass]] = []
+        for net_name in skip_nets:
+            if net_name == "GND":
+                pour_nets_decl.append((net_name, NetClass.GROUND))
+            else:
+                pour_nets_decl.append((net_name, NetClass.POWER))
+        zone_count = auto_create_zones_for_pour_nets(
+            output_path, pour_nets_decl, edge_clearance=0.5
+        )
+        print(f"   Created {zone_count} zone(s) for {[n for n, _ in pour_nets_decl]}")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   Zone generation skipped: {exc}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets

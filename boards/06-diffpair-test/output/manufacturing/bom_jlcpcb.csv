@@ -1,0 +1,8 @@
+Comment,Designator,Footprint,LCSC Part #
+BGA49_USB3,U2,Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm,generic
+FFC4,J4,Connector_FFC:FFC_4P_0.5mm,generic
+MiniPCIe,J3,Connector_PCIE:PCIE_Mini_Edge,generic
+QFN24_MIPI,U4,Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm,generic
+QFN32_USB2,U1,Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm,generic
+QFP48_PCIe,U3,Package_QFP:LQFP-48_7x7mm_P0.5mm,generic
+USB-C,J1,Connector_USB:USB_C_Receptacle_USB2.0,C165948

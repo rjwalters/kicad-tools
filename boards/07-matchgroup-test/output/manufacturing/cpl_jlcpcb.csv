@@ -1,0 +1,9 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+J1,FFC6_MIPI,Connector_FFC:FFC_6P_1.0mm,15.0000mm,55.0000mm,0.0,Top
+J2,HDMI19,Connector_Video:HDMI_A_Receptacle,60.0000mm,55.0000mm,0.0,Top
+J3,ADDR_HDR,Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical,20.0000mm,80.0000mm,0.0,Top
+U1,QFN48_DDR_CTRL,Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm,20.0000mm,25.0000mm,0.0,Top
+U2,QFN48_DRAM,Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm,50.0000mm,25.0000mm,0.0,Top
+U3,QFN24_MIPI,Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm,35.0000mm,55.0000mm,0.0,Top
+U4,BGA49_HDMI,Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm,85.0000mm,55.0000mm,0.0,Top
+U5,QFP48_SRAM,Package_QFP:LQFP-48_7x7mm_P0.5mm,60.0000mm,80.0000mm,0.0,Top

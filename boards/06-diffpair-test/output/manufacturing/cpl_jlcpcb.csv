@@ -1,0 +1,8 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+J1,USB-C,Connector_USB:USB_C_Receptacle_USB2.0,15.0000mm,8.0000mm,0.0,Top
+J3,MiniPCIe,Connector_PCIE:PCIE_Mini_Edge,95.0000mm,45.0000mm,0.0,Top
+J4,FFC4,Connector_FFC:FFC_4P_0.5mm,8.0000mm,70.0000mm,0.0,Top
+U1,QFN32_USB2,Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm,15.0000mm,22.0000mm,0.0,Top
+U2,BGA49_USB3,Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm,55.0000mm,20.0000mm,0.0,Top
+U3,QFP48_PCIe,Package_QFP:LQFP-48_7x7mm_P0.5mm,70.0000mm,45.0000mm,0.0,Top
+U4,QFN24_MIPI,Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm,30.0000mm,70.0000mm,0.0,Top

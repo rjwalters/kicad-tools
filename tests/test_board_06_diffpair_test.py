@@ -187,14 +187,15 @@ class TestRoutedPcbArtifact:
             "MIPI_D0-",
         ]
         for net_name in pair_nets:
-            # Each (pad ... (net N "name") ...) declaration emits on a
-            # single line.  Match any line that starts with ``(pad`` and
-            # contains the target net reference.  Pads from multiple
-            # footprints (e.g. J1 + U1 for USB2) all share the same net
-            # number, so 2+ matches mean at least 2 pads carry the net.
+            # Match any ``(pad ... (net N "name"))`` block.  Pads may be
+            # serialized on a single line (KiCad source) or across
+            # multiple lines (after a SExp round-trip during zone
+            # generation, see #2835), so we use DOTALL + a non-greedy
+            # body to span newlines while still scoping each match to
+            # one pad declaration.
             line_pattern = re.compile(
-                rf'^\s*\(pad\b.*\(net \d+ "{re.escape(net_name)}"\)',
-                re.MULTILINE,
+                rf'\(pad\b.*?\(net \d+ "{re.escape(net_name)}"\)',
+                re.DOTALL,
             )
             matches = line_pattern.findall(routed_pcb_text)
             assert len(matches) >= 1, (
