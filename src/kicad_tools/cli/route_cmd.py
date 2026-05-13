@@ -56,6 +56,7 @@ Layer Stack Configuration:
 import argparse
 import logging
 import math
+import os
 import random
 import shutil
 import signal
@@ -316,6 +317,92 @@ def _validate_sexp_parentheses(content: str) -> bool:
     return depth == 0
 
 
+def _write_routed_pcb(
+    pcb_path: Path,
+    output_path: Path,
+    route_sexp: str,
+    *,
+    layer_count: int = 2,
+    is_checkpoint: bool = False,
+) -> Path:
+    """Atomically write a routed PCB file.
+
+    Consolidates the read_text -> update_pcb_layer_stackup ->
+    _insert_sexp_before_closing -> _validate_sexp_parentheses -> write
+    sequence that was previously duplicated at four save sites in this
+    module.
+
+    Uses an atomic write via ``<output>.tmp`` + ``os.fsync`` +
+    ``os.replace(tmp, output)`` so a SIGKILL/OOM between bytes-on-the-wire
+    and final flush cannot leave a torn (truncated) PCB file at the user's
+    output path.  Closes Issue #2808's torn-file hazard.
+
+    Honors ``output_path`` exactly -- callers must NOT pre-suffix the path
+    with ``_4layer`` or similar; the layer count is recorded inside the
+    PCB content via :func:`update_pcb_layer_stackup`, not in the filename
+    (closes Issue #2809).
+
+    Args:
+        pcb_path: Path to the source (unrouted) PCB file.  Read fresh on
+            every call so checkpoint writes pick up upstream edits to the
+            input file (rare, but supported).
+        output_path: Final destination path.  Written atomically via a
+            sibling ``.tmp`` file.
+        route_sexp: S-expression fragment(s) to insert before the closing
+            ``)``.  Can be empty -- in that case the original PCB is
+            written back unchanged (useful for checkpoints that fire
+            before any net has routed).
+        layer_count: Target copper layer count for the layer stackup
+            update.  ``2`` is a no-op.  Defaults to ``2``.
+        is_checkpoint: When True, skip the layer-stackup mutation.
+            Checkpoints serialize the in-progress best snapshot; they
+            should match whatever stackup is currently in use and not
+            attempt to escalate.  Defaults to False.
+
+    Returns:
+        The ``output_path`` that was written to (returned unchanged so
+        callers can use the helper inline, e.g.
+        ``written = _write_routed_pcb(...)``).
+
+    Raises:
+        ValueError: If the generated PCB has unbalanced S-expression
+            parentheses (indicates a bug in route generation -- caller
+            is responsible for surfacing this).
+    """
+    original_content = pcb_path.read_text()
+
+    # Update layer stackup for terminal writes when we escalated above 2L.
+    # Checkpoints skip this -- they reflect mid-route state and should not
+    # rewrite the stackup at every flush.
+    if not is_checkpoint and layer_count > 2:
+        original_content = update_pcb_layer_stackup(original_content, layer_count)
+
+    if route_sexp:
+        output_content = _insert_sexp_before_closing(original_content, route_sexp)
+    else:
+        output_content = original_content
+
+    if not _validate_sexp_parentheses(output_content):
+        logger.error("Generated PCB file has unbalanced parentheses")
+        raise ValueError(
+            "Generated PCB file has invalid S-expression syntax "
+            "(unbalanced parentheses). This is a bug in kicad-tools. "
+            "Please report it."
+        )
+
+    # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
+    # ensures os.replace is a same-filesystem rename (atomic on POSIX).
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_path.write_text(output_content)
+    # fsync the file so a crash between write and rename does not leave
+    # a partial-content tmp file masquerading as the routed PCB.
+    with open(tmp_path, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp_path, output_path)
+
+    return output_path
+
+
 def _connectivity_snapshot(router: "Autorouter"):
     """Capture per-net connectivity + deep-copied routes (issue #2596).
 
@@ -379,6 +466,77 @@ def _enforce_connectivity_invariant_or_exit(
         # contract documented near the bottom of main() for the post-save
         # output connectivity verification.
         sys.exit(6)
+
+
+def _make_checkpoint_callback(
+    pcb_path: Path,
+    output_path: Path,
+    interval: float,
+    quiet: bool = False,
+):
+    """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
+
+    Returns a callable matching ``Callable[[list[Route], IterationMetrics], None]``
+    that atomically flushes the best-so-far snapshot to ``output_path`` no
+    more often than every ``interval`` seconds.
+
+    Returns ``None`` when ``interval <= 0`` so the caller can pass the
+    return value directly to ``route_all_negotiated(checkpoint_callback=...)``
+    without conditional plumbing -- the router already treats ``None`` as
+    "no checkpointing".
+
+    The callback is gated by ``time.monotonic()`` (immune to wall-clock
+    skew during long routing runs).  The first improvement event always
+    fires immediately (no warm-up delay) so the first checkpoint lands
+    at iteration 0/1 rather than waiting one full ``interval``.
+
+    Args:
+        pcb_path: Source PCB path (passed through to ``_write_routed_pcb``).
+        output_path: User's ``--output`` destination.  Honored exactly --
+            no ``_4layer`` suffix appending (closes #2809).
+        interval: Minimum seconds between checkpoint writes.  ``0`` (or
+            negative) disables checkpointing entirely.
+        quiet: Suppress the "checkpoint: wrote ..." log line.
+
+    Returns:
+        Callback or ``None``.
+    """
+    if interval <= 0:
+        return None
+
+    # Mutable container so the closure can write back the timestamp.
+    # ``[None]`` sentinel means "no checkpoint written yet"; the first
+    # improvement event triggers an immediate write.
+    last_time: list[float | None] = [None]
+
+    def _checkpoint(best_routes, best_metrics) -> None:
+        from kicad_tools.cli.progress import flush_print
+
+        now = time.monotonic()
+        if last_time[0] is not None and (now - last_time[0]) < interval:
+            return
+
+        # Materialize sexp from the snapshot (NOT self.routes).  Each
+        # Route has its own to_sexp() so we can serialize directly without
+        # touching the router's live state.
+        route_sexp = "\n\t".join(r.to_sexp() for r in best_routes)
+        _write_routed_pcb(
+            pcb_path,
+            output_path,
+            route_sexp,
+            is_checkpoint=True,
+        )
+
+        last_time[0] = now
+        if not quiet:
+            flush_print(
+                f"  checkpoint: wrote best-so-far "
+                f"(iter={best_metrics.iteration}, "
+                f"routed={best_metrics.routed_count}, "
+                f"overflow={best_metrics.overflow}) to {output_path}"
+            )
+
+    return _checkpoint
 
 
 def _finalize_routes(
@@ -2216,37 +2374,18 @@ def route_with_layer_escalation(
         print("\n--- Saving routed PCB ---")
 
     with spinner("Saving routed PCB...", quiet=quiet):
-        # Read original PCB content
-        original_content = pcb_path.read_text()
-
-        # Update layer stackup if we escalated
-        if final_result.layer_count > 2:
-            original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
-
-        # Insert routes before final closing parenthesis
-        if route_sexp:
-            output_content = _insert_sexp_before_closing(original_content, route_sexp)
-        else:
-            output_content = original_content
-            if not quiet:
-                print("  Warning: No routes generated!")
-
-        # Validate S-expression structure before writing
-        if not _validate_sexp_parentheses(output_content):
-            logger.error("Generated PCB file has unbalanced parentheses")
-            raise ValueError(
-                "Generated PCB file has invalid S-expression syntax "
-                "(unbalanced parentheses). This is a bug in kicad-tools. "
-                "Please report it."
-            )
-
-        # Update output filename to include layer count
-        if final_result.layer_count > 2:
-            output_path = output_path.with_stem(
-                output_path.stem + f"_{final_result.layer_count}layer"
-            )
-
-        output_path.write_text(output_content)
+        if not route_sexp and not quiet:
+            print("  Warning: No routes generated!")
+        # Issue #2808: atomic write via _write_routed_pcb (consolidates the
+        # read -> stackup-update -> insert -> validate -> write sequence).
+        # Issue #2809: honor --output exactly; layer count is recorded in
+        # the PCB content via update_pcb_layer_stackup, NOT in the filename.
+        _write_routed_pcb(
+            pcb_path,
+            output_path,
+            route_sexp,
+            layer_count=final_result.layer_count,
+        )
 
     if not quiet:
         print(f"  Saved to: {output_path}")
@@ -2758,27 +2897,18 @@ def route_with_rule_relaxation(
         print("\n--- Saving routed PCB ---")
 
     with spinner("Saving routed PCB...", quiet=quiet):
-        # Read original PCB content
-        original_content = pcb_path.read_text()
-
-        # Insert routes before final closing parenthesis
-        if route_sexp:
-            output_content = _insert_sexp_before_closing(original_content, route_sexp)
-        else:
-            output_content = original_content
-            if not quiet:
-                print("  Warning: No routes generated!")
-
-        # Validate S-expression structure before writing
-        if not _validate_sexp_parentheses(output_content):
-            logger.error("Generated PCB file has unbalanced parentheses")
-            raise ValueError(
-                "Generated PCB file has invalid S-expression syntax "
-                "(unbalanced parentheses). This is a bug in kicad-tools. "
-                "Please report it."
-            )
-
-        output_path.write_text(output_content)
+        if not route_sexp and not quiet:
+            print("  Warning: No routes generated!")
+        # Issue #2808: atomic write via _write_routed_pcb.  Rule-relaxation
+        # flow always runs at the same layer count it started with, so we
+        # pass layer_count=2 (no stackup update needed for the typical 2L
+        # rule-relaxation path; layer_count is a no-op when <= 2 anyway).
+        _write_routed_pcb(
+            pcb_path,
+            output_path,
+            route_sexp,
+            layer_count=final_result.layer_count,
+        )
 
     if not quiet:
         print(f"  Saved to: {output_path}")
@@ -3334,38 +3464,16 @@ def route_with_combined_escalation(
         print("\n--- Saving routed PCB ---")
 
     with spinner("Saving routed PCB...", quiet=quiet):
-        # Read original PCB content
-        original_content = pcb_path.read_text()
-
-        # Update layer stackup if we escalated
-        if final_result.layer_count > 2:
-            original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
-
-        # Insert routes before final closing parenthesis
-        if route_sexp:
-            output_content = _insert_sexp_before_closing(original_content, route_sexp)
-        else:
-            output_content = original_content
-            if not quiet:
-                print("  Warning: No routes generated!")
-
-        # Validate S-expression structure before writing
-        if not _validate_sexp_parentheses(output_content):
-            logger.error("Generated PCB file has unbalanced parentheses")
-            raise ValueError(
-                "Generated PCB file has invalid S-expression syntax "
-                "(unbalanced parentheses). This is a bug in kicad-tools. "
-                "Please report it."
-            )
-
-        # Update output filename to include layer count and tier
-        if final_result.layer_count > 2 or final_result.tier > 0:
-            suffix = ""
-            if final_result.layer_count > 2:
-                suffix += f"_{final_result.layer_count}layer"
-            output_path = output_path.with_stem(output_path.stem + suffix)
-
-        output_path.write_text(output_content)
+        if not route_sexp and not quiet:
+            print("  Warning: No routes generated!")
+        # Issue #2808: atomic write via _write_routed_pcb.
+        # Issue #2809: honor --output exactly; do NOT append _Nlayer suffix.
+        _write_routed_pcb(
+            pcb_path,
+            output_path,
+            route_sexp,
+            layer_count=final_result.layer_count,
+        )
 
     if not quiet:
         print(f"  Saved to: {output_path}")
@@ -3618,6 +3726,19 @@ def main(argv: list[str] | None = None) -> int:
         default=30.0,
         help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
         "Prevents individual nets from monopolizing the router. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=float,
+        default=30.0,
+        help=(
+            "Interval in seconds between best-so-far checkpoint writes to "
+            "--output during the negotiated routing loop (Issue #2808). "
+            "Each checkpoint atomically replaces the file at --output so a "
+            "crash/SIGTERM/--timeout leaves the user with the best partial "
+            "result rather than the original unrouted input. Default: 30.0. "
+            "Use 0 to disable checkpointing (only the terminal save fires)."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -5059,6 +5180,21 @@ def main(argv: list[str] | None = None) -> int:
         # Resolve escape routing flag: True=force on, False=force off, None=auto-detect
         escape_routing_flag = _resolve_escape_routing_flag(args)
 
+        # Build checkpoint callback once -- shared across every
+        # route_all_negotiated call in this invocation (Issue #2808).
+        # Returns None when --checkpoint-interval is 0 or unset, in which
+        # case the router treats it as "no checkpointing".
+        # The last_write_time is internal to the closure and persists
+        # across all route_all_negotiated calls (placement-feedback iter
+        # loops do NOT reset cadence, so back-to-back PF iterations can
+        # share a single throttle window).
+        _checkpoint_cb = _make_checkpoint_callback(
+            pcb_path,
+            output_path,
+            float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
+            quiet=quiet,
+        )
+
         # Define routing function for profiling
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report
@@ -5102,6 +5238,7 @@ def main(argv: list[str] | None = None) -> int:
                                     or getattr(args, "high_performance", False),
                                     hierarchical=getattr(args, "hierarchical", False),
                                     perturbation=getattr(args, "perturbation", True),
+                                    checkpoint_callback=_checkpoint_cb,
                                 )
                             return router.route_all()
 
@@ -5147,6 +5284,7 @@ def main(argv: list[str] | None = None) -> int:
                             or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
                             perturbation=getattr(args, "perturbation", True),
+                            checkpoint_callback=_checkpoint_cb,
                         )
                     else:
                         return router.route_all()
@@ -5207,6 +5345,7 @@ def main(argv: list[str] | None = None) -> int:
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
+                        checkpoint_callback=_checkpoint_cb,
                     )
 
                 result, dp_warnings = router.route_all_with_diffpairs(
@@ -5225,6 +5364,7 @@ def main(argv: list[str] | None = None) -> int:
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 result, dp_warnings = router.route_all_with_diffpairs(diffpair_config)
@@ -5693,37 +5833,32 @@ def main(argv: list[str] | None = None) -> int:
             print("\n--- Saving routed PCB ---")
 
         with spinner("Saving routed PCB...", quiet=quiet):
-            # Read original PCB content
-            original_content = pcb_path.read_text()
-
             # route_sexp was already generated by _finalize_routes() above
-
-            # Insert routes and zones before final closing parenthesis
-            # Note: KiCad's S-expression format doesn't support ; comments
+            # Combine zone + route fragments before insertion.
+            # Note: KiCad's S-expression format doesn't support ; comments.
+            combined_sexp = ""
             if route_sexp or zone_sexp:
-                # Combine zone and route fragments
                 fragments = []
                 if zone_sexp:
                     fragments.append(zone_sexp)
                 if route_sexp:
                     fragments.append(route_sexp)
                 combined_sexp = "\n  ".join(fragments)
-                output_content = _insert_sexp_before_closing(original_content, combined_sexp)
-            else:
-                output_content = original_content
-                if not quiet:
-                    print("  Warning: No routes generated!")
+            elif not quiet:
+                print("  Warning: No routes generated!")
 
-            # Validate S-expression structure before writing
-            if not _validate_sexp_parentheses(output_content):
-                logger.error("Generated PCB file has unbalanced parentheses")
-                raise ValueError(
-                    "Generated PCB file has invalid S-expression syntax "
-                    "(unbalanced parentheses). This is a bug in kicad-tools. "
-                    "Please report it."
-                )
+            # Issue #2808: atomic write via _write_routed_pcb.  No layer
+            # escalation in this flow, so layer_count defaults to 2 (no-op).
+            _write_routed_pcb(
+                pcb_path,
+                output_path,
+                combined_sexp,
+            )
 
-            output_path.write_text(output_content)
+            # We need output_content for the connectivity verification below;
+            # re-read since the atomic write left output_path with the final
+            # content we just wrote.
+            output_content = output_path.read_text()
 
         if not quiet:
             print(f"  Saved to: {output_path}")
