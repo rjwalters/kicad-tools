@@ -8,6 +8,7 @@ routing failures.
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 from dataclasses import dataclass, field
@@ -320,6 +321,26 @@ class PlacementFeedbackLoop:
         # backwards-compatible default on ``PlacementFeedbackResult``.
         exit_reason = "pf_max_iter"
 
+        # Issue #2840: best-known routed state across all iterations.
+        # The placement-feedback loop is non-monotonic by construction --
+        # each iteration calls ``_clear_routes()`` and routes fresh, so if
+        # iteration N+1 produces fewer routed nets than iteration N, the
+        # router's live ``self.routes`` ends up worse than a prior
+        # iteration's result.  To make the loop monotonic in routed-net
+        # count, snapshot the routes whenever a new iteration strictly
+        # improves on the best-known count, and restore the best snapshot
+        # before returning so callers always see the highest routed count
+        # observed in this run.
+        #
+        # Mirrors the deep-copy pattern from
+        # ``Autorouter.route_all_negotiated`` (core.py:4791-4838, PR #2805).
+        # Only deep-copies on strict improvement (Strategy B from #2803:
+        # minimal memory cost — at most ``max_adjustments + 1`` snapshots
+        # taken, only one retained).
+        best_routes_snapshot: list[Route] = []
+        best_routed_count = -1
+        best_iteration = -1
+
         if self.verbose:
             print("\n=== Placement-Routing Feedback Loop ===")
             print(f"  Max adjustments: {max_adjustments}")
@@ -383,9 +404,35 @@ class PlacementFeedbackLoop:
             routed_count = total_nets - len(failed_nets)
             routed_history.append(routed_count)
 
+            # Issue #2840: snapshot the routed state on strict improvement
+            # so the loop is monotonic in routed-net count.  Without this,
+            # a later iteration that regresses (fewer nets routed) leaves
+            # ``self.router.routes`` in a worse state than a prior pass
+            # produced, and the final ``PlacementFeedbackResult`` reports
+            # the regression.  Deep-copy only on strict improvement.
+            if routed_count > best_routed_count:
+                improved = True
+                best_routed_count = routed_count
+                best_routes_snapshot = copy.deepcopy(list(self.router.routes))
+                best_iteration = iteration
+            else:
+                improved = False
+
             if self.verbose:
                 print(f"  Routed: {routed_count}/{total_nets} nets")
                 print(f"  Failed: {len(failed_nets)} nets")
+                if improved:
+                    print(
+                        f"  [iter {iteration}] routed={routed_count}/{total_nets} "
+                        f"(best={best_routed_count}); improved"
+                    )
+                else:
+                    delta = routed_count - best_routed_count
+                    tag = "tied" if delta == 0 else "reverted"
+                    print(
+                        f"  [iter {iteration}] routed={routed_count}/{total_nets} "
+                        f"(best={best_routed_count}, delta={delta:+d}); {tag}"
+                    )
 
             # Success - all nets routed
             if not failed_nets:
@@ -474,7 +521,39 @@ class PlacementFeedbackLoop:
             adjustments.append(adjustment)
             total_moved += len(result.components_moved)
 
-        # Final failure analysis
+        # Issue #2840: restore the best-known routed state before
+        # reporting the result.  The placement-feedback loop is
+        # non-monotonic by construction (each iteration calls
+        # ``_clear_routes()`` and routes fresh), so ``self.router.routes``
+        # at this point reflects whichever iteration ran last -- not
+        # necessarily the best.  Restore the deep-copied snapshot whenever
+        # a strictly better state was observed earlier in the run.
+        #
+        # We restore by reassigning ``self.router.routes`` to a deep copy
+        # of the best snapshot.  Note: the grid state is NOT restored.
+        # That is intentional -- the grid is reset by ``_clear_routes()``
+        # at the top of every iteration, so no caller relies on grid
+        # state being consistent with ``self.router.routes`` after the
+        # placement-feedback loop returns.  ``get_failed_nets()`` derives
+        # solely from ``self.router.routes`` (core.py:8320), so restoring
+        # the routes is sufficient to make the reported failed-net count
+        # consistent with the restored snapshot.
+        current_routed_count = len(self.router.nets) - 1 - len(self.router.get_failed_nets())
+        if best_routed_count > current_routed_count:
+            if self.verbose:
+                print(
+                    f"  Restoring best snapshot from iter {best_iteration} "
+                    f"(routed={best_routed_count}) "
+                    f"instead of final iter (routed={current_routed_count})"
+                )
+            # Deep-copy the snapshot so the loop's internal best state
+            # cannot be mutated through ``self.router.routes`` after
+            # this call returns.
+            self.router.routes = copy.deepcopy(best_routes_snapshot)
+
+        # Final failure analysis -- computed AFTER restoration so the
+        # result reflects the restored state, not the live last-iteration
+        # state.
         failed_nets = self.router.get_failed_nets()
         if adjustments:
             adjustments[-1].failed_nets_after = failed_nets
