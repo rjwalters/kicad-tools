@@ -190,6 +190,13 @@ def run_route_command(args) -> int:
     checkpoint_interval_val = getattr(args, "checkpoint_interval", 30.0)
     if checkpoint_interval_val != 30.0:
         sub_argv.extend(["--checkpoint-interval", str(checkpoint_interval_val)])
+    # Issue #2819: forward --max-search-iterations to the inner parser.
+    # Both defaults are 0 (= use cols*rows*4 heuristic), so only forward
+    # when the user passed a non-default value (matches the per-net-timeout
+    # and checkpoint-interval patterns above).
+    max_iter_val = getattr(args, "max_search_iterations", 0) or 0
+    if max_iter_val:
+        sub_argv.extend(["--max-search-iterations", str(max_iter_val)])
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:
