@@ -1052,6 +1052,15 @@ class RoutingGrid:
         - Cells inside the halo but already inside another pad's clearance
           envelope (``blocked == True`` AND ``net == 0``) keep their
           existing state.
+        - Issue #2869: the same-component sibling-envelope carve-out is
+          *net-aware*.  A halo cell that falls inside a same-component
+          signal pad's standard envelope is only carved out (i.e. left
+          passable) when the cell currently belongs to the sibling pad's
+          own net (its escape corridor).  Foreign-net cells inside the
+          sibling envelope still see the halo as blocked, preventing a
+          foreign signal trace from threading the LQFP edge alongside the
+          chip's own escape routing (root cause of 44 residual
+          ``clearance_pad_segment`` errors on board 04).
 
         The halo expands the *clearance* envelope from
         ``base_clearance`` (which may be the fine-pitch ``min_trace_width/2``)
@@ -1143,7 +1152,18 @@ class RoutingGrid:
         # signal pad is the right authority for that pin's routing
         # corridor.  Mirrors the same-component clearance relaxation at
         # :meth:`_relax_same_component_clearance` (Issue #2452).
-        same_component_envelopes: list[tuple[float, float, float, float]] = []
+        #
+        # Issue #2869: the carve-out is *net-aware*.  We only skip the
+        # halo for cells owned by the sibling pad's own net (its escape
+        # corridor).  Foreign-net cells inside the sibling envelope must
+        # still see the halo as blocked, otherwise a foreign signal trace
+        # can thread the LQFP edge alongside the chip's own escape
+        # routing and produce a ``clearance_pad_segment`` DRC error
+        # against the plane-net pad (44 errors on routed board 04 before
+        # this fix).  Each envelope entry now carries its owning net so
+        # the cell-by-cell test below can compare against the cell's
+        # current net assignment.
+        same_component_envelopes: list[tuple[float, float, float, float, int]] = []
         if pad.ref:
             for other in self._component_pads.get(pad.ref, []):
                 if other is pad or other.net == 0:
@@ -1169,6 +1189,7 @@ class RoutingGrid:
                         other.y - oeh / 2.0 - other_clearance,
                         other.x + oew / 2.0 + other_clearance,
                         other.y + oeh / 2.0 + other_clearance,
+                        other.net,
                     )
                 )
 
@@ -1184,13 +1205,22 @@ class RoutingGrid:
                     if std_x1 <= wx <= std_x2 and std_y1 <= wy <= std_y2:
                         continue
 
-                    # Skip cells that fall inside a same-component signal
-                    # pad's standard envelope -- the chip's own escape
-                    # corridor takes precedence over the via halo.
+                    # Issue #2869: net-aware sibling-envelope carve-out.
+                    # Skip the halo only for cells that fall inside a
+                    # sibling envelope AND are currently owned by that
+                    # sibling's net.  Foreign-net (or unclaimed) cells in
+                    # the sibling envelope still get the halo applied so
+                    # foreign signal traces cannot thread the plane-net
+                    # pad's clearance band.  The sibling pad's own
+                    # envelope already assigned ``cell.net = sibling.net``
+                    # at line 960/968 in ``_add_pad_unsafe`` so the
+                    # comparison is well-defined.
+                    cell_net = int(self._net[layer_idx, gy, gx])
                     in_sibling_envelope = False
-                    for sx1, sy1, sx2, sy2 in same_component_envelopes:
+                    for sx1, sy1, sx2, sy2, sibling_net in same_component_envelopes:
                         if sx1 <= wx <= sx2 and sy1 <= wy <= sy2:
-                            in_sibling_envelope = True
+                            if cell_net == sibling_net:
+                                in_sibling_envelope = True
                             break
                     if in_sibling_envelope:
                         continue
@@ -1199,7 +1229,8 @@ class RoutingGrid:
                     if self._pad_blocked[layer_idx, gy, gx]:
                         continue
 
-                    cell_net = int(self._net[layer_idx, gy, gx])
+                    # ``cell_net`` was already read above for the
+                    # sibling-envelope check (Issue #2869); reuse it.
 
                     if cell_net == 0:
                         # Unclaimed cell (or another plane-net halo cell):

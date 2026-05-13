@@ -284,6 +284,61 @@ class TestPlaneNetHaloReservation:
             "With stitch_via_halo=False the halo must NOT be applied."
         )
 
+    def test_foreign_net_blocked_inside_sibling_envelope(self, fine_pitch_rules):
+        """Issue #2869: a halo cell inside a same-component sibling
+        envelope must still be blocked for foreign nets.  Prior to the
+        net-aware tightening the carve-out at ``grid.py:1146-1196``
+        unconditionally skipped cells inside any sibling envelope,
+        letting foreign signal traces thread the LQFP edge alongside
+        the chip's own escape routing (44 ``clearance_pad_segment``
+        DRC errors on routed board 04 before the fix).
+        """
+        grid = _make_grid(fine_pitch_rules)
+
+        # Same component (U2), 0.5 mm pitch: add sibling signal pad
+        # FIRST so its envelope is recorded with cell.net = 9 before
+        # the plane pad's halo runs.
+        sibling = _make_pad(x=0.0, y=0.25, net=9, net_name="NRST", pin="7")
+        grid.add_pad(sibling, pin_pitch=0.5)
+
+        plane = _make_pad(x=0.0, y=0.75, net=0, net_name="GND", pin="8")
+        grid.add_pad(plane, pin_pitch=0.5)
+
+        # Probe a halo cell on the east narrow-axis of the plane pad
+        # (x ~= 0.32) at a y near the boundary between the two pads
+        # where the sibling envelope rectangle overlaps the plane halo
+        # ring.  Use net=42 to represent an unrelated foreign signal
+        # net the pathfinder might try to route through.
+        gx, gy = grid.world_to_grid(0.32, 0.55)
+        assert grid.is_blocked(gx, gy, Layer.F_CU, net=42), (
+            "Foreign-net trace must still see the plane-pad halo as "
+            "blocked even when the cell falls inside a same-component "
+            "sibling pad's envelope (Issue #2869)."
+        )
+
+    def test_sibling_own_net_passable_inside_sibling_envelope(self, fine_pitch_rules):
+        """Issue #2869 regression guard: the chip's own escape routing
+        must still be able to thread the sibling envelope on the
+        sibling's own net.  Without this, board 04's NRST escape
+        between U2.7 and U2.8 would regress (the original motivation
+        for PR #2860's carve-out).
+        """
+        grid = _make_grid(fine_pitch_rules)
+
+        sibling = _make_pad(x=0.0, y=0.25, net=9, net_name="NRST", pin="7")
+        grid.add_pad(sibling, pin_pitch=0.5)
+        plane = _make_pad(x=0.0, y=0.75, net=0, net_name="GND", pin="8")
+        grid.add_pad(plane, pin_pitch=0.5)
+
+        # Sibling pad center: must remain reachable by net 9.  This is
+        # the chip's own escape endpoint -- if the plane halo blocked
+        # it for net 9 the sibling could never be connected.
+        gx, gy = grid.world_to_grid(sibling.x, sibling.y)
+        assert not grid.is_blocked(gx, gy, Layer.F_CU, net=sibling.net), (
+            "Sibling pad center cell must remain passable for the "
+            "sibling's own net (board 04 NRST escape regression guard)."
+        )
+
     def test_pth_plane_pad_envelope_covers_all_layers(self, standard_pitch_rules):
         """Through-hole plane-net pads (e.g. PTH connector ground pins)
         block routing on every layer.  Because they are standard-pitch
