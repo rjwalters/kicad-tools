@@ -311,10 +311,17 @@ def generate_usb_connector() -> str:
 
     pads_str = "\n".join(pads)
 
+    # J1 is a perimeter-mounted USB-C receptacle whose location is mechanically
+    # constrained by the board edge. Mark it `(attr smd locked)` so that
+    # placement-feedback passes from `kct route --placement-feedback` and
+    # `--anchor-weight` (PR #2825) treat it as an immovable anchor. Without
+    # this, the centroid pull would relocate the connector and starve VBUS /
+    # USB_CC1 / USB_CC2 of routing corridors (see #2833 sub-issue A / #2836).
     return f"""  (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
+    (attr smd locked)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -349,10 +356,16 @@ def generate_joystick() -> str:
 
     pads_str = "\n".join(pads)
 
+    # J2 is the through-hole joystick header. Like J1 it is a mechanically
+    # constrained perimeter component (the joystick module body extends
+    # beyond the PCB edge for the user to grip). Lock it so placement
+    # cannot drift it interior, which would starve VCC / GND distribution
+    # to the joystick analog rail (see #2833 sub-issue A / #2836).
     return f"""  (footprint "Module:Joystick_Analog"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
+    (attr through_hole locked)
     (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -604,6 +617,46 @@ def generate_joystick_filter() -> str:
     return "\n".join(parts)
 
 
+def generate_gnd_pour() -> str:
+    """Generate a B.Cu GND copper pour covering the board outline.
+
+    Board 03 has 32 of ~40 GND pads spread across the board — at every
+    decoupling cap, the joystick, J1's shield, and U1's pin 1 / pin 16 /
+    pin 25 / pin 32. Routing GND as individual traces on F.Cu fails
+    structurally (`#2833` shows 32 GND pads unconnected with only F.Cu
+    signal traces available). The fix is a B.Cu copper pour bound to net
+    GND, which short-circuits the connectivity problem to "every pad
+    over the pour is one stitching via away from GND."
+
+    The pour polygon inset is ~0.5mm from the Edge.Cuts rectangle so it
+    cannot violate edge-clearance DRC even with default 0.2mm
+    `clearance` and 0.25mm `min_thickness` (the standard kicad-tools zone
+    template, matching `boards/00-simple-led/output/simple_led.kicad_pcb`).
+    """
+    gnd_net = NETS["GND"]
+    inset = 0.5  # mm — keep zone copper clear of board edge for DRC
+    x1 = BOARD_ORIGIN_X + inset
+    y1 = BOARD_ORIGIN_Y + inset
+    x2 = BOARD_ORIGIN_X + BOARD_WIDTH - inset
+    y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT - inset
+    return f"""  (zone
+    (net {gnd_net})
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "{generate_uuid()}")
+    (hatch edge 0.5)
+    (priority 1)
+    (connect_pads (clearance 0.3)
+    )
+    (min_thickness 0.25)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+    )
+    (polygon (pts (xy {x1} {y1}) (xy {x2} {y1}) (xy {x2} {y2}) (xy {x1} {y2}))
+    )
+  )"""
+
+
 def generate_pcb() -> str:
     """Generate the complete PCB file."""
     parts = [
@@ -645,6 +698,13 @@ def generate_pcb() -> str:
     for ref, pos, net1, net2 in cap_positions:
         parts.append(generate_capacitor(ref, pos, net1, net2))
 
+    # B.Cu GND pour. Emitted after all footprints (KiCad accepts zones
+    # in any order inside `(kicad_pcb ...)`, but emitting last keeps
+    # the file readable: footprints define geometry, the pour reacts to
+    # it). The fill polygon covers the board outline minus a 0.5mm
+    # edge inset and is bound to net GND. Sub-issue A of #2833.
+    parts.append(generate_gnd_pour())
+
     parts.append(")")  # Close kicad_pcb
 
     return "\n".join(parts)
@@ -662,12 +722,14 @@ def main():
     print(f"  Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
     print("  Components:")
     print("    - 1 MCU (32-pin QFP)")
-    print("    - 1 USB-C connector")
-    print("    - 1 Analog joystick module")
+    print("    - 1 USB-C connector (J1, locked)")
+    print("    - 1 Analog joystick module (J2, locked)")
     print("    - 4 Tactile buttons")
     print("    - 1 Crystal oscillator + 2 load caps (C5/C6, 22pF)")
     print("    - 4 Decoupling capacitors (C1-C4)")
     print("    - Joystick RC filter + BTN pull-up (R10/C10, R11/C11, R12)")
+    print("  Zones:")
+    print("    - 1 GND copper pour on B.Cu (board outline minus 0.5mm inset)")
     print(f"  Nets: {len([n for n in NETS.values() if n > 0])}")
 
 
