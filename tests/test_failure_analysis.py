@@ -18,7 +18,7 @@ from kicad_tools.router.failure_analysis import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad
+from kicad_tools.router.primitives import Pad, Via
 from kicad_tools.router.rules import DesignRules
 
 
@@ -853,6 +853,133 @@ class TestAnalyzePadAccessBlockers:
 
         # Same net should not be reported as a blocker
         assert not any(b.blocking_net == 1 for b in blockers)
+
+    def test_analyze_pad_access_blockers_distinguishes_pad_clearance_from_via(
+        self, routing_grid: RoutingGrid
+    ):
+        """Issue #2810: pad-clearance zones must classify as ``pad_clearance``.
+
+        Reproduces the TQFP fine-pitch scenario from board 03 (XTAL2): two
+        small SMD pads on different nets at a pitch such that the neighbor's
+        clearance zone (not its metal area) is the closest blocker to the
+        victim pad's center. Before #2810 the classifier mislabelled these
+        cells as ``"via"`` because the only ``else`` branch caught them;
+        after the fix the ``original_net == cell.net`` discriminator
+        distinguishes the case.
+
+        Geometry note: pads are 0.2 mm square at 0.8 mm pitch so that the
+        neighbor's metal area falls JUST outside the pad-access search
+        radius (~0.6 mm with the default test rules), while the neighbor's
+        clearance envelope (~0.25 mm beyond the metal edge) reaches well
+        into the search radius. The closest blocking cell is therefore a
+        clearance-zone cell, not a metal cell -- exactly the misclassified
+        case the fix targets.
+        """
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.2,
+            height=0.2,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        neighbor = Pad(
+            x=25.8,
+            y=25.0,
+            width=0.2,
+            height=0.2,
+            net=2,
+            net_name="NEIGHBOR",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+        routing_grid.add_pad(neighbor)
+
+        analyzer = RootCauseAnalyzer()
+
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "NEIGHBOR"},
+        )
+
+        # The neighbor pad's clearance zone must be flagged as a blocker,
+        # and the classifier must report ``pad_clearance`` -- NOT ``via``.
+        neighbor_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(neighbor_blockers) >= 1, (
+            "Expected at least one blocker from the neighbor pad's clearance "
+            f"zone, got: {blockers!r}"
+        )
+        assert any(b.blocking_type == "pad_clearance" for b in neighbor_blockers), (
+            "Expected blocking_type='pad_clearance' for the neighbor pad's "
+            f"clearance zone, got: {[b.blocking_type for b in neighbor_blockers]!r}"
+        )
+
+    def test_analyze_pad_access_blockers_via_remains_via(
+        self, routing_grid: RoutingGrid
+    ):
+        """Issue #2810 regression guard: real vias must still classify as ``via``.
+
+        Places only a via (no pads in the search radius) and confirms the new
+        ``pad_clearance`` branch does NOT swallow the ``via`` case.
+        ``_mark_via`` never sets ``cell.original_net``, so the new
+        discriminator (``original_net != 0 and original_net == cell.net``)
+        evaluates False and the cell correctly falls through to ``"via"``.
+        """
+        # Place a target pad we'll analyse for blockers.
+        target = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(target)
+
+        # Place an isolated via from a different net nearby (no pad near it).
+        # The via's clearance ring (radius ~= drill/2 + via_clearance +
+        # trace_width/2) will extend cells into the pad-access search
+        # radius (~0.6 mm with the default test rules).
+        offending_via = Via(
+            x=26.0,
+            y=25.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        routing_grid._mark_via(offending_via)
+
+        analyzer = RootCauseAnalyzer()
+
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "OTHER"},
+        )
+
+        # The via must be reported as a blocker AND classified as "via",
+        # not "pad_clearance" (regression guard for the new branch).
+        via_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(via_blockers) >= 1, (
+            f"Expected at least one blocker from the offending via, got: {blockers!r}"
+        )
+        assert all(b.blocking_type == "via" for b in via_blockers), (
+            "Expected blocking_type='via' for the isolated via, got: "
+            f"{[b.blocking_type for b in via_blockers]!r}"
+        )
 
     def test_failure_analysis_includes_pad_access_blockers(self):
         """Test that FailureAnalysis includes pad_access_blockers field."""
