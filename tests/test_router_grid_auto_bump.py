@@ -32,7 +32,6 @@ import pytest
 
 from kicad_tools.router.io import (
     FineZone,
-    MultiResolutionGridPlan,
     _compute_zone_resolution_and_offset,
     _count_off_grid_with_offset,
     _is_on_grid_with_offset,
@@ -41,7 +40,6 @@ from kicad_tools.router.io import (
 )
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -425,7 +423,7 @@ class TestSubGridUsesZoneOffset:
         """
         from kicad_tools.router.grid import RoutingGrid
         from kicad_tools.router.rules import DesignRules
-        from kicad_tools.router.subgrid import SubGridPad, SubGridRouter
+        from kicad_tools.router.subgrid import SubGridRouter
 
         rules = DesignRules(
             grid_resolution=0.1, trace_width=0.15, trace_clearance=0.1,
