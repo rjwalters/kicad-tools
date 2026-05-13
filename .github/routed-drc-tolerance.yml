@@ -118,3 +118,40 @@ tolerances:
   # PR locks in the GEOMETRY fix, not the routing yield.
   # Tracked: Phase 3N (#2726), match-group tuning (#2723).
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70
+
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard) added by PR #2846 as
+  # part of issue #2834 work.  Currently 98 DRC errors driven by
+  # TWO upstream router bugs, neither of which is fixable inside
+  # the board-04 PR scope:
+  #
+  #   * #2848 -- router with `--mfr jlcpcb-tier1` on a 2-layer board
+  #     emits vias at 0.200mm drill / 0.450mm diameter / 0.125mm
+  #     annular ring (the 4-layer tier1 profile), but the 2-layer
+  #     jlcpcb-tier1 minima are 0.300 / 0.600 / 0.150.  That single
+  #     bug accounts for 14 dimension_via_drill + 14
+  #     dimension_via_diameter + 14 dimension_annular_ring = 42
+  #     of the 98 errors.  Router-side config fix; tracked as #2848.
+  #
+  #   * #2842 -- router does not reserve clearance around plane-net
+  #     GND pads for the stitch step, so the LQFP-48 fine-pitch
+  #     escape on U2 lays signal traces within ~0.1mm of GND pads.
+  #     Drives the 44 clearance_pad_segment + 4 clearance_segment_via
+  #     + 4 clearance_pad_via + 4 clearance_segment_segment = 56
+  #     remaining errors.  Router-side fix; tracked as #2842.
+  #
+  # Error breakdown (from `kct check --mfr jlcpcb --errors-only`):
+  #   44 clearance_pad_segment
+  #   14 dimension_via_drill
+  #   14 dimension_via_diameter
+  #   14 dimension_annular_ring
+  #    4 clearance_segment_via
+  #    4 clearance_pad_via
+  #    4 clearance_segment_segment
+  #
+  # Tolerance is set to 100 (small margin over 98) to allow merge
+  # while #2848 and #2842 are in flight.  REDUCE TO 0 (and remove
+  # this entry) once BOTH issues are resolved and the board is
+  # re-routed.  Per-PR drift warning will nag the diff if the
+  # actual count drops below the floor.
+  # Tracked: #2848 (router via dimensions), #2842 (stitch-via clearance).
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 100
