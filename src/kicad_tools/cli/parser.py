@@ -2102,6 +2102,29 @@ def _add_stitch_parser(subparsers) -> None:
         dest="stitch_drc",
         help="Run DRC after stitching (fills zones automatically via kicad-cli)",
     )
+    stitch_parser.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="stitch_mfr",
+        default=None,
+        help=(
+            "Manufacturer profile (e.g., 'jlcpcb', 'jlcpcb-tier1'). When set, "
+            "stitch via dimensions are resolved from the manufacturer's YAML "
+            "design rules using the board's actual copper layer count, "
+            "overriding --via-size and --drill defaults. When omitted, the "
+            "existing CLI defaults are used."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        dest="stitch_copper",
+        help=(
+            "Outer copper weight in oz (default: 1.0). Used together with --mfr "
+            "to select the correct design-rules row from the manufacturer YAML."
+        ),
+    )
 
 
 def _add_route_parser(subparsers) -> None:
