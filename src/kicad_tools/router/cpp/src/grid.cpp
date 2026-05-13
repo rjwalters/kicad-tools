@@ -372,8 +372,16 @@ ValidationResult Grid3D::validate_route(
             // Skip same-net pads
             if (pad.net == exclude_net) continue;
 
-            // Issue #1764: Skip pads on excluded components
-            if (is_excluded_ref(pad.ref_hash)) continue;
+            // Issue #1764 + #2871 follow-up: the same-component-ref exclusion
+            // is intended to permit signal-pin escape routing through the
+            // chip's own perimeter (Issue #1764 reachability fix). It must
+            // NOT permit signal traces to clip plane-net pads on the same
+            // chip. Keep plane-net pads (pad.net == 0, the SKIPPED-net
+            // convention threaded through cpp_backend.py:596-605) in the
+            // validator even when their component is in the exclude set
+            // (44 clearance_pad_segment errors on board 04 NRST / OSC_OUT /
+            // SWCLK vs U2 GND / +3.3V pads -- see issue #2871).
+            if (pad.net != 0 && is_excluded_ref(pad.ref_hash)) continue;
 
             // Skip pads on different layers (unless through-hole: layer_idx == -1)
             if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
