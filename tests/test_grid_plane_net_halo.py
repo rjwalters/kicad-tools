@@ -134,9 +134,7 @@ class TestPlaneNetHaloReservation:
             "nets after #2842 (halo extends to 0.425 mm from pad center)."
         )
 
-    def test_fine_pitch_plane_pad_halo_does_not_extend_beyond_radius(
-        self, fine_pitch_rules
-    ):
+    def test_fine_pitch_plane_pad_halo_does_not_extend_beyond_radius(self, fine_pitch_rules):
         """A cell well outside the halo must remain unblocked."""
         grid = _make_grid(fine_pitch_rules)
         plane_pad = _make_pad(x=0.0, y=0.0, net=0, net_name="GND")
@@ -144,9 +142,9 @@ class TestPlaneNetHaloReservation:
 
         # Halo extends 0.425 mm from pad center.  Cell at x=0.6 is
         # 0.175 mm outside the halo -- must remain passable.
-        assert not grid.is_blocked(
-            *grid.world_to_grid(0.6, 0.0), Layer.F_CU, net=9
-        ), "Cell well outside the halo radius must remain passable."
+        assert not grid.is_blocked(*grid.world_to_grid(0.6, 0.0), Layer.F_CU, net=9), (
+            "Cell well outside the halo radius must remain passable."
+        )
 
     def test_standard_pitch_plane_pad_envelope_unchanged(self, standard_pitch_rules):
         """Standard-pitch passives use ``trace_clearance + trace_width/2 =
@@ -167,29 +165,38 @@ class TestPlaneNetHaloReservation:
         # the standard halo, not by the via halo.  A cell at x=0.95
         # (just past the standard envelope) must NOT be blocked by the
         # via halo (because the halo would not extend that far).
-        assert not grid.is_blocked(
-            *grid.world_to_grid(0.95, 0.0), Layer.F_CU, net=9
-        ), (
+        assert not grid.is_blocked(*grid.world_to_grid(0.95, 0.0), Layer.F_CU, net=9), (
             "Standard-pitch plane pad must keep its pre-#2842 envelope; "
             "the via halo is satisfied inside the pad metal itself."
         )
 
     def test_signal_pad_unaffected_by_halo_machinery(self, fine_pitch_rules):
-        """Signal pads (``pad.net > 0``) must keep their existing fine-pitch
-        envelope; the via halo is *only* for plane-net pads.
+        """Signal pads (``pad.net > 0``) must not receive the *via* halo
+        regardless of pin pitch; the via halo is *only* for plane-net pads.
+
+        Issue #2865 narrow-channel guard: with this fixture's
+        ``trace_clearance=trace_width=0.2`` and ``pitch=0.5``, the
+        fine-pitch shrink is geometrically infeasible (channel cannot
+        fit ``2*clearance + trace_width = 0.6 mm`` -- only 0.246 mm is
+        available).  ``_clearance_for_pin_pitch`` therefore returns the
+        standard envelope (0.3 mm) so any cell within 0.45 mm of the pad
+        center *is* blocked, but that block comes from the standard
+        clearance envelope -- NOT from the via halo (which never applies
+        to signal pads).  Probe a point well beyond the standard
+        envelope to assert "no via halo" cleanly.
         """
         grid = _make_grid(fine_pitch_rules)
         sig_pad = _make_pad(x=0.0, y=0.0, net=9, net_name="NRST")
         grid.add_pad(sig_pad, pin_pitch=0.5)
 
-        # Fine-pitch envelope = 0.127 / 2 = 0.0635 mm.
-        # A cell at x=0.3 (0.15 east of pad edge, well past the fine-pitch
-        # envelope, well inside what the via halo *would* be) must remain
-        # passable for foreign nets (this is the whole point of fine-pitch
-        # clearance reduction -- #1778).
-        assert not grid.is_blocked(
-            *grid.world_to_grid(0.3, 0.0), Layer.F_CU, net=10
-        ), "Signal pad envelope must not get the via halo (only plane-net pads do)."
+        # Standard envelope edge: pad_half_width (0.15) + clearance +
+        # trace_width/2 (0.3) = 0.45 mm.  Via halo would have extended
+        # to 0.425 mm from center.  A cell at x=0.5 is past both, so
+        # the only way it could be blocked is if the via halo (a
+        # plane-net-only feature) were applied to this signal pad.
+        assert not grid.is_blocked(*grid.world_to_grid(0.5, 0.0), Layer.F_CU, net=10), (
+            "Signal pad envelope must not get the via halo (only plane-net pads do)."
+        )
 
     def test_halo_does_not_overwrite_signal_pad_metal(self, fine_pitch_rules):
         """When a plane-net pad's halo overlaps an adjacent same-component
@@ -222,9 +229,7 @@ class TestPlaneNetHaloReservation:
             "Signal pad's own net (9) must still reach the pad metal."
         )
 
-    def test_halo_blocks_foreign_net_but_pad_net_marker_unchanged(
-        self, fine_pitch_rules
-    ):
+    def test_halo_blocks_foreign_net_but_pad_net_marker_unchanged(self, fine_pitch_rules):
         """The halo cells must remain ``cell.net == 0`` (the plane-net
         sentinel) so the existing "static no-net obstacle" path in
         ``Grid.is_blocked`` and the pathfinder fires correctly for foreign
@@ -249,6 +254,13 @@ class TestPlaneNetHaloReservation:
         """Setting ``rules.stitch_via_halo = False`` must restore pre-#2842
         behaviour (no halo reservation).  This is the routing-intent
         opt-out the AC requires.
+
+        Issue #2865 narrow-channel guard: with the fixture's tight
+        clearance (0.2 mm) the fine-pitch shrink is geometrically
+        infeasible at 0.5 mm pitch, so the envelope falls back to the
+        standard one regardless of the via halo flag.  Probe a cell
+        past the standard envelope edge (0.45 mm) so the test isolates
+        the via halo's contribution.
         """
         rules_no_halo = DesignRules(
             trace_width=fine_pitch_rules.trace_width,
@@ -263,9 +275,11 @@ class TestPlaneNetHaloReservation:
         plane_pad = _make_pad(x=0.0, y=0.0, net=0, net_name="GND")
         grid.add_pad(plane_pad, pin_pitch=0.5)
 
-        # With the opt-out, the fine-pitch envelope is back to 0.0635 mm.
-        # A cell at x=0.4 (0.25 mm east of pad metal) must now be unblocked.
-        gx, gy = grid.world_to_grid(0.4, 0.0)
+        # With the opt-out, the via halo (which would extend to 0.425 mm
+        # from center) is not applied.  A cell at x=0.5 (past the standard
+        # envelope edge at 0.45 mm, past the would-be halo at 0.425 mm)
+        # must remain unblocked.
+        gx, gy = grid.world_to_grid(0.5, 0.0)
         assert not grid.is_blocked(gx, gy, Layer.F_CU, net=9), (
             "With stitch_via_halo=False the halo must NOT be applied."
         )
@@ -301,6 +315,5 @@ class TestPlaneNetHaloReservation:
         for layer in (Layer.F_CU, Layer.B_CU):
             gx, gy = grid.world_to_grid(1.0, 0.0)
             assert grid.is_blocked(gx, gy, layer, net=9), (
-                f"PTH plane-pad standard envelope must extend to {layer.value} "
-                "(not just F.Cu)."
+                f"PTH plane-pad standard envelope must extend to {layer.value} (not just F.Cu)."
             )

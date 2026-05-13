@@ -776,25 +776,68 @@ class RoutingGrid:
         a passive's clearance halo to the BGA pad whose *real* envelope
         was the smaller fine-pitch one.
 
+        Issue #2865 -- narrow-channel guard: the fine-pitch shrink
+        (``min_trace_width / 2``) is only a sound optimisation when the
+        resulting *inter-pad* channel is wide enough that a trace centred
+        in it still satisfies full manufacturer clearance against both
+        flanking pads.  On crowded packages such as LQFP-48 0.5 mm pitch
+        with jlcpcb-tier1 rules (``min_trace=min_clearance=0.127 mm``),
+        threading a signal trace between adjacent pads is geometrically
+        infeasible: the required channel is ``2*clearance + trace_width =
+        0.381 mm`` but only ~0.25 mm of edge-to-edge gap exists.  In that
+        situation shrinking the halo to ``0.0635 mm`` only fools the
+        pathfinder into producing a route that DRC then rejects -- the
+        observed pathology behind 44 ``clearance_pad_segment`` errors on
+        board 04's STM32 west edge.  When the shrunk channel is too
+        narrow we therefore decline the optimisation and fall back to
+        the standard envelope, which causes the pathfinder to look for
+        escape routes around the package instead of through-channel.
+
         Args:
             pin_pitch: The component pin pitch in mm, or None when not
                 available.  When below ``rules.fine_pitch_threshold``
                 (and ``rules.min_trace_width`` is configured) the envelope
                 shrinks to ``min_trace_width / 2`` -- the minimum needed
-                to keep a necked-down trace from overlapping pad copper.
-                Full manufacturer clearance is validated in post-routing
-                DRC.
+                to keep a necked-down trace from overlapping pad copper --
+                *provided* the resulting channel can still satisfy full
+                clearance per the narrow-channel guard.  Full manufacturer
+                clearance is validated in post-routing DRC.
 
         Returns:
             Clearance distance in mm to pad outside the pad's metal.
         """
+        standard = self.rules.trace_clearance + self.rules.trace_width / 2
         if (
             pin_pitch is not None
             and pin_pitch < self.rules.fine_pitch_threshold
             and self.rules.min_trace_width is not None
         ):
-            return self.rules.min_trace_width / 2
-        return self.rules.trace_clearance + self.rules.trace_width / 2
+            shrunk = self.rules.min_trace_width / 2
+            # Issue #2865 narrow-channel guard.  Reject the shrink when
+            # the resulting inter-pad channel cannot host a trace at full
+            # clearance.  The geometry (pitch-based, mirroring the
+            # Curator's recommended formula) is:
+            #
+            #     effective_channel = pitch - 2 * shrunk - trace_width
+            #     required_channel  = 2 * trace_clearance + trace_width
+            #
+            # ``effective_channel`` is the band available for a trace
+            # centered between two halo edges; ``required_channel`` is
+            # the minimum copper-to-copper distance the manufacturer
+            # rule demands (clearance on each side of the trace).  When
+            # the channel cannot fit the trace + 2 x clearance the
+            # shrunk halo is geometrically infeasible -- the pathfinder
+            # would place a trace that DRC must reject.  Fall back to
+            # the standard envelope so the router routes *around* the
+            # package via the escape mechanism instead.
+            effective_channel = pin_pitch - 2.0 * shrunk - self.rules.trace_width
+            required_channel = 2.0 * self.rules.trace_clearance + self.rules.trace_width
+            if effective_channel >= required_channel:
+                return shrunk
+            # Narrow channel -- shrink is geometrically infeasible.
+            # Fall through to the standard envelope so the router does
+            # not try to thread between these pads.
+        return standard
 
     def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
@@ -1038,23 +1081,21 @@ class RoutingGrid:
         # Equivalently, it extends ``halo_from_center - pad_half_extent``
         # *beyond the pad edge* along each axis.
         #
-        # Scope to the fine-pitch case (board 04 U2.8/U2.23/U2.35 LQFP-48
-        # corner GND pins).  On standard-pitch pads the existing
-        # envelope is already ``trace_clearance + trace_width/2``, which
-        # is at least as wide as the via halo *for the via that the
-        # stitcher will actually pick*.  Applying an extra ring on
-        # standard-pitch passives crowds inter-component routing channels
-        # (board 04 passive arrays go from 9/9 -> 3/9 with an unrestricted
-        # halo applied to every GND cap).
-        standard_envelope = (
-            self.rules.trace_clearance + self.rules.trace_width / 2.0
-        )
-        if base_clearance >= standard_envelope:
-            # Standard-pitch pad already has the full clearance envelope.
-            # The via center sits inside the pad metal -- already
-            # exclusively the plane net's territory.
-            return
-
+        # Issue #2865 follow-up: the pre-check that used to short-circuit
+        # "standard-pitch pads already have the full clearance envelope"
+        # by comparing ``base_clearance`` to ``standard_envelope`` is no
+        # longer correct.  After #2865's narrow-channel guard, *fine-pitch*
+        # pads on crowded packages (LQFP-48 0.5 mm pitch + jlcpcb-tier1)
+        # also receive ``base_clearance == standard_envelope``, and they
+        # still need the via halo applied along the narrow axis (board 04
+        # U2.8/U2.23/U2.35 GND pins).  The per-axis check below is the
+        # correct gate: it compares the via halo extension along each
+        # axis to ``base_clearance`` and returns when *both* axes are
+        # already covered.  Standard-pitch wide pads (e.g. 0805 caps,
+        # half-extents >= ``halo_from_center``) still short-circuit there
+        # because ``ext_x`` and ``ext_y`` clamp to zero -- the board 04
+        # passive-array yield concern (9/9 -> 3/9) the original early
+        # return was guarding remains protected.
         halo_from_center = self.rules.stitch_via_halo_radius()
         # Halo extension is measured separately per axis: an
         # LQFP-48-style pad is wide (1.5 mm) on one axis but narrow
@@ -1121,9 +1162,7 @@ class RoutingGrid:
                     oew, oeh = other.width, other.height
                 # Use the same pin_pitch envelope; without ``_pad_pin_pitch``
                 # data we fall back to the standard envelope.
-                other_clearance = self._clearance_for_pin_pitch(
-                    self._pad_pin_pitch.get(id(other))
-                )
+                other_clearance = self._clearance_for_pin_pitch(self._pad_pin_pitch.get(id(other)))
                 same_component_envelopes.append(
                     (
                         other.x - oew / 2.0 - other_clearance,
@@ -2175,8 +2214,7 @@ class RoutingGrid:
         """
         if not (0 <= layer_idx < self.num_layers):
             raise ValueError(
-                f"reserve_corridor_cells: layer_idx {layer_idx} out of range "
-                f"[0, {self.num_layers})"
+                f"reserve_corridor_cells: layer_idx {layer_idx} out of range [0, {self.num_layers})"
             )
         owners = frozenset(int(n) for n in net_ids)
         if not owners:
