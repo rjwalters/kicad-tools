@@ -26,7 +26,15 @@ from .violation import DRCViolation, ViolationType
 
 @dataclass
 class DrillRepairAction:
-    """Record of a single drill clearance repair action."""
+    """Record of a single drill clearance repair action.
+
+    The signed ``displacement_x`` / ``displacement_y`` fields capture the
+    direction of a slide so callers can reverse it (used by the granular
+    rollback path in ``fix-drc``).  For ``deduplicate`` actions these are
+    zero -- a removed via cannot currently be restored from the in-memory
+    action record, so granular rollback falls back to a bulk snapshot
+    restore when a dedup action is implicated.
+    """
 
     action: str  # "deduplicate" or "slide"
     via_x: float
@@ -34,6 +42,9 @@ class DrillRepairAction:
     net_name: str
     detail: str  # human-readable description
     displacement_mm: float = 0.0  # 0 for dedup
+    displacement_x: float = 0.0
+    displacement_y: float = 0.0
+    uuid: str = ""
 
     def __str__(self) -> str:
         return f"{self.action}: via [{self.net_name}] at ({self.via_x:.4f}, {self.via_y:.4f}) - {self.detail}"
@@ -282,6 +293,8 @@ class DrillClearanceRepairer:
         dry_run: bool,
     ) -> None:
         """Remove a duplicate same-net via."""
+        uuid_node = via_node.find("uuid")
+        uuid_str = uuid_node.get_first_atom() if uuid_node else ""
         action = DrillRepairAction(
             action="deduplicate",
             via_x=via_x,
@@ -289,6 +302,7 @@ class DrillClearanceRepairer:
             net_name=net_name,
             detail="removed duplicate same-net via",
             displacement_mm=0.0,
+            uuid=str(uuid_str) if uuid_str else "",
         )
         result.actions.append(action)
 
@@ -375,6 +389,8 @@ class DrillClearanceRepairer:
                 via_x, via_y, other_x, other_y, required_displacement
             )
 
+        uuid_node = via_node.find("uuid")
+        uuid_str = uuid_node.get_first_atom() if uuid_node else ""
         action = DrillRepairAction(
             action="slide",
             via_x=via_x,
@@ -382,6 +398,9 @@ class DrillClearanceRepairer:
             net_name=via_net,
             detail=f"slid {dist:.4f}mm to increase clearance",
             displacement_mm=dist,
+            displacement_x=dx,
+            displacement_y=dy,
+            uuid=str(uuid_str) if uuid_str else "",
         )
         result.actions.append(action)
 
@@ -394,6 +413,96 @@ class DrillClearanceRepairer:
 
         result.repaired += 1
         result.slid += 1
+
+    def undo_action(self, action: DrillRepairAction) -> bool:
+        """Reverse a previously-applied drill-clearance repair action.
+
+        For ``slide`` actions, locates the via by UUID and applies the
+        inverse displacement to both the via and any segment endpoint
+        currently anchored at the slid (post-action) position.
+
+        For ``deduplicate`` actions the original via was removed from the
+        document, so the action record is insufficient to restore it.
+        These return ``False`` so callers can fall back to a bulk-snapshot
+        restore.
+
+        Args:
+            action: The :class:`DrillRepairAction` to undo.
+
+        Returns:
+            ``True`` on success, ``False`` when the action cannot be
+            reversed (UUID lookup miss, dedup action, etc.).
+        """
+        if action.action == "deduplicate":
+            # A removed via cannot be restored from the action record alone.
+            # Signal failure so the orchestrator falls back to the bulk
+            # snapshot restore.
+            return False
+
+        if action.action != "slide":
+            return False
+
+        uuid = action.uuid
+        if not uuid:
+            return False
+
+        # Locate the via by UUID at its current (post-slide) position.
+        target = None
+        for via_node in self.doc.find_all("via"):
+            uuid_node = via_node.find("uuid")
+            if not uuid_node:
+                continue
+            atom = uuid_node.get_first_atom()
+            if atom is None:
+                continue
+            if str(atom).strip('"') == str(uuid).strip('"'):
+                target = via_node
+                break
+        if target is None:
+            return False
+
+        at_node = target.find("at")
+        if not at_node:
+            return False
+
+        at_atoms = at_node.get_atoms()
+        cur_x = float(at_atoms[0]) if at_atoms else 0.0
+        cur_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0.0
+
+        # The segment endpoint that was updated alongside the slide will
+        # currently sit at the post-slide via position.  Reset it together
+        # with the via.
+        dx = -action.displacement_x
+        dy = -action.displacement_y
+        new_x = round(cur_x + dx, 4)
+        new_y = round(cur_y + dy, 4)
+
+        tolerance = 0.01
+        segments_to_update: list[SExp] = []
+        for seg_node in self.doc.find_all("segment"):
+            start_node = seg_node.find("start")
+            end_node = seg_node.find("end")
+            if not (start_node and end_node):
+                continue
+            start_atoms = start_node.get_atoms()
+            end_atoms = end_node.get_atoms()
+            sx = float(start_atoms[0]) if start_atoms else 0.0
+            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0.0
+            ex = float(end_atoms[0]) if end_atoms else 0.0
+            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0.0
+            if (
+                math.sqrt((sx - cur_x) ** 2 + (sy - cur_y) ** 2) < tolerance
+                or math.sqrt((ex - cur_x) ** 2 + (ey - cur_y) ** 2) < tolerance
+            ):
+                segments_to_update.append(seg_node)
+
+        at_node.set_value(0, new_x)
+        at_node.set_value(1, new_y)
+
+        for seg_node in segments_to_update:
+            self._update_segment_endpoint(seg_node, cur_x, cur_y, new_x, new_y)
+
+        return True
 
     def _compute_push_away(
         self,

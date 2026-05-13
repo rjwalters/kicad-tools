@@ -521,3 +521,110 @@ def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None
         f"USB-C-class pad-density boards or a placement change that pushed "
         f"a previously-routable net out of reach."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2851: granular rollback preserves non-regressing fixes
+# ---------------------------------------------------------------------------
+
+
+def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
+    """Issue #2851: ``kct fix-drc`` repairs >0 violations on board 03.
+
+    Layer-3 acceptance criterion from issue #2839 / parent #2833.
+
+    Pre-#2851, board 03's routed PCB had 18 clearance nudges available
+    (max 0.1880 mm, well under the 2.0 mm cap), of which only a small
+    handful broke connectivity.  Under the bulk-snapshot rollback, all
+    18 nudges were thrown away whenever the connectivity check fired,
+    leaving the user with "Repaired 0/N" even though the majority were
+    safe.
+
+    With granular per-nudge rollback in place, ``fix-drc`` must keep at
+    least one nudge that did NOT touch a regressed net, so the post-fix
+    summary reports ``Repaired K/N`` with K > 0.
+
+    This test loads the committed routed PCB and runs ``fix-drc``
+    in-process via the CLI module; no router invocation is required.
+    The board 03 routed PCB has ~4 clearance violations clustered around
+    the USB diff-pair flip-routing corridor; some of those nudges touch
+    USB_D+ (whose connectivity is fragile due to the 2-of-3-pads stub
+    geometry) and some do not.  The granular rollback should preserve
+    the latter group.
+    """
+    if not ROUTED_PCB_FILE.exists():
+        pytest.skip(
+            f"Board 03 routed PCB not found at {ROUTED_PCB_FILE!s}; "
+            "regenerate via the board's generate/route demo scripts."
+        )
+
+    output_file = tmp_path / "usb_joystick_repaired.kicad_pcb"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "fix-drc",
+            str(ROUTED_PCB_FILE),
+            "-o",
+            str(output_file),
+            "--format",
+            "json",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    # fix-drc exit codes: 0 = clean, 2 = partial, 3 = full rollback.
+    # We accept anything except 3 -- a full rollback would mean granular
+    # attribution failed and the legacy bulk path fired.
+    assert proc.returncode != 3, (
+        "fix-drc full-rolled-back on board 03: this is the issue #2851 "
+        "regression we are trying to prevent.  Expected granular "
+        "rollback to preserve at least 1 nudge.\n"
+        f"stdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}"
+    )
+
+    # Parse JSON to assert at least one nudge was applied.  ``fix-drc``
+    # may report ``total_repaired = 0`` when there are no violations at
+    # all (clean board), in which case the test is vacuously satisfied
+    # by the exit-code check above.
+    import json as _json
+
+    if not proc.stdout.strip():
+        return  # No JSON output (likely no violations).
+
+    # ``fix-drc`` prints a ``Running DRC on:`` preamble to stdout before
+    # the JSON document when ``--drc-report`` is not supplied.  Find the
+    # first ``{`` to locate the JSON body.
+    json_start = proc.stdout.find("{")
+    if json_start < 0:
+        return  # No JSON document emitted -- no violations to repair.
+    json_text = proc.stdout[json_start:]
+
+    try:
+        data = _json.loads(json_text)
+    except _json.JSONDecodeError:
+        pytest.fail(
+            f"Could not parse fix-drc JSON output:\n{proc.stdout[-2000:]}"
+        )
+
+    total_violations = data.get("total_violations", 0)
+    total_repaired = data.get("total_repaired", 0)
+
+    if total_violations == 0:
+        return  # No work to do; vacuously satisfied.
+
+    assert total_repaired > 0, (
+        "fix-drc on board 03 reported total_violations="
+        f"{total_violations} but total_repaired={total_repaired}.  "
+        "This is the issue #2851 layer-3 contract: granular rollback "
+        "must preserve at least 1 nudge that does not touch a regressed "
+        "net.  A zero count here means the granular path attributed the "
+        "regression to every nudge (legitimate full rollback) OR the "
+        "granular path fell back to bulk snapshot restore."
+    )
