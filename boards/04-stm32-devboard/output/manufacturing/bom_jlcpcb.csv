@@ -1,0 +1,12 @@
+Comment,Designator,Footprint,LCSC Part #
+100nF,"C12,C13,C14,C15,C3",Capacitor_SMD:C_0805_2012Metric,C1525
+10k,R2,Resistor_SMD:R_0805_2012Metric,
+10uF,"C1,C2",Capacitor_SMD:C_0805_2012Metric,C15850
+20pF,"C10,C11",Capacitor_SMD:C_0805_2012Metric,C1554
+330R,R1,Resistor_SMD:R_0805_2012Metric,C17630
+4.7uF,C16,Capacitor_SMD:C_0805_2012Metric,
+8MHz,Y1,Crystal:Crystal_HC49-4H_Vertical,C12674
+AMS1117-3.3,U1,Package_TO_SOT_SMD:SOT-223-3_TabPin2,C6186
+STM32F103C8T6,U2,Package_QFP:LQFP-48_7x7mm_P0.5mm,
+SWD-6,J1,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C40877
+USER,D1,LED_SMD:LED_0805_2012Metric,C72038
