@@ -25,6 +25,7 @@ from typing import Sequence
 from kicad_tools.placement.cost import (
     BoardOutline,
     ComponentPlacement,
+    CostMode,
     DesignRuleSet,
     Net,
     PlacementCostConfig,
@@ -179,21 +180,53 @@ def _build_footprint_sizes(
 
 
 def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
-    """Parse a JSON string into PlacementCostConfig, or return defaults."""
+    """Parse a JSON string into PlacementCostConfig.
+
+    Defaults to :class:`CostMode.LEXICOGRAPHIC` so that the optimizer's
+    convergence check (issue #2821) can use the feasibility-sentinel
+    score (>= 1e12) to refuse early convergence in the infeasible region.
+
+    Callers can override the mode via the ``"mode"`` key in the JSON
+    payload (``"lexicographic"`` or ``"weighted_sum"``).
+    """
+    defaults = {
+        "overlap_weight": 1e6,
+        "drc_weight": 1e4,
+        "boundary_weight": 1e5,
+        "wirelength_weight": 1.0,
+        "area_weight": 0.1,
+        "mode": CostMode.LEXICOGRAPHIC,
+    }
+
     if weights_json is None:
-        return PlacementCostConfig()
+        return PlacementCostConfig(**defaults)
     try:
         data = json.loads(weights_json)
     except json.JSONDecodeError as e:
         print(f"Error: invalid JSON for --weights: {e}", file=sys.stderr)
         raise SystemExit(1) from e
 
+    mode = defaults["mode"]
+    raw_mode = data.get("mode")
+    if raw_mode is not None:
+        try:
+            mode = CostMode(raw_mode)
+        except ValueError as e:
+            valid = ", ".join(m.value for m in CostMode)
+            print(
+                f"Error: invalid 'mode' in --weights JSON "
+                f"(got {raw_mode!r}; valid: {valid})",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from e
+
     return PlacementCostConfig(
-        overlap_weight=data.get("overlap", 1e6),
-        drc_weight=data.get("drc", 1e4),
-        boundary_weight=data.get("boundary", 1e5),
-        wirelength_weight=data.get("wirelength", 1.0),
-        area_weight=data.get("area", 0.1),
+        overlap_weight=data.get("overlap", defaults["overlap_weight"]),
+        drc_weight=data.get("drc", defaults["drc_weight"]),
+        boundary_weight=data.get("boundary", defaults["boundary_weight"]),
+        wirelength_weight=data.get("wirelength", defaults["wirelength_weight"]),
+        area_weight=data.get("area", defaults["area_weight"]),
+        mode=mode,
     )
 
 
@@ -490,6 +523,8 @@ def run_optimize_placement(
     quiet: bool = False,
     no_slide_off: bool = False,
     anchor_weight: float = 0.0,
+    time_budget: float | None = None,
+    allow_infeasible: bool = False,
 ) -> int:
     """Run placement optimization.
 
@@ -510,9 +545,22 @@ def run_optimize_placement(
             receive an inflated wirelength weight of
             ``1 + anchor_weight * anchor_pad_fraction``. Default 0.0
             preserves the historical uniform weighting (regression-safe).
+        time_budget: Wall-clock budget in seconds. The main optimization
+            loop exits as soon as the elapsed time exceeds this value
+            (after completing the current generation). ``None`` means no
+            wall-clock cap (issue #2821). Used to bound the new
+            "keep going past plateau while infeasible" behaviour.
+        allow_infeasible: When True, the command returns exit code 0 even
+            if the final placement is infeasible (overlap/DRC/boundary
+            violations remain). Default behaviour is to exit 1 with a
+            ``FATAL:`` message on stderr in that case (issue #2821).
 
     Returns:
-        Exit code (0 for success, 1 for failure).
+        Exit code:
+            * 0 -- final placement is feasible (or ``allow_infeasible=True``)
+            * 1 -- input error, write error, infeasible final placement, or
+              unresolved pad-pad overlaps from the post-pass slide-off
+            * 2 -- interrupted (SIGINT/SIGTERM); partial result saved
     """
     # Validate PCB file exists
     pcb_file = Path(pcb_path)
@@ -724,6 +772,18 @@ def run_optimize_placement(
                     print(f"  Converged at iteration {iteration}")
                 break
 
+            # Wall-clock budget check (issue #2821): exit gracefully if
+            # the configured time budget has been exceeded. Checked
+            # before each generation so the most recent best is preserved.
+            if time_budget is not None and (time.monotonic() - start_time) >= time_budget:
+                if not quiet:
+                    elapsed_now = time.monotonic() - start_time
+                    print(
+                        f"  Time budget exhausted at iteration {iteration} "
+                        f"(elapsed={elapsed_now:.1f}s, budget={time_budget:.1f}s)"
+                    )
+                break
+
             # Ask for new candidates
             pop_size = strategy._population_size
             candidates = strategy.suggest(pop_size)
@@ -872,7 +932,47 @@ def run_optimize_placement(
     if _interrupt_state["interrupted"]:
         return 2
 
+    # Issue #2821: gate exit code on full feasibility, not just pad-pad
+    # slide-off failures. If the final placement has overlap > 0 OR
+    # drc > 0 OR boundary > 0 OR block_boundary > 0, the optimizer has
+    # produced an illegal placement and downstream consumers (router,
+    # DRC) will inherit it. Print a FATAL line and exit non-zero so
+    # pipelines like `place_route.py` and `BuildStep.PLACE` can detect
+    # the failure. The legacy "exit 0 even when infeasible" behaviour
+    # is available via ``--allow-infeasible`` for explicit opt-in
+    # debugging / interactive workflows.
+    if not final_score.is_feasible:
+        b = final_score.breakdown
+        components_failing = []
+        if b.overlap > 0:
+            components_failing.append(f"overlap={b.overlap:.2f}mm^2")
+        if b.drc > 0:
+            components_failing.append(f"drc={b.drc:.0f}")
+        if b.boundary > 0:
+            components_failing.append(f"boundary={b.boundary:.2f}")
+        if b.block_boundary > 0:
+            components_failing.append(f"block_boundary={b.block_boundary:.2f}")
+        detail = ", ".join(components_failing) if components_failing else "unknown"
+
+        if not allow_infeasible:
+            print(
+                f"FATAL: optimizer exited with infeasible placement ({detail}). "
+                f"Downstream router/DRC will inherit illegal geometry. "
+                f"Pass --allow-infeasible to suppress this error.",
+                file=sys.stderr,
+            )
+            return 1
+        elif not quiet:
+            print(
+                f"\n  WARNING: final placement is infeasible ({detail}); "
+                f"--allow-infeasible suppresses non-zero exit."
+            )
+
     # Exit code 1 when pad-pad overlaps remain (actual clearance < 0).
+    # Note: with the feasibility gate above this is now mostly redundant
+    # (any pad overlap implies overlap > 0 in the cost breakdown), but
+    # it is preserved for backwards compatibility with callers that pass
+    # ``--allow-infeasible`` and still want pad-pad failures surfaced.
     if has_unresolved_overlaps:
         pad_overlaps = [
             d

@@ -3615,6 +3615,32 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "signals (connectors, edge sense FETs) from being starved."
         ),
     )
+    op_parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wall-clock budget in seconds. The optimization loop exits "
+            "once this many seconds have elapsed (after the current "
+            "generation finishes). Use this to bound the new "
+            "feasibility-gated convergence behaviour (issue #2821), "
+            "where the loop refuses to declare convergence while the "
+            "best-known placement is still infeasible. Default: no cap."
+        ),
+    )
+    op_parser.add_argument(
+        "--allow-infeasible",
+        action="store_true",
+        default=False,
+        help=(
+            "Return exit code 0 even when the final placement is "
+            "infeasible (overlap/DRC/boundary violations remain). "
+            "Default behaviour (issue #2821) is to exit 1 with a "
+            "FATAL: message on stderr so pipelines do not silently "
+            "hand illegal placements to the router."
+        ),
+    )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 

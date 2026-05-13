@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from .cost import INFEASIBILITY_OFFSET
 from .strategy import PlacementStrategy, StrategyConfig
 from .vector import PlacementBounds, PlacementVector
 
@@ -281,6 +282,21 @@ class CMAESStrategy(PlacementStrategy):
         Convergence is detected when the best score has not improved by
         more than ``convergence_threshold`` (relative) over the last
         ``convergence_window`` generations.
+
+        Feasibility gate (added for issue #2821):
+            When the best-known score indicates an infeasible placement
+            (i.e. ``best_score >= INFEASIBILITY_OFFSET`` under
+            :class:`CostMode.LEXICOGRAPHIC`), convergence is suppressed.
+            This prevents the optimizer from terminating early at a
+            plateau in the infeasible region — the loop continues until
+            the iteration cap (or wall-clock budget) is hit, giving the
+            optimizer a chance to push into the feasible region.
+
+            The check is purely score-based, so it is a no-op for the
+            ``WEIGHTED_SUM`` cost mode (where infeasibility is not
+            sentinel-encoded). Callers that want feasibility-gated
+            convergence should drive the optimizer with
+            ``CostMode.LEXICOGRAPHIC``.
         """
         if self._config is None:
             return
@@ -302,11 +318,18 @@ class CMAESStrategy(PlacementStrategy):
         else:
             improvement = abs(oldest - newest) / abs(oldest)
 
-        if improvement < self._config.convergence_threshold:
-            self._converged = True
+        plateau = improvement < self._config.convergence_threshold
+        # Library-level stopping criterion (e.g. CMA-ES sigma collapse).
+        library_stop = self._optimizer is not None and self._optimizer.should_stop()
 
-        # Also check the library's own stopping criterion
-        if self._optimizer is not None and self._optimizer.should_stop():
+        # Feasibility gate: never declare convergence while the best-known
+        # score corresponds to an infeasible placement (lexicographic mode).
+        # In WEIGHTED_SUM mode this gate is inactive because scores below
+        # INFEASIBILITY_OFFSET (1e12) can also be infeasible -- callers who
+        # need this gate should use lexicographic mode.
+        infeasible = self._best_score >= INFEASIBILITY_OFFSET
+
+        if (plateau or library_stop) and not infeasible:
             self._converged = True
 
     def save_state(self, path: Path | str) -> None:
