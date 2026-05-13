@@ -217,7 +217,7 @@ class PadAccessBlocker:
     pad_ref: str  # e.g. "U1.13"
     blocking_net: int  # Net ID of the blocking net
     blocking_net_name: str  # e.g. "SC_POS_PLUS"
-    blocking_type: str  # "trace", "via", "pad"
+    blocking_type: str  # "trace", "via", "pad", "pad_clearance"
     distance: float  # Distance from pad center to blocking element in mm
     suggested_clearance: float  # Clearance that would allow access in mm
 
@@ -1521,10 +1521,27 @@ class RootCauseAnalyzer:
                 distance = math.sqrt((cell_wx - pad_x) ** 2 + (cell_wy - pad_y) ** 2)
 
                 # Determine blocking type
+                #
+                # Issue #2810: Distinguish pad-clearance zones from vias. The
+                # ``original_net`` attribute on a cell is set ONLY by
+                # ``Grid._block_pad`` (see ``grid.py:903/933/3111/3136``) at
+                # pad placement time and is never touched by ``_mark_via`` or
+                # ``_mark_segment``. So when ``original_net == cell.net`` and
+                # both are non-zero, the cell is unambiguously a pad-clearance
+                # zone that has not been overwritten by a later via.
+                #
+                # Ambiguous case (a via lands on top of a previously-cleared
+                # pad-clearance zone): ``_mark_via`` overwrites ``cell.net`` to
+                # the via's net while ``cell.original_net`` stays at the
+                # pad's net. The discriminator fails and the cell correctly
+                # falls through to ``"via"`` -- matching operator intent that
+                # the immediate blocker is the via's clearance ring.
                 if cell.pad_blocked:
                     blocking_type = "pad"
                 elif cell.usage_count > 0:
                     blocking_type = "trace"
+                elif cell.original_net != 0 and cell.original_net == cell.net:
+                    blocking_type = "pad_clearance"
                 else:
                     blocking_type = "via"
 
