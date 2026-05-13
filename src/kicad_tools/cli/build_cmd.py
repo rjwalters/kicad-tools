@@ -794,6 +794,14 @@ def _run_step_placement(ctx: BuildContext, console: Console) -> BuildResult:
             "cmaes",
             "--max-iterations",
             "300",
+            # Wall-clock cap: with the feasibility-gated convergence
+            # added in #2821 the optimizer no longer terminates at a
+            # plateau in the infeasible region, so a hard time budget
+            # is required to keep the build step bounded. Generous
+            # default (5 minutes) -- callers who need more should run
+            # `kct optimize-placement` directly.
+            "--time-budget",
+            "300",
             "--seed",
             "force-directed",
             "--output",

@@ -970,10 +970,12 @@ def run_optimize_placement(
 
     # Exit code 1 when pad-pad overlaps remain (actual clearance < 0).
     # Note: with the feasibility gate above this is now mostly redundant
-    # (any pad overlap implies overlap > 0 in the cost breakdown), but
-    # it is preserved for backwards compatibility with callers that pass
-    # ``--allow-infeasible`` and still want pad-pad failures surfaced.
-    if has_unresolved_overlaps:
+    # (any pad overlap implies overlap > 0 in the cost breakdown). It is
+    # preserved as a fallback for callers that disable the feasibility
+    # gate by writing custom weights with ``CostMode.WEIGHTED_SUM``,
+    # where ``is_feasible`` is still computed but the feasibility gate
+    # may behave differently. Skipped under ``--allow-infeasible``.
+    if has_unresolved_overlaps and not allow_infeasible:
         pad_overlaps = [
             d
             for d in post_slide_result.overlap_details

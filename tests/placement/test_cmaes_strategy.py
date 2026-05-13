@@ -8,8 +8,6 @@ INFEASIBILITY_OFFSET`` under :class:`CostMode.LEXICOGRAPHIC`).
 
 from __future__ import annotations
 
-import numpy as np
-
 from kicad_tools.placement.cmaes_strategy import CMAESStrategy
 from kicad_tools.placement.cost import INFEASIBILITY_OFFSET, BoardOutline
 from kicad_tools.placement.strategy import StrategyConfig
