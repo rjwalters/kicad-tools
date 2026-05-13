@@ -184,6 +184,12 @@ def run_route_command(args) -> int:
     per_net_timeout_val = getattr(args, "per_net_timeout", 30.0)
     if per_net_timeout_val != 30.0:
         sub_argv.extend(["--per-net-timeout", str(per_net_timeout_val)])
+    # Issue #2817: forward --checkpoint-interval to the inner parser.  The
+    # inner default also lives at 30.0, so only forward when the user passed
+    # a non-default value (matches the per-net-timeout pattern above).
+    checkpoint_interval_val = getattr(args, "checkpoint_interval", 30.0)
+    if checkpoint_interval_val != 30.0:
+        sub_argv.extend(["--checkpoint-interval", str(checkpoint_interval_val)])
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:
@@ -229,9 +235,7 @@ def run_route_command(args) -> int:
     if getattr(args, "placement_feedback", False):
         sub_argv.append("--placement-feedback")
     if getattr(args, "placement_feedback_budget", 3) != 3:
-        sub_argv.extend(
-            ["--placement-feedback-budget", str(args.placement_feedback_budget)]
-        )
+        sub_argv.extend(["--placement-feedback-budget", str(args.placement_feedback_budget)])
     if getattr(args, "placement_feedback_max_movement", 5.0) != 5.0:
         sub_argv.extend(
             [
@@ -240,9 +244,7 @@ def run_route_command(args) -> int:
             ]
         )
     if getattr(args, "placement_feedback_anchor", None):
-        sub_argv.extend(
-            ["--placement-feedback-anchor", args.placement_feedback_anchor]
-        )
+        sub_argv.extend(["--placement-feedback-anchor", args.placement_feedback_anchor])
     if getattr(args, "placement_feedback_no_anchor", None):
         sub_argv.extend(
             [

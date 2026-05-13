@@ -2165,6 +2165,20 @@ def _add_route_parser(subparsers) -> None:
         help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
         "Prevents individual nets from monopolizing the router. Use 0 to disable.",
     )
+    # Issue #2817: forward --checkpoint-interval through the outer parser so
+    # users can disable (``0``) or tune the best-so-far checkpoint cadence
+    # introduced by #2812.  The inner parser at route_cmd.py also declares
+    # this flag (default 30.0); both sites must stay in sync, enforced by
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--checkpoint-interval",
+        type=float,
+        default=30.0,
+        help=(
+            "Interval in seconds between best-so-far checkpoint writes to "
+            "--output. Default: 30. Use 0 to disable."
+        ),
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
