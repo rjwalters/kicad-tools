@@ -3860,6 +3860,23 @@ def main(argv: list[str] | None = None) -> int:
             "Use 0 to disable checkpointing (only the terminal save fires)."
         ),
     )
+    # Issue #2819: declare --max-search-iterations on the inner parser so the
+    # forwarding shim in ``commands/routing.py`` can hand it through.  Default
+    # 0 = use the historical ``cols * rows * 4`` heuristic (matches the outer
+    # parser declaration at parser.py and the C++ A* backstop semantics from
+    # Issue #2610).
+    parser.add_argument(
+        "--max-search-iterations",
+        type=int,
+        default=0,
+        help=(
+            "Override the C++ A* iteration backstop (default: 0 = use "
+            "cols*rows*4, which is ~1M for a 500x500 grid). Positive values "
+            "let dense boards trade memory for completeness. Iteration-cap "
+            "aborts are logged distinctly from --per-net-timeout (wall-clock) "
+            "aborts so you can tell which limit fired."
+        ),
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -4920,7 +4937,12 @@ def main(argv: list[str] | None = None) -> int:
                 validate_drc=not args.force,
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #2610: thread --max-search-iterations through.
-                max_search_iterations=getattr(args, "max_search_iterations", 0) or 0,
+                # The inner parser declares this flag with default=0 (Issue
+                # #2819), so the attribute is guaranteed to exist; the
+                # ``or 0`` guards against an explicit ``--max-search-iterations 0``
+                # being treated as falsy (which is the intended behaviour:
+                # 0 means "use the cols*rows*4 heuristic").
+                max_search_iterations=args.max_search_iterations or 0,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
@@ -5286,7 +5308,10 @@ def main(argv: list[str] | None = None) -> int:
             if per_net_timeout_val:
                 flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
             # Issue #2610: report the iteration backstop override if set.
-            _max_iter_val = getattr(args, "max_search_iterations", 0) or 0
+            # Issue #2819: the inner parser now declares the flag (default=0),
+            # so the attribute is guaranteed to exist; ``or 0`` preserves the
+            # historic semantics (0 = use cols*rows*4 heuristic, suppress log).
+            _max_iter_val = args.max_search_iterations or 0
             if _max_iter_val:
                 flush_print(f"  Max search iterations: {_max_iter_val}")
             if args.profile:

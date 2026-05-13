@@ -1,10 +1,10 @@
-"""Argparse-drift regression test (Issue #2817).
+"""Argparse-drift regression test (Issues #2817, #2819).
 
-This test prevents a recurring class of bug where a new flag is added to
-the *inner* ``route_cmd.py`` parser without being added to the *outer*
-``parser.py`` parser and to the forwarding shim in
-``commands/routing.py``.  Three prior instances of this exact pattern
-have shipped to ``main`` and required a follow-up bugfix:
+This test prevents a recurring class of bug where a flag is added to one
+of the two ``route`` parsers without being added to the other (and to
+the forwarding shim in ``commands/routing.py``).  Five prior instances
+of this exact pattern have shipped to ``main`` and required a follow-up
+bugfix:
 
 * **#2620** -- ``--placement-feedback-outer-timeout`` declared outer,
   rejected inner (drift in the opposite direction).
@@ -12,20 +12,30 @@ have shipped to ``main`` and required a follow-up bugfix:
 * **#2812 / #2817** -- ``--checkpoint-interval`` declared inner only;
   ``kct route --checkpoint-interval 30`` rejected with
   ``error: unrecognized arguments``.
+* **#2819** -- ``--max-search-iterations`` declared outer only; the
+  shim dropped the flag and the inner parser never saw it, so
+  ``kct route --max-search-iterations 50000`` parsed cleanly but ran
+  the C++ A* with ``max_search_iterations=0`` (the historical
+  ``cols*rows*4`` heuristic) regardless of the user-supplied value.
 
 The drift is invisible to the type checker and to most unit tests
 because both parsers are constructed independently with no shared
-schema.  This test introspects both parsers and asserts that every
-``--flag`` accepted by the inner parser is also accepted by the outer
-parser, except for an explicit allowlist of historically inner-only
-flags.
+schema.  This test introspects both parsers and asserts symmetric
+containment:
 
-If you legitimately need to add a new inner-only flag, add it to
-``INNER_ONLY_ALLOWLIST`` below with a comment explaining why it does
-not belong on the outer parser.  In most cases the right answer is to
-add it to BOTH parsers and to the forwarding shim -- see the
-``--per-net-timeout`` block in ``commands/routing.py`` for the model
-pattern.
+* ``inner_flags - outer_flags ⊆ INNER_ONLY_ALLOWLIST`` (inner-only flags
+  must be explicitly allowlisted -- guards the #2812/#2817 direction).
+* ``outer_flags - inner_flags ⊆ OUTER_ONLY_ALLOWLIST`` (outer-only flags
+  must be explicitly allowlisted -- guards the #2819 direction, where
+  the shim consumes the flag entirely or the forwarding block is
+  missing).
+
+If you legitimately need to add a new inner-only or outer-only flag,
+add it to the corresponding allowlist below with a comment explaining
+why the flag does not belong on the other parser.  In most cases the
+right answer is to add it to BOTH parsers and to the forwarding shim --
+see the ``--per-net-timeout`` block in ``commands/routing.py`` for the
+model pattern.
 """
 
 from __future__ import annotations
@@ -43,9 +53,10 @@ import pytest
 # internal-only (debug/diagnostic toggles, dev-only profiling switches,
 # experimental features that should not be advertised through ``kct``).
 #
-# Snapshot taken 2026-05-12 while fixing #2817.  Many of the entries
-# below pre-date the drift test; future flags should generally NOT be
-# added here -- expose them through the outer parser instead.
+# Snapshot taken 2026-05-12 while fixing #2817 and the symmetric
+# outer-only check added by #2819.  Many of the entries below pre-date
+# the drift test; future flags should generally NOT be added here --
+# expose them through the outer parser instead.
 INNER_ONLY_ALLOWLIST: frozenset[str] = frozenset(
     {
         # Diagnostics / debug / profiling -- not part of the
@@ -87,6 +98,19 @@ INNER_ONLY_ALLOWLIST: frozenset[str] = frozenset(
         "--two-phase-iterations",
     }
 )
+
+# Flags that legitimately exist ONLY on the outer ``parser.py`` route
+# subparser.  These are flags the shim consumes entirely before invoking
+# the inner ``route_cmd.main`` (e.g. they alter how ``sub_argv`` is
+# built rather than being forwarded verbatim), or flags whose outer
+# spelling differs from any inner equivalent.
+#
+# Snapshot taken 2026-05-12 while fixing #2819.  After the #2819 fix,
+# ``--max-search-iterations`` lives on BOTH parsers, so the outer-only
+# set is empty -- every outer flag either has a matching inner flag or
+# would be a drift bug.  Future outer-only entries belong here only if
+# the flag is genuinely consumed by the shim and never forwarded.
+OUTER_ONLY_ALLOWLIST: frozenset[str] = frozenset(set())
 
 
 def _flags_from_parser(parser: argparse.ArgumentParser) -> set[str]:
@@ -219,4 +243,90 @@ def test_checkpoint_interval_is_on_both_parsers():
     assert "--checkpoint-interval" in outer, (
         "--checkpoint-interval is missing from the outer parser.py route "
         "subparser (this would regress #2817)"
+    )
+
+
+def test_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer parser must also be on the inner parser.
+
+    Exceptions live in ``OUTER_ONLY_ALLOWLIST`` with justification.
+    This guards against the #2819 direction of the drift bug class: a
+    flag declared on the outer parser but never forwarded by the shim
+    (and therefore never declared on the inner parser).  In that
+    scenario ``kct route --flag VALUE`` parses cleanly but the inner
+    command never sees the override and the value is silently
+    discarded.
+    """
+    inner = _inner_route_parser_flags()
+    outer = _outer_route_parser_flags()
+
+    outer_only = outer - inner
+    unexpected_outer_only = outer_only - OUTER_ONLY_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct route' parser but rejected by the inner "
+            "'route_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/route_cmd.py :: main "
+            "(add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/routing.py :: run_route_command "
+            "(forward to sub_argv)\n\n"
+            "Model after the --per-net-timeout block.  If the flag is "
+            "genuinely consumed by the shim and intentionally never "
+            "forwarded, add it to OUTER_ONLY_ALLOWLIST in "
+            "tests/test_cli_parser_drift.py with justification."
+        )
+
+
+def test_allowlist_entries_are_actually_outer_only():
+    """Sanity: every flag in the allowlist should genuinely be outer-only.
+
+    Prevents the allowlist from growing stale -- if a flag is later
+    added to the inner parser it should be removed from the allowlist
+    so we don't accidentally mask a future drift bug for that flag.
+    """
+    inner = _inner_route_parser_flags()
+    outer = _outer_route_parser_flags()
+
+    stale: set[str] = set()
+    for flag in OUTER_ONLY_ALLOWLIST:
+        if flag not in outer:
+            stale.add(f"{flag} (not on outer parser at all)")
+        elif flag in inner:
+            stale.add(f"{flag} (now on inner parser -- remove from allowlist)")
+
+    if stale:
+        entries = "\n  ".join(sorted(stale))
+        pytest.fail(
+            "Stale entries in OUTER_ONLY_ALLOWLIST:\n  "
+            f"{entries}\n\n"
+            "Remove these entries from tests/test_cli_parser_drift.py."
+        )
+
+
+def test_max_search_iterations_is_on_both_parsers():
+    """Direct regression test for #2819.
+
+    ``--max-search-iterations`` was added to the outer parser by #2610
+    but the shim did not forward it and the inner parser never declared
+    it, so ``kct route --max-search-iterations N`` parsed cleanly and
+    the override was silently dropped (inner saw ``0`` via the defensive
+    ``getattr(args, "max_search_iterations", 0)``).  This test pins
+    both parsers to ensure the flag never goes missing again.
+    """
+    inner = _inner_route_parser_flags()
+    outer = _outer_route_parser_flags()
+
+    assert "--max-search-iterations" in inner, (
+        "--max-search-iterations is missing from the inner route_cmd.py "
+        "parser (this would regress #2819)"
+    )
+    assert "--max-search-iterations" in outer, (
+        "--max-search-iterations is missing from the outer parser.py route "
+        "subparser (this would regress #2610)"
     )
