@@ -1253,11 +1253,21 @@ def compute_multi_resolution_plan(
         )
 
         if should_escalate and off_grid_refs:
-            # Add these components as needing fine-grid zones (if not already)
-            # using the pad-position-aware solver introduced in #2837.  For
-            # each off-grid component we pick the coarsest fine resolution
-            # plus an origin offset that puts ALL of its pads on-grid.
+            # Add these components as needing fine-grid zones using the
+            # pad-position-aware solver introduced in #2837.  For each
+            # off-grid component we pick the coarsest fine resolution plus
+            # an origin offset that puts ALL of its pads on-grid.
+            #
+            # Skip single-pad components: a fine zone around a single point
+            # has nothing to refine -- the existing sub-grid escape routing
+            # already handles isolated off-grid pads.  This preserves
+            # parity with the pre-#2837 behaviour where ``if deltas`` was
+            # the gate that filtered out single-pad off-grid refs (e.g.
+            # mounting holes MH1-MH4 on board 05).
+            escalated = 0
             for ref, ref_pads in off_grid_refs.items():
+                if len(ref_pads) < 2:
+                    continue
                 fine_res, x_off, y_off = _compute_zone_resolution_and_offset(
                     ref_pads,
                     coarse_resolution=coarse_resolution,
@@ -1268,6 +1278,7 @@ def compute_multi_resolution_plan(
                 # actually checks pad-position alignment.
                 fine_components[ref] = fine_res
                 pad_position_offsets[ref] = (x_off, y_off)
+                escalated += 1
 
             logger.info(
                 "Off-grid escalation: %d/%d pads (%.1f%%) off-grid at "
@@ -1276,7 +1287,7 @@ def compute_multi_resolution_plan(
                 uniform_result.total_pads,
                 uniform_result.off_grid_percentage,
                 coarse_resolution,
-                len(off_grid_refs),
+                escalated,
             )
 
     if not fine_components:
