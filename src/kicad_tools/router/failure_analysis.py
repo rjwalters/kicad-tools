@@ -1304,9 +1304,7 @@ class RootCauseAnalyzer:
                 )
 
         elif cause == FailureCause.ROUTING_ORDER and blocking_net:
-            suggestions.append(
-                f"Try routing {net_name or 'this net'} before {blocking_net}"
-            )
+            suggestions.append(f"Try routing {net_name or 'this net'} before {blocking_net}")
             actionable.append(
                 ActionableSuggestion(
                     category="routing_order",
@@ -1332,9 +1330,7 @@ class RootCauseAnalyzer:
                     center = corridor.center
                     direction = self._suggest_move_direction(blocking, center)
                     if direction:
-                        suggestions.append(
-                            f"Move {ref_list} {direction} to create routing channel"
-                        )
+                        suggestions.append(f"Move {ref_list} {direction} to create routing channel")
                         for ref in sorted(movable_refs)[:2]:
                             actionable.append(
                                 ActionableSuggestion(
@@ -1455,6 +1451,151 @@ class RootCauseAnalyzer:
         else:
             return "south" if dy > 0 else "north"
 
+    @staticmethod
+    def _classify_blocker_geometry(
+        grid: RoutingGrid,
+        cell_wx: float,
+        cell_wy: float,
+        cell_net: int,
+        layer: int,
+    ) -> str:
+        """Return ``"via"`` or ``"trace"`` by inspecting ``grid.routes`` for ``cell_net``.
+
+        Issue #2858: The ``cell.original_net == 0`` fall-through in
+        :meth:`analyze_pad_access_blockers` cannot distinguish a trace
+        clearance cell from a via clearance cell using ``Cell`` state alone --
+        both have ``pad_blocked=False``, ``usage_count=0``, ``original_net=0``,
+        and ``net=route.net``.  This helper resolves the ambiguity by checking
+        the actual route geometry for ``cell_net``:
+
+        1. If any ``Via`` in those routes is within
+           ``via.diameter/2 + via_clearance + trace_width/2 + safety_margin``
+           of ``(cell_wx, cell_wy)``, return ``"via"`` (matches the radius
+           used by :meth:`grid.Grid._mark_via`).
+        2. Else if any ``Segment`` in those routes has perpendicular distance
+           ``<= seg.width/2 + trace_clearance + safety_margin`` from
+           ``(cell_wx, cell_wy)``, return ``"trace"`` (matches the radius
+           used by :meth:`grid.Grid._mark_segment`).
+        3. Else default to ``"via"`` -- preserves the pre-fix fall-through
+           behaviour for stale/rip-reroute artifacts where the cell's
+           ``net`` no longer matches any current route geometry.
+
+        The safety_margin matches the ``+1 cell`` quantization buffer that
+        ``_mark_via`` (grid.py:2116) and ``_mark_segment`` (grid.py:2010)
+        apply when marking cells.  Constants are pulled from ``grid.rules``
+        and ``grid.resolution`` to stay in sync if the marking radii change.
+
+        Uses the per-layer R-tree (``grid._seg_rtree``) for fast segment
+        proximity queries when available; falls back to linear iteration
+        over ``grid.routes`` when the index is unavailable or has not yet
+        been populated for ``layer``.  Via lists are typically small
+        enough that linear iteration is fine.
+
+        Args:
+            grid: The routing grid (used for ``routes``, ``rules``,
+                ``resolution``, and the R-tree index).
+            cell_wx: World X coordinate of the cell center (mm).
+            cell_wy: World Y coordinate of the cell center (mm).
+            cell_net: Net ID stored on the cell (matches the marking
+                operation's net).
+            layer: Layer index to filter segments by.
+
+        Returns:
+            ``"via"`` or ``"trace"``.
+        """
+        rules = grid.rules
+        # ``_mark_segment`` and ``_mark_via`` both apply two cells of
+        # quantization buffer when computing the halo: one cell for the
+        # ``int(... / resolution) + 1`` round-up plus one cell for the
+        # explicit safety margin (Issue #1666 / #1797).  Plus, the actual
+        # marking uses Chebyshev (square) cells, so a corner cell at
+        # ``N`` cells away has world distance up to ``N * sqrt(2) *
+        # resolution``.  Use ``2 * resolution`` as the safety buffer for
+        # this Euclidean radius check so it conservatively covers the
+        # worst-case quantization corner.
+        safety_margin = 2.0 * grid.resolution
+        trace_w = rules.trace_width
+
+        # Step 1: Via proximity check.  Iterate vias of matching net linearly
+        # (typical route has O(1) vias; small enough that R-tree is overkill).
+        for route in grid.routes:
+            if route.net != cell_net:
+                continue
+            for via in route.vias:
+                via_radius = via.diameter / 2 + rules.via_clearance + trace_w / 2 + safety_margin
+                dx = via.x - cell_wx
+                dy = via.y - cell_wy
+                if dx * dx + dy * dy <= via_radius * via_radius:
+                    return "via"
+
+        # Step 2: Segment proximity check.  Use the R-tree when available
+        # (Issue #1249) to prune candidates by bounding box before exact
+        # distance evaluation.  The R-tree envelopes are already inflated by
+        # ``grid._rtree_clearance_inflation`` (= max_clearance), so any
+        # segment within trace clearance of the cell point is guaranteed to
+        # have its envelope contain the cell point's bbox.
+        #
+        # Per-candidate radius uses ``seg.width`` (not ``rules.trace_width``)
+        # to mirror ``_mark_segment``'s halo computation: wider net-class
+        # traces have larger envelopes than ``rules.trace_width`` would
+        # suggest.
+
+        use_rtree = (
+            grid._rtree_available and layer in grid._seg_rtree and grid._seg_rtree_count >= 1
+        )
+
+        if use_rtree:
+            # Query envelope sized to capture any segment whose halo could
+            # reach this cell.  The maximum segment halo radius for the
+            # default net class is ``trace_width / 2 + trace_clearance +
+            # safety_margin``; wide net-class traces can be larger but the
+            # R-tree envelopes are already inflated by
+            # ``_rtree_clearance_inflation`` (= ``rules.max_clearance``)
+            # which covers the worst-case net-class clearance.  Expand the
+            # query box by ``max_clearance + trace_width / 2 + safety_margin``
+            # so the resulting intersection covers every segment within
+            # halo distance of the cell point.
+            query_expand = rules.max_clearance + trace_w / 2 + safety_margin
+            query_envelope = (
+                cell_wx - query_expand,
+                cell_wy - query_expand,
+                cell_wx + query_expand,
+                cell_wy + query_expand,
+            )
+            candidate_ids = list(grid._seg_rtree[layer].intersection(query_envelope))
+            layer_items = grid._seg_rtree_items.get(layer, {})
+            for cand_id in candidate_ids:
+                seg = layer_items.get(cand_id)
+                if seg is None or seg.net != cell_net:
+                    continue
+                dist = grid._point_to_segment_distance(
+                    cell_wx, cell_wy, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+                seg_radius = seg.width / 2 + rules.trace_clearance + safety_margin
+                if dist <= seg_radius:
+                    return "trace"
+        else:
+            # Brute-force fallback when the R-tree is unavailable or empty.
+            for route in grid.routes:
+                if route.net != cell_net:
+                    continue
+                for seg in route.segments:
+                    if grid.layer_to_index(seg.layer.value) != layer:
+                        continue
+                    dist = grid._point_to_segment_distance(
+                        cell_wx, cell_wy, seg.x1, seg.y1, seg.x2, seg.y2
+                    )
+                    seg_radius = seg.width / 2 + rules.trace_clearance + safety_margin
+                    if dist <= seg_radius:
+                        return "trace"
+
+        # Step 3: Default to "via" -- preserves the pre-fix fall-through for
+        # stale or rip-reroute artifacts where the cell's net no longer
+        # matches any current route geometry.  Avoids a sudden behavioural
+        # change for cells that the prior cascade also fell through to
+        # ``"via"``.
+        return "via"
+
     def analyze_pad_access_blockers(
         self,
         grid: RoutingGrid,
@@ -1534,8 +1675,15 @@ class RootCauseAnalyzer:
                 # pad-clearance zone): ``_mark_via`` overwrites ``cell.net`` to
                 # the via's net while ``cell.original_net`` stays at the
                 # pad's net. The discriminator fails and the cell correctly
-                # falls through to ``"via"`` -- matching operator intent that
-                # the immediate blocker is the via's clearance ring.
+                # falls through to the geometry classifier below -- matching
+                # operator intent that the immediate blocker is the via's
+                # clearance ring.
+                #
+                # Issue #2858: The ``cell.original_net == 0`` else branch
+                # cannot distinguish trace clearance from via clearance from
+                # Cell state alone, so it delegates to
+                # ``_classify_blocker_geometry`` which inspects
+                # ``grid.routes`` to decide.
                 if cell.pad_blocked:
                     blocking_type = "pad"
                 elif cell.usage_count > 0:
@@ -1543,7 +1691,22 @@ class RootCauseAnalyzer:
                 elif cell.original_net != 0 and cell.original_net == cell.net:
                     blocking_type = "pad_clearance"
                 else:
-                    blocking_type = "via"
+                    # Issue #2858: ``cell.original_net == 0`` can mean either
+                    # a via clearance cell or a trace clearance cell -- both
+                    # have identical Cell state shape (``pad_blocked=False``,
+                    # ``usage_count=0``, ``original_net=0``).  Inspect
+                    # ``grid.routes`` for ``cell.net`` to disambiguate by
+                    # actual route geometry rather than defaulting to
+                    # ``"via"`` (which misroutes the downstream resolver to
+                    # ``ViaConflictManager`` for trace blockers; see
+                    # ``core.py:9018``).
+                    blocking_type = self._classify_blocker_geometry(
+                        grid=grid,
+                        cell_wx=cell_wx,
+                        cell_wy=cell_wy,
+                        cell_net=cell.net,
+                        layer=layer,
+                    )
 
                 # Track closest element for this net
                 net_id = cell.net
