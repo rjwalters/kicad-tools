@@ -573,11 +573,30 @@ class SubGridRouter:
         Returns:
             Fine resolution in mm, or None if the pad is outside all fine zones.
         """
-        best: float | None = None
+        zone = self._get_pad_fine_zone(pad)
+        return zone.resolution if zone is not None else None
+
+    def _get_pad_fine_zone(self, pad: Pad) -> "FineZone | None":
+        """Return the finest FineZone containing the pad, or None.
+
+        When a pad falls inside multiple zones (overlapping fine zones from
+        nearby components), the one with the smallest ``resolution`` wins
+        so the densest grid drives escape candidate generation.  Unlike
+        :meth:`_get_pad_fine_resolution`, this returns the full zone so
+        callers can also use its origin offsets (issue #2837).
+
+        Args:
+            pad: The pad to check.
+
+        Returns:
+            The finest containing FineZone, or None if the pad is outside
+            every fine zone.
+        """
+        best: "FineZone | None" = None
         for zone in self.fine_zones:
             if zone.contains(pad.x, pad.y):
-                if best is None or zone.resolution < best:
-                    best = zone.resolution
+                if best is None or zone.resolution < best.resolution:
+                    best = zone
         return best
 
     def _generate_fine_grid_candidates(
@@ -634,16 +653,41 @@ class SubGridRouter:
                 extended_mm = max(min_search_mm, pad_pitch * 2)
                 fine_radius = max(fine_radius, math.ceil(extended_mm / fine_resolution))
 
-        # The fine grid is centred on the pad's nearest coarse-grid point
-        # (sgp.snap_x, sgp.snap_y) and extends ``fine_radius`` fine cells
-        # in each direction.
+        # Determine the fine-grid origin.  Historically the fine grid was
+        # centred on the pad's nearest coarse-grid point (sgp.snap_x,
+        # sgp.snap_y).  For pad-position-aware fine zones (issue #2837),
+        # the FineZone may carry an explicit (x_offset, y_offset) that aligns
+        # the fine grid with the component's actual pad positions.  In that
+        # case we anchor candidates to the nearest fine-grid point that
+        # satisfies ``x = x_offset + k * fine_resolution`` (and similarly for
+        # y), so candidate columns include the pad's own coordinate even
+        # when the coarse grid does not.
+        zone = self._get_pad_fine_zone(pad)
+        if zone is not None and (zone.x_offset != 0.0 or zone.y_offset != 0.0):
+            # Snap the centre to the fine grid defined by (x_offset, y_offset).
+            anchor_x = (
+                zone.x_offset
+                + round((sgp.snap_x - zone.x_offset) / fine_resolution)
+                * fine_resolution
+            )
+            anchor_y = (
+                zone.y_offset
+                + round((sgp.snap_y - zone.y_offset) / fine_resolution)
+                * fine_resolution
+            )
+        else:
+            anchor_x = sgp.snap_x
+            anchor_y = sgp.snap_y
+
+        # The fine grid extends ``fine_radius`` fine cells in each direction
+        # around the anchor point.
         candidates: list[tuple[float, int, int, float, float]] = []
 
         for dy in range(-fine_radius, fine_radius + 1):
             for dx in range(-fine_radius, fine_radius + 1):
                 # Fine-grid candidate in world coordinates
-                fx = sgp.snap_x + dx * fine_resolution
-                fy = sgp.snap_y + dy * fine_resolution
+                fx = anchor_x + dx * fine_resolution
+                fy = anchor_y + dy * fine_resolution
 
                 # Distance from pad center to this fine-grid point
                 dist = math.sqrt((pad.x - fx) ** 2 + (pad.y - fy) ** 2)
