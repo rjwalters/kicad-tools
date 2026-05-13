@@ -122,7 +122,13 @@ class TestRunAutoFix:
 
     @patch("kicad_tools.cli.fix_drc_cmd.main")
     def test_run_auto_fix_not_quiet_failure(self, mock_fix_drc, capsys):
-        """_run_auto_fix prints failure message when not quiet and fix fails."""
+        """_run_auto_fix prints failure message when not quiet and fix fails.
+
+        Issue #2839: exit code 1 (no progress) now emits a distinct
+        ``no progress made`` message instead of the generic
+        ``some violations remain`` -- the latter is reserved for the
+        catch-all "unknown exit code" branch.
+        """
         from pathlib import Path
 
         mock_fix_drc.return_value = 1
@@ -130,7 +136,7 @@ class TestRunAutoFix:
 
         captured = capsys.readouterr()
         assert "Auto-Fix DRC Violations" in captured.out
-        assert "some violations remain" in captured.out
+        assert "no progress made" in captured.out
 
     @patch("kicad_tools.cli.fix_drc_cmd.main")
     def test_run_auto_fix_quiet_no_output(self, mock_fix_drc, capsys):
@@ -142,6 +148,100 @@ class TestRunAutoFix:
 
         captured = capsys.readouterr()
         assert "Auto-Fix DRC Violations" not in captured.out
+
+    # ── Issue #2839: distinct exit-code messages ─────────────────────
+
+    @patch("kicad_tools.cli.fix_drc_cmd.main")
+    def test_auto_fix_rollback_message_distinguishable(self, mock_fix_drc, capsys):
+        """Exit code 3 (connectivity rollback) emits a distinct, named message.
+
+        Issue #2839 sub-bug #1: previously, ``_run_auto_fix`` collapsed
+        all non-zero exit codes into a single generic ``some violations
+        remain`` message.  After the fix, the rollback case (exit 3)
+        emits a message containing ``rolled back`` and ``connectivity``
+        so the user knows the work was *attempted* and *thrown away*
+        (rather than never having happened).
+        """
+        from pathlib import Path
+
+        mock_fix_drc.return_value = 3  # connectivity rollback
+        _run_auto_fix(Path("/tmp/board.kicad_pcb"), max_passes=1, quiet=False)
+
+        captured = capsys.readouterr()
+        assert "Auto-Fix DRC Violations" in captured.out
+        # Distinct message keywords -- must mention rollback AND connectivity
+        out_lower = captured.out.lower()
+        assert "rolled back" in out_lower or "rollback" in out_lower, (
+            f"Expected 'rolled back'/'rollback' in output, got: {captured.out!r}"
+        )
+        assert "connectivity" in out_lower, (
+            f"Expected 'connectivity' in output, got: {captured.out!r}"
+        )
+        # Must NOT collapse into the generic "some violations remain"
+        # catch-all (which was the pre-fix behavior).
+        assert "some violations remain" not in captured.out, (
+            f"Generic catch-all message leaked into rollback path: {captured.out!r}"
+        )
+        # Must point the user at the documented escape hatch.
+        assert "--no-connectivity-check" in captured.out, (
+            f"Expected '--no-connectivity-check' guidance in output, "
+            f"got: {captured.out!r}"
+        )
+
+    @patch("kicad_tools.cli.fix_drc_cmd.main")
+    def test_auto_fix_partial_repair_message(self, mock_fix_drc, capsys):
+        """Exit code 2 (partial repair) emits its own distinct message.
+
+        Issue #2839 sub-bug #1: each documented fix-drc exit code gets a
+        distinct message so the user can tell ``no progress`` (1) from
+        ``partial repair`` (2) from ``connectivity rollback`` (3).
+        """
+        from pathlib import Path
+
+        mock_fix_drc.return_value = 2  # partial repair
+        _run_auto_fix(Path("/tmp/board.kicad_pcb"), max_passes=1, quiet=False)
+
+        captured = capsys.readouterr()
+        assert "Auto-Fix DRC Violations" in captured.out
+        # Exit 2 should mention "partial" -- not "rolled back".
+        assert "partial" in captured.out.lower()
+        assert "rolled back" not in captured.out.lower()
+        assert "rollback" not in captured.out.lower()
+
+    @patch("kicad_tools.cli.fix_drc_cmd.main")
+    def test_auto_fix_no_progress_message(self, mock_fix_drc, capsys):
+        """Exit code 1 (no progress) emits its own distinct message."""
+        from pathlib import Path
+
+        mock_fix_drc.return_value = 1  # no progress
+        _run_auto_fix(Path("/tmp/board.kicad_pcb"), max_passes=1, quiet=False)
+
+        captured = capsys.readouterr()
+        assert "Auto-Fix DRC Violations" in captured.out
+        # Exit 1 should mention "no progress" -- not "rolled back".
+        assert "no progress" in captured.out.lower()
+        assert "rolled back" not in captured.out.lower()
+        assert "rollback" not in captured.out.lower()
+
+    @patch("kicad_tools.cli.fix_drc_cmd.main")
+    def test_auto_fix_success_message(self, mock_fix_drc, capsys):
+        """Exit code 0 (success) emits the celebratory message (regression guard).
+
+        Issue #2839 synthetic positive control: a non-regressing case
+        must still report ``all targeted violations repaired`` so the
+        layer-1 visibility fix does not over-correct the happy path.
+        """
+        from pathlib import Path
+
+        mock_fix_drc.return_value = 0  # success
+        _run_auto_fix(Path("/tmp/board.kicad_pcb"), max_passes=1, quiet=False)
+
+        captured = capsys.readouterr()
+        assert "all targeted violations repaired" in captured.out.lower()
+        # Success path must not accidentally print rollback wording.
+        assert "rolled back" not in captured.out.lower()
+        assert "rollback" not in captured.out.lower()
+        assert "partial" not in captured.out.lower()
 
 
 class TestFixDrcSuggestionInDrcOutput:

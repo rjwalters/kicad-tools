@@ -1102,8 +1102,34 @@ def _run_auto_fix(
     result = fix_drc_main(fix_argv)
 
     if not quiet:
+        # Exit-code contract from fix_drc_cmd.main (see fix_drc_cmd.py:375-390):
+        #   0 = all targeted violations repaired
+        #   1 = no violations found or no progress made
+        #   2 = partial repair (some repairable violations remain)
+        #   3 = connectivity rollback (issue #2839)
+        #
+        # Each code gets a distinct message so the user can distinguish
+        # "rollback fired and silently zeroed out the work" (3) from
+        # "fix-drc tried and partially succeeded" (2) and from "nothing
+        # could be done at all" (1).
         if result == 0:
             print("  Auto-fix: all targeted violations repaired!")
+        elif result == 3:
+            print(
+                "  Auto-fix: rolled back due to connectivity regression "
+                "(nudges would have broken at least one net)."
+            )
+            print(
+                "  Run 'kct fix-drc <pcb> --no-connectivity-check' to apply "
+                "the nudges anyway"
+            )
+            print(
+                "  (only safe when partial-completion regressions are acceptable)."
+            )
+        elif result == 2:
+            print("  Auto-fix: partial repair; some violations remain.")
+        elif result == 1:
+            print("  Auto-fix: no progress made (manual repair may be needed).")
         else:
             print("  Auto-fix: some violations remain (manual repair may be needed)")
 
