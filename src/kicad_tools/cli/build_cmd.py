@@ -50,6 +50,7 @@ class BuildStep(str, Enum):
     SILKSCREEN = "silkscreen"
     ROUTE = "route"
     STITCH = "stitch"
+    PREFLIGHT_ROUTING = "preflight-routing"
     VERIFY = "verify"
     EXPORT = "export"
     ALL = "all"
@@ -83,6 +84,7 @@ class BuildContext:
     force: bool = False
     optimize_placement: bool = False
     smoke_check: bool = True
+    allow_incomplete: bool = False
     _executed_scripts: set[Path] | None = None
     _kicad_cli_warning_emitted: bool = False
 
@@ -1974,6 +1976,157 @@ def _run_step_sync(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
+def _print_net_status_detail(result, console: Console, max_nets: int = 10) -> None:
+    """Print per-net detail for incomplete/unrouted nets.
+
+    Lists at most ``max_nets`` offending nets sorted by status (incomplete
+    first, then unrouted), then by name.  Mirrors the indentation used by
+    :func:`_print_sync_analysis_detail` so the build command's surface
+    reads consistently across SYNC and PREFLIGHT_ROUTING failures.
+    """
+    # Nets are already sorted by status in NetStatusResult.analyze()
+    # (incomplete, then unrouted, then complete). Pull just the offenders.
+    offenders = [n for n in result.nets if n.status in ("incomplete", "unrouted")]
+    if not offenders:
+        return
+
+    shown = offenders[:max_nets]
+    console.print(f"    Offending nets ({len(offenders)} total, showing {len(shown)}):")
+    for net in shown:
+        if net.status == "incomplete":
+            detail = f"{net.connected_count}/{net.total_pads} pads connected"
+        else:
+            detail = f"unrouted ({net.total_pads} pads)"
+        console.print(f"      {net.net_name}: {detail}")
+
+    if len(offenders) > max_nets:
+        console.print(f"      ... and {len(offenders) - max_nets} more")
+
+
+def _run_step_preflight_routing(ctx: BuildContext, console: Console) -> BuildResult:
+    """Routing-completeness gate between STITCH and VERIFY.
+
+    Runs the in-process :class:`NetStatusAnalyzer` against the routed PCB
+    and halts the build if any nets are incomplete or unrouted.  This
+    closes the issue #2831 gap where ``kct build`` would emit a full
+    manufacturing package (gerbers, BOM, CPL) even when nets were
+    unconnected.
+
+    Semantics mirror :func:`_run_step_sync`:
+
+    - No PCB available: skipped (``success=True``).
+    - All nets complete: ``success=True``.
+    - Any incomplete/unrouted nets: blocking failure naming both the
+      ``--allow-incomplete`` escape hatch and ``kct route ... --auto-fix``.
+    - ``ctx.force`` bypass converts the failure into a warning
+      (parity with SYNC's ``--force`` semantics).
+    - ``ctx.allow_incomplete`` is the targeted, advertised opt-out and
+      also converts the failure into a warning.
+
+    The check is read-only and is intentionally *not* added to
+    ``_PCB_WRITE_STEPS`` (no smoke-check needed) or to the "stop on
+    failure" exemption set (we want it to halt the build, same as SYNC).
+    """
+    # Skip if no PCB file available (e.g., running just this step before
+    # PCB generation has happened).
+    pcb_to_check = ctx.routed_pcb_file or ctx.pcb_file
+    if not pcb_to_check or not pcb_to_check.exists():
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                "preflight-routing: no PCB available — skipped (run 'kct build --step pcb' first)"
+            ),
+        )
+
+    # Dry-run mode: preview without instantiating the analyser
+    if ctx.dry_run:
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=f"[dry-run] Would check net status on {pcb_to_check.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Checking net status on {pcb_to_check.name}...")
+
+    # Instantiate NetStatusAnalyzer in-process (no subprocess overhead).
+    try:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        analyzer = NetStatusAnalyzer(pcb_to_check)
+        result = analyzer.analyze()
+    except Exception as e:
+        logger.warning("preflight-routing: failed to analyze: %s", e)
+        return BuildResult(
+            step="preflight-routing",
+            success=False,
+            message=f"preflight-routing: failed to analyze — {e}",
+        )
+
+    total = result.total_nets
+    incomplete = result.incomplete_count
+    unrouted = result.unrouted_count
+
+    # Clean pass: every net is complete (or there are no nets at all).
+    if incomplete == 0 and unrouted == 0:
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=f"preflight-routing: {total}/{total} nets complete",
+        )
+
+    # Print the summary plus per-net detail for offenders
+    if not ctx.quiet:
+        for line in result.summary().splitlines():
+            console.print(f"    {line}")
+        _print_net_status_detail(result, console)
+
+    offending = incomplete + unrouted
+
+    # --allow-incomplete: targeted, grep-friendly opt-out advertised in the
+    # FAIL message itself.  Convert blocking failure into a yellow warning
+    # so the build proceeds through VERIFY and EXPORT.
+    if ctx.allow_incomplete:
+        if not ctx.quiet:
+            console.print(
+                f"  [yellow]preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--allow-incomplete)[/yellow]"
+            )
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                f"preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--allow-incomplete)"
+            ),
+        )
+
+    # --force: existing umbrella escape hatch (mirrors SYNC semantics).
+    if ctx.force:
+        if not ctx.quiet:
+            console.print(
+                f"  [yellow]preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--force)[/yellow]"
+            )
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                f"preflight-routing: {offending}/{total} nets incomplete — continuing (--force)"
+            ),
+        )
+
+    return BuildResult(
+        step="preflight-routing",
+        success=False,
+        message=(
+            f"preflight-routing: {offending}/{total} nets incomplete;"
+            " run `kct route ... --auto-fix` or pass --allow-incomplete to bypass"
+        ),
+    )
+
+
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
     """Run verification step (DRC + audit)."""
     # Find the PCB to verify (prefer routed version)
@@ -2331,6 +2484,7 @@ Examples:
             "silkscreen",
             "route",
             "stitch",
+            "preflight-routing",
             "verify",
             "export",
             "all",
@@ -2385,6 +2539,14 @@ Examples:
             "Disable the per-step kicad-cli load smoke check that runs "
             "after each PCB-write step.  Use to restore prior behaviour "
             "when kicad-cli is misbehaving or pipeline speed matters."
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Skip the routing-completeness preflight "
+            "(advertised in failure messages; CI greppable)."
         ),
     )
 
@@ -2458,6 +2620,7 @@ Examples:
         force=args.force,
         optimize_placement=args.optimize_placement,
         smoke_check=not args.no_smoke_check,
+        allow_incomplete=args.allow_incomplete,
     )
 
     # Print build header
@@ -2492,6 +2655,7 @@ Examples:
             BuildStep.SILKSCREEN,
             BuildStep.ROUTE,
             BuildStep.STITCH,
+            BuildStep.PREFLIGHT_ROUTING,
             BuildStep.VERIFY,
             BuildStep.EXPORT,
         ]
@@ -2547,6 +2711,9 @@ Examples:
                 result = _run_step_stitch(ctx, console)
                 if result.output_file:
                     ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.PREFLIGHT_ROUTING:
+                result = _run_step_preflight_routing(ctx, console)
 
             elif step == BuildStep.VERIFY:
                 result = _run_step_verify(ctx, console)
