@@ -412,7 +412,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # any timeout bracket).  Mirrors the recommendation in the
     # Router.route_all() #2794 warning and the bracket semantics added
     # by PR #2779 / #2775.
-    router.route_all(per_net_timeout=30.0, timeout=240.0)
+    #
+    # Outer timeout=600.0 (not 240.0): the CI runner has no C++ router
+    # (router_cpp.*.so absent), so the pure-Python fallback runs
+    # 10-100x slower. With timeout=240.0 only ~14/31 nets complete on
+    # CI -- not enough for detect_match_groups -> derive_group_skew_data
+    # to engage match_group_length_skew, which trips the silent-regression
+    # gate in scripts/ci/check_matchgroup_coverage.py. 600.0s gives the
+    # pure-Python fallback budget for 31 nets while remaining under the
+    # GitHub Actions 10-min job ceiling. Per-net timeout stays at 30s --
+    # that's the #2779 bracket worth preserving.
+    router.route_all(per_net_timeout=30.0, timeout=600.0)
 
     # _finalize_routing has now populated _match_group_tracker via
     # the Phase 1D producer wiring (#2690).  Capture the skew snapshot
