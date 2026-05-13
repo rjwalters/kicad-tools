@@ -503,6 +503,12 @@ class FineZone:
         x_max: Bounding box maximum X (mm)
         y_max: Bounding box maximum Y (mm)
         resolution: Fine grid resolution for this zone (mm)
+        x_offset: Origin offset of the fine grid along X (mm, default 0.0).
+            Grid points within this zone fall at ``x_offset + k * resolution``
+            for integer k.  Used so the fine grid aligns to the component's
+            actual pad positions even when those positions are off-grid in
+            world coordinates (issue #2837).
+        y_offset: Origin offset of the fine grid along Y (mm, default 0.0).
     """
 
     ref: str
@@ -511,6 +517,8 @@ class FineZone:
     x_max: float
     y_max: float
     resolution: float
+    x_offset: float = 0.0
+    y_offset: float = 0.0
 
     @property
     def width(self) -> float:
@@ -579,10 +587,15 @@ class MultiResolutionGridPlan:
             f"  Fine zones: {len(self.fine_zones)}",
         ]
         for zone in self.fine_zones:
+            offset_str = ""
+            if zone.x_offset != 0.0 or zone.y_offset != 0.0:
+                offset_str = (
+                    f" offset=({zone.x_offset:.4f},{zone.y_offset:.4f})"
+                )
             lines.append(
                 f"    {zone.ref}: {zone.resolution:.4f}mm "
                 f"({zone.width:.1f}x{zone.height:.1f}mm, "
-                f"~{zone.cell_count:,} cells)"
+                f"~{zone.cell_count:,} cells){offset_str}"
             )
         lines.append(f"  Total cell estimate: {self.total_cell_estimate:,}")
         if self.uniform_fallback > 0:
@@ -846,6 +859,89 @@ def _compute_gcd_grid_candidates(
     return result
 
 
+def _compute_zone_resolution_and_offset(
+    comp_pads: list,
+    coarse_resolution: float,
+    min_fine_resolution: float = 0.005,
+) -> tuple[float, float, float]:
+    """Find the coarsest fine-grid (resolution, x_offset, y_offset) for a component.
+
+    Searches a series of candidate fine-grid resolutions (coarsest first)
+    and, for each, finds an origin offset that maximizes on-grid coverage
+    of *this component's* pads.  Returns the coarsest resolution for which
+    ALL of the component's pads are on-grid with the chosen offset.  If no
+    candidate achieves full coverage, the finest candidate is returned with
+    its best-fit offset.
+
+    This is the pad-position-aware refinement for issue #2837: rather than
+    deriving a fine resolution heuristically from ``min_pad_delta / 10``,
+    we pick a (resolution, offset) pair that actually aligns the
+    component's pads.  This is essential for off-grid components like J1
+    USB-C (half-grid offsets) and Y1 crystals (sub-0.05mm spacing) that
+    the previous heuristic could not handle.
+
+    Args:
+        comp_pads: List of Pad objects belonging to the component.
+        coarse_resolution: The coarse global grid resolution in mm.  The
+            chosen fine resolution will be strictly finer than this (a
+            fine zone at the coarse resolution would be redundant).
+        min_fine_resolution: Floor for the fine grid resolution (mm).
+            Below this, the candidate is rejected as impractical.
+
+    Returns:
+        Tuple of (fine_resolution_mm, x_offset_mm, y_offset_mm).  When the
+        component has fewer than 2 pads, returns
+        ``(min_fine_resolution, 0.0, 0.0)`` as a conservative default.
+    """
+    if not comp_pads:
+        return (min_fine_resolution, 0.0, 0.0)
+
+    # Build candidate resolutions: fixed grid-fraction values plus
+    # GCD-derived candidates from this component's pad spacings.  Coarsest
+    # values come first so we prefer the cheapest fine zone that works.
+    fixed_candidates = [0.1, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
+    gcd_candidates = _compute_gcd_grid_candidates(comp_pads, min_grid=min_fine_resolution)
+    raw_candidates = sorted(
+        {round(c, 6) for c in (fixed_candidates + gcd_candidates)},
+        reverse=True,
+    )
+
+    # Keep only candidates strictly finer than the coarse grid and at or
+    # above the minimum floor.  A fine zone at >= coarse_resolution would
+    # not refine anything (the coarse grid would suffice).
+    candidates = [
+        c for c in raw_candidates
+        if c < coarse_resolution and c >= min_fine_resolution
+    ]
+
+    if not candidates:
+        # Fall back to half the coarse grid floored at the minimum.  This
+        # preserves the legacy behaviour when the component genuinely
+        # can't be refined below the coarse grid.
+        return (max(coarse_resolution / 2.0, min_fine_resolution), 0.0, 0.0)
+
+    # Walk candidates coarsest -> finest, returning the first (R, O) that
+    # places *all* of the component's pads on-grid.  This minimises the
+    # fine zone's cell count while still being pad-position-aware.
+    best_finest: tuple[float, float, float, int] | None = None
+    for res in candidates:
+        offset = _find_optimal_origin_offset(comp_pads, res)
+        off_grid = _count_off_grid_with_offset(comp_pads, res, offset[0], offset[1])
+        if off_grid == 0:
+            return (res, offset[0], offset[1])
+        # Track best-effort fallback (lowest off-grid count, prefer coarser
+        # at equal off-grid count).
+        if best_finest is None or off_grid < best_finest[3]:
+            best_finest = (res, offset[0], offset[1], off_grid)
+
+    # No candidate achieved 0 off-grid; return the best-effort result.
+    if best_finest is not None:
+        return (best_finest[0], best_finest[1], best_finest[2])
+
+    # Defensive fallback (should be unreachable given the candidate list).
+    return (min_fine_resolution, 0.0, 0.0)
+
+
 def auto_select_grid_resolution(
     pads: list[Pad] | list[PadPosition] | dict[tuple[str, str], Pad],
     clearance: float,
@@ -1032,17 +1128,19 @@ def compute_multi_resolution_plan(
     zone_padding: float = 2.0,
     min_fine_resolution: float = 0.05,
     fine_pitch_threshold: float = 0.8,
-    off_grid_escalation_threshold: float = 50.0,
+    off_grid_escalation_threshold: float = 10.0,
+    min_off_grid_pads_to_escalate: int = 2,
+    min_escalation_fine_resolution: float = 0.005,
 ) -> MultiResolutionGridPlan | None:
     """Compute a multi-resolution grid plan for adaptive routing.
 
     Analyzes pad positions to determine if a multi-resolution approach is
     beneficial. Returns a plan with coarse global grid and per-component
     fine zones when fine-pitch components are detected OR when the uniform
-    grid leaves a high percentage of pads off-grid.
+    grid leaves any structurally-significant cluster of pads off-grid.
 
-    Returns None if all components are coarse-pitch and off-grid percentage
-    is acceptable (uniform grid is optimal).
+    Returns None if all components are coarse-pitch and the uniform grid
+    already places every pad on-grid (uniform grid is optimal).
 
     Args:
         pads: Pad objects or positions
@@ -1051,12 +1149,26 @@ def compute_multi_resolution_plan(
         board_height: Board height in mm
         max_cells: Maximum total cell budget across all zones
         zone_padding: Padding around component bbox for fine zones (mm)
-        min_fine_resolution: Minimum fine grid resolution floor (mm)
+        min_fine_resolution: Minimum fine grid resolution floor (mm) for
+            the fine-pitch path.  Default 0.05mm avoids generating absurdly
+            fine zones for on-grid fine-pitch components (e.g. TQFP-32
+            with 0.8mm pitch already at 0.1mm-aligned positions).
         fine_pitch_threshold: Pitch below this triggers fine-grid zone
-        off_grid_escalation_threshold: When off-grid percentage exceeds this
-            value after origin-offset optimization, automatically create
-            escape zones for off-grid pad clusters even if they are not
-            fine-pitch.  Default 50.0%.
+        off_grid_escalation_threshold: When off-grid percentage exceeds
+            this value after origin-offset optimization, escape zones are
+            created for off-grid pad clusters even if they are not
+            fine-pitch.  Default 10.0% (lowered from 50.0% in #2837 so
+            small-but-real off-grid clusters like USB-C half-grid pads
+            and crystals are caught instead of warned-about).
+        min_off_grid_pads_to_escalate: Absolute floor on the number of
+            off-grid pads required to trigger escalation independent of
+            the percentage threshold.  Prevents spurious bumps from a
+            single mis-snapped pad while still catching small clusters
+            (e.g. a 2-pad crystal off by 0.010mm).  Default 2.
+        min_escalation_fine_resolution: Floor for the escalation path's
+            fine resolution (mm).  Lower than ``min_fine_resolution`` so
+            the solver can find a (resolution, offset) that aligns
+            sub-0.05mm pad coordinates (issue #2837).  Default 0.005mm.
 
     Returns:
         MultiResolutionGridPlan if fine-pitch components detected or
@@ -1098,14 +1210,22 @@ def compute_multi_resolution_plan(
         fine_pitch_threshold=fine_pitch_threshold,
     )
 
-    # Escalation: when off-grid percentage is still high after origin-offset
-    # optimization, identify off-grid pad clusters and create escape zones
-    # for them even if they are not fine-pitch.  This handles mixed
-    # metric/imperial boards where no single uniform grid works.
-    if (
-        uniform_result.off_grid_percentage >= off_grid_escalation_threshold
-        and has_ref
-    ):
+    # Escalation: when the uniform grid still leaves any meaningful cluster
+    # of pads off-grid after origin-offset optimisation, create escape zones
+    # for the off-grid components -- even if they are not fine-pitch in the
+    # min-pad-pitch sense.  This handles mixed metric/imperial boards, USB-C
+    # half-grid pads, and crystals whose pad positions don't divide evenly
+    # into any common coarse grid (issue #2837).
+    #
+    # The escalation fires when EITHER:
+    #   - the off-grid percentage exceeds ``off_grid_escalation_threshold``,
+    #     OR
+    #   - the absolute off-grid pad count is at or above
+    #     ``min_off_grid_pads_to_escalate``.
+    # The threshold path catches large clusters; the absolute floor catches
+    # small but structurally-critical components (e.g. a 2-pad crystal).
+    pad_position_offsets: dict[str, tuple[float, float]] = {}
+    if has_ref and uniform_result.off_grid_pads > 0:
         # Find components with off-grid pads at the chosen resolution+offset
         off_grid_refs: dict[str, list] = {}
         offset = uniform_result.origin_offset
@@ -1120,32 +1240,53 @@ def compute_multi_resolution_plan(
                     off_grid_refs[ref] = []
                 off_grid_refs[ref].append(pad)
 
-        # Add these components as needing fine-grid zones (if not already)
-        for ref, ref_pads in off_grid_refs.items():
-            if ref not in fine_components:
-                # Use a resolution that divides into the component's pad pitch
-                xs = sorted({p.x for p in ref_pads})
-                ys = sorted({p.y for p in ref_pads})
-                deltas = []
-                for coords in (xs, ys):
-                    for i in range(1, len(coords)):
-                        d = coords[i] - coords[i - 1]
-                        if d > 0.001:
-                            deltas.append(d)
-                if deltas:
-                    # Pick a resolution that divides the smallest delta
-                    min_delta = min(deltas)
-                    # Use pitch/10 or min_fine_resolution, whichever is larger
-                    fine_res = max(min_delta / 10.0, min_fine_resolution)
-                    fine_components[ref] = fine_res
-
-        logger.info(
-            "Off-grid escalation: %.1f%% pads off-grid at %.3fmm, "
-            "creating escape zones for %d components",
-            uniform_result.off_grid_percentage,
-            coarse_resolution,
-            len(off_grid_refs),
+        # Decide whether the escalation actually fires.  We escalate if the
+        # percentage threshold is exceeded OR if the absolute off-grid pad
+        # count meets the minimum cluster size.  Both gates together prevent
+        # spurious escalation on boards whose pads are already aligned
+        # (uniform_result.off_grid_pads == 0 short-circuits above).
+        should_escalate = (
+            uniform_result.off_grid_percentage >= off_grid_escalation_threshold
+            or uniform_result.off_grid_pads >= min_off_grid_pads_to_escalate
         )
+
+        if should_escalate and off_grid_refs:
+            # Add these components as needing fine-grid zones using the
+            # pad-position-aware solver introduced in #2837.  For each
+            # off-grid component we pick the coarsest fine resolution plus
+            # an origin offset that puts ALL of its pads on-grid.
+            #
+            # Skip single-pad components: a fine zone around a single point
+            # has nothing to refine -- the existing sub-grid escape routing
+            # already handles isolated off-grid pads.  This preserves
+            # parity with the pre-#2837 behaviour where ``if deltas`` was
+            # the gate that filtered out single-pad off-grid refs (e.g.
+            # mounting holes MH1-MH4 on board 05).
+            escalated = 0
+            for ref, ref_pads in off_grid_refs.items():
+                if len(ref_pads) < 2:
+                    continue
+                fine_res, x_off, y_off = _compute_zone_resolution_and_offset(
+                    ref_pads,
+                    coarse_resolution=coarse_resolution,
+                    min_fine_resolution=min_escalation_fine_resolution,
+                )
+                # The new solver supersedes any heuristic value that
+                # identify_fine_pitch_components produced earlier -- it
+                # actually checks pad-position alignment.
+                fine_components[ref] = fine_res
+                pad_position_offsets[ref] = (x_off, y_off)
+                escalated += 1
+
+            logger.info(
+                "Off-grid escalation: %d/%d pads (%.1f%%) off-grid at "
+                "%.3fmm coarse; creating fine zones for %d component(s)",
+                uniform_result.off_grid_pads,
+                uniform_result.total_pads,
+                uniform_result.off_grid_percentage,
+                coarse_resolution,
+                escalated,
+            )
 
     if not fine_components:
         # No fine-pitch components and off-grid is acceptable
@@ -1174,9 +1315,24 @@ def compute_multi_resolution_plan(
         x_max = max(xs) + zone_padding
         y_max = max(ys) + zone_padding
 
-        # Fine resolution for this component
+        # Fine resolution for this component.  Escalation components use
+        # the lower ``min_escalation_fine_resolution`` floor so the solver
+        # can express the sub-0.05mm grids needed for half-grid USB-C and
+        # crystal pads (issue #2837).  Plain fine-pitch components keep the
+        # higher ``min_fine_resolution`` floor that avoids absurdly fine
+        # zones for on-grid SOIC/TSSOP/QFP packages.
         fine_res = fine_components[ref]
-        fine_res = max(fine_res, min_fine_resolution)
+        if ref in pad_position_offsets:
+            fine_res = max(fine_res, min_escalation_fine_resolution)
+        else:
+            fine_res = max(fine_res, min_fine_resolution)
+
+        # Per-zone origin offset.  If the escalation branch produced a
+        # pad-position-aware (resolution, offset) tuple, use it.  Otherwise
+        # default to (0, 0) which matches the legacy behaviour for plain
+        # fine-pitch components whose pad positions already align to a
+        # zero-origin fine grid (TSSOP, SOIC, etc.).
+        x_off, y_off = pad_position_offsets.get(ref, (0.0, 0.0))
 
         fine_zones.append(FineZone(
             ref=ref,
@@ -1185,6 +1341,8 @@ def compute_multi_resolution_plan(
             x_max=x_max,
             y_max=y_max,
             resolution=fine_res,
+            x_offset=x_off,
+            y_offset=y_off,
         ))
 
     if not fine_zones:
