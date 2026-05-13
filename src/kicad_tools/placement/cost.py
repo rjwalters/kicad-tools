@@ -140,10 +140,17 @@ class Net:
     Attributes:
         name: Net name.
         pins: Sequence of (reference, pin_name) pairs in this net.
+        weight: Per-net multiplier for wirelength cost contributions.
+            Defaults to 1.0 (uniform weighting). Values >1.0 prioritise
+            keeping this net short (useful when one or more pins are
+            anchored to a fixed perimeter footprint and the optimizer
+            could otherwise stretch the channel). A weight of 0.0
+            removes the net from the wirelength sum entirely.
     """
 
     name: str
     pins: Sequence[tuple[str, str]]
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -196,12 +203,17 @@ def compute_wirelength(
     connected component positions. This is the standard HPWL estimator
     used in placement optimization.
 
+    Each net's HPWL contribution is multiplied by ``net.weight`` (default
+    ``1.0``). Setting ``weight > 1.0`` prioritises keeping that net short
+    (used by the anchor-aware path in ``optimize-placement``); setting
+    ``weight = 0.0`` excludes the net from the wirelength sum entirely.
+
     Args:
         placements: Current component positions.
         nets: Net connectivity information.
 
     Returns:
-        Total HPWL across all nets (mm).
+        Total weighted HPWL across all nets (mm).
     """
     if not nets:
         return 0.0
@@ -220,7 +232,7 @@ def compute_wirelength(
                 xs.append(x)
                 ys.append(y)
         if len(xs) >= 2:
-            total += (max(xs) - min(xs)) + (max(ys) - min(ys))
+            total += net.weight * ((max(xs) - min(xs)) + (max(ys) - min(ys)))
     return total
 
 

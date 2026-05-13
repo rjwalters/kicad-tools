@@ -72,6 +72,8 @@ def _validate_pcb_path(pcb_path: str) -> Path:
 
 def _read_board_data(
     pcb_path: str,
+    *,
+    anchor_weight: float = 0.0,
 ) -> tuple[list[ComponentDef], list[Net], BoardOutline, DesignRuleSet, tuple[float, float]]:
     """Read component, net, and board data from a .kicad_pcb file.
 
@@ -80,6 +82,10 @@ def _read_board_data(
 
     Args:
         pcb_path: Path to .kicad_pcb file.
+        anchor_weight: When > 0, every net touching at least one ``(locked)``
+            footprint receives ``Net.weight = 1 + anchor_weight * f``, where
+            ``f`` is the fraction of the net's pins that land on locked
+            footprints (range 0..1). Default 0.0 preserves uniform weighting.
 
     Returns:
         Tuple of (components, nets, board_outline, rules, board_origin).
@@ -105,11 +111,15 @@ def _read_board_data(
         board_outline = _extract_board_outline(pcb)
 
     # Components from footprints
+    locked_refs: set[str] = set()
     components: list[ComponentDef] = []
     for fp in pcb.footprints:
         ref = fp.reference
         if not ref:
             continue
+
+        if getattr(fp, "locked", False):
+            locked_refs.add(ref)
 
         width, height = _footprint_size_from_pads(fp)
 
@@ -148,11 +158,39 @@ def _read_board_data(
 
     nets: list[Net] = []
     for net_name, pins in net_map.items():
-        if len(pins) >= 2:
-            nets.append(Net(name=net_name, pins=pins))
+        if len(pins) < 2:
+            continue
+        weight = _compute_net_anchor_weight(pins, locked_refs, anchor_weight)
+        nets.append(Net(name=net_name, pins=pins, weight=weight))
 
     rules = DesignRuleSet()
     return components, nets, board_outline, rules, pcb.board_origin
+
+
+def _compute_net_anchor_weight(
+    pins: Sequence[tuple[str, str]],
+    locked_refs: set[str],
+    anchor_weight: float,
+) -> float:
+    """Compute the per-net wirelength weight from anchor pad fraction.
+
+    Mirror of the helper in ``kicad_tools.cli.optimize_placement_cmd``.
+    A pin contributes to the "anchored" count when its component reference
+    appears in ``locked_refs`` (set of footprints carrying the ``(locked)``
+    attribute). The returned weight is::
+
+        1.0 + anchor_weight * (anchored_pins / total_pins)
+
+    For ``anchor_weight <= 0`` the weight collapses to 1.0 (regression-safe
+    default). Nets with no anchored pins also collapse to 1.0.
+    """
+    if anchor_weight <= 0.0 or not pins or not locked_refs:
+        return 1.0
+    anchored = sum(1 for ref, _ in pins if ref in locked_refs)
+    if anchored == 0:
+        return 1.0
+    fraction = anchored / len(pins)
+    return 1.0 + anchor_weight * fraction
 
 
 
@@ -293,6 +331,7 @@ def optimize_placement(
     seed_method: str = "force-directed",
     output_path: str | None = None,
     pre_slide_off: bool = True,
+    anchor_weight: float = 0.0,
 ) -> dict[str, Any]:
     """Optimize component placement on a PCB board using CMA-ES.
 
@@ -310,6 +349,12 @@ def optimize_placement(
         output_path: Path for output file. If None, does not write to disk.
         pre_slide_off: If True, run slide-off overlap resolution on the seed
             placement before passing it to the optimizer.
+        anchor_weight: When > 0, every net touching a footprint with the
+            KiCad ``(locked)`` attribute gets a wirelength multiplier of
+            ``1 + anchor_weight * anchor_pad_fraction``. Default 0.0
+            preserves uniform per-net weighting (regression-safe).
+            Recommended starting range: 2.0..5.0 for boards with
+            perimeter-anchored signals (connectors, edge sense FETs).
 
     Returns:
         Dictionary with optimization results:
@@ -330,12 +375,18 @@ def optimize_placement(
     Raises:
         FileNotFoundError: If the PCB file does not exist.
         ParseError: If the PCB file cannot be parsed.
+        ValueError: If anchor_weight is negative.
     """
     _validate_pcb_path(pcb_path)
 
+    if anchor_weight < 0.0:
+        raise ValueError(f"anchor_weight must be >= 0 (got {anchor_weight})")
+
     # Parse board data
     try:
-        components, nets, board_outline, rules, board_origin = _read_board_data(pcb_path)
+        components, nets, board_outline, rules, board_origin = _read_board_data(
+            pcb_path, anchor_weight=anchor_weight,
+        )
     except Exception as e:
         raise ParseError(f"Failed to parse PCB file: {e}") from e
 

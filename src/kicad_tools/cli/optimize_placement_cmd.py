@@ -235,6 +235,8 @@ def _print_score(label: str, score: PlacementScore) -> None:
 
 def _read_board_data(
     pcb_path: str,
+    *,
+    anchor_weight: float = 0.0,
 ) -> tuple[
     list[ComponentDef],
     list[Net],
@@ -249,6 +251,13 @@ def _read_board_data(
 
     The returned board origin is needed by the writer to convert
     board-relative optimizer output back to sheet-absolute coordinates.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        anchor_weight: When > 0, every net touching at least one ``(locked)``
+            footprint receives ``Net.weight = 1 + anchor_weight * f``, where
+            ``f`` is the fraction of the net's pins that land on locked
+            footprints (range 0..1). Default 0.0 preserves uniform weighting.
     """
     from kicad_tools.placement.vector import PadDef
     from kicad_tools.schema.pcb import PCB as SchemaPCB
@@ -272,11 +281,17 @@ def _read_board_data(
         board_outline = _extract_board_outline(pcb)
 
     # --- Components from footprints ---
+    # Track which footprints carry the (locked) attribute so we can later
+    # compute per-net anchor fractions for weighted wirelength.
+    locked_refs: set[str] = set()
     components: list[ComponentDef] = []
     for fp in pcb.footprints:
         ref = fp.reference
         if not ref:
             continue
+
+        if getattr(fp, "locked", False):
+            locked_refs.add(ref)
 
         # Compute footprint size from pad extents
         width, height = _footprint_size_from_pads(fp)
@@ -317,13 +332,40 @@ def _read_board_data(
 
     nets: list[Net] = []
     for net_name, pins in net_map.items():
-        if len(pins) >= 2:
-            nets.append(Net(name=net_name, pins=pins))
+        if len(pins) < 2:
+            continue
+        weight = _compute_net_anchor_weight(pins, locked_refs, anchor_weight)
+        nets.append(Net(name=net_name, pins=pins, weight=weight))
 
     # --- Design rules (use defaults; PCB setup has limited rule info) ---
     rules = DesignRuleSet()
 
     return components, nets, board_outline, rules, pcb.board_origin
+
+
+def _compute_net_anchor_weight(
+    pins: Sequence[tuple[str, str]],
+    locked_refs: set[str],
+    anchor_weight: float,
+) -> float:
+    """Compute the per-net wirelength weight from anchor pad fraction.
+
+    A pin contributes to the "anchored" count when its component reference
+    appears in ``locked_refs`` (set of footprints carrying the ``(locked)``
+    attribute). The returned weight is::
+
+        1.0 + anchor_weight * (anchored_pins / total_pins)
+
+    For ``anchor_weight <= 0`` the weight collapses to 1.0 (regression-safe
+    default). Nets with no anchored pins also collapse to 1.0.
+    """
+    if anchor_weight <= 0.0 or not pins or not locked_refs:
+        return 1.0
+    anchored = sum(1 for ref, _ in pins if ref in locked_refs)
+    if anchored == 0:
+        return 1.0
+    fraction = anchored / len(pins)
+    return 1.0 + anchor_weight * fraction
 
 
 
@@ -447,6 +489,7 @@ def run_optimize_placement(
     verbose: bool = False,
     quiet: bool = False,
     no_slide_off: bool = False,
+    anchor_weight: float = 0.0,
 ) -> int:
     """Run placement optimization.
 
@@ -463,6 +506,10 @@ def run_optimize_placement(
         verbose: Enable verbose output.
         quiet: Suppress non-essential output.
         no_slide_off: If True, skip slide-off overlap pre-processing.
+        anchor_weight: When > 0, nets touching a ``(locked)`` footprint
+            receive an inflated wirelength weight of
+            ``1 + anchor_weight * anchor_pad_fraction``. Default 0.0
+            preserves the historical uniform weighting (regression-safe).
 
     Returns:
         Exit code (0 for success, 1 for failure).
@@ -474,6 +521,12 @@ def run_optimize_placement(
         return 1
     if pcb_file.suffix != ".kicad_pcb":
         print(f"Error: expected .kicad_pcb file, got: {pcb_file.suffix}", file=sys.stderr)
+        return 1
+    if anchor_weight < 0.0:
+        print(
+            f"Error: --anchor-weight must be >= 0 (got {anchor_weight})",
+            file=sys.stderr,
+        )
         return 1
 
     if output_path is None:
@@ -498,7 +551,9 @@ def run_optimize_placement(
 
     # Read board data
     try:
-        components, nets, board_outline, rules, board_origin = _read_board_data(pcb_path)
+        components, nets, board_outline, rules, board_origin = _read_board_data(
+            pcb_path, anchor_weight=anchor_weight,
+        )
     except Exception as e:
         print(f"Error reading PCB: {e}", file=sys.stderr)
         if verbose:

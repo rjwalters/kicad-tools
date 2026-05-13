@@ -3600,6 +3600,21 @@ def _add_optimize_placement_parser(subparsers) -> None:
         default=False,
         help="Disable slide-off overlap pre-processing on the seed placement",
     )
+    op_parser.add_argument(
+        "--anchor-weight",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Per-net wirelength multiplier boost for nets that touch "
+            "footprints carrying the KiCad (locked) attribute. Each "
+            "qualifying net's HPWL is scaled by "
+            "1 + anchor_weight * (anchored_pins / total_pins). "
+            "Default 0.0 preserves uniform weighting; recommended "
+            "starting range is 2.0..5.0 to keep perimeter-anchored "
+            "signals (connectors, edge sense FETs) from being starved."
+        ),
+    )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
