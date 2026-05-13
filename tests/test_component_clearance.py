@@ -37,24 +37,41 @@ class TestDesignRulesComponentClearance:
         assert rules.get_clearance_for_component("R1") == 0.15  # Default
 
     def test_fine_pitch_automatic_clearance(self):
-        """Test automatic fine-pitch clearance based on pin pitch."""
+        """Test automatic fine-pitch clearance based on pin pitch.
+
+        Uses a geometrically feasible fixture so the Issue #2867
+        narrow-channel guard accepts the fine-pitch shrink: at
+        pin_pitch=0.65, trace_width=0.1, trace_clearance=0.075,
+        fine_pitch_clearance=0.08:
+
+            effective_channel = 0.65 - 2*0.08 - 0.1 = 0.39 mm
+            required_channel  = 2*0.075 + 0.1       = 0.25 mm
+
+        0.39 >= 0.25 so the shrink is feasible.
+        """
         rules = DesignRules(
-            trace_clearance=0.15,
-            fine_pitch_clearance=0.1,
+            trace_width=0.1,
+            trace_clearance=0.075,
+            fine_pitch_clearance=0.08,
             fine_pitch_threshold=0.8,  # Components with pitch < 0.8mm get fine_pitch_clearance
         )
 
         # Component with 0.65mm pitch should get fine-pitch clearance
-        assert rules.get_clearance_for_component("U1", pin_pitch=0.65) == 0.1
+        assert rules.get_clearance_for_component("U1", pin_pitch=0.65) == 0.08
 
         # Component with 1.0mm pitch should get default clearance
-        assert rules.get_clearance_for_component("U1", pin_pitch=1.0) == 0.15
+        assert rules.get_clearance_for_component("U1", pin_pitch=1.0) == 0.075
 
         # Without pitch info, default is used
-        assert rules.get_clearance_for_component("U1") == 0.15
+        assert rules.get_clearance_for_component("U1") == 0.075
 
     def test_explicit_override_takes_precedence_over_fine_pitch(self):
-        """Test that explicit override takes precedence over fine-pitch auto-detection."""
+        """Test that explicit override takes precedence over fine-pitch auto-detection.
+
+        Explicit overrides bypass the Issue #2867 narrow-channel guard:
+        the caller asserts the geometry is feasible for this specific
+        component.
+        """
         rules = DesignRules(
             trace_clearance=0.15,
             component_clearances={"U1": 0.08},
@@ -75,6 +92,119 @@ class TestDesignRulesComponentClearance:
 
         # Even fine-pitch components get default clearance
         assert rules.get_clearance_for_component("U1", pin_pitch=0.65) == 0.15
+
+    def test_narrow_channel_guard_rejects_infeasible_shrink(self):
+        """Issue #2867: narrow-channel guard falls back to default when geometrically infeasible.
+
+        The original (pre-guard) behaviour shrank to ``fine_pitch_clearance``
+        unconditionally.  When the inter-pad channel cannot host a trace
+        at full manufacturer clearance, the C++ validator would accept a
+        geometrically infeasible route that DRC then rejects.
+
+        This is the failure mode that produced 44 ``clearance_pad_segment``
+        errors on routed board 04 (LQFP-48 0.5 mm pitch + jlcpcb-tier1
+        rules).  Fixture mirrors that configuration:
+
+            pin_pitch         = 0.5  mm
+            trace_width       = 0.127 mm
+            trace_clearance   = 0.127 mm
+            fine_pitch_clearance = 0.0635 mm
+
+            effective_channel = 0.5 - 2*0.0635 - 0.127 = 0.246 mm
+            required_channel  = 2*0.127 + 0.127         = 0.381 mm
+
+        0.246 < 0.381 so the shrink is infeasible and the guard must
+        return ``trace_clearance`` (0.127), not ``fine_pitch_clearance``
+        (0.0635).
+        """
+        rules = DesignRules(
+            trace_width=0.127,
+            trace_clearance=0.127,
+            fine_pitch_clearance=0.0635,
+            fine_pitch_threshold=0.8,
+        )
+
+        # LQFP-48 0.5 mm pitch -- infeasible shrink
+        clearance = rules.get_clearance_for_component("U1", pin_pitch=0.5)
+        assert clearance == 0.127, (
+            f"Narrow-channel guard should reject infeasible shrink; got {clearance}"
+        )
+
+    def test_narrow_channel_guard_accepts_feasible_shrink(self):
+        """Issue #2867: narrow-channel guard accepts shrink when geometrically feasible.
+
+        With a wider pin pitch or looser trace_width / trace_clearance,
+        the fine-pitch shrink remains sound -- the guard is a *floor*,
+        not a blanket disable.
+
+            pin_pitch         = 0.65 mm
+            trace_width       = 0.1  mm
+            trace_clearance   = 0.075 mm
+            fine_pitch_clearance = 0.08 mm
+
+            effective_channel = 0.65 - 2*0.08 - 0.1 = 0.39 mm
+            required_channel  = 2*0.075 + 0.1       = 0.25 mm
+
+        0.39 >= 0.25 so the shrink is feasible and the guard returns
+        ``fine_pitch_clearance``.
+        """
+        rules = DesignRules(
+            trace_width=0.1,
+            trace_clearance=0.075,
+            fine_pitch_clearance=0.08,
+            fine_pitch_threshold=0.8,
+        )
+
+        clearance = rules.get_clearance_for_component("U1", pin_pitch=0.65)
+        assert clearance == 0.08, (
+            f"Narrow-channel guard should accept feasible shrink; got {clearance}"
+        )
+
+    def test_board04_jlcpcb_tier1_lqfp48_clearance(self):
+        """Issue #2867: end-to-end board-04 fixture asserts the validator-path clearance.
+
+        Replicates the jlcpcb-tier1 + LQFP-48 conditions that drove 44
+        ``clearance_pad_segment`` errors on routed board 04.  The C++
+        validator consumes the return value of
+        ``get_clearance_for_component`` as its per-pad
+        ``clearance_override`` (see ``cpp_backend.py:591``).  With the
+        narrow-channel guard in place, the override must equal
+        ``trace_clearance`` rather than ``fine_pitch_clearance`` so the
+        validator rejects through-channel routes that DRC would flag.
+        """
+        rules = _make_board04_rules()
+
+        # U2 is the LQFP-48 STM32F103C8T6 on board 04 with 0.5 mm pitch.
+        # The narrow-channel guard must fire here.
+        override = rules.get_clearance_for_component("U2", pin_pitch=0.5)
+        assert override == rules.trace_clearance, (
+            "C++ validator-path clearance must fall back to default on "
+            f"LQFP-48 jlcpcb-tier1; got {override} (expected "
+            f"{rules.trace_clearance})"
+        )
+
+        # Standard-pitch component on the same board still gets the
+        # default -- guard only acts on fine-pitch entries.
+        override = rules.get_clearance_for_component("R1", pin_pitch=2.54)
+        assert override == rules.trace_clearance
+
+
+def _make_board04_rules() -> DesignRules:
+    """Build a ``DesignRules`` instance mirroring board-04 jlcpcb-tier1 settings.
+
+    Numbers come from ``boards/04-stm32-devboard`` rendered under the
+    jlcpcb-tier1 manufacturer profile (see ``mfr_limits.py``).  Used
+    by Issue #2867 regression tests to assert the C++ validator-path
+    clearance falls back to default on LQFP-48 0.5 mm pitch.
+    """
+    return DesignRules(
+        trace_width=0.127,
+        trace_clearance=0.127,
+        min_trace_width=0.127,
+        fine_pitch_clearance=0.0635,
+        fine_pitch_threshold=0.8,
+        manufacturer="jlcpcb-tier1",
+    )
 
 
 class TestRoutingGridComponentPitches:
@@ -233,9 +363,24 @@ class TestValidateSegmentClearanceWithComponents:
         assert actual_clearance >= 0.08
 
     def test_validate_clearance_with_fine_pitch_auto(self):
-        """Test clearance validation uses automatic fine-pitch detection."""
+        """Test clearance validation uses automatic fine-pitch detection.
+
+        Fixture is geometrically feasible under the Issue #2867
+        narrow-channel guard so the fine-pitch shrink applies:
+
+            pin_pitch         = 0.65 mm
+            trace_width       = 0.1  mm
+            trace_clearance   = 0.075 mm
+            fine_pitch_clearance = 0.08 mm
+
+            effective_channel = 0.65 - 2*0.08 - 0.1 = 0.39 mm
+            required_channel  = 2*0.075 + 0.1       = 0.25 mm
+
+        0.39 >= 0.25 so the shrink is feasible.
+        """
         rules = DesignRules(
-            trace_clearance=0.15,
+            trace_width=0.1,
+            trace_clearance=0.075,
             grid_resolution=0.05,
             fine_pitch_clearance=0.08,
             fine_pitch_threshold=0.8,

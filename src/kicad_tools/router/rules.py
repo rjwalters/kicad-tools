@@ -315,22 +315,35 @@ class DesignRules:
         fine-pitch clearance based on pin pitch, then falls back to the
         default trace_clearance.
 
-        Issue #2865 follow-up scope note: this method is the C++
-        pad-vs-segment validator's clearance source.  It is *parallel*
-        to :meth:`RoutingGrid._clearance_for_pin_pitch` (which sets the
-        *grid halo*) -- both layers independently shrink for fine-pitch
-        pads.  The Curator's recommended Option C patch (#2865)
-        intentionally scopes the narrow-channel guard to the grid-halo
-        path only, leaving this validator clearance untouched.  As a
-        result the localized #2865 fix tightens the grid blocking on
-        LQFP-48 0.5 mm pitch + jlcpcb-tier1 (preventing the pathfinder
-        from threading the inter-pad channel in the first place) but
-        the C++ pathfinder's geometric validator still accepts the
-        reduced clearance if the negotiated outer loop forces a
-        through-channel path under congestion pressure.  Promoting the
-        guard to this method is documented as a follow-up: see issue
-        #2865 acceptance note "the per-board allowlist entry can be
-        reduced to 0" for the eventual end-state.
+        Issue #2867 -- narrow-channel guard (C++ validator path): this
+        method is the C++ pad-vs-segment validator's clearance source
+        (see ``cpp_backend.py:591`` -> ``clearance_override`` for
+        ``add_pad``).  It is *parallel* to
+        :meth:`RoutingGrid._clearance_for_pin_pitch` which sets the
+        *grid halo* on the Python pathfinder side.  Both layers
+        independently shrink for fine-pitch pads.  PR #2866 (issue
+        #2865) added a narrow-channel guard to the grid-halo path
+        only; this method continued to shrink unconditionally, so the
+        C++ validator still accepted geometrically infeasible
+        through-channel paths under congestion pressure (44
+        ``clearance_pad_segment`` errors on routed board 04).
+
+        Issue #2867 promotes the guard here as well.  When the
+        fine-pitch shrink would produce an inter-pad channel that
+        cannot host a trace at full manufacturer clearance, we decline
+        the shrink and fall back to ``trace_clearance`` so the C++
+        validator (and any other ``clearance_override`` consumer)
+        rejects through-channel routes the same way the grid halo
+        does.  Geometry (mirroring ``_clearance_for_pin_pitch``):
+
+            effective_channel = pin_pitch - 2 * fine_pitch_clearance - trace_width
+            required_channel  = 2 * trace_clearance + trace_width
+
+        When ``effective_channel < required_channel`` the shrunk
+        clearance is infeasible and the default ``trace_clearance`` is
+        used instead.  Explicit per-component overrides
+        (``component_clearances``) bypass the guard -- callers who set
+        an override are asserting they know the geometry is feasible.
 
         Args:
             ref: Component reference (e.g., "U1")
@@ -353,7 +366,9 @@ class DesignRules:
             >>> rules.get_clearance_for_component("R1")  # Default
             0.15
         """
-        # Check explicit per-component override first
+        # Check explicit per-component override first.  Explicit overrides
+        # bypass the narrow-channel guard: the caller is asserting the
+        # geometry is feasible for this specific component.
         if ref in self.component_clearances:
             return self.component_clearances[ref]
 
@@ -363,7 +378,24 @@ class DesignRules:
             and pin_pitch is not None
             and pin_pitch < self.fine_pitch_threshold
         ):
-            return self.fine_pitch_clearance
+            # Issue #2867 narrow-channel guard.  Mirror the grid-halo
+            # check in :meth:`RoutingGrid._clearance_for_pin_pitch` so
+            # the C++ validator (which consumes the value returned
+            # here as ``clearance_override``) does not accept through-
+            # channel routes that DRC will reject as
+            # ``clearance_pad_segment``.  The shrunk fine-pitch
+            # clearance is only sound when a trace centred between
+            # two adjacent pads can satisfy full manufacturer
+            # clearance against both.
+            effective_channel = (
+                pin_pitch - 2.0 * self.fine_pitch_clearance - self.trace_width
+            )
+            required_channel = 2.0 * self.trace_clearance + self.trace_width
+            if effective_channel >= required_channel:
+                return self.fine_pitch_clearance
+            # Narrow channel -- fine-pitch shrink is geometrically
+            # infeasible.  Fall through to the default clearance so
+            # the validator rejects through-channel routes.
 
         # Fall back to default clearance
         return self.trace_clearance
