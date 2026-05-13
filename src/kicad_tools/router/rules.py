@@ -216,6 +216,17 @@ class DesignRules:
     constraint_pad_count_weight: float = 0.5  # Weight for number of pads in net
     constraint_congestion_weight: float = 5.0  # Weight for nets in congested areas
 
+    # Stitch-via halo for plane-net pads (Issue #2842)
+    # When True (default), the routing grid reserves a clearance halo of radius
+    # ``stitch_via_halo_radius()`` around plane-net pads (``pad.net == 0``) so the
+    # subsequent stitch step can land a via on the pad without colliding with
+    # adjacent signal traces.  The halo only blocks *foreign* nets -- the plane
+    # net itself (net id 0) is unaffected and the existing fine-pitch trace
+    # clearance halo (``_clearance_for_pin_pitch``) is unchanged.  Set to False
+    # for designs that intentionally never stitch (single-layer, no-plane, etc.)
+    # to avoid the small extra clearance reservation.
+    stitch_via_halo: bool = True
+
     @property
     def max_clearance(self) -> float:
         """Return the maximum clearance across all configured clearance values.
@@ -240,6 +251,62 @@ class DesignRules:
         if self.fine_pitch_clearance is not None:
             clearances.append(self.fine_pitch_clearance)
         return max(clearances)
+
+    def stitch_via_halo_radius(self) -> float:
+        """Return the foreign-net clearance halo to reserve around plane-net pads.
+
+        Issue #2842 -- the stitch pass (``kct stitch``) drops one via per
+        plane-net pad to bond the plane to the surface pin.  A via with
+        diameter ``D`` and trace clearance ``C`` needs ``D/2 + C`` of clear
+        space around the pad center for the via to land without violating
+        clearance.  The router has historically sized its pad clearance halo
+        for *traces* (``_clearance_for_pin_pitch``, ~0.05-0.3 mm depending on
+        pitch), which is too small for a via drop and lets foreign-net
+        traces crowd plane-net pads.  This method returns the larger
+        via-aware radius so :meth:`RoutingGrid._add_pad_unsafe` can reserve
+        the right amount of room for the deferred stitch step.
+
+        The radius is derived from the configured manufacturer when
+        available (``rules.manufacturer`` -> ``MfrLimits.min_via_diameter``
+        + ``trace_clearance``).  When no manufacturer is configured the
+        formula falls back to the stitcher's default 0.45 mm via plus the
+        configured ``trace_clearance`` -- i.e. ``0.225 + trace_clearance``.
+
+        TODO(#2848): once the router's ``--mfr`` flag plumbs the
+        manufacturer profile through to stitch's via-dimension selection,
+        the unmanufactured fallback can be tightened to match whatever the
+        stitcher actually uses.  For now the 0.45 mm default mirrors
+        ``stitch_cmd.py:2400, :2573`` byte-for-byte.
+
+        Returns:
+            Halo radius in mm.  Always at least as large as the standard
+            ``trace_clearance + trace_width/2`` envelope so this never
+            *shrinks* the existing clearance for callers that opt in.
+        """
+        # Default via diameter when no manufacturer profile is available.
+        # Mirrors ``stitch_cmd.py:2400`` (the canonical stitcher default).
+        # TODO(#2848): tighten once stitch consumes mfr-derived via dimensions
+        # from the route step.
+        default_via_diameter = 0.45
+
+        via_diameter = default_via_diameter
+        if self.manufacturer is not None:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                mfr = get_mfr_limits(self.manufacturer)
+                via_diameter = max(via_diameter, mfr.min_via_diameter)
+            except (ValueError, ImportError):
+                # Unknown manufacturer -> fall back to the conservative default.
+                pass
+
+        via_halo = via_diameter / 2.0 + self.trace_clearance
+
+        # Never shrink below the standard pad-clearance envelope; that
+        # envelope was tuned for trace routing and the via-aware envelope
+        # is strictly a *minimum*.
+        standard_envelope = self.trace_clearance + self.trace_width / 2.0
+        return max(via_halo, standard_envelope)
 
     def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
         """Get the clearance to use for a specific component.

@@ -950,6 +950,238 @@ class RoutingGrid:
                 pad, effective_width, effective_height, clearance, layers_to_block
             )
 
+        # Issue #2842: Stitch-via halo reservation for plane-net pads.
+        # Plane-net pads (``pad.net == 0``) will be bonded to the plane by a
+        # stitch via dropped during ``kct stitch``.  That via needs
+        # ``via_diameter/2 + clearance`` (~0.425 mm with the stitcher's
+        # default 0.45/0.2 via) of clear space around the pad center -- much
+        # more than the trace-only halo that ``_clearance_for_pin_pitch``
+        # provides for fine-pitch pads (~0.05 mm).  Reserve the larger halo
+        # for foreign-net traces so the stitch pass has somewhere to land.
+        if (
+            pad.net == 0
+            and getattr(self.rules, "stitch_via_halo", True)
+            and hasattr(self.rules, "stitch_via_halo_radius")
+        ):
+            self._apply_stitch_via_halo(
+                pad,
+                effective_width=effective_width,
+                effective_height=effective_height,
+                base_clearance=clearance,
+                layers_to_block=layers_to_block,
+            )
+
+    def _apply_stitch_via_halo(
+        self,
+        pad: Pad,
+        effective_width: float,
+        effective_height: float,
+        base_clearance: float,
+        layers_to_block: list[int],
+    ) -> None:
+        """Reserve a foreign-net keep-out halo around a plane-net pad (Issue #2842).
+
+        The stitch pass (``kct stitch``) drops one via per plane-net pad to
+        bond the plane to the pin.  That via needs ``via_diameter/2 +
+        clearance`` of clear space around the pad center.  The router's
+        trace-only halo (``_clearance_for_pin_pitch``) is much smaller --
+        for fine-pitch LQFP/QFN pads it shrinks to ``min_trace_width/2``
+        (~0.05 mm) to keep escape routing feasible.  That tiny halo leaves
+        no room for a stitch via, which is the root cause of the U2.8 /
+        U2.23 / U2.35 stitch failures on board 04.
+
+        This helper extends the blocked region around plane-net pads out
+        to ``rules.stitch_via_halo_radius()`` for *foreign* nets only.
+        Same-net (plane) crossings are not affected.  The standard halo
+        already laid down by ``_add_pad_unsafe`` is preserved -- this only
+        adds cells beyond it.
+
+        Safety constraints (preserve existing routing yield):
+        - Cells inside another pad's metal area are NEVER overwritten
+          (``pad_blocked == True``).  Same-component signal pads must keep
+          their metal accessible for escape routing.
+        - Cells already owned by another routable net (``cell.net > 0``)
+          are NOT overwritten.  Their existing pad-clearance contract
+          stands; we only mark them as ``is_obstacle = True`` so foreign
+          traces (other nets) cannot route through them in negotiated mode
+          -- mirroring the existing plane-net pad clearance behaviour at
+          ``_add_pad_unsafe`` lines 920-927.
+        - Cells inside the halo but already inside another pad's clearance
+          envelope (``blocked == True`` AND ``net == 0``) keep their
+          existing state.
+
+        The halo expands the *clearance* envelope from
+        ``base_clearance`` (which may be the fine-pitch ``min_trace_width/2``)
+        to ``rules.stitch_via_halo_radius()``.  We only iterate over the
+        *new* cells -- the annular ring between the standard envelope and
+        the halo envelope -- to avoid re-touching cells that the main
+        ``_add_pad_unsafe`` loop already handled.
+
+        Args:
+            pad: The plane-net pad whose halo we are reserving
+                (``pad.net == 0``).
+            effective_width: The pad's effective width in mm (mirrors the
+                ``_add_pad_unsafe`` computation -- through-hole pads get
+                their drill-derived dimensions when no rectangular
+                geometry is set).
+            effective_height: As above for height.
+            base_clearance: The standard clearance returned by
+                ``_clearance_for_pin_pitch``; we extend beyond it to the
+                via-aware halo.
+            layers_to_block: Layer indices to apply the halo to (PTH pads
+                hit all layers; SMD pads hit only their layer).
+        """
+        # Issue #2842 geometry: the stitch via lands on the pad center,
+        # not the pad edge.  Required clearance is measured from the via
+        # center.  So the foreign-net keep-out region is a circle of
+        # radius ``via_radius + clearance`` around the pad center.
+        # Equivalently, it extends ``halo_from_center - pad_half_extent``
+        # *beyond the pad edge* along each axis.
+        #
+        # Scope to the fine-pitch case (board 04 U2.8/U2.23/U2.35 LQFP-48
+        # corner GND pins).  On standard-pitch pads the existing
+        # envelope is already ``trace_clearance + trace_width/2``, which
+        # is at least as wide as the via halo *for the via that the
+        # stitcher will actually pick*.  Applying an extra ring on
+        # standard-pitch passives crowds inter-component routing channels
+        # (board 04 passive arrays go from 9/9 -> 3/9 with an unrestricted
+        # halo applied to every GND cap).
+        standard_envelope = (
+            self.rules.trace_clearance + self.rules.trace_width / 2.0
+        )
+        if base_clearance >= standard_envelope:
+            # Standard-pitch pad already has the full clearance envelope.
+            # The via center sits inside the pad metal -- already
+            # exclusively the plane net's territory.
+            return
+
+        halo_from_center = self.rules.stitch_via_halo_radius()
+        # Halo extension is measured separately per axis: an
+        # LQFP-48-style pad is wide (1.5 mm) on one axis but narrow
+        # (0.3 mm) on the other.  The narrow axis is where neighbour
+        # signal pins sit at 0.5 mm pitch -- that is where the halo
+        # needs to extend BEYOND the pad metal.  The wide axis is
+        # parallel to the chip edge; neighbours along that axis are
+        # already on the other side of the package body and not at
+        # risk of crowding.
+        half_w = effective_width / 2.0
+        half_h = effective_height / 2.0
+        # Halo extension per axis (clamped at zero so we never shrink
+        # the standard envelope).
+        ext_x = max(0.0, halo_from_center - half_w)
+        ext_y = max(0.0, halo_from_center - half_h)
+        if ext_x <= base_clearance and ext_y <= base_clearance:
+            # The standard envelope already covers the via halo on
+            # both axes.  Nothing to do.
+            return
+
+        # Halo envelope (world coordinates) -- use the per-axis extents
+        # so we apply the via halo precisely where it is needed (e.g.
+        # short-axis on an LQFP pad) and leave the long-axis untouched.
+        halo_x1 = pad.x - half_w - ext_x
+        halo_y1 = pad.y - half_h - ext_y
+        halo_x2 = pad.x + half_w + ext_x
+        halo_y2 = pad.y + half_h + ext_y
+
+        # Standard envelope already processed by _add_pad_unsafe
+        std_x1 = pad.x - half_w - base_clearance
+        std_y1 = pad.y - half_h - base_clearance
+        std_x2 = pad.x + half_w + base_clearance
+        std_y2 = pad.y + half_h + base_clearance
+
+        hgx1, hgy1 = self.world_to_grid(halo_x1, halo_y1)
+        hgx2, hgy2 = self.world_to_grid(halo_x2, halo_y2)
+
+        # Issue #2842 regression-guard: skip halo cells that fall inside
+        # the standard clearance envelope of any *same-component* signal
+        # pad already added.  Without this exclusion the halo on a
+        # fine-pitch LQFP GND pin would block the same chip's neighbour
+        # signal pin escape (board 04: pin 8 GND halo blocks pin 7 NRST
+        # escape).  The component footprint already guarantees physical
+        # manufacturability at the pitch -- the standard envelope of the
+        # signal pad is the right authority for that pin's routing
+        # corridor.  Mirrors the same-component clearance relaxation at
+        # :meth:`_relax_same_component_clearance` (Issue #2452).
+        same_component_envelopes: list[tuple[float, float, float, float]] = []
+        if pad.ref:
+            for other in self._component_pads.get(pad.ref, []):
+                if other is pad or other.net == 0:
+                    continue
+                # Compute the other pad's effective rectangle + base
+                # clearance envelope (same dilation as
+                # ``_clearance_for_pin_pitch`` would apply).
+                if other.through_hole:
+                    if other.width > 0 and other.height > 0:
+                        oew, oeh = other.width, other.height
+                    elif other.drill > 0:
+                        oew = oeh = other.drill + 0.7
+                    else:
+                        oew = oeh = 1.7
+                else:
+                    oew, oeh = other.width, other.height
+                # Use the same pin_pitch envelope; without ``_pad_pin_pitch``
+                # data we fall back to the standard envelope.
+                other_clearance = self._clearance_for_pin_pitch(
+                    self._pad_pin_pitch.get(id(other))
+                )
+                same_component_envelopes.append(
+                    (
+                        other.x - oew / 2.0 - other_clearance,
+                        other.y - oeh / 2.0 - other_clearance,
+                        other.x + oew / 2.0 + other_clearance,
+                        other.y + oeh / 2.0 + other_clearance,
+                    )
+                )
+
+        for layer_idx in layers_to_block:
+            for gy in range(hgy1, hgy2 + 1):
+                for gx in range(hgx1, hgx2 + 1):
+                    if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+                        continue
+
+                    # Skip cells already inside the standard envelope --
+                    # those were handled by the main _add_pad_unsafe loop.
+                    wx, wy = self.grid_to_world(gx, gy)
+                    if std_x1 <= wx <= std_x2 and std_y1 <= wy <= std_y2:
+                        continue
+
+                    # Skip cells that fall inside a same-component signal
+                    # pad's standard envelope -- the chip's own escape
+                    # corridor takes precedence over the via halo.
+                    in_sibling_envelope = False
+                    for sx1, sy1, sx2, sy2 in same_component_envelopes:
+                        if sx1 <= wx <= sx2 and sy1 <= wy <= sy2:
+                            in_sibling_envelope = True
+                            break
+                    if in_sibling_envelope:
+                        continue
+
+                    # Never overwrite another pad's metal area.
+                    if self._pad_blocked[layer_idx, gy, gx]:
+                        continue
+
+                    cell_net = int(self._net[layer_idx, gy, gx])
+
+                    if cell_net == 0:
+                        # Unclaimed cell (or another plane-net halo cell):
+                        # reserve it for the plane net.  cell.blocked = True
+                        # with cell.net == 0 is the standard "static no-net
+                        # obstacle" pattern that blocks foreign traces in
+                        # both standard and negotiated modes (see
+                        # pathfinder ``_is_trace_blocked`` and
+                        # ``allow_sharing`` paths).
+                        self._blocked[layer_idx, gy, gx] = True
+                    else:
+                        # Cell already owned by a routable signal net
+                        # (almost certainly a neighbour pad's clearance
+                        # envelope).  Mirror the existing plane-net
+                        # behaviour at ``_add_pad_unsafe`` lines 920-927:
+                        # mark the cell as a hard obstacle so foreign
+                        # nets cannot share it in negotiated mode, but
+                        # leave its net assignment intact so its owner can
+                        # still route through it.
+                        self._is_obstacle[layer_idx, gy, gx] = True
+
     def _relax_same_component_clearance(
         self,
         pad: Pad,
