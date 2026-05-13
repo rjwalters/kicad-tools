@@ -231,39 +231,52 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not __import__(
+        "kicad_tools.router.via_conflict", fromlist=["TRACE_RIP_REROUTE_ENABLED"]
+    ).TRACE_RIP_REROUTE_ENABLED,
+    reason=(
+        "Issue #2864 round-2 feedback: the trace rip-reroute branch is "
+        "default-disabled because the localized DRC safety check inside "
+        "try_trace_rip_reroute cannot prevent boards 06/07 regressions "
+        "from long re-routed diff-pair traces.  Enable via "
+        "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to run this test.  "
+        "When the full transactional wrapper lands, the default flips "
+        "back to True and this skipif drops."
+    ),
+)
 def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
-    """ViaConflictManager wiring exists and is not invoked spuriously on XTAL2.
+    """XTAL2 routes via ``ViaConflictManager`` trace rip-and-reroute.
 
-    Issue #2838 (closes #2761 gap): On ``main`` at the branch point,
-    ``Autorouter`` has no ``_via_manager`` attribute at all and the
-    PIN_ACCESS retry path in ``route_net`` never invokes via-conflict
-    resolution.  This regression test asserts the **structural wiring**
-    is in place: after ``route_all_with_diffpairs`` the
-    ``Autorouter._via_manager`` attribute exists (lazy property
-    initialized to ``None``).
+    Issue #2838 (closes #2761 gap): wired ``ViaConflictManager`` into
+    ``Autorouter.route_net``'s PIN_ACCESS retry path.
 
-    Issue #2858 (this PR): Fixed the misclassification of XTAL2's
-    XTAL1 blocker.  Pre-fix the failure analyser reported a XTAL1
-    "via at 0.32mm" blocker that triggered ``ViaConflictManager`` --
-    which then found 0 vias to relocate because the real obstacle is
-    a XTAL1 *trace* segment (the nearest XTAL1 via is 7.5 mm away).
-    Post-fix the classifier correctly reports the blocker as
-    ``blocking_type="trace"``, so ``_resolve_via_conflicts_for_net``
-    early-returns at the ``has_via_blocker`` gate (``core.py:9018-9023``)
-    WITHOUT invoking ``ViaConflictManager``.  Net result: the
-    ``via_manager`` lazy property never fires, and
-    ``router._via_manager`` remains ``None``.
+    Issue #2858: fixed the misclassification of XTAL2's XTAL1 blocker
+    so it correctly emits ``blocking_type == "trace"`` instead of
+    ``"via"``.  Pre-#2858 the via-only resolver fired but found no
+    vias to relocate (the nearest XTAL1 via is 7.5 mm away from U1.3),
+    so XTAL2 stayed unrouted.
 
-    Acceptance criteria (Issue #2858):
-      1. ``hasattr(router, "_via_manager")`` -- wiring still in place.
-      2. XTAL2's failure surfaces a XTAL1 ``"trace"`` blocker (pinned
-         by ``test_xtal2_failure_classified_as_trace_blocker``).
-      3. ``router._via_manager`` is ``None`` for this board -- the
-         resolver is NOT engaged spuriously when the only blockers
-         are traces.
+    Issue #2859 (this PR): extends ``ViaConflictManager`` with a
+    trace-blocker branch (``find_blocking_traces`` /
+    ``try_trace_rip_reroute``).  ``Autorouter._resolve_via_conflicts_for_net``
+    now dispatches to that branch when the failure analyser reports a
+    ``"trace"`` blocker (the case on board 03 for XTAL2).  Net result:
+    the resolver rips the XTAL1 trace, routes XTAL2, and re-routes
+    XTAL1.
 
-    Fully unblocking XTAL2 requires a downstream trace-clearance
-    resolver tracked in #2859 -- out of scope for this PR.
+    Acceptance criteria (Issue #2859):
+      1. ``hasattr(router, "_via_manager")`` -- structural wiring still
+         in place (the #2838 minimum bar).
+      2. XTAL1 still routes -- the rip-reroute may temporarily un-mark
+         the XTAL1 route but must restore or re-route it (the rip-
+         reroute pattern restores on failure; on success it re-routes).
+      3. XTAL2 is no longer in ``router.routing_failures`` and has at
+         least one route -- the canonical "XTAL2 unblocked" assertion.
+      4. The resolver's success counter
+         (``trace_rip_reroutes_succeeded + rip_reroutes_succeeded``)
+         is ``>= 1`` -- proves the resolver actually fired and the
+         success is not accidental.
     """
     router, net_map = routed_board_03
 
@@ -282,17 +295,19 @@ def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
         routes_by_net[route.net] = routes_by_net.get(route.net, 0) + len(route.segments)
 
     # No regression on XTAL1: it routed first under pre-fix main and
-    # must continue to route post-fix (the via-conflict resolver does
-    # not rip-reroute XTAL1 on this board, but if it ever does, XTAL1
-    # must still end up routed).
+    # must continue to route post-fix (the trace rip-and-reroute
+    # branch may rip XTAL1 to free U1.3, but it must re-route XTAL1
+    # before returning success -- otherwise the rip-reroute restore-on-
+    # failure path would have triggered).
     xtal1_segments = routes_by_net.get(xtal1_id, 0)
     assert xtal1_segments > 0, (
         f"XTAL1 (net {xtal1_id}) routed with 0 segments after the "
-        "via-conflict fix.  Either rip-and-reroute removed XTAL1's "
+        "trace-conflict fix.  Either rip-and-reroute removed XTAL1's "
         "route to free U1.3 but failed to find an alternate path on "
-        "retry, or the routing order changed and XTAL1 is now being "
-        "scheduled after XTAL2 (which would make this test the wrong "
-        "test for the regression)."
+        "retry (the restore-on-failure path should have kicked in), or "
+        "the routing order changed and XTAL1 is now being scheduled "
+        "after XTAL2 (which would make this test the wrong test for "
+        "the regression)."
     )
 
     # Structural wiring assertion (the #2838 minimum bar): the
@@ -307,33 +322,59 @@ def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
         "self._via_manager."
     )
 
-    # Issue #2858 acceptance criterion 3: ``_resolve_via_conflicts_for_net``
-    # MUST NOT be invoked spuriously for XTAL2's failure.  Pre-fix the
-    # XTAL1 blocker was misclassified as ``"via"`` and triggered the
-    # resolver (which then found 0 vias to relocate).  Post-fix the
-    # blocker is correctly classified as ``"trace"`` and the resolver
-    # early-returns at ``core.py:9023`` -- the lazy ``via_manager``
-    # property is never accessed.
-    #
-    # The XTAL2-specific guarantee comes from
-    # ``test_xtal2_failure_classified_as_trace_blocker``, which pins the
-    # ``blocking_type == "trace"`` classification on the same failure
-    # record.  Together the two tests pin the full Issue #2858 acceptance.
-    assert router._via_manager is None, (
-        "Issue #2858 acceptance criterion: ``ViaConflictManager`` should "
-        "NOT be invoked spuriously for XTAL2 on board 03 anymore.  The "
-        "lazy ``via_manager`` property is initialised on first access "
-        "from ``_resolve_via_conflicts_for_net``, so a non-None value "
-        "here means the resolver ran on at least one net.  XTAL2's "
-        "XTAL1 blocker should now classify as 'trace' (see "
-        "test_xtal2_failure_classified_as_trace_blocker) and the "
-        "``has_via_blocker`` gate at ``core.py:9018-9023`` should "
-        "early-return WITHOUT touching ``self.via_manager``.  If this "
-        "fails, either: (1) the classifier regressed and the blocker is "
-        "back to ``'via'``, or (2) another net on this board has a "
-        "genuine via blocker that the resolver legitimately needs to "
-        "handle -- in which case file a follow-up and adjust this "
-        "assertion to target XTAL2 specifically via ``manager.stats``."
+    # Issue #2859 acceptance criterion: XTAL2 must route to completion.
+    failed_net_ids = {failure.net for failure in router.routing_failures}
+    assert xtal2_id not in failed_net_ids, (
+        f"XTAL2 (net {xtal2_id}) is still in routing_failures after "
+        "the trace-conflict fix.  This is the Issue #2859 regression: "
+        "the trace rip-and-reroute branch should have ripped the XTAL1 "
+        "trace blocker at U1.3, routed XTAL2, and re-routed XTAL1.  "
+        "Check core.py:_resolve_via_conflicts_for_net's trace branch "
+        "and via_conflict.py:try_trace_rip_reroute."
+    )
+    xtal2_segments = routes_by_net.get(xtal2_id, 0)
+    assert xtal2_segments > 0, (
+        f"XTAL2 (net {xtal2_id}) has 0 segments after the trace "
+        "rip-and-reroute claimed success.  This is inconsistent: the "
+        "resolver returned routes for XTAL2 but they were not added "
+        "to router.routes.  Check the recursive route_net call inside "
+        "_resolve_via_conflicts_for_net's trace branch."
+    )
+
+    # Issue #2859 canonical acceptance counter: the resolver must have
+    # successfully fired at least once on this board.  We accept either
+    # ``trace_rip_reroutes_succeeded >= 1`` (the typical XTAL2 outcome)
+    # or ``rip_reroutes_succeeded >= 1`` (a possible alternate outcome
+    # if some other net on this board had a via blocker resolved on
+    # the way).
+    assert router._via_manager is not None, (
+        "Issue #2859 acceptance criterion: ``ViaConflictManager`` must "
+        "have fired for XTAL2 (the trace-blocker resolver is the only "
+        "path that unblocks XTAL2's PIN_ACCESS failure on board 03).  "
+        "router._via_manager is None means the resolver was never "
+        "invoked.  Check that _resolve_via_conflicts_for_net's trace "
+        "branch is gated on has_trace_blocker (not just has_via_blocker)."
+    )
+    manager_stats = router._via_manager.stats
+    resolver_fired_count = (
+        manager_stats.trace_rip_reroutes_succeeded
+        + manager_stats.rip_reroutes_succeeded
+    )
+    assert resolver_fired_count >= 1, (
+        f"Issue #2859 acceptance counter "
+        f"(trace_rip_reroutes_succeeded + rip_reroutes_succeeded) is "
+        f"{resolver_fired_count}; expected >= 1.  Stats: "
+        f"trace_conflicts_found={manager_stats.trace_conflicts_found}, "
+        f"trace_rip_reroutes_attempted="
+        f"{manager_stats.trace_rip_reroutes_attempted}, "
+        f"trace_rip_reroutes_succeeded="
+        f"{manager_stats.trace_rip_reroutes_succeeded}, "
+        f"conflicts_found={manager_stats.conflicts_found}, "
+        f"rip_reroutes_attempted={manager_stats.rip_reroutes_attempted}, "
+        f"rip_reroutes_succeeded={manager_stats.rip_reroutes_succeeded}.  "
+        "The resolver found candidate(s) but didn't successfully "
+        "rip-and-reroute -- check the restore-on-failure path in "
+        "try_trace_rip_reroute."
     )
 
 

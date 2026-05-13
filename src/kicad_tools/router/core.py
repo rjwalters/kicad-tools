@@ -91,6 +91,7 @@ from .tuning import (
     tune_parameters,
 )
 from .congestion_estimator import CongestionEstimator
+from . import via_conflict as _via_conflict_module
 from .via_conflict import ViaConflictManager
 from .zones import ZoneManager
 
@@ -7575,6 +7576,16 @@ class Autorouter:
                 "rip_reroutes_attempted": vc_stats.rip_reroutes_attempted,
                 "rip_reroutes_succeeded": vc_stats.rip_reroutes_succeeded,
                 "nets_unblocked": vc_stats.nets_unblocked,
+                # Issue #2859: trace-blocker resolution channel.  Reported
+                # separately so demos / tests can distinguish trace resolution
+                # from via resolution.  ``total_resolved`` already sums both.
+                "trace_conflicts_found": vc_stats.trace_conflicts_found,
+                "trace_rip_reroutes_attempted": (
+                    vc_stats.trace_rip_reroutes_attempted
+                ),
+                "trace_rip_reroutes_succeeded": (
+                    vc_stats.trace_rip_reroutes_succeeded
+                ),
                 "total_resolved": vc_stats.total_resolved,
             }
 
@@ -9019,54 +9030,19 @@ class Autorouter:
             blocker.blocking_type == "via"
             for blocker in analysis.pad_access_blockers
         )
-        if not has_via_blocker:
+        has_trace_blocker = any(
+            blocker.blocking_type == "trace"
+            for blocker in analysis.pad_access_blockers
+        )
+        if not has_via_blocker and not has_trace_blocker:
             return []
 
         manager = self.via_manager
         if manager is None:
             return []
 
-        # Find all vias blocking this net's pads (across every pad on the
-        # net, not just the pads named by the failure record -- a failing
-        # MST edge typically names two pads but the conflict may live on
-        # any pad of an N-port net).  Dedup by via position so we don't
-        # process the same offending via twice.
         net_pad_keys = self.nets[net]
         net_pads = [self.pads[key] for key in net_pad_keys if key in self.pads]
-        all_conflicts = []
-        for pad in net_pads:
-            conflicts = manager.find_blocking_vias(
-                pad=pad,
-                pad_net=net,
-                net_names=self.net_names,
-            )
-            all_conflicts.extend(conflicts)
-
-        seen_positions: set[tuple[float, float]] = set()
-        unique_conflicts = []
-        for conflict in all_conflicts:
-            key = (round(conflict.via.x, 4), round(conflict.via.y, 4))
-            if key in seen_positions:
-                continue
-            seen_positions.add(key)
-            unique_conflicts.append(conflict)
-
-        if not unique_conflicts:
-            return []
-
-        net_name = self.net_names.get(net, f"Net {net}")
-        flush_print(
-            f"  Via conflict resolver for {net_name}: "
-            f"{len(unique_conflicts)} candidate conflict(s) found"
-        )
-
-        # Attempt resolution: RELOCATE first (cheap, in-place), then fall
-        # back to RIP_REROUTE on relocation failure (destructive but
-        # broader).  We accept a single successful resolution as enough
-        # to justify the retry -- the resolver doesn't need to clear
-        # every conflict, just unblock the pad enough for A* to find a
-        # path.
-        any_resolved = False
 
         # The rip-reroute fallback needs a callable that routes a single
         # net.  Use ``_subgrid_retry=True`` to prevent the recursive
@@ -9075,25 +9051,146 @@ class Autorouter:
         def _route_net_fn(net_id: int) -> list[Route]:
             return self.route_net(net_id, _subgrid_retry=True)
 
-        for conflict in unique_conflicts:
-            relocation = manager.try_relocate(conflict)
-            if relocation.success:
-                any_resolved = True
-                continue
-            # Relocation failed -- try rip-and-reroute.
-            rip_result = manager.try_rip_reroute(
-                conflict,
-                route_net_fn=_route_net_fn,
-            )
-            if rip_result.success:
-                any_resolved = True
-                # rip_reroute already routed the blocked net (our net)
-                # and the displaced net, so the new routes for `net`
-                # were appended to self.routes by the recursive call.
-                # We still need to drop the old failure entries and
-                # treat this as resolved; break out of the loop because
-                # the failing condition no longer holds.
-                break
+        any_resolved = False
+        net_name = self.net_names.get(net, f"Net {net}")
+
+        # =====================================================================
+        # Via-blocker branch (Issue #2838): find_blocking_vias →
+        # try_relocate → try_rip_reroute.
+        # =====================================================================
+        if has_via_blocker:
+            # Find all vias blocking this net's pads (across every pad on the
+            # net, not just the pads named by the failure record -- a failing
+            # MST edge typically names two pads but the conflict may live on
+            # any pad of an N-port net).  Dedup by via position so we don't
+            # process the same offending via twice.
+            all_conflicts = []
+            for pad in net_pads:
+                conflicts = manager.find_blocking_vias(
+                    pad=pad,
+                    pad_net=net,
+                    net_names=self.net_names,
+                )
+                all_conflicts.extend(conflicts)
+
+            seen_positions: set[tuple[float, float]] = set()
+            unique_conflicts = []
+            for conflict in all_conflicts:
+                key = (round(conflict.via.x, 4), round(conflict.via.y, 4))
+                if key in seen_positions:
+                    continue
+                seen_positions.add(key)
+                unique_conflicts.append(conflict)
+
+            if unique_conflicts:
+                flush_print(
+                    f"  Via conflict resolver for {net_name}: "
+                    f"{len(unique_conflicts)} candidate via conflict(s) found"
+                )
+
+                # Attempt resolution: RELOCATE first (cheap, in-place), then
+                # fall back to RIP_REROUTE on relocation failure (destructive
+                # but broader).  A single successful resolution justifies the
+                # retry -- the resolver doesn't need to clear every conflict,
+                # just unblock the pad enough for A* to find a path.
+                for conflict in unique_conflicts:
+                    relocation = manager.try_relocate(conflict)
+                    if relocation.success:
+                        any_resolved = True
+                        continue
+                    # Relocation failed -- try rip-and-reroute.
+                    rip_result = manager.try_rip_reroute(
+                        conflict,
+                        route_net_fn=_route_net_fn,
+                    )
+                    if rip_result.success:
+                        any_resolved = True
+                        # rip_reroute already routed the blocked net (our net)
+                        # and the displaced net, so the new routes for `net`
+                        # were appended to self.routes by the recursive call.
+                        # We still need to drop the old failure entries and
+                        # treat this as resolved; break out of the loop
+                        # because the failing condition no longer holds.
+                        break
+
+        # =====================================================================
+        # Trace-blocker branch (Issue #2859): find_blocking_traces →
+        # try_trace_rip_reroute.  Vias and traces are mutually exclusive per
+        # failure-analyser semantics (a single closest blocker per net), but
+        # both branches are attempted on partial-success multi-edge nets where
+        # some MST edges hit a via and others hit a trace.  Skip if the via
+        # branch already routed the net to avoid spurious trace surgery.
+        #
+        # Issue #2864 round-2 feedback: this branch is gated on a feature
+        # flag (default-disabled) because the localized DRC safety check
+        # inside ``try_trace_rip_reroute`` cannot cover violations from
+        # long re-routed diff-pair traces (board 06 USB3, board 07
+        # DDR/MIPI) that land outside its 10 mm envelope, nor can it
+        # cover the post-success ``route_net`` retry below at line
+        # ``retry_routes = self.route_net(...)``.  Enable via
+        # ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1`` once the full
+        # transactional wrapper is in place.  See
+        # :func:`via_conflict._trace_rip_reroute_enabled_default` for
+        # the rationale and the follow-up plan.
+        # =====================================================================
+        if (
+            has_trace_blocker
+            and not any_resolved
+            and _via_conflict_module.TRACE_RIP_REROUTE_ENABLED
+        ):
+            all_trace_conflicts = []
+            for pad in net_pads:
+                trace_conflicts = manager.find_blocking_traces(
+                    pad=pad,
+                    pad_net=net,
+                    net_names=self.net_names,
+                )
+                all_trace_conflicts.extend(trace_conflicts)
+
+            # Dedup by (route id, segment endpoints) to avoid trying to rip
+            # the same segment twice when iterated from multiple pads.
+            seen_segments: set[
+                tuple[int, tuple[float, float, float, float]]
+            ] = set()
+            unique_trace_conflicts = []
+            for conflict in all_trace_conflicts:
+                seg = conflict.segment
+                key = (
+                    id(conflict.segment_route),
+                    (
+                        round(seg.x1, 4),
+                        round(seg.y1, 4),
+                        round(seg.x2, 4),
+                        round(seg.y2, 4),
+                    ),
+                )
+                if key in seen_segments:
+                    continue
+                seen_segments.add(key)
+                unique_trace_conflicts.append(conflict)
+
+            if unique_trace_conflicts:
+                flush_print(
+                    f"  Trace conflict resolver for {net_name}: "
+                    f"{len(unique_trace_conflicts)} candidate trace "
+                    f"conflict(s) found"
+                )
+
+                # Traces have no "relocate" sibling (a segment is not a
+                # point), so the only resolution strategy is rip-and-reroute.
+                for conflict in unique_trace_conflicts:
+                    rip_result = manager.try_trace_rip_reroute(
+                        conflict,
+                        route_net_fn=_route_net_fn,
+                    )
+                    if rip_result.success:
+                        any_resolved = True
+                        # try_trace_rip_reroute already routed the blocked net
+                        # (our net) and the displaced net, so new routes for
+                        # ``net`` were appended to ``self.routes`` by the
+                        # recursive call.  Break out -- one successful trace
+                        # rip-reroute is enough to justify the retry.
+                        break
 
         if not any_resolved:
             return []
