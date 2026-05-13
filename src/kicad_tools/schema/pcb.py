@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +467,41 @@ class Footprint:
         repr=False,
         compare=False,
     )
+    # Tokens inside ``(attr ...)`` that the parser does not yet model
+    # (e.g. ``board_only``, ``allow_missing_courtyard``,
+    # ``allow_soldermask_bridges``). Preserved verbatim so that the
+    # ``__setattr__`` rebuild of the ``(attr ...)`` block does not
+    # silently drop them on round-trip.
+    _attr_unknown_tokens: list[str] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+    )
+
+    # Set of attr-block tokens the parser models explicitly. Anything
+    # else that appears as an atom child of ``(attr ...)`` is captured
+    # in ``_attr_unknown_tokens`` and re-emitted verbatim.
+    _ATTR_KNOWN_TOKENS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "smd",
+            "through_hole",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "locked",
+            "dnp",
+        }
+    )
+
+    _ATTR_SYNCED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "attr",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "locked",
+            "dnp",
+            "_attr_unknown_tokens",
+        }
+    )
 
     # ------------------------------------------------------------------
     # __setattr__ override -- syncs position/rotation/layer to _sexp_node
@@ -505,6 +540,73 @@ class Footprint:
             layer_node = sexp_node.find("layer")
             if layer_node is not None:
                 layer_node.set_value(0, value)
+
+        elif name in self._ATTR_SYNCED_FIELDS:
+            # Any change to a field that maps into the (attr ...) block
+            # rebuilds that block from the current Python state. Unknown
+            # tokens captured at parse time (board_only,
+            # allow_missing_courtyard, allow_soldermask_bridges, ...)
+            # are preserved verbatim via ``_attr_unknown_tokens`` so we
+            # don't drop tokens the parser doesn't yet model.
+            self._sync_attr_node()
+
+    def _sync_attr_node(self) -> None:
+        """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
+
+        Mirrors the position/rotation/layer sync pattern in
+        :meth:`__setattr__`. Removes the existing ``(attr ...)`` node
+        (if any), then re-emits it from the current values of
+        ``attr``, ``exclude_from_pos_files``, ``exclude_from_bom``,
+        ``locked``, ``dnp``, and any ``_attr_unknown_tokens`` captured
+        during parse. If no flags are set and no unknown tokens are
+        present, no ``(attr ...)`` node is emitted (matches KiCad's
+        canonical "no flags" form).
+        """
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+
+        # Remove any existing (attr ...) so we can rebuild it cleanly.
+        # find_children() searches direct children only -- we want to
+        # avoid stripping nested (attr ...) inside fp_text/property,
+        # which don't currently exist but could appear in future
+        # KiCad versions.
+        for existing in list(sexp_node.find_children("attr")):
+            sexp_node.remove(existing)
+
+        unknown = self.__dict__.get("_attr_unknown_tokens", []) or []
+
+        # Only emit (attr ...) if there is something to say.
+        if not (
+            self.attr
+            or self.locked
+            or self.dnp
+            or self.exclude_from_pos_files
+            or self.exclude_from_bom
+            or unknown
+        ):
+            return
+
+        attr_node = SExp.list("attr")
+        # Canonical KiCad order: <type> [board_only] [exclude_from_pos_files]
+        # [exclude_from_bom] [allow_missing_courtyard] [dnp], with `locked`
+        # appearing as a peer token. We emit modeled tokens in a stable
+        # order and append unknown tokens at the end -- KiCad accepts
+        # any ordering of these atoms, so this is a safe simplification.
+        if self.attr:
+            attr_node.add(self.attr)  # 'smd' or 'through_hole'
+        if self.exclude_from_pos_files:
+            attr_node.add("exclude_from_pos_files")
+        if self.exclude_from_bom:
+            attr_node.add("exclude_from_bom")
+        if self.locked:
+            attr_node.add("locked")
+        if self.dnp:
+            attr_node.add("dnp")
+        for token in unknown:
+            attr_node.add(token)
+
+        sexp_node.append(attr_node)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Footprint:
@@ -552,10 +654,29 @@ class Footprint:
         if tags := sexp.find("tags"):
             fp.tags = tags.get_string(0) or ""
         if attr := sexp.find("attr"):
-            fp.attr = attr.get_string(0) or ""
-            # Parse additional attribute flags (e.g., exclude_from_pos_files, dnp)
-            for i in range(len(attr.children)):
+            # The footprint *type* token (``smd`` / ``through_hole``)
+            # is optional in KiCad's emitted form. When KiCad omits the
+            # type, the first atom is a flag (e.g. ``(attr
+            # exclude_from_pos_files exclude_from_bom)``). Detect this
+            # by only accepting known type tokens at index 0.
+            first_token = attr.get_string(0) or ""
+            if first_token in ("smd", "through_hole"):
+                fp.attr = first_token
+                token_start_idx = 1
+            else:
+                fp.attr = ""
+                token_start_idx = 0
+            # Parse additional attribute flags (e.g., exclude_from_pos_files, dnp).
+            # Tokens we don't model (board_only, allow_missing_courtyard,
+            # allow_soldermask_bridges, ...) are captured verbatim into
+            # _attr_unknown_tokens so the (attr ...) rebuild in
+            # _sync_attr_node() can re-emit them on save without
+            # silent data loss.
+            unknown_tokens: list[str] = []
+            for i in range(token_start_idx, len(attr.children)):
                 token = attr.get_string(i)
+                if token is None:
+                    continue
                 if token == "exclude_from_pos_files":
                     fp.exclude_from_pos_files = True
                 elif token == "exclude_from_bom":
@@ -564,6 +685,10 @@ class Footprint:
                     fp.locked = True
                 elif token == "dnp":
                     fp.dnp = True
+                else:
+                    unknown_tokens.append(token)
+            if unknown_tokens:
+                fp._attr_unknown_tokens = unknown_tokens
 
         # Reference and value from fp_text (KiCad 7 format)
         for fp_text_sexp in sexp.find_all("fp_text"):
