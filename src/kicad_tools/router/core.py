@@ -91,6 +91,7 @@ from .tuning import (
     tune_parameters,
 )
 from .congestion_estimator import CongestionEstimator
+from .via_conflict import ViaConflictManager
 from .zones import ZoneManager
 
 
@@ -451,6 +452,16 @@ class Autorouter:
         self._diffpair_router: DiffPairRouter | None = None
         self._escape_router: EscapeRouter | None = None
         self._subgrid_router: SubGridRouter | None = None
+
+        # Issue #2838 (closes #2761 gap): Lazy-initialized via conflict
+        # manager.  Wired into the single-ended PIN_ACCESS retry path in
+        # ``route_net`` so vias from already-routed nets that sit within
+        # clearance of a failing net's pad are relocated (or rip-rerouted)
+        # before the failure becomes terminal.  The instance is re-used
+        # across all nets routed by this Autorouter so stats accumulate
+        # for the whole ``route_all_with_diffpairs`` pass.  Mirrors
+        # ``RoutingOrchestrator._via_manager`` at orchestrator.py:137.
+        self._via_manager: ViaConflictManager | None = None
 
         # Issue #2330: Waypoint injection replaces the sub-grid escape pre-pass.
         # When True, the pathfinder injects off-grid pad positions directly into
@@ -1516,16 +1527,48 @@ class Autorouter:
 
         # Issue #1603: Retry with sub-grid escape on PIN_ACCESS failure
         # Issue #2330: Skip sub-grid retry when waypoint injection is active
-        if not _subgrid_retry and not new_routes and not self.use_waypoint_injection:
-            # Check if this net has a PIN_ACCESS failure
+        # Issue #2838: Fire via-conflict resolver whenever a PIN_ACCESS
+        # failure is recorded -- not just when every edge of a multi-pin
+        # net failed.  Pre-fix this block was gated on ``not new_routes``,
+        # which meant a 3-pin net like XTAL2 (U1.3 / Y1.2 / C6.1) that
+        # routed Y1.2->C6.1 but failed U1.3->C6.1 due to an XTAL1 via
+        # would bypass the resolver entirely.  We now run the resolver
+        # whenever the net has a fresh PIN_ACCESS failure on the
+        # routing_failures list, regardless of whether any edges of the
+        # same net previously succeeded.
+        if not _subgrid_retry:
             has_pin_access_failure = any(
                 f.net == net and f.failure_cause == FailureCause.PIN_ACCESS
                 for f in self.routing_failures
             )
             if has_pin_access_failure:
-                retry_routes = self._retry_net_with_subgrid(net)
-                if retry_routes:
-                    routes.extend(retry_routes)
+                subgrid_recovered = False
+                # Sub-grid retry is only useful when waypoint injection is
+                # disabled (otherwise the C++ pathfinder already handles
+                # off-grid pads).  Sub-grid retry is also pointless when
+                # we already produced some routes for this net (it can't
+                # add coverage; the failing edge is what we need to
+                # un-block, and only via-conflict resolution can do that).
+                if not self.use_waypoint_injection and not new_routes:
+                    retry_routes = self._retry_net_with_subgrid(net)
+                    if retry_routes:
+                        routes.extend(retry_routes)
+                        subgrid_recovered = True
+                if not subgrid_recovered:
+                    # Issue #2838 (closes #2761 gap): Run via-conflict
+                    # resolution.  Neither sub-grid escape nor waypoint
+                    # injection can move an existing via from another
+                    # net; when the failure analyser reports
+                    # ``pad_access_blockers`` with ``blocking_type ==
+                    # "via"`` the only viable fix is to relocate or
+                    # rip-reroute the offending via.  This is the
+                    # canonical XTAL2 (board 03) failure pattern: XTAL1
+                    # routes first, drops a via 0.317 mm from U1.3,
+                    # XTAL2 fails PIN_ACCESS on the U1.3->C6.1 edge
+                    # while Y1.2->C6.1 routes successfully.
+                    via_retry_routes = self._resolve_via_conflicts_for_net(net)
+                    if via_retry_routes:
+                        routes.extend(via_retry_routes)
 
         # Issue #2336: Store freshly routed solution in sub-problem cache
         if sub_sig is not None and new_routes and self._sub_problem_cache is not None:
@@ -7508,13 +7551,34 @@ class Autorouter:
                 if pad_list:
                     net_pads[net_id] = pad_list
 
-        return compute_routing_statistics(
+        stats = compute_routing_statistics(
             routes=self.routes,
             grid=self.grid,
             layer_stats=self.get_layer_usage_statistics(),
             nets_to_route_ids=nets_to_route_ids,
             net_pads=net_pads,
         )
+
+        # Issue #2838 (closes #2761 gap): Surface via conflict resolver
+        # stats so demos and tests can assert the resolver fired (the
+        # canonical acceptance criterion from #2761 / #2838 is
+        # ``relocations_succeeded + rip_reroutes_succeeded >= 1`` on
+        # boards that need it).  Reading ``self._via_manager`` directly
+        # (not the lazy property) avoids surprise instantiation when
+        # nothing has triggered the resolver.
+        if self._via_manager is not None:
+            vc_stats = self._via_manager.stats
+            stats["via_conflict_resolution"] = {
+                "conflicts_found": vc_stats.conflicts_found,
+                "relocations_attempted": vc_stats.relocations_attempted,
+                "relocations_succeeded": vc_stats.relocations_succeeded,
+                "rip_reroutes_attempted": vc_stats.rip_reroutes_attempted,
+                "rip_reroutes_succeeded": vc_stats.rip_reroutes_succeeded,
+                "nets_unblocked": vc_stats.nets_unblocked,
+                "total_resolved": vc_stats.total_resolved,
+            }
+
+        return stats
 
     def get_layer_usage_statistics(self) -> dict:
         """Get layer utilization statistics from routed segments (Issue #625).
@@ -8886,6 +8950,164 @@ class Autorouter:
         # Retry routing
         retry_routes = self.route_net(net, _subgrid_retry=True)
         return escape_routes + retry_routes
+
+    @property
+    def via_manager(self) -> ViaConflictManager | None:
+        """Lazy-initialized via conflict manager instance.
+
+        Issue #2838 (closes #2761 gap): The manager is instantiated on
+        first access and re-used across the whole routing pass so its
+        :attr:`stats` accumulate over every net that triggers
+        PIN_ACCESS via-conflict resolution.  Returns ``None`` only if
+        the Autorouter has no routing grid (should never happen post-
+        ``__init__`` since ``_create_grid_and_routers`` always builds
+        one, but checked defensively to mirror
+        :class:`RoutingOrchestrator.via_manager`).
+        """
+        if self._via_manager is None and self.grid is not None:
+            self._via_manager = ViaConflictManager(grid=self.grid, rules=self.rules)
+        return self._via_manager
+
+    def _resolve_via_conflicts_for_net(self, net: int) -> list[Route]:
+        """Resolve via conflicts blocking a net's pads, then retry routing.
+
+        Issue #2838 (closes the gap left by closed #2761): Called from
+        :meth:`route_net` after :meth:`_retry_net_with_subgrid` returns
+        empty on a PIN_ACCESS failure.  Examines the failing net's most
+        recent failure analysis for ``pad_access_blockers`` entries with
+        ``blocking_type == "via"``; for each such blocker, asks
+        :class:`ViaConflictManager` to find the offending vias, then tries
+        relocation first (cheaper, non-destructive) and falls back to
+        rip-and-reroute if relocation fails.  On any successful resolution
+        the net's failure entries are dropped and routing is retried.
+
+        Mirrors :meth:`RoutingOrchestrator._route_via_conflict_resolution`
+        (orchestrator.py:855-905), but operates on the
+        ``Autorouter.route_net`` flow used by ``kct route`` and
+        ``route_all_with_diffpairs`` -- the path that closed #2761 missed.
+
+        Args:
+            net: Net ID whose PIN_ACCESS failure should be re-attempted
+                after relocating blocking vias.
+
+        Returns:
+            List of new routes for ``net`` if a conflict was resolved and
+            the retry succeeded; empty list otherwise.  Routes are also
+            appended to ``self.routes`` via the standard ``_mark_route``
+            path inside the recursive ``route_net`` call.
+        """
+        if net not in self.nets:
+            return []
+
+        # Find the most recent failure for this net and confirm it's a
+        # PIN_ACCESS failure with at least one via blocker.  This gates
+        # the resolver so we never run on BLOCKED_PATH / CONGESTION
+        # failures (those have their own resolvers).
+        recent_failure: RoutingFailure | None = None
+        for failure in reversed(self.routing_failures):
+            if failure.net == net:
+                recent_failure = failure
+                break
+        if recent_failure is None:
+            return []
+        if recent_failure.failure_cause != FailureCause.PIN_ACCESS:
+            return []
+        analysis = recent_failure.analysis
+        if analysis is None:
+            return []
+        has_via_blocker = any(
+            blocker.blocking_type == "via"
+            for blocker in analysis.pad_access_blockers
+        )
+        if not has_via_blocker:
+            return []
+
+        manager = self.via_manager
+        if manager is None:
+            return []
+
+        # Find all vias blocking this net's pads (across every pad on the
+        # net, not just the pads named by the failure record -- a failing
+        # MST edge typically names two pads but the conflict may live on
+        # any pad of an N-port net).  Dedup by via position so we don't
+        # process the same offending via twice.
+        net_pad_keys = self.nets[net]
+        net_pads = [self.pads[key] for key in net_pad_keys if key in self.pads]
+        all_conflicts = []
+        for pad in net_pads:
+            conflicts = manager.find_blocking_vias(
+                pad=pad,
+                pad_net=net,
+                net_names=self.net_names,
+            )
+            all_conflicts.extend(conflicts)
+
+        seen_positions: set[tuple[float, float]] = set()
+        unique_conflicts = []
+        for conflict in all_conflicts:
+            key = (round(conflict.via.x, 4), round(conflict.via.y, 4))
+            if key in seen_positions:
+                continue
+            seen_positions.add(key)
+            unique_conflicts.append(conflict)
+
+        if not unique_conflicts:
+            return []
+
+        net_name = self.net_names.get(net, f"Net {net}")
+        flush_print(
+            f"  Via conflict resolver for {net_name}: "
+            f"{len(unique_conflicts)} candidate conflict(s) found"
+        )
+
+        # Attempt resolution: RELOCATE first (cheap, in-place), then fall
+        # back to RIP_REROUTE on relocation failure (destructive but
+        # broader).  We accept a single successful resolution as enough
+        # to justify the retry -- the resolver doesn't need to clear
+        # every conflict, just unblock the pad enough for A* to find a
+        # path.
+        any_resolved = False
+
+        # The rip-reroute fallback needs a callable that routes a single
+        # net.  Use ``_subgrid_retry=True`` to prevent the recursive
+        # ``route_net`` call from re-entering the via-conflict resolver
+        # (and from re-entering the sub-grid retry path).
+        def _route_net_fn(net_id: int) -> list[Route]:
+            return self.route_net(net_id, _subgrid_retry=True)
+
+        for conflict in unique_conflicts:
+            relocation = manager.try_relocate(conflict)
+            if relocation.success:
+                any_resolved = True
+                continue
+            # Relocation failed -- try rip-and-reroute.
+            rip_result = manager.try_rip_reroute(
+                conflict,
+                route_net_fn=_route_net_fn,
+            )
+            if rip_result.success:
+                any_resolved = True
+                # rip_reroute already routed the blocked net (our net)
+                # and the displaced net, so the new routes for `net`
+                # were appended to self.routes by the recursive call.
+                # We still need to drop the old failure entries and
+                # treat this as resolved; break out of the loop because
+                # the failing condition no longer holds.
+                break
+
+        if not any_resolved:
+            return []
+
+        # Drop the prior failure records for this net (mirror
+        # _retry_net_with_subgrid pattern at core.py:8895) and retry
+        # routing.  When the rip-and-reroute branch above already
+        # produced routes for ``net``, the recursive route_net call
+        # below will be a near-no-op (pads already marked), but it
+        # ensures the standard post-route bookkeeping runs and that we
+        # return a consistent route list.
+        self.routing_failures = [f for f in self.routing_failures if f.net != net]
+        retry_routes = self.route_net(net, _subgrid_retry=True)
+        return retry_routes
 
     def route_with_subgrid(
         self,
