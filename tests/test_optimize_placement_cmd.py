@@ -406,7 +406,13 @@ class TestRunOptimizePlacement:
         assert result2 == 0
 
     def test_summary_output(self, tmp_pcb, capsys):
-        """Verify the summary includes expected fields."""
+        """Verify the summary includes expected fields.
+
+        The single "Improvement: X%" line was removed in #2828 because under
+        LEXICOGRAPHIC mode (now the default) the percent was dominated by the
+        INFEASIBILITY_OFFSET and rounded to 0.0% even on dramatic real progress.
+        We now assert per-axis labels are present instead.
+        """
         result = run_optimize_placement(
             str(tmp_pcb),
             max_iterations=2,
@@ -414,9 +420,98 @@ class TestRunOptimizePlacement:
         assert result == 0
         captured = capsys.readouterr()
         assert "Optimization Summary" in captured.out
-        assert "Improvement" in captured.out
         assert "Iterations" in captured.out
         assert "Wall time" in captured.out
+        # Per-axis breakdown replaced the single misleading "Improvement: X%" line.
+        assert "Per-axis change:" in captured.out
+        assert "Wirelength:" in captured.out
+        assert "Overlap:" in captured.out
+        assert "Boundary:" in captured.out
+        assert "DRC:" in captured.out
+        assert "Area:" in captured.out
+        assert "Feasibility:" in captured.out
+
+    def test_summary_reports_per_axis_deltas(self, tmp_pcb, capsys):
+        """Run a short optimization and assert the summary contains all five
+        axis labels via capsys, per the acceptance criteria of #2828."""
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=2,
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        # Each per-axis line must appear, sourced from score.breakdown.
+        for label in ("Wirelength:", "Overlap:", "Boundary:", "DRC:", "Area:"):
+            assert label in captured.out, f"missing per-axis label {label!r} in summary"
+
+
+class TestSummaryNoMisleadingZeroPercent:
+    """Regression coverage for #2828: the old single-percent improvement line
+    silently reported '0.0%' even when the optimizer crossed the feasibility
+    boundary, because the LEXICOGRAPHIC INFEASIBILITY_OFFSET (~1e12) dominates
+    the absolute total. The summary must surface feasibility as a categorical
+    transition and never print 'Improvement: 0.0%'.
+    """
+
+    def test_summary_no_misleading_zero_percent_on_feasibility_transition(
+        self, monkeypatch, tmp_pcb, capsys
+    ):
+        """Stub _evaluate to return an infeasible seed and a feasible final
+        score, then assert the summary does NOT contain 'Improvement: 0.0%'
+        and DOES contain 'INFEASIBLE → feasible'."""
+        infeasible_seed = PlacementScore(
+            total=1.000006658836e12,  # offset-dominated lexicographic total
+            breakdown=CostBreakdown(
+                wirelength=2608.0,
+                overlap=6.39,
+                boundary=0.0,
+                drc=27.0,
+                area=5003.65,
+            ),
+            is_feasible=False,
+        )
+        feasible_final = PlacementScore(
+            total=42.5,  # below INFEASIBILITY_OFFSET → feasible region
+            breakdown=CostBreakdown(
+                wirelength=6699.02,
+                overlap=0.0,
+                boundary=0.0,
+                drc=0.0,
+                area=6629.90,
+            ),
+            is_feasible=True,
+        )
+
+        # _evaluate is called once for the seed and once for the final result.
+        # Return infeasible first, then feasible.
+        scores = iter([infeasible_seed, feasible_final])
+
+        def _stub_evaluate(*args, **kwargs):
+            try:
+                return next(scores)
+            except StopIteration:
+                # Any extra evaluations during optimization fall through to
+                # the feasible final so the optimizer treats it as monotonic.
+                return feasible_final
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.optimize_placement_cmd._evaluate",
+            _stub_evaluate,
+        )
+
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=2,
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+
+        # The pre-#2828 misleading single-percent line must be gone.
+        assert "Improvement: 0.0%" not in captured.out
+        assert "Improvement:" not in captured.out
+
+        # Feasibility transition must be surfaced categorically.
+        assert "INFEASIBLE → feasible" in captured.out
 
 
 # ---------------------------------------------------------------------------

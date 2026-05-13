@@ -877,12 +877,32 @@ def run_optimize_placement(
         _print_score("Initial", seed_score)
         _print_score("Final", final_score)
 
-        if seed_score.total > 0:
-            improvement = (seed_score.total - final_score.total) / seed_score.total * 100
-        else:
-            improvement = 0.0
+        # Per-axis breakdown. We deliberately avoid a single "Improvement: X%"
+        # line because, under LEXICOGRAPHIC mode, the absolute total is
+        # dominated by the INFEASIBILITY_OFFSET (~1e12) and a real improvement
+        # of ~1e9 inside the infeasible region rounds to "0.0%". See #2828.
+        si, sf = seed_score.breakdown, final_score.breakdown
 
-        print(f"\n  Improvement: {improvement:.1f}%")
+        def _delta(initial: float, final: float, *, fmt: str = ".2f") -> str:
+            if initial == 0 and final == 0:
+                return f"{initial:{fmt}} → {final:{fmt}} (no change)"
+            if initial == 0:
+                return f"{initial:{fmt}} → {final:{fmt}} (new)"
+            pct = (final - initial) / initial * 100
+            return f"{initial:{fmt}} → {final:{fmt}} ({pct:+.1f}%)"
+
+        print("\n  Per-axis change:")
+        print(f"    Wirelength:    {_delta(si.wirelength, sf.wirelength)}")
+        print(f"    Overlap:       {_delta(si.overlap, sf.overlap)}")
+        print(f"    Boundary:      {_delta(si.boundary, sf.boundary)}")
+        print(f"    DRC:           {si.drc:.0f} → {sf.drc:.0f} ({sf.drc - si.drc:+.0f})")
+        print(f"    Area:          {_delta(si.area, sf.area)}")
+
+        # Feasibility transition (categorical, not percent)
+        seed_feas = "feasible" if seed_score.is_feasible else "INFEASIBLE"
+        final_feas = "feasible" if final_score.is_feasible else "INFEASIBLE"
+        print(f"  Feasibility:   {seed_feas} → {final_feas}")
+
         print(f"  Iterations: {iteration}")
         print(f"  Wall time: {elapsed:.2f}s")
         print(f"  Feasible: {final_score.is_feasible}")
