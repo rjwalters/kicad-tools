@@ -232,46 +232,38 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
 
 
 def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
-    """ViaConflictManager wiring is exercised on board 03's XTAL2 failure path.
+    """ViaConflictManager wiring exists and is not invoked spuriously on XTAL2.
 
     Issue #2838 (closes #2761 gap): On ``main`` at the branch point,
     ``Autorouter`` has no ``_via_manager`` attribute at all and the
     PIN_ACCESS retry path in ``route_net`` never invokes via-conflict
-    resolution.  XTAL2 fails ``PIN_ACCESS`` on the U1.3 -> C6.1 edge
-    (the failure analyser reports U1.3 as blocked by a XTAL1 "via at
-    0.32mm") and the failure is terminal.
+    resolution.  This regression test asserts the **structural wiring**
+    is in place: after ``route_all_with_diffpairs`` the
+    ``Autorouter._via_manager`` attribute exists (lazy property
+    initialized to ``None``).
 
-    This regression test asserts the **structural wiring** is in place:
-    after ``route_all_with_diffpairs`` the ``Autorouter._via_manager``
-    attribute exists and has been instantiated, meaning the PIN_ACCESS
-    retry block in ``route_net`` reached the via-conflict resolution
-    branch.  This is the minimum verifiable bar for the #2838 wiring
-    fix on a real board.
+    Issue #2858 (this PR): Fixed the misclassification of XTAL2's
+    XTAL1 blocker.  Pre-fix the failure analyser reported a XTAL1
+    "via at 0.32mm" blocker that triggered ``ViaConflictManager`` --
+    which then found 0 vias to relocate because the real obstacle is
+    a XTAL1 *trace* segment (the nearest XTAL1 via is 7.5 mm away).
+    Post-fix the classifier correctly reports the blocker as
+    ``blocking_type="trace"``, so ``_resolve_via_conflicts_for_net``
+    early-returns at the ``has_via_blocker`` gate (``core.py:9018-9023``)
+    WITHOUT invoking ``ViaConflictManager``.  Net result: the
+    ``via_manager`` lazy property never fires, and
+    ``router._via_manager`` remains ``None``.
 
-    *Caveat — XTAL2 doesn't fully route after this fix.*  Inspection
-    of board 03's actual routed state shows that XTAL1's nearest via
-    is 7.5 mm from U1.3, well outside any via-clearance zone.  The
-    failure analyser's classification of the U1.3 blocker as
-    ``blocking_type="via"`` is misleading: the real blocker is a
-    XTAL1 *trace* segment whose clearance envelope sits ~0.9 mm from
-    U1.3.  Because ``ViaConflictManager.find_blocking_vias`` only
-    scans actual ``Via`` objects on ``grid.routes``, it correctly
-    reports ``conflicts_found == 0`` for this board -- there is no
-    via to relocate.  Fully unblocking XTAL2 requires either:
+    Acceptance criteria (Issue #2858):
+      1. ``hasattr(router, "_via_manager")`` -- wiring still in place.
+      2. XTAL2's failure surfaces a XTAL1 ``"trace"`` blocker (pinned
+         by ``test_xtal2_failure_classified_as_trace_blocker``).
+      3. ``router._via_manager`` is ``None`` for this board -- the
+         resolver is NOT engaged spuriously when the only blockers
+         are traces.
 
-    1. Fixing the failure analyser's ``via`` vs ``trace`` classification
-       (the ``cell.original_net == 0`` fall-through at
-       ``failure_analysis.py:1546`` defaults to ``"via"`` for trace
-       clearance cells), or
-    2. Extending ``ViaConflictManager`` to also relocate / rip-reroute
-       *trace* segments (much larger scope -- out of scope per the
-       issue's "Out of scope" section).
-
-    Both are tracked separately.  For this PR, the success criterion
-    is the wiring -- which the synthetic test in
-    ``tests/test_via_conflict.py::TestViaConflictManagerIntegration``
-    pins more directly (it constructs a real via blocker and asserts
-    ``relocations_succeeded + rip_reroutes_succeeded >= 1``).
+    Fully unblocking XTAL2 requires a downstream trace-clearance
+    resolver tracked in #2859 -- out of scope for this PR.
     """
     router, net_map = routed_board_03
 
@@ -283,9 +275,7 @@ def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
         "schematic / PCB generator no longer emits XTAL1, this test "
         "needs to be updated."
     )
-    assert xtal2_id is not None, (
-        "XTAL2 net missing from board 03 unrouted PCB -- see XTAL1 note."
-    )
+    assert xtal2_id is not None, "XTAL2 net missing from board 03 unrouted PCB -- see XTAL1 note."
 
     routes_by_net: dict[int, int] = {}
     for route in router.routes:
@@ -317,18 +307,137 @@ def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
         "self._via_manager."
     )
 
-    # Resolver-was-reached assertion: the lazy ``via_manager`` property
-    # was triggered, meaning ``_resolve_via_conflicts_for_net`` ran on
-    # at least one PIN_ACCESS failure during the routing pass.  XTAL2
-    # is the canonical trigger (its failure analyser reports a
-    # ``blocking_type == "via"`` blocker -- regardless of whether the
-    # underlying obstacle is actually a via or a misclassified trace).
-    assert router._via_manager is not None, (
-        "Autorouter._via_manager is None after route_all_with_diffpairs.  "
-        "The PIN_ACCESS retry block in route_net() did not call "
-        "_resolve_via_conflicts_for_net for any net.  Board 03's XTAL2 "
-        "should have triggered it -- check that the PIN_ACCESS gate at "
-        "core.py:1530 still fires when waypoint injection is on."
+    # Issue #2858 acceptance criterion 3: ``_resolve_via_conflicts_for_net``
+    # MUST NOT be invoked spuriously for XTAL2's failure.  Pre-fix the
+    # XTAL1 blocker was misclassified as ``"via"`` and triggered the
+    # resolver (which then found 0 vias to relocate).  Post-fix the
+    # blocker is correctly classified as ``"trace"`` and the resolver
+    # early-returns at ``core.py:9023`` -- the lazy ``via_manager``
+    # property is never accessed.
+    #
+    # The XTAL2-specific guarantee comes from
+    # ``test_xtal2_failure_classified_as_trace_blocker``, which pins the
+    # ``blocking_type == "trace"`` classification on the same failure
+    # record.  Together the two tests pin the full Issue #2858 acceptance.
+    assert router._via_manager is None, (
+        "Issue #2858 acceptance criterion: ``ViaConflictManager`` should "
+        "NOT be invoked spuriously for XTAL2 on board 03 anymore.  The "
+        "lazy ``via_manager`` property is initialised on first access "
+        "from ``_resolve_via_conflicts_for_net``, so a non-None value "
+        "here means the resolver ran on at least one net.  XTAL2's "
+        "XTAL1 blocker should now classify as 'trace' (see "
+        "test_xtal2_failure_classified_as_trace_blocker) and the "
+        "``has_via_blocker`` gate at ``core.py:9018-9023`` should "
+        "early-return WITHOUT touching ``self.via_manager``.  If this "
+        "fails, either: (1) the classifier regressed and the blocker is "
+        "back to ``'via'``, or (2) another net on this board has a "
+        "genuine via blocker that the resolver legitimately needs to "
+        "handle -- in which case file a follow-up and adjust this "
+        "assertion to target XTAL2 specifically via ``manager.stats``."
+    )
+
+
+def test_xtal2_failure_classified_as_trace_blocker(routed_board_03) -> None:
+    """Issue #2858: XTAL2's pad-access blocker (if any) must surface as ``"trace"``.
+
+    Pre-fix behaviour (the bug):
+      The failure analyser at ``failure_analysis.py:1546`` defaulted to
+      ``blocking_type == "via"`` for any cell that wasn't a pad, trace
+      centerline, or pad-clearance zone.  XTAL2's U1.3 pad was blocked
+      by a XTAL1 *trace* clearance halo (~0.3-0.9 mm from the pad), not
+      a via (nearest XTAL1 via is 7.5 mm away).  Reporting ``"via"``
+      misrouted the failure to ``ViaConflictManager`` which then found
+      nothing to relocate, leaving the failure terminal.
+
+    Post-fix behaviour (two valid outcomes -- both pass this test):
+
+      A. **XTAL2 routes fully.**  The classifier fix changes the
+         ``_resolve_via_conflicts_for_net`` early-return point, which
+         in turn changes the downstream negotiated-routing strategy's
+         exploration path enough that XTAL2 finds a working route.
+         This is a positive side effect of the fix: with the spurious
+         ``ViaConflictManager`` engagement gone, the negotiated /
+         rip-up-and-reroute strategy has more iterations available
+         and can solve the routing.
+
+      B. **XTAL2 fails with a ``"trace"``-classified blocker.**  If
+         the routing strategy still cannot solve XTAL2 (e.g. on a
+         different machine or after future strategy tuning that
+         changes iteration counts), the failure record must report
+         the XTAL1 blocker as ``blocking_type == "trace"`` rather
+         than ``"via"`` -- the actual Issue #2858 acceptance criterion.
+
+    Either outcome confirms the fix: outcome A is empirical evidence
+    the misclassification was load-bearing in the resolver flow, and
+    outcome B directly pins the classifier change.  The fail case is
+    "blocker classified as 'via'" -- which would mean the classifier
+    fix regressed.
+
+    References:
+      - Issue #2858 (this fix)
+      - PR #2856 / Issue #2838 (XTAL2 wiring fix that exposed this bug)
+      - Issue #2859 (trace-clearance resolver, dependent on this fix)
+    """
+    router, net_map = routed_board_03
+
+    xtal1_id = net_map.get("XTAL1")
+    xtal2_id = net_map.get("XTAL2")
+    assert xtal1_id is not None and xtal2_id is not None, (
+        "XTAL1 / XTAL2 nets missing from board 03; see "
+        "test_xtal2_unblocks_via_conflict_resolution for the canonical "
+        "skip path."
+    )
+
+    xtal2_failures = [f for f in router.routing_failures if f.net == xtal2_id]
+
+    # Outcome A: XTAL2 routes fully (no failures recorded).  This is a
+    # legitimate post-fix outcome; the classifier acceptance is then
+    # pinned by the synthetic tests in
+    # ``tests/test_failure_analysis.py::TestBlockerGeometryClassifier``.
+    if not xtal2_failures:
+        # Verify XTAL2 actually has routes (not just absent from
+        # routing_failures due to never being attempted).
+        xtal2_segs = sum(
+            len(r.segments) for r in router.routes if r.net == xtal2_id
+        )
+        assert xtal2_segs > 0, (
+            "XTAL2 has no failures AND no routes -- it was skipped "
+            "entirely, not routed.  Check that the routing pass still "
+            "attempts XTAL2; if the skip list grew, update SKIP_NETS."
+        )
+        return
+
+    # Outcome B: XTAL2 still fails -- the classifier fix must surface
+    # the XTAL1 blocker as ``"trace"`` rather than ``"via"``.
+    xtal1_blockers = []
+    for failure in xtal2_failures:
+        if failure.analysis is None:
+            continue
+        for blocker in failure.analysis.pad_access_blockers:
+            if blocker.blocking_net == xtal1_id:
+                xtal1_blockers.append(blocker)
+
+    assert len(xtal1_blockers) >= 1, (
+        f"XTAL2 failed but no XTAL1 blocker appears in its "
+        f"pad_access_blockers records: {[f.analysis for f in xtal2_failures]!r}. "
+        "If the failure analyser is no longer emitting pad_access_blockers "
+        "for this case, this test needs to be updated; see issue #2858 "
+        "for what changed in the analyser."
+    )
+
+    # The Issue #2858 acceptance criterion: at least one XTAL1 blocker on
+    # XTAL2's failure must be classified ``"trace"``, not ``"via"``.
+    # Pre-fix ALL of these would be classified ``"via"``; post-fix the
+    # closest blocker (the segment halo) must be ``"trace"``.
+    trace_classified = [b for b in xtal1_blockers if b.blocking_type == "trace"]
+    assert len(trace_classified) >= 1, (
+        "Issue #2858 acceptance criterion: XTAL2's failure must report a "
+        "XTAL1 blocker with blocking_type='trace' (the real obstacle is a "
+        "XTAL1 trace segment clearance halo, ~0.3-0.9 mm from U1.3).  Got "
+        f"blocker types: {[b.blocking_type for b in xtal1_blockers]!r}.  "
+        "If this test fails, check that "
+        "_classify_blocker_geometry (failure_analysis.py) was invoked "
+        "from the else branch of analyze_pad_access_blockers's cascade."
     )
 
 

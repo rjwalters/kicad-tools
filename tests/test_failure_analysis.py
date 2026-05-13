@@ -18,7 +18,7 @@ from kicad_tools.router.failure_analysis import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
@@ -772,6 +772,357 @@ class TestPadAccessBlocker:
         assert "0.12" in s
 
 
+class TestBlockerGeometryClassifier:
+    """Issue #2858: geometry-based classification of trace vs via blockers.
+
+    The pre-fix cascade at ``failure_analysis.py:1539-1546`` defaulted to
+    ``"via"`` whenever the first three predicates fell through, which
+    misclassified *trace clearance* cells (which have the exact same
+    ``Cell`` state shape as via clearance cells:
+    ``pad_blocked=False``, ``usage_count=0``, ``original_net=0``).
+    The post-fix path delegates the else branch to
+    ``_classify_blocker_geometry``, which inspects ``grid.routes`` for
+    the cell's net and picks ``"trace"`` vs ``"via"`` by checking which
+    geometric envelope the cell falls inside.
+
+    These tests pin both the new behaviour and the cascade-order
+    invariants so regressions surface before they reach a real board.
+    """
+
+    def test_trace_clearance_classified_as_trace(self, routing_grid: RoutingGrid) -> None:
+        """A cell inside a segment's clearance envelope -> ``"trace"``.
+
+        Fails on main: the pre-fix cascade falls through to ``"via"``.
+        Passes after fix: ``_classify_blocker_geometry`` inspects
+        ``grid.routes`` and matches the segment's clearance halo.
+        """
+        # Target pad (the victim we'll analyse) at (25, 25).
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+
+        # Lay down a horizontal segment from a different net (net=2) just
+        # outside the segment centerline but well inside its clearance halo.
+        # ``_mark_segment`` halo radius =
+        #     seg.width / 2 + trace_clearance + safety_margin (1 cell)
+        # With default rules (trace_width=0.2, trace_clearance=0.15), that's
+        # 0.1 + 0.15 + 0.1 = 0.35 mm.  Place the segment 0.3 mm above the
+        # victim so the cell at the pad's location is inside the halo but
+        # outside the centerline.
+        rules = routing_grid.rules
+        offset = rules.trace_width / 2 + rules.trace_clearance + 0.5 * routing_grid.resolution
+        seg = Segment(
+            x1=20.0,
+            y1=25.0 + offset,
+            x2=30.0,
+            y2=25.0 + offset,
+            width=rules.trace_width,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="OTHER",
+        )
+        route = Route(net=2, net_name="OTHER", segments=[seg])
+        routing_grid.mark_route(route)
+
+        analyzer = RootCauseAnalyzer()
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "OTHER"},
+        )
+
+        other_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(other_blockers) >= 1, (
+            f"Expected the OTHER segment's clearance halo to register as a "
+            f"blocker on the VICTIM pad, got: {blockers!r}"
+        )
+        assert any(b.blocking_type == "trace" for b in other_blockers), (
+            "Issue #2858: a segment clearance cell must classify as "
+            f"'trace', got: {[b.blocking_type for b in other_blockers]!r}"
+        )
+
+    def test_via_clearance_classified_as_via(self, routing_grid: RoutingGrid) -> None:
+        """A cell inside a via's clearance ring -> ``"via"``.
+
+        Regression guard: must still pass after the Issue #2858 fix.
+        Passes on main as well (the pre-fix default already returns
+        ``"via"`` here); the new path resolves the same answer by
+        geometric inspection.
+        """
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+
+        # Place a via from net 2 just inside its own clearance ring of
+        # the victim pad's cell.  ``_mark_via`` radius =
+        #     via.diameter/2 + via_clearance + trace_width/2 + safety_margin
+        # = 0.3 + 0.2 + 0.1 + 0.1 = 0.7 mm.  Put the via at ~0.6 mm so the
+        # victim pad center is well inside the halo.
+        rules = routing_grid.rules
+        via_offset = (
+            0.6 / 2 + rules.via_clearance + rules.trace_width / 2 - 0.5 * routing_grid.resolution
+        )
+        offending_via = Via(
+            x=25.0 + via_offset,
+            y=25.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        # Route the via through ``mark_route`` so it lands in ``grid.routes``
+        # (the new classifier inspects ``grid.routes`` rather than scanning
+        # all blocked cells).
+        route = Route(net=2, net_name="OTHER", vias=[offending_via])
+        routing_grid.mark_route(route)
+
+        analyzer = RootCauseAnalyzer()
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "OTHER"},
+        )
+
+        via_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(via_blockers) >= 1, (
+            f"Expected the OTHER via's clearance ring to register as a "
+            f"blocker on the VICTIM pad, got: {blockers!r}"
+        )
+        assert all(b.blocking_type == "via" for b in via_blockers), (
+            "Issue #2858 regression guard: an isolated via must still "
+            f"classify as 'via', got: {[b.blocking_type for b in via_blockers]!r}"
+        )
+
+    def test_both_blockers_pick_closest(self, routing_grid: RoutingGrid) -> None:
+        """When both segment and via from the same net block a pad, the
+        closest cell wins; the classifier returns the type matching the
+        closest cell's geometric envelope.
+
+        Geometry: place the segment closer than the via.  The closest
+        blocking cell will be inside the segment's clearance halo, so the
+        net_closest map should record ``"trace"`` for net=2.
+        """
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+
+        rules = routing_grid.rules
+        # Segment trace 0.4 mm above the pad (closest cell ~0.05 mm
+        # above the pad metal edge).
+        seg_offset = rules.trace_width / 2 + rules.trace_clearance + 0.5 * routing_grid.resolution
+        close_seg = Segment(
+            x1=20.0,
+            y1=25.0 + seg_offset,
+            x2=30.0,
+            y2=25.0 + seg_offset,
+            width=rules.trace_width,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="OTHER",
+        )
+        # Via 1.5 mm to the east, just inside its own clearance ring but
+        # farther from the pad than the segment.
+        far_via = Via(
+            x=25.0 + 1.5,
+            y=25.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        route = Route(net=2, net_name="OTHER", segments=[close_seg], vias=[far_via])
+        routing_grid.mark_route(route)
+
+        analyzer = RootCauseAnalyzer()
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "OTHER"},
+        )
+
+        other_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(other_blockers) == 1, (
+            "Expected exactly one entry for OTHER (closest cell wins per net), "
+            f"got: {other_blockers!r}"
+        )
+        # The closest blocking cell sits inside the segment halo, so the
+        # geometry classifier should return 'trace'.
+        assert other_blockers[0].blocking_type == "trace", (
+            "Closest cell is inside the segment clearance halo; expected "
+            f"'trace' classification, got: {other_blockers[0].blocking_type!r}"
+        )
+
+    def test_pad_blocked_takes_precedence(self, routing_grid: RoutingGrid) -> None:
+        """``pad_blocked`` must win over geometry inspection (cascade order).
+
+        Even if a route from the same blocking net's geometry is also
+        present, the ``pad_blocked`` predicate fires first.
+        """
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        # Place a foreign pad whose metal cell overlaps the search radius
+        # of the victim pad.  ``_block_pad`` sets ``pad_blocked=True`` on
+        # the metal cells, and that predicate is first in the cascade.
+        blocker_pad = Pad(
+            x=25.5,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="OTHER",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+        routing_grid.add_pad(blocker_pad)
+
+        # Also add a Route from net=2 to ensure geometry inspection has
+        # something to find -- the predicate cascade must NOT delegate to
+        # geometry when pad_blocked is True.
+        far_seg = Segment(
+            x1=30.0,
+            y1=30.0,
+            x2=35.0,
+            y2=30.0,
+            width=routing_grid.rules.trace_width,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="OTHER",
+        )
+        routing_grid.mark_route(Route(net=2, net_name="OTHER", segments=[far_seg]))
+
+        analyzer = RootCauseAnalyzer()
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "OTHER"},
+        )
+
+        other_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(other_blockers) >= 1
+        # The metal cell of the foreign pad must dominate the closest cell
+        # search, and the cascade short-circuits at ``pad_blocked`` -> 'pad'.
+        assert other_blockers[0].blocking_type == "pad", (
+            "Issue #2858 cascade-order guard: ``pad_blocked`` must take "
+            f"precedence over geometry inspection, got: "
+            f"{other_blockers[0].blocking_type!r}"
+        )
+
+    def test_pad_clearance_takes_precedence(self, routing_grid: RoutingGrid) -> None:
+        """``original_net != 0 and == cell.net`` must win over geometry.
+
+        Reproduces the Issue #2810 pad-clearance test scenario but also
+        adds a foreign-net route so the geometry classifier *would*
+        return ``"trace"`` if invoked.  The cascade must short-circuit
+        at ``pad_clearance`` before reaching the geometry check.
+        """
+        victim = Pad(
+            x=25.0,
+            y=25.0,
+            width=0.2,
+            height=0.2,
+            net=1,
+            net_name="VICTIM",
+            layer=Layer.F_CU,
+        )
+        neighbor = Pad(
+            x=25.8,
+            y=25.0,
+            width=0.2,
+            height=0.2,
+            net=2,
+            net_name="NEIGHBOR",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(victim)
+        routing_grid.add_pad(neighbor)
+
+        # Also add a segment from the same NEIGHBOR net so geometry would
+        # match if invoked.  The expected behaviour: the pad_clearance
+        # predicate fires first (because the neighbor's pad-clearance
+        # cells have ``original_net == net == 2``), so the geometry
+        # classifier is NOT consulted for those cells.
+        rules = routing_grid.rules
+        seg_offset = rules.trace_width / 2 + rules.trace_clearance + 0.5 * routing_grid.resolution
+        far_seg = Segment(
+            x1=22.0,
+            y1=25.0 - seg_offset,
+            x2=23.0,
+            y2=25.0 - seg_offset,
+            width=rules.trace_width,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NEIGHBOR",
+        )
+        routing_grid.mark_route(Route(net=2, net_name="NEIGHBOR", segments=[far_seg]))
+
+        analyzer = RootCauseAnalyzer()
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "VICTIM", 2: "NEIGHBOR"},
+        )
+
+        neighbor_blockers = [b for b in blockers if b.blocking_net == 2]
+        assert len(neighbor_blockers) >= 1
+        # The closest blocking cell must be in the neighbor's pad
+        # clearance envelope (not the more distant segment halo).
+        assert neighbor_blockers[0].blocking_type == "pad_clearance", (
+            "Issue #2858 cascade-order guard: ``pad_clearance`` predicate "
+            f"must take precedence over geometry inspection, got: "
+            f"{neighbor_blockers[0].blocking_type!r}"
+        )
+
+
 class TestAnalyzePadAccessBlockers:
     """Tests for analyze_pad_access_blockers method."""
 
@@ -823,9 +1174,7 @@ class TestAnalyzePadAccessBlockers:
         # The blocking element should be from net 2
         assert any(b.blocking_net == 2 for b in blockers)
 
-    def test_analyze_pad_access_blockers_same_net_not_blocked(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_analyze_pad_access_blockers_same_net_not_blocked(self, routing_grid: RoutingGrid):
         """Test that same net elements don't count as blockers."""
         # Add a pad from same net
         same_net_pad = Pad(
@@ -920,9 +1269,7 @@ class TestAnalyzePadAccessBlockers:
             f"clearance zone, got: {[b.blocking_type for b in neighbor_blockers]!r}"
         )
 
-    def test_analyze_pad_access_blockers_via_remains_via(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_analyze_pad_access_blockers_via_remains_via(self, routing_grid: RoutingGrid):
         """Issue #2810 regression guard: real vias must still classify as ``via``.
 
         Places only a via (no pads in the search radius) and confirms the new
