@@ -302,7 +302,10 @@ class TestStitchViaHaloEndToEnd:
             1
             for p in gnd_pads
             if _gnd_pad_has_via_landing(
-                grid, p, STITCH_VIA_SIZE, STITCH_VIA_CLEARANCE,
+                grid,
+                p,
+                STITCH_VIA_SIZE,
+                STITCH_VIA_CLEARANCE,
                 other_pads=pads,
             )
         )
@@ -337,14 +340,11 @@ class TestStitchViaHaloEndToEnd:
                 f"Signal pad {sig_pad.pin} (net {sig_pad.net}) center cell "
                 f"lost its net assignment: got cell.net={cell.net}."
             )
-            assert cell.pad_blocked, (
-                f"Signal pad {sig_pad.pin} center must remain pad_blocked."
-            )
+            assert cell.pad_blocked, f"Signal pad {sig_pad.pin} center must remain pad_blocked."
             # And the owner net must still pass our blocked check at its
             # own pad center.
             assert not grid.is_blocked(gx, gy, Layer.F_CU, net=sig_pad.net), (
-                f"Signal pad {sig_pad.pin} center must remain reachable "
-                f"to its own net."
+                f"Signal pad {sig_pad.pin} center must remain reachable to its own net."
             )
 
     def test_halo_blocks_more_cells_than_disabled_mode(self):
@@ -353,22 +353,57 @@ class TestStitchViaHaloEndToEnd:
         cells around the pad are blocked for foreign nets.  Counts cells
         in a 1.5 mm box around pad 8's center that are blocked for a
         foreign net (net=99 -- arbitrary).
+
+        Issue #2865 follow-up: the original board-04 rules
+        (``trace_clearance=0.15``, ``trace_width=0.2``, ``pitch=0.5``)
+        now route through the narrow-channel guard's "standard
+        envelope" branch (effective channel 0.173 mm < required
+        0.5 mm).  When the standard envelope is wider than the via
+        halo on both axes, the halo and no-halo modes produce
+        identical blocking -- because the standard envelope already
+        covers what the halo would reserve.  This is the correct
+        outcome for jlcpcb-tier1 LQFP-48 corner GND pins: the
+        standard halo *is* the via halo, and no extra ring is needed.
+
+        To still exercise the halo's contribution to blocking,
+        construct a fixture where the *fine-pitch shrink remains
+        feasible* (looser clearance with min_trace_width), so the
+        halo annular ring lives outside the shrunk standard envelope.
         """
+
+        # Looser-clearance ruleset where the narrow-channel guard
+        # permits the shrink at 0.65 mm pitch, so the halo annular
+        # ring is visible beyond the shrunk envelope.
+        def _make_loose_rules() -> DesignRules:
+            return DesignRules(
+                trace_width=0.15,
+                trace_clearance=0.1,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=0.05,
+                min_trace_width=0.1,
+                fine_pitch_clearance=0.1,
+                fine_pitch_threshold=0.8,
+                manufacturer="jlcpcb-tier1",
+            )
+
         # With halo (default)
-        rules_on = _make_board04_rules()
+        rules_on = _make_loose_rules()
         grid_on = _make_grid(rules_on)
         gnd_pins = {8, 23, 35}
-        pads_on = _make_lqfp48_pads(gnd_pin_numbers=gnd_pins)
+        # Use 0.65 mm pitch so the shrink remains feasible per #2865's
+        # narrow-channel guard.
+        pads_on = _make_lqfp48_pads(gnd_pin_numbers=gnd_pins, pitch=0.65)
         for pad in pads_on:
-            grid_on.add_pad(pad, pin_pitch=0.5)
+            grid_on.add_pad(pad, pin_pitch=0.65)
 
         # Without halo (opt-out)
-        rules_off = _make_board04_rules()
+        rules_off = _make_loose_rules()
         rules_off.stitch_via_halo = False
         grid_off = _make_grid(rules_off)
-        pads_off = _make_lqfp48_pads(gnd_pin_numbers=gnd_pins)
+        pads_off = _make_lqfp48_pads(gnd_pin_numbers=gnd_pins, pitch=0.65)
         for pad in pads_off:
-            grid_off.add_pad(pad, pin_pitch=0.5)
+            grid_off.add_pad(pad, pin_pitch=0.65)
 
         # Count cells blocked for a foreign net (net=99) in a 1.5 mm
         # box around pin 8's center.

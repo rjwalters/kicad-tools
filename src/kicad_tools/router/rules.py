@@ -315,6 +315,23 @@ class DesignRules:
         fine-pitch clearance based on pin pitch, then falls back to the
         default trace_clearance.
 
+        Issue #2865 follow-up scope note: this method is the C++
+        pad-vs-segment validator's clearance source.  It is *parallel*
+        to :meth:`RoutingGrid._clearance_for_pin_pitch` (which sets the
+        *grid halo*) -- both layers independently shrink for fine-pitch
+        pads.  The Curator's recommended Option C patch (#2865)
+        intentionally scopes the narrow-channel guard to the grid-halo
+        path only, leaving this validator clearance untouched.  As a
+        result the localized #2865 fix tightens the grid blocking on
+        LQFP-48 0.5 mm pitch + jlcpcb-tier1 (preventing the pathfinder
+        from threading the inter-pad channel in the first place) but
+        the C++ pathfinder's geometric validator still accepts the
+        reduced clearance if the negotiated outer loop forces a
+        through-channel path under congestion pressure.  Promoting the
+        guard to this method is documented as a follow-up: see issue
+        #2865 acceptance note "the per-board allowlist entry can be
+        reduced to 0" for the eventual end-state.
+
         Args:
             ref: Component reference (e.g., "U1")
             pin_pitch: Optional pin pitch in mm (for automatic fine-pitch detection)
