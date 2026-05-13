@@ -2276,6 +2276,453 @@ class TestConnectivityCheckRollback:
         )
 
 
+PCB_GRANULAR_ROLLBACK = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NET_X")
+  (net 2 "NET_Y")
+  (net 3 "NET_Z")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-x-1"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-1"))
+  (segment (start 100 105) (end 110 105) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-x-2"))
+  (segment (start 100 105.15) (end 110 105.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-2"))
+  (segment (start 100 110) (end 110 110) (width 0.25) (layer "F.Cu") (net 3) (uuid "seg-z-1"))
+  (segment (start 100 110.15) (end 110 110.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-3"))
+)
+"""
+
+DRC_REPORT_GRANULAR_ROLLBACK = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 3 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [NET_X] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [NET_Y] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 105.0000 mm): Track [NET_X] on F.Cu
+    @(105.0000 mm, 105.1500 mm): Track [NET_Y] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 110.0000 mm): Track [NET_Z] on F.Cu
+    @(105.0000 mm, 110.1500 mm): Track [NET_Y] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+@pytest.fixture
+def pcb_granular_rollback(tmp_path: Path) -> Path:
+    f = tmp_path / "granular.kicad_pcb"
+    f.write_text(PCB_GRANULAR_ROLLBACK)
+    return f
+
+
+@pytest.fixture
+def report_granular_rollback(tmp_path: Path) -> Path:
+    f = tmp_path / "granular-drc.rpt"
+    f.write_text(DRC_REPORT_GRANULAR_ROLLBACK)
+    return f
+
+
+class TestGranularRollback:
+    """Tests for issue #2851: per-nudge granular rollback.
+
+    When the post-pass connectivity check fires, only nudges that touch
+    a regressed net are reverted; the rest stay applied.  Falls back to
+    the legacy bulk-snapshot restore when per-nudge attribution is not
+    possible (empty offender set, every nudge implicated, or undo
+    failure).
+    """
+
+    def _patch_connectivity(
+        self,
+        monkeypatch,
+        *,
+        baseline_count: int,
+        after_count: int,
+        baseline_issues: tuple = (),
+        after_issues: tuple = (),
+    ):
+        """Install paired mocks for _count_connected_nets and _connectivity_report.
+
+        The two helpers are called in lockstep: every baseline/after pair
+        is one of each.  We dispatch on call_count so the after report
+        sees the regressed-net set.
+        """
+        from kicad_tools.validate.connectivity import (
+            ConnectivityIssue,
+            ConnectivityResult,
+        )
+
+        def _make_result(count: int, issues: tuple) -> ConnectivityResult:
+            r = ConnectivityResult()
+            r.connected_nets = count
+            r.total_nets = count + len(issues)
+            for net_name in issues:
+                r.add(
+                    ConnectivityIssue(
+                        severity="error",
+                        issue_type="partial",
+                        net_name=net_name,
+                        message=f"Net '{net_name}' broken",
+                        suggestion="reconnect",
+                    )
+                )
+            return r
+
+        count_calls = {"n": 0}
+        report_calls = {"n": 0}
+
+        def mock_count(_pcb_path):
+            count_calls["n"] += 1
+            return baseline_count if count_calls["n"] == 1 else after_count
+
+        def mock_report(_pcb_path):
+            report_calls["n"] += 1
+            if report_calls["n"] == 1:
+                return _make_result(baseline_count, baseline_issues)
+            return _make_result(after_count, after_issues)
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets", mock_count
+        )
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._connectivity_report", mock_report
+        )
+        return count_calls, report_calls
+
+    def test_synthetic_positive_control_partial_rollback(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 1: 3 clearance nudges, regression attributed to NET_X only.
+
+        Expect: nudges on NET_X reverted, nudges on NET_Y / NET_Z kept.
+        Top-level summary: ``Repaired (3-K)/3``, exit code != 3.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # Connectivity dropped: 10 -> 9.  Regression attributed to NET_X.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Partial rollback -- not a full rollback, so exit code != 3.
+        assert result != 3, f"Granular partial rollback should not return exit 3, got {result}"
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # connectivity_check should reflect the partial-rollback state.
+        conn = data["connectivity_check"]["passes"][0]
+        assert conn["rolled_back"] is False, "Partial rollback is not a full rollback"
+        assert conn["partial_rollback"] is True
+        assert len(conn["reverted_uuids"]) >= 1, "At least one nudge should be reverted"
+
+        # The clearance nudges list must tag the reverted entries.
+        nudges = data["clearance"]["nudges"]
+        net_x_nudges = [n for n in nudges if n["net_name"] == "NET_X"]
+        non_x_nudges = [n for n in nudges if n["net_name"] != "NET_X"]
+        # NET_X nudges should be reverted.
+        for n in net_x_nudges:
+            assert n["reverted"] is True, f"NET_X nudge should be reverted: {n}"
+        # Non-NET_X nudges should NOT be reverted.
+        for n in non_x_nudges:
+            assert n["reverted"] is False, f"Non-NET_X nudge should remain: {n}"
+
+        # Repaired total = total_attempted - reverted.
+        total_attempted = data["clearance"]["violations"]
+        reverted_count = sum(1 for n in nudges if n["reverted"])
+        expected_kept = total_attempted - reverted_count
+        assert data["total_repaired"] == expected_kept, (
+            f"Expected total_repaired={expected_kept}, "
+            f"got {data['total_repaired']}"
+        )
+
+    def test_full_rollback_when_all_nudges_touch_offending_net(
+        self,
+        pcb_same_net_vias: Path,
+        report_same_net_drill: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 4: every applied nudge touches the regressed net -> full rollback.
+
+        The granular path must degenerate to ``revert all`` -- same exit
+        code 3 and same bulk-snapshot semantics as before.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_same_net_vias.read_bytes()
+
+        # The same-net-vias fixture has a single GND drill-dedup action.
+        # Reporting GND as regressed implicates every applied nudge.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=8,
+            baseline_issues=(),
+            after_issues=("GND",),
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Full rollback path -- exit code 3, file restored.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        conn = data["connectivity_check"]["passes"][0]
+        assert conn["rolled_back"] is True
+        assert conn["partial_rollback"] is False
+
+    def test_local_rerouter_not_called_during_rollback(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Step 5: performance guard -- the rollback path must not re-route.
+
+        ``LocalRerouter.reroute_segment`` is the only routing entry point
+        reachable from the repair pipeline.  We install a sentinel that
+        fails the test if it is invoked at all (we use
+        ``--no-local-reroute`` so the legitimate nudge phase also never
+        routes).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        from kicad_tools.drc.local_rerouter import LocalRerouter
+
+        original_reroute = LocalRerouter.reroute_segment
+        call_count = {"n": 0}
+
+        def sentinel_reroute(self, *args, **kwargs):
+            call_count["n"] += 1
+            return original_reroute(self, *args, **kwargs)
+
+        monkeypatch.setattr(LocalRerouter, "reroute_segment", sentinel_reroute)
+
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        # ``--no-local-reroute`` to ensure the nudge phase doesn't route
+        # legitimately (which would also count against the sentinel).
+        main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # The rollback path must add zero routing calls.  With
+        # --no-local-reroute the nudge phase also adds zero, so the total
+        # must be zero.
+        assert call_count["n"] == 0, (
+            f"LocalRerouter.reroute was called {call_count['n']} time(s) "
+            f"during fix-drc; the rollback path must be routing-free."
+        )
+
+    def test_undo_failure_falls_back_to_bulk_snapshot(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 6: per-nudge undo failure -> bulk snapshot restore.
+
+        Patch ``_undo_nudge`` to return False for one nudge.  Expect the
+        granular path to abort and the file to be restored to the
+        pre-pass snapshot, with a warning logged.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_granular_rollback.read_bytes()
+
+        # Force undo failure for any nudge.
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        def failing_undo(self, nudge):
+            return False
+
+        monkeypatch.setattr(ClearanceRepairer, "_undo_nudge", failing_undo)
+
+        # Regression attributed to NET_X only -- partial path is selected,
+        # then fails, then falls back to bulk.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Bulk fallback -> exit code 3 and file restored.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+        # The warning should mention the fallback.
+        captured = capsys.readouterr()
+        assert "per-nudge rollback failed" in captured.err
+        assert "bulk snapshot restore" in captured.err
+
+    def test_connectivity_validator_calls_are_o1(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Step 2: Approach 1 -- the rollback path uses O(1) connectivity calls.
+
+        Asserts the upper bound on _connectivity_report calls per pass
+        (Approach 1 = 2: baseline + after).  An extra post-undo
+        _count_connected_nets call is allowed (one O(1) re-check).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        count_calls, report_calls = self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Approach 1 budget: 2 _connectivity_report calls (baseline + after)
+        # and at most 3 _count_connected_nets calls (baseline + after + post-undo).
+        # Anything materially larger indicates regression toward Approach 2/3.
+        assert report_calls["n"] <= 2, (
+            f"Too many _connectivity_report calls: {report_calls['n']} > 2; "
+            f"the rollback path should not re-validate per nudge."
+        )
+        assert count_calls["n"] <= 3, (
+            f"Too many _count_connected_nets calls: {count_calls['n']} > 3"
+        )
+
+    def test_empty_regressed_set_falls_back_to_bulk(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """When per-net attribution cannot identify offenders, bulk restore.
+
+        The count drops but no specific net is flagged as regressed.
+        Without an offender set, the granular path falls back to the
+        legacy bulk-snapshot restore.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_granular_rollback.read_bytes()
+
+        # Count drops but issue lists are empty in both reports.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=8,
+            baseline_issues=(),
+            after_issues=(),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Empty offender set -> bulk fallback -> exit 3.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+
 class TestCountConnectedNets:
     """Tests for the _count_connected_nets helper."""
 

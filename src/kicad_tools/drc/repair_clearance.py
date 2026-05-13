@@ -1549,6 +1549,141 @@ class ClearanceRepairer:
                 end_node.set_value(0, round(ex + dx, 4))
                 end_node.set_value(1, round(ey + dy, 4))
 
+    def _find_node_by_uuid(
+        self,
+        uuid: str,
+        obj_type: str,
+    ) -> SExp | None:
+        """Find a top-level segment or via node by its UUID.
+
+        Args:
+            uuid: UUID string to match (compared against the first atom of
+                the ``(uuid ...)`` child).
+            obj_type: ``"segment"`` or ``"via"`` — the S-expression tag to
+                look for.
+
+        Returns:
+            The matching :class:`SExp` node, or ``None`` if not found.
+        """
+        if not uuid:
+            return None
+        for node in self.doc.find_all(obj_type):
+            uuid_node = node.find("uuid")
+            if not uuid_node:
+                continue
+            atom = uuid_node.get_first_atom()
+            if atom is None:
+                continue
+            if str(atom).strip('"') == str(uuid).strip('"'):
+                return node
+        return None
+
+    def _undo_nudge(self, nudge: NudgeResult) -> bool:
+        """Reverse a previously-applied nudge.
+
+        Locates the object by UUID and applies the inverse displacement
+        ``(-displacement_x, -displacement_y)``.  For vias, mirrors
+        ``_apply_nudge``'s behavior of also updating the endpoints of any
+        segments that currently terminate at the post-nudge via position
+        (so the via and its attached traces move back together).
+
+        For segments where one endpoint was pinned at a via during the
+        original nudge, only the moved endpoint is reverted.  The same
+        ``via_positions`` check used by ``_apply_nudge`` is applied to the
+        *current* board state to detect this asymmetric case.
+
+        Args:
+            nudge: The :class:`NudgeResult` to undo.
+
+        Returns:
+            ``True`` if the undo succeeded, ``False`` otherwise (e.g. the
+            UUID could not be located in the current document).  Callers
+            should treat ``False`` as a trigger for the bulk-snapshot
+            fallback so the file state is never left half-reverted.
+        """
+        if not nudge.uuid:
+            return False
+        node = self._find_node_by_uuid(nudge.uuid, nudge.object_type)
+        if node is None:
+            return False
+
+        # Inverse displacement.
+        dx = -nudge.displacement_x
+        dy = -nudge.displacement_y
+
+        if nudge.object_type == "via":
+            at_node = node.find("at")
+            if not at_node:
+                return False
+            at_atoms = at_node.get_atoms()
+            cur_x = float(at_atoms[0]) if at_atoms else 0.0
+            cur_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0.0
+            new_x = round(cur_x + dx, 4)
+            new_y = round(cur_y + dy, 4)
+
+            # Find segments currently anchored at the via's post-nudge
+            # position before we move the via -- otherwise we'd be looking
+            # for segments at the pre-nudge position which no longer exists.
+            connected = self._find_connected_segments(cur_x, cur_y)
+
+            at_node.set_value(0, new_x)
+            at_node.set_value(1, new_y)
+
+            for seg_node, endpoint in connected:
+                ep_node = seg_node.find(endpoint)
+                if ep_node:
+                    ep_node.set_value(0, new_x)
+                    ep_node.set_value(1, new_y)
+            return True
+
+        if nudge.object_type == "segment":
+            start_node = node.find("start")
+            end_node = node.find("end")
+            if not (start_node and end_node):
+                return False
+
+            start_atoms = start_node.get_atoms()
+            end_atoms = end_node.get_atoms()
+            sx = float(start_atoms[0]) if start_atoms else 0.0
+            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0.0
+            ex = float(end_atoms[0]) if end_atoms else 0.0
+            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0.0
+
+            # Mirror _apply_nudge's via-pinning logic against the current
+            # board state.  If a segment endpoint is currently at a via,
+            # only the other (moved) endpoint gets the inverse displacement.
+            via_positions = self._find_via_positions()
+            tolerance = 0.001
+            start_at_via = any(
+                math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance
+                for vx, vy in via_positions
+            )
+            end_at_via = any(
+                math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance
+                for vx, vy in via_positions
+            )
+
+            if start_at_via and end_at_via:
+                # Both endpoints at vias -- _apply_nudge would have done
+                # nothing here, so there's nothing to undo.  Treat as
+                # success so the orchestrator continues.
+                return True
+
+            if start_at_via:
+                end_node.set_value(0, round(ex + dx, 4))
+                end_node.set_value(1, round(ey + dy, 4))
+            elif end_at_via:
+                start_node.set_value(0, round(sx + dx, 4))
+                start_node.set_value(1, round(sy + dy, 4))
+            else:
+                start_node.set_value(0, round(sx + dx, 4))
+                start_node.set_value(1, round(sy + dy, 4))
+                end_node.set_value(0, round(ex + dx, 4))
+                end_node.set_value(1, round(ey + dy, 4))
+            return True
+
+        return False
+
     def _closest_point_on_segment(
         self,
         x1: float,

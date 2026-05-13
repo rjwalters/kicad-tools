@@ -41,6 +41,16 @@ class PassResult:
     connectivity_before: int | None = None
     connectivity_after: int | None = None
     connectivity_rolled_back: bool = False
+    # Per-nudge granular rollback metadata (issue #2851):
+    #   * ``reverted_uuids`` holds the UUIDs of nudges/actions that were
+    #     individually reverted (subset of all applied work this pass).
+    #   * ``connectivity_partial_rollback`` is ``True`` when only a
+    #     proper subset of nudges was reverted; ``connectivity_rolled_back``
+    #     remains the flag for a *full* rollback so existing consumers
+    #     (text rendering, JSON ``rolled_back`` field, exit code 3) keep
+    #     their semantics.
+    reverted_uuids: tuple[str, ...] = ()
+    connectivity_partial_rollback: bool = False
 
     @property
     def violations_after(self) -> int:
@@ -260,14 +270,22 @@ Examples:
                     f"violation(s) (edge clearance, dimension, silkscreen, etc.)"
                 )
 
-        # Snapshot and baseline connectivity before the repair pass
+        # Snapshot and baseline connectivity before the repair pass.
+        # Issue #2851: we record the full ConnectivityResult (when
+        # available) alongside the count so the post-pass rollback can
+        # attribute regressions to specific nets and undo only the
+        # offending subset of nudges.  The simple count is what the
+        # rollback *decision* is based on (preserving the legacy
+        # _count_connected_nets mock surface used by existing tests).
         snapshot: bytes | None = None
         baseline_conn: int | None = None
+        baseline_report = None
         if do_connectivity_check:
             load_for_snapshot = output_path if pass_num > 1 else pcb_path
             if load_for_snapshot.exists():
                 snapshot = load_for_snapshot.read_bytes()
                 baseline_conn = _count_connected_nets(load_for_snapshot)
+                baseline_report = _connectivity_report(load_for_snapshot)
 
         # Run single-pass repairs
         clearance_result, drill_result = _run_single_pass(
@@ -288,6 +306,8 @@ Examples:
         # Post-pass connectivity check and rollback
         after_conn: int | None = None
         rolled_back = False
+        partial_rolled_back = False
+        reverted_uuids: tuple[str, ...] = ()
         if (
             snapshot is not None
             and baseline_conn is not None
@@ -298,16 +318,54 @@ Examples:
         ):
             after_conn = _count_connected_nets(output_path)
             if after_conn >= 0 and after_conn < baseline_conn:
-                # Connectivity decreased -- rollback
-                output_path.write_bytes(snapshot)
-                rolled_back = True
-                connectivity_rollback_occurred = True
-                repaired_this_pass = 0
-                print(
-                    f"Warning: pass {pass_num} decreased connectivity "
-                    f"({baseline_conn} -> {after_conn} nets); rolled back.",
-                    file=sys.stderr,
+                # Connectivity decreased -- try granular rollback first.
+                after_report = _connectivity_report(output_path)
+                regressed = _regressed_nets(baseline_report, after_report)
+
+                reverted_all, kept_count, reverted_uuid_list = _attempt_granular_rollback(
+                    output_path=output_path,
+                    clearance_result=clearance_result,
+                    drill_result=drill_result,
+                    regressed=regressed,
+                    snapshot=snapshot,
+                    pass_number=pass_num,
                 )
+
+                if reverted_all:
+                    # Full bulk rollback (legacy behavior).  All applied
+                    # nudges were thrown away.
+                    rolled_back = True
+                    connectivity_rollback_occurred = True
+                    repaired_this_pass = 0
+                    print(
+                        f"Warning: pass {pass_num} decreased connectivity "
+                        f"({baseline_conn} -> {after_conn} nets); rolled back.",
+                        file=sys.stderr,
+                    )
+                else:
+                    # Partial granular rollback: ``kept_count`` nudges
+                    # survived, ``len(reverted_uuid_list)`` were reverted.
+                    partial_rolled_back = True
+                    reverted_uuids = tuple(reverted_uuid_list)
+                    reverted_count = len(reverted_uuid_list)
+                    repaired_this_pass = kept_count
+                    pre_undo_after = after_conn
+                    # Re-measure connectivity so the JSON/text output
+                    # reports the post-undo state, not the (worse)
+                    # pre-undo state.  This is one extra
+                    # ConnectivityValidator call -- still O(1) in N.
+                    new_after = _count_connected_nets(output_path)
+                    if new_after >= 0:
+                        after_conn = new_after
+                    print(
+                        f"Warning: pass {pass_num} initially decreased "
+                        f"connectivity ({baseline_conn} -> {pre_undo_after} nets); "
+                        f"reverted {reverted_count} of "
+                        f"{reverted_count + kept_count} nudge(s) on regressed "
+                        f"net(s) {sorted(regressed)!r}; "
+                        f"now {after_conn} connected net(s).",
+                        file=sys.stderr,
+                    )
 
         pass_results.append(
             PassResult(
@@ -320,6 +378,8 @@ Examples:
                 connectivity_before=baseline_conn,
                 connectivity_after=after_conn,
                 connectivity_rolled_back=rolled_back,
+                reverted_uuids=reverted_uuids,
+                connectivity_partial_rollback=partial_rolled_back,
             )
         )
 
@@ -465,6 +525,150 @@ def _count_connected_nets(pcb_path: Path) -> int:
         return -1
 
 
+def _connectivity_report(pcb_path: Path):
+    """Return the full :class:`ConnectivityResult` for a PCB, or ``None``.
+
+    Used by the granular rollback path in addition to
+    :func:`_count_connected_nets`: the count alone is enough to *decide*
+    whether to roll back, but the per-net ``issues`` list is required to
+    attribute the regression to specific nets and identify the offending
+    nudges.  Returning ``None`` on failure lets callers transparently
+    fall back to the bulk-snapshot rollback.
+    """
+    try:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        validator = ConnectivityValidator(pcb_path)
+        return validator.validate()
+    except Exception:
+        return None
+
+
+def _regressed_nets(baseline, after) -> set[str]:
+    """Compute the set of nets that regressed between two ConnectivityResults.
+
+    A net is "regressed" if it was fully connected (no issue) in the
+    ``baseline`` result but is broken (has an entry in ``issues``) in the
+    ``after`` result.  Returns an empty set when either argument is
+    ``None`` -- callers treat that as "no per-net attribution available"
+    and fall back to a bulk rollback.
+    """
+    if baseline is None or after is None:
+        return set()
+    baseline_broken = {issue.net_name for issue in baseline.issues if issue.net_name}
+    after_broken = {issue.net_name for issue in after.issues if issue.net_name}
+    return after_broken - baseline_broken
+
+
+def _attempt_granular_rollback(
+    *,
+    output_path: Path,
+    clearance_result: RepairResult,
+    drill_result: DrillRepairResult,
+    regressed: set[str],
+    snapshot: bytes,
+    pass_number: int,
+) -> tuple[bool, int, list[str]]:
+    """Revert only the nudges that touched a regressed net.
+
+    Returns a 3-tuple ``(reverted_all, kept_count, reverted_uuids)``:
+
+    * ``reverted_all`` is ``True`` when every nudge was reverted (a true
+      full rollback, e.g. all nudges touched a regressed net or
+      attribution returned an empty offender set so the safety-net
+      fallback fired).
+    * ``kept_count`` is the number of nudges that remained applied
+      (``repaired_this_pass`` minus the reverted subset).
+    * ``reverted_uuids`` lists the UUIDs of nudges that were reverted via
+      the per-nudge undo path so the renderer can tag them
+      ``(reverted)``.
+
+    The function never re-routes the board: it edits the live S-exp tree
+    in memory and rewrites the file in a single ``save`` call, satisfying
+    the O(1)-extra-routing performance guard documented in the issue.
+
+    Falls back to the bulk-snapshot restore (and reports
+    ``reverted_all=True``) on any failure: empty ``regressed`` set, every
+    nudge implicated, per-nudge undo returning ``False``, or an exception
+    during the in-place edit.  In every fallback case the caller sees the
+    legacy "revert all" semantics.
+    """
+    nudges = list(clearance_result.nudges)
+    actions = list(drill_result.actions)
+    total = len(nudges) + len(actions)
+
+    # No nudges were applied this pass -- nothing to do.
+    if total == 0:
+        return (False, 0, [])
+
+    # Identify offenders by net_name membership.
+    offending_nudges = [n for n in nudges if n.net_name in regressed]
+    offending_actions = [a for a in actions if a.net_name in regressed]
+    offender_count = len(offending_nudges) + len(offending_actions)
+
+    # If we cannot attribute the regression to any specific nudge (e.g.
+    # empty regressed set, or no net_name match), fall back to a bulk
+    # restore.  This preserves the legacy "revert all" semantics whenever
+    # the granular path can't make a confident decision.
+    if offender_count == 0:
+        output_path.write_bytes(snapshot)
+        return (True, 0, [])
+
+    # If *every* nudge is implicated, the granular path degenerates to
+    # the legacy bulk-rollback.  Skip the per-nudge edits and just
+    # restore the snapshot -- this is the cheapest and safest path.
+    if offender_count == total:
+        output_path.write_bytes(snapshot)
+        return (True, 0, [])
+
+    # Per-nudge undo on a freshly-loaded document so the edits are
+    # written atomically.  Apply clearance undos first, save, then load
+    # the saved tree to apply drill undos on top.  Any failure triggers
+    # the bulk fallback so we never leave the file half-reverted.
+    try:
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+        from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer
+
+        reverted_uuids: list[str] = []
+
+        if offending_nudges:
+            clearance_repairer = ClearanceRepairer(output_path)
+            for nudge in offending_nudges:
+                ok = clearance_repairer._undo_nudge(nudge)
+                if not ok:
+                    raise RuntimeError(
+                        f"per-nudge undo failed for {nudge.object_type} "
+                        f"uuid={nudge.uuid!r} on net {nudge.net_name!r}"
+                    )
+                reverted_uuids.append(nudge.uuid)
+            clearance_repairer.save(output_path)
+
+        if offending_actions:
+            drill_repairer = DrillClearanceRepairer(output_path)
+            for act in offending_actions:
+                ok = drill_repairer.undo_action(act)
+                if not ok:
+                    raise RuntimeError(
+                        f"per-action undo failed for {act.action} via "
+                        f"uuid={act.uuid!r} on net {act.net_name!r}"
+                    )
+                reverted_uuids.append(act.uuid)
+            drill_repairer.save(output_path)
+
+        kept = total - offender_count
+        return (False, kept, reverted_uuids)
+
+    except Exception as e:
+        # Fall back to bulk restore on any failure.
+        print(
+            f"Warning: pass {pass_number} per-nudge rollback failed "
+            f"({e}); falling back to bulk snapshot restore.",
+            file=sys.stderr,
+        )
+        output_path.write_bytes(snapshot)
+        return (True, 0, [])
+
+
 def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | None:
     """Load or generate a DRC report.
 
@@ -574,12 +778,33 @@ def _print_json(
     # surface ``clearance.repaired`` / ``drill_clearance.repaired`` the
     # same way for consistency.
     rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
+    partial_rolled_back = (
+        bool(last.connectivity_partial_rollback) if last is not None else False
+    )
+    reverted_uuids = set(last.reverted_uuids) if last is not None else set()
+
+    # Per-category reverted counts (for partial rollback): count nudges /
+    # actions whose UUID is in the reverted set.  The repairer-side
+    # counters (``RepairResult.repaired`` etc.) still reflect the
+    # pre-rollback total; subtracting the reverted count gives the
+    # effective post-rollback count.
+    clearance_reverted = sum(
+        1 for n in clearance_result.nudges if n.uuid in reverted_uuids
+    )
+    drill_reverted = sum(
+        1 for a in drill_result.actions if a.uuid in reverted_uuids
+    )
 
     # For single-pass (or backward compat), use the single-pass totals
     if len(pass_results) == 1:
         total_violations = clearance_result.total_violations + drill_result.total_violations
         if rolled_back:
             total_repaired = 0
+        elif partial_rolled_back:
+            total_repaired = (
+                (clearance_result.repaired - clearance_reverted)
+                + (drill_result.repaired - drill_reverted)
+            )
         else:
             total_repaired = clearance_result.repaired + drill_result.repaired
     else:
@@ -591,10 +816,18 @@ def _print_json(
     # Non-targeted violations (detected but not repairable by fix-drc)
     non_targeted = last.non_targeted_count if last else 0
 
-    # Effective per-category repaired counts (zeroed on rollback so the JSON
+    # Effective per-category repaired counts (zeroed on full rollback,
+    # decremented by the reverted subset on partial rollback so the JSON
     # summary agrees with the text output and the exit code).
-    effective_clearance_repaired = 0 if rolled_back else clearance_result.repaired
-    effective_drill_repaired = 0 if rolled_back else drill_result.repaired
+    if rolled_back:
+        effective_clearance_repaired = 0
+        effective_drill_repaired = 0
+    elif partial_rolled_back:
+        effective_clearance_repaired = clearance_result.repaired - clearance_reverted
+        effective_drill_repaired = drill_result.repaired - drill_reverted
+    else:
+        effective_clearance_repaired = clearance_result.repaired
+        effective_drill_repaired = drill_result.repaired
 
     data: dict = {
         "dry_run": dry_run,
@@ -623,6 +856,9 @@ def _print_json(
                     "y": n.y,
                     "net_name": n.net_name,
                     "displacement_mm": round(n.displacement_mm, 4),
+                    "reverted": (
+                        bool(rolled_back) or (n.uuid in reverted_uuids)
+                    ),
                 }
                 for n in clearance_result.nudges
             ],
@@ -646,6 +882,9 @@ def _print_json(
                     "net_name": a.net_name,
                     "displacement_mm": round(a.displacement_mm, 4),
                     "detail": a.detail,
+                    "reverted": (
+                        bool(rolled_back) or (a.uuid in reverted_uuids)
+                    ),
                 }
                 for a in drill_result.actions
             ],
@@ -664,6 +903,8 @@ def _print_json(
                     "connected_nets_before": p.connectivity_before,
                     "connected_nets_after": p.connectivity_after,
                     "rolled_back": p.connectivity_rolled_back,
+                    "partial_rollback": p.connectivity_partial_rollback,
+                    "reverted_uuids": list(p.reverted_uuids),
                 }
                 for p in pass_results
                 if p.connectivity_before is not None or p.connectivity_after is not None
@@ -704,12 +945,44 @@ def _print_summary(
         clearance_result = last.clearance_result if last else RepairResult()
         drill_result = last.drill_result if last else DrillRepairResult()
         total_violations = clearance_result.total_violations + drill_result.total_violations
-        total_repaired = clearance_result.repaired + drill_result.repaired
+
+        # Issue #2851: when a rollback occurred (full or partial), the
+        # underlying ``RepairResult.repaired`` still counts the
+        # pre-rollback work; subtract the reverted subset so the
+        # ``Repaired N/M`` headline matches the on-disk state.
+        rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
+        partial_rolled_back = (
+            bool(last.connectivity_partial_rollback) if last is not None else False
+        )
+        reverted_uuids = set(last.reverted_uuids) if last is not None else set()
+        clearance_reverted = sum(
+            1 for n in clearance_result.nudges if n.uuid in reverted_uuids
+        )
+        drill_reverted = sum(
+            1 for a in drill_result.actions if a.uuid in reverted_uuids
+        )
+
+        if rolled_back:
+            total_repaired = 0
+            clearance_repaired = 0
+            drill_repaired = 0
+        elif partial_rolled_back:
+            clearance_repaired = clearance_result.repaired - clearance_reverted
+            drill_repaired = drill_result.repaired - drill_reverted
+            total_repaired = clearance_repaired + drill_repaired
+        else:
+            clearance_repaired = clearance_result.repaired
+            drill_repaired = drill_result.repaired
+            total_repaired = clearance_repaired + drill_repaired
+
         print(f"{action} {total_repaired}/{total_violations} DRC violations")
         if clearance_result.total_violations > 0:
-            print(f"  Clearance: {clearance_result.repaired}/{clearance_result.total_violations}")
+            print(f"  Clearance: {clearance_repaired}/{clearance_result.total_violations}")
         if drill_result.total_violations > 0:
-            print(f"  Drill clearance: {drill_result.repaired}/{drill_result.total_violations}")
+            print(
+                f"  Drill clearance: "
+                f"{drill_repaired}/{drill_result.total_violations}"
+            )
     else:
         # Multi-pass: per-pass progress
         total_repaired_all = sum(p.repaired for p in pass_results)
@@ -756,7 +1029,30 @@ def _print_text(
     # way: header shows ``0/total (rolled back)`` and each listed nudge gets a
     # ``(reverted)`` suffix so the user can still see *what would have been
     # changed* without contradicting the summary.
+    #
+    # Issue #2851: when only a *subset* of nudges is rolled back (granular
+    # path), only those entries get the ``(reverted)`` tag; the others
+    # remain plain so the user can see the work that survived.
     rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
+    partial_rolled_back = (
+        bool(last.connectivity_partial_rollback) if last is not None else False
+    )
+    reverted_uuids = set(last.reverted_uuids) if last is not None else set()
+
+    def _is_reverted(uuid: str) -> bool:
+        if rolled_back:
+            return True
+        if partial_rolled_back and uuid in reverted_uuids:
+            return True
+        return False
+
+    # Per-category reverted counts (for partial rollback).
+    clearance_reverted_count = sum(
+        1 for n in clearance_result.nudges if n.uuid in reverted_uuids
+    )
+    drill_reverted_count = sum(
+        1 for a in drill_result.actions if a.uuid in reverted_uuids
+    )
 
     print(f"\n{'=' * 60}")
     print("DRC VIOLATION REPAIR")
@@ -780,16 +1076,30 @@ def _print_text(
 
     total_violations = first_violations
     total_repaired = total_repaired_all
-    summary_suffix = " (rolled back — connectivity regression)" if rolled_back else ""
+    summary_suffix = ""
+    if rolled_back:
+        summary_suffix = " (rolled back -- connectivity regression)"
+    elif partial_rolled_back:
+        total_reverted = clearance_reverted_count + drill_reverted_count
+        summary_suffix = (
+            f" (partial rollback -- {total_reverted} nudge(s) reverted "
+            f"on regressed nets)"
+        )
     print(f"\n{action} {total_repaired}/{total_violations} violations{summary_suffix}")
-    if rolled_back and last is not None:
+    if (rolled_back or partial_rolled_back) and last is not None:
         before = last.connectivity_before
         after = last.connectivity_after
         if before is not None and after is not None:
-            print(
-                f"  Connectivity: {before} -> {after} connected nets; "
-                f"nudges reverted to preserve connectivity."
-            )
+            if rolled_back:
+                print(
+                    f"  Connectivity: {before} -> {after} connected nets; "
+                    f"nudges reverted to preserve connectivity."
+                )
+            else:
+                print(
+                    f"  Connectivity: {before} -> {after} connected nets "
+                    f"after granular rollback."
+                )
 
     if clearance_result.total_violations > 0:
         print(f"\n{'-' * 60}")
@@ -797,15 +1107,26 @@ def _print_text(
         # ``clearance_result.repaired`` still reflects the pre-rollback total
         # (the rollback happens after the repairer returns).  Report 0/total
         # here so the header agrees with the ``Repaired 0/N`` summary.
-        effective_repaired = 0 if rolled_back else clearance_result.repaired
-        header_suffix = " (reverted)" if rolled_back else ""
+        if rolled_back:
+            effective_repaired = 0
+            header_suffix = " (reverted)"
+        elif partial_rolled_back:
+            effective_repaired = clearance_result.repaired - clearance_reverted_count
+            header_suffix = (
+                f" ({clearance_reverted_count} reverted)"
+                if clearance_reverted_count > 0
+                else ""
+            )
+        else:
+            effective_repaired = clearance_result.repaired
+            header_suffix = ""
         print(
             f"CLEARANCE: {effective_repaired}/{clearance_result.total_violations}"
             f"{header_suffix}"
         )
         if clearance_result.nudges:
-            nudge_suffix = " (reverted)" if rolled_back else ""
             for nudge in clearance_result.nudges[:5]:
+                nudge_suffix = " (reverted)" if _is_reverted(nudge.uuid) else ""
                 print(f"  [{nudge.object_type.upper()}] {nudge.net_name}{nudge_suffix}")
                 print(f"    at ({nudge.x:.4f}, {nudge.y:.4f}) -> {nudge.displacement_mm:.4f}mm")
             if len(clearance_result.nudges) > 5:
@@ -813,8 +1134,19 @@ def _print_text(
 
     if drill_result.total_violations > 0:
         print(f"\n{'-' * 60}")
-        effective_drill_repaired = 0 if rolled_back else drill_result.repaired
-        drill_header_suffix = " (reverted)" if rolled_back else ""
+        if rolled_back:
+            effective_drill_repaired = 0
+            drill_header_suffix = " (reverted)"
+        elif partial_rolled_back:
+            effective_drill_repaired = drill_result.repaired - drill_reverted_count
+            drill_header_suffix = (
+                f" ({drill_reverted_count} reverted)"
+                if drill_reverted_count > 0
+                else ""
+            )
+        else:
+            effective_drill_repaired = drill_result.repaired
+            drill_header_suffix = ""
         print(
             f"DRILL CLEARANCE: {effective_drill_repaired}/{drill_result.total_violations}"
             f"{drill_header_suffix}"
@@ -825,8 +1157,8 @@ def _print_text(
             if drill_result.slid > 0:
                 print(f"  Slid apart: {drill_result.slid}")
         if drill_result.actions:
-            action_suffix = " (reverted)" if rolled_back else ""
             for act in drill_result.actions[:5]:
+                action_suffix = " (reverted)" if _is_reverted(act.uuid) else ""
                 print(f"  [{act.action.upper()}] {act.net_name}{action_suffix}")
                 print(f"    at ({act.via_x:.4f}, {act.via_y:.4f}) - {act.detail}")
             if len(drill_result.actions) > 5:
