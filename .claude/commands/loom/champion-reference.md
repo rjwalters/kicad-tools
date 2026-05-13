@@ -135,8 +135,12 @@ fi
 
 **Handling**:
 ```bash
-# Extract all linked issues
-LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json body --jq '.body' | grep -Eo "(Closes|Fixes|Resolves) #[0-9]+" | grep -Eo "[0-9]+")
+# Ask GitHub which issues this PR closes per official semantics
+# (Closes/Fixes/Resolves keywords; case-insensitive; proper word boundaries).
+# This does NOT match Updates/See/References or words like "Closure of".
+# See issue #2849 for why a body regex is the wrong tool.
+LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json closingIssuesReferences \
+  --jq '.closingIssuesReferences[].number')
 
 # Verify each issue closed after merge
 for issue in $LINKED_ISSUES; do
@@ -500,11 +504,15 @@ echo ""
 echo "STEP 4/5: Verifying linked issue closure..."
 echo ""
 
-PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq -r '.body')
-LINKED_ISSUES=$(echo "$PR_BODY" | grep -Eo "(Closes|Fixes|Resolves) #[0-9]+" | grep -Eo "[0-9]+" | sort -u)
+# Ask GitHub which issues this PR closes per official semantics
+# (Closes/Fixes/Resolves keywords; case-insensitive; proper word boundaries).
+# This does NOT match Updates/See/References or words like "Closure of".
+# See issue #2849 for why a body regex is the wrong tool.
+LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json closingIssuesReferences \
+  --jq '.closingIssuesReferences[].number' 2>/dev/null)
 
 if [ -z "$LINKED_ISSUES" ]; then
-  echo "No linked issues found - skipping closure verification"
+  echo "No closing-issue references found - skipping closure verification"
 else
   echo "Found linked issues: $LINKED_ISSUES"
   for issue in $LINKED_ISSUES; do
@@ -624,8 +632,9 @@ done
 # Check PR merge status
 gh pr view <number> --json state,mergeable,statusCheckRollup
 
-# View linked issues
-gh pr view <number> --json body --jq '.body' | grep -Eo "(Closes|Fixes|Resolves) #[0-9]+"
+# View linked issues (canonical: uses GitHub's computed closingIssuesReferences,
+# which correctly handles Closes/Fixes/Resolves keywords and ignores Updates/See/etc.)
+gh pr view <number> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
 
 # Check daemon state
 cat .loom/daemon-state.json | jq '.force_mode'

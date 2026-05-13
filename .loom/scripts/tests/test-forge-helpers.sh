@@ -115,6 +115,123 @@ else
     echo -e "  ${RED}FAIL${NC}: forge_get_repo_nwo returned empty"
 fi
 
+# --- Test forge_pr_close_targets ---
+# Tests the canonical "what issues does this PR close?" helper, which is the
+# single source of truth used by the Champion role's verify-issue-closure
+# step. See issue #2849.
+#
+# We test by stubbing `gh` (GitHub path) and `forge_get_pr_body` (Gitea path).
+# The stub strategy mirrors how forge_pr_close_targets calls into them.
+echo ""
+echo "Testing forge_pr_close_targets..."
+
+# Helper to define a one-shot stub `gh` that emits canned JSON for the
+# `closingIssuesReferences` query and a different payload for everything else.
+_stub_gh_closing_refs() {
+    # $1 = JSON string for .closingIssuesReferences (e.g. '[{"number":100}]')
+    local refs_json="$1"
+    eval "gh() {
+        if [[ \"\$*\" == *closingIssuesReferences* ]]; then
+            if [[ \"\$*\" == *--jq* ]]; then
+                # Emulate \`gh ... --jq '.closingIssuesReferences[].number'\`
+                echo '$refs_json' | jq -r '.[].number'
+            else
+                echo '{\"closingIssuesReferences\": $refs_json}'
+            fi
+        fi
+    }"
+    export -f gh 2>/dev/null || true
+}
+
+_unstub_gh() {
+    unset -f gh 2>/dev/null || true
+}
+
+FORGE_TYPE="github"
+
+# Case 1: PR with Closes #100 -> closingIssuesReferences: [{number:100}]
+_stub_gh_closing_refs '[{"number":100}]'
+result=$(forge_pr_close_targets 1234 gh)
+assert_eq "100" "$result" "Closes #100 -> 100"
+_unstub_gh
+
+# Case 2: PR with Updates #100 only -> closingIssuesReferences: []
+_stub_gh_closing_refs '[]'
+result=$(forge_pr_close_targets 1234 gh)
+assert_eq "" "$result" "Updates #100 (no Closes) -> empty (the #2849 bug case)"
+_unstub_gh
+
+# Case 3: PR with Closes #100 + Updates #200 -> only 100 closes
+_stub_gh_closing_refs '[{"number":100}]'
+result=$(forge_pr_close_targets 1234 gh)
+assert_eq "100" "$result" "Closes #100 + Updates #200 -> 100 only"
+_unstub_gh
+
+# Case 4: PR mentioning "Closure of #100" but no actual close keyword -> empty
+_stub_gh_closing_refs '[]'
+result=$(forge_pr_close_targets 1234 gh)
+assert_eq "" "$result" "Closure of #100 (substring) -> empty"
+_unstub_gh
+
+# Case 5: Multiple closing references
+_stub_gh_closing_refs '[{"number":100},{"number":200},{"number":300}]'
+result=$(forge_pr_close_targets 1234 gh | tr '\n' ' ' | sed 's/ $//')
+assert_eq "100 200 300" "$result" "Multiple closes -> all numbers"
+_unstub_gh
+
+# Case 6: Empty body / no references
+_stub_gh_closing_refs '[]'
+result=$(forge_pr_close_targets 1234 gh)
+assert_eq "" "$result" "Empty body -> empty"
+_unstub_gh
+
+# --- Test Gitea body-regex path for forge_pr_close_targets ---
+echo ""
+echo "Testing forge_pr_close_targets (Gitea body-regex path)..."
+
+# Stub forge_get_pr_body and forge_get_repo_nwo for the Gitea path
+_stub_pr_body() {
+    local body="$1"
+    eval "forge_get_pr_body() { printf '%s' \"\$(cat <<'BODY_EOF'
+$body
+BODY_EOF
+)\"; }"
+    eval "forge_get_repo_nwo() { echo 'owner/repo'; }"
+}
+
+_unstub_pr_body() {
+    # Re-source to restore originals
+    source "$HELPERS_DIR/lib/forge-helpers.sh"
+}
+
+FORGE_TYPE="gitea"
+
+_stub_pr_body "Closes #100"
+result=$(forge_pr_close_targets 1234)
+assert_eq "100" "$result" "Gitea: Closes #100 -> 100"
+_unstub_pr_body
+
+FORGE_TYPE="gitea"
+_stub_pr_body "Updates #100 only, no closure keyword."
+result=$(forge_pr_close_targets 1234)
+assert_eq "" "$result" "Gitea: Updates #100 only -> empty"
+_unstub_pr_body
+
+FORGE_TYPE="gitea"
+_stub_pr_body "Closure of this criterion is gated on #200."
+result=$(forge_pr_close_targets 1234)
+assert_eq "" "$result" "Gitea: 'Closure of' substring -> empty (word boundary)"
+_unstub_pr_body
+
+FORGE_TYPE="gitea"
+_stub_pr_body "closes #42 and Fixes #43 and resolves #44"
+result=$(forge_pr_close_targets 1234 | tr '\n' ' ' | sed 's/ $//')
+assert_eq "42 43 44" "$result" "Gitea: mixed-case canonical keywords -> all"
+_unstub_pr_body
+
+# Restore FORGE_TYPE
+FORGE_TYPE="github"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"
