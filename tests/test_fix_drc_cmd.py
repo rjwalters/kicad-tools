@@ -2067,6 +2067,214 @@ class TestConnectivityCheckRollback:
         assert pr.connectivity_after is None
         assert pr.connectivity_rolled_back is False
 
+    # ── Issue #2839: self-consistent summary on rollback ─────────────
+
+    def test_rollback_text_output_is_self_consistent(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """On rollback, text ``CLEARANCE: M/N`` header agrees with ``Repaired 0/N``.
+
+        Issue #2839 sub-bug #2: previously, ``_print_text`` printed
+        ``Repaired 0/18`` in the summary but ``CLEARANCE: 18/18`` in
+        the per-category listing because ``clearance_result.nudges``
+        retained the pre-rollback list.  After the fix, the listed
+        nudges are annotated ``(reverted)`` and the per-category header
+        reflects the rolled-back count (0).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 8  # after pass -- decreased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                # text is the default but be explicit
+                "--format",
+                "text",
+            ]
+        )
+
+        # Exit code 3 = connectivity rollback
+        assert result == 3
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # The summary line must say "Repaired 0/N" (with the rollback
+        # annotation) -- it must NOT show the pre-rollback work count.
+        # Find the "Repaired X/Y" line.
+        import re
+
+        summary_match = re.search(r"Repaired (\d+)/(\d+) violations", out)
+        assert summary_match is not None, f"Could not find 'Repaired X/Y' in: {out!r}"
+        repaired_count = int(summary_match.group(1))
+        total_count = int(summary_match.group(2))
+        assert repaired_count == 0, (
+            f"On rollback, summary must say 'Repaired 0/N' but said "
+            f"'Repaired {repaired_count}/{total_count}'"
+        )
+        assert "rolled back" in out.lower(), (
+            f"Summary should explicitly mention 'rolled back', got: {out!r}"
+        )
+
+        # The per-category header must agree: either no listing at all,
+        # or the header is "0/total" and individual entries are tagged.
+        # Look for any line that starts with "CLEARANCE: " or
+        # "DRILL CLEARANCE: " and check it doesn't show a non-zero
+        # repaired count without a (reverted) annotation.
+        cat_lines = [
+            ln for ln in out.splitlines()
+            if ln.startswith("CLEARANCE:") or ln.startswith("DRILL CLEARANCE:")
+        ]
+        for line in cat_lines:
+            # Parse "CLEARANCE: M/N" or "DRILL CLEARANCE: M/N"
+            m = re.search(r":\s*(\d+)/(\d+)", line)
+            assert m is not None, f"Could not parse category header: {line!r}"
+            m_repaired = int(m.group(1))
+            assert m_repaired == 0 or "(reverted)" in line.lower(), (
+                f"On rollback, category header must show 0 repaired or be "
+                f"tagged '(reverted)', got: {line!r}"
+            )
+
+        # Any individual nudge entries listed must be tagged "(reverted)"
+        # so the user sees the work was thrown away.
+        for line in out.splitlines():
+            # Listed nudge entries look like "  [SEGMENT] NETNAME ..."
+            # or "  [VIA] NETNAME ..." or "  [DEDUPLICATE] NETNAME ..."
+            if re.match(r"\s+\[[A-Z_]+\]\s", line):
+                # Only object-type lines for nudges/actions (skip the
+                # detail "at (x, y) ..." continuation lines).
+                if "reverted" not in line.lower():
+                    raise AssertionError(
+                        f"Listed nudge entry not tagged '(reverted)' "
+                        f"on rollback: {line!r}"
+                    )
+
+    def test_rollback_json_output_is_self_consistent(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """On rollback, JSON ``total_repaired`` and per-category ``repaired`` agree.
+
+        Issue #2839 sub-bug #2 (JSON variant): the JSON output's
+        ``total_repaired`` and per-category ``repaired`` counters must
+        match the rolled-back state (0), not the pre-rollback attempted
+        work count.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10
+            return 8
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        assert result == 3
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Top-level ``total_repaired`` must be 0 on rollback so the
+        # JSON consumer agrees with the exit code and the rollback flag.
+        assert data["total_repaired"] == 0, (
+            f"On rollback, total_repaired must be 0, got: {data['total_repaired']}"
+        )
+
+        # Per-category repaired counters must also be 0 on rollback so
+        # the JSON is internally consistent.
+        if data.get("clearance", {}).get("violations", 0) > 0:
+            assert data["clearance"]["repaired"] == 0, (
+                f"On rollback, clearance.repaired must be 0, "
+                f"got: {data['clearance']['repaired']}"
+            )
+        if data.get("drill_clearance", {}).get("violations", 0) > 0:
+            assert data["drill_clearance"]["repaired"] == 0, (
+                f"On rollback, drill_clearance.repaired must be 0, "
+                f"got: {data['drill_clearance']['repaired']}"
+            )
+
+        # The connectivity_check section must still flag the rollback.
+        assert data["connectivity_check"]["passes"][0]["rolled_back"] is True
+
+    def test_no_rollback_text_output_unchanged(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When no rollback occurs, listed nudges are NOT tagged '(reverted)'.
+
+        Issue #2839 synthetic positive control: the layer-2 fix
+        annotates nudges on rollback only.  A non-rollback happy path
+        must NOT gain a spurious ``(reverted)`` tag on its listings.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # Stable connectivity -- no rollback.
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            lambda _p: 10,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "text",
+            ]
+        )
+
+        # Non-rollback: should be 0 (success) or 2 (partial) -- NOT 3.
+        assert result != 3
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # No "(reverted)" tags should appear on the happy path.
+        assert "(reverted)" not in out.lower(), (
+            f"Happy path leaked '(reverted)' tag into output: {out!r}"
+        )
+        # No "rolled back" in the summary line on the happy path.
+        assert "rolled back" not in out.lower(), (
+            f"Happy path leaked 'rolled back' into output: {out!r}"
+        )
+
 
 class TestCountConnectedNets:
     """Tests for the _count_connected_nets helper."""

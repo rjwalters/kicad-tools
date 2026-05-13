@@ -566,10 +566,22 @@ def _print_json(
     # Compute overall totals across all passes
     total_repaired_all = sum(p.repaired for p in pass_results)
 
+    # Issue #2839: when the final pass was rolled back, the per-result
+    # ``repaired`` counters still reflect the pre-rollback (work-attempted)
+    # counts, but the effective number of changes to the PCB is 0.  Use the
+    # per-PassResult ``repaired`` (which is already zeroed on rollback) so
+    # the JSON ``total_repaired`` agrees with the rolled-back state, and
+    # surface ``clearance.repaired`` / ``drill_clearance.repaired`` the
+    # same way for consistency.
+    rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
+
     # For single-pass (or backward compat), use the single-pass totals
     if len(pass_results) == 1:
         total_violations = clearance_result.total_violations + drill_result.total_violations
-        total_repaired = clearance_result.repaired + drill_result.repaired
+        if rolled_back:
+            total_repaired = 0
+        else:
+            total_repaired = clearance_result.repaired + drill_result.repaired
     else:
         # Multi-pass: first pass had the original count; total repaired is cumulative
         first = pass_results[0]
@@ -579,6 +591,11 @@ def _print_json(
     # Non-targeted violations (detected but not repairable by fix-drc)
     non_targeted = last.non_targeted_count if last else 0
 
+    # Effective per-category repaired counts (zeroed on rollback so the JSON
+    # summary agrees with the text output and the exit code).
+    effective_clearance_repaired = 0 if rolled_back else clearance_result.repaired
+    effective_drill_repaired = 0 if rolled_back else drill_result.repaired
+
     data: dict = {
         "dry_run": dry_run,
         "max_displacement_mm": max_displacement,
@@ -587,7 +604,7 @@ def _print_json(
         "non_targeted_violations": non_targeted,
         "clearance": {
             "violations": clearance_result.total_violations,
-            "repaired": clearance_result.repaired,
+            "repaired": effective_clearance_repaired,
             "relocated_vias": clearance_result.relocated_vias,
             "endpoint_nudges": clearance_result.endpoint_nudges,
             "local_rerouted": clearance_result.local_rerouted,
@@ -612,7 +629,7 @@ def _print_json(
         },
         "drill_clearance": {
             "violations": drill_result.total_violations,
-            "repaired": drill_result.repaired,
+            "repaired": effective_drill_repaired,
             "deduplicated": drill_result.deduplicated,
             "slid": drill_result.slid,
             "skipped": {
@@ -731,6 +748,16 @@ def _print_text(
     drill_result = last.drill_result if last else DrillRepairResult()
     action = "Would repair" if dry_run else "Repaired"
 
+    # Issue #2839: when the final pass was rolled back due to a connectivity
+    # regression, ``clearance_result.nudges`` / ``drill_result.actions`` still
+    # contain the *pre-rollback* lists.  Printing them verbatim contradicts the
+    # ``Repaired 0/N`` summary line (which reflects the rolled-back count).
+    # We use the rolled_back flag to render the section in a self-consistent
+    # way: header shows ``0/total (rolled back)`` and each listed nudge gets a
+    # ``(reverted)`` suffix so the user can still see *what would have been
+    # changed* without contradicting the summary.
+    rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
+
     print(f"\n{'=' * 60}")
     print("DRC VIOLATION REPAIR")
     print(f"{'=' * 60}")
@@ -753,28 +780,54 @@ def _print_text(
 
     total_violations = first_violations
     total_repaired = total_repaired_all
-    print(f"\n{action} {total_repaired}/{total_violations} violations")
+    summary_suffix = " (rolled back — connectivity regression)" if rolled_back else ""
+    print(f"\n{action} {total_repaired}/{total_violations} violations{summary_suffix}")
+    if rolled_back and last is not None:
+        before = last.connectivity_before
+        after = last.connectivity_after
+        if before is not None and after is not None:
+            print(
+                f"  Connectivity: {before} -> {after} connected nets; "
+                f"nudges reverted to preserve connectivity."
+            )
 
     if clearance_result.total_violations > 0:
         print(f"\n{'-' * 60}")
-        print(f"CLEARANCE: {clearance_result.repaired}/{clearance_result.total_violations}")
+        # When rolled back, the *effective* repaired count is 0 even though
+        # ``clearance_result.repaired`` still reflects the pre-rollback total
+        # (the rollback happens after the repairer returns).  Report 0/total
+        # here so the header agrees with the ``Repaired 0/N`` summary.
+        effective_repaired = 0 if rolled_back else clearance_result.repaired
+        header_suffix = " (reverted)" if rolled_back else ""
+        print(
+            f"CLEARANCE: {effective_repaired}/{clearance_result.total_violations}"
+            f"{header_suffix}"
+        )
         if clearance_result.nudges:
+            nudge_suffix = " (reverted)" if rolled_back else ""
             for nudge in clearance_result.nudges[:5]:
-                print(f"  [{nudge.object_type.upper()}] {nudge.net_name}")
+                print(f"  [{nudge.object_type.upper()}] {nudge.net_name}{nudge_suffix}")
                 print(f"    at ({nudge.x:.4f}, {nudge.y:.4f}) -> {nudge.displacement_mm:.4f}mm")
             if len(clearance_result.nudges) > 5:
                 print(f"  ... and {len(clearance_result.nudges) - 5} more")
 
     if drill_result.total_violations > 0:
         print(f"\n{'-' * 60}")
-        print(f"DRILL CLEARANCE: {drill_result.repaired}/{drill_result.total_violations}")
-        if drill_result.deduplicated > 0:
-            print(f"  De-duplicated: {drill_result.deduplicated}")
-        if drill_result.slid > 0:
-            print(f"  Slid apart: {drill_result.slid}")
+        effective_drill_repaired = 0 if rolled_back else drill_result.repaired
+        drill_header_suffix = " (reverted)" if rolled_back else ""
+        print(
+            f"DRILL CLEARANCE: {effective_drill_repaired}/{drill_result.total_violations}"
+            f"{drill_header_suffix}"
+        )
+        if not rolled_back:
+            if drill_result.deduplicated > 0:
+                print(f"  De-duplicated: {drill_result.deduplicated}")
+            if drill_result.slid > 0:
+                print(f"  Slid apart: {drill_result.slid}")
         if drill_result.actions:
+            action_suffix = " (reverted)" if rolled_back else ""
             for act in drill_result.actions[:5]:
-                print(f"  [{act.action.upper()}] {act.net_name}")
+                print(f"  [{act.action.upper()}] {act.net_name}{action_suffix}")
                 print(f"    at ({act.via_x:.4f}, {act.via_y:.4f}) - {act.detail}")
             if len(drill_result.actions) > 5:
                 print(f"  ... and {len(drill_result.actions) - 5} more")
