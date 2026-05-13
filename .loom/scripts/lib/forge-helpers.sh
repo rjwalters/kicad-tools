@@ -515,6 +515,50 @@ forge_get_pr_reviews() {
   fi
 }
 
+# Get the list of issue numbers a PR closes per official forge semantics.
+# Usage: forge_pr_close_targets PR_NUMBER [GH_CMD]
+# Output: newline-separated issue numbers on stdout; empty if none.
+#
+# Single source of truth for "what issues does this PR close?".
+# This is the correct way to compute closure targets — NOT a regex over the
+# PR body. GitHub computes `closingIssuesReferences` from the body using
+# canonical keyword semantics (`Closes/Fixes/Resolves`, case-insensitive,
+# with proper word boundaries). Words like `Updates`, `See`, `References`,
+# or `Closure of` are correctly excluded.
+#
+# GitHub: gh pr view --json closingIssuesReferences
+# Gitea: parses the PR body with a strict word-boundary regex (Gitea exposes
+#        the body but not a server-computed closes list comparable to
+#        GitHub's `closingIssuesReferences`). The regex restricts matches
+#        to the canonical closing keywords with explicit boundaries so it
+#        cannot match `Updates`, `Closure`, etc.
+#
+# See: https://github.com/rjwalters/kicad-tools/issues/2849
+forge_pr_close_targets() {
+  local pr_number="$1"
+  local gh_cmd="${2:-gh}"
+
+  if [[ "$FORGE_TYPE" == "gitea" ]]; then
+    # Gitea has no equivalent of closingIssuesReferences; derive from body
+    # using a strict regex with explicit word boundaries.
+    local nwo
+    nwo=$(forge_get_repo_nwo) || return 0
+    local body matches
+    body=$(forge_get_pr_body "$nwo" "$pr_number")
+    # \b boundary on both sides; case-insensitive.
+    # Use `|| true` to keep behavior consistent under `set -e` when there
+    # are no matches (grep exits 1 on no match).
+    matches=$(echo "$body" \
+      | grep -oEi '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]*#[0-9]+' \
+      || true)
+    [[ -z "$matches" ]] && return 0
+    echo "$matches" | grep -oE '[0-9]+' | sort -u
+  else
+    "$gh_cmd" pr view "$pr_number" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[].number' 2>/dev/null | sort -u
+  fi
+}
+
 # Get repo NWO (name with owner).
 # Usage: forge_get_repo_nwo [GH_CMD]
 # Returns "owner/repo" on stdout.

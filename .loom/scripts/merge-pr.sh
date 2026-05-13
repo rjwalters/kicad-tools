@@ -236,7 +236,13 @@ fi
 
 success "PR #$PR_NUMBER merged successfully"
 
-# NOTE: Label cleanup on linked issues is intentionally skipped.
+# NOTE: This script does NOT close linked issues. GitHub auto-closes issues
+# referenced by `Closes/Fixes/Resolves` keywords; for cross-repo or missed
+# auto-closes, the Champion role's verify-issue-closure step handles it.
+# See: .claude/commands/loom/champion-pr-merge.md (Step 4)
+# See: https://github.com/rjwalters/kicad-tools/issues/2849
+#
+# NOTE: Label cleanup on linked issues is also intentionally skipped here.
 # Labels on closed/merged items are harmless — all agents filter by open state.
 # See: https://github.com/rjwalters/loom/issues/2838
 
