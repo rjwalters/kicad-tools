@@ -1185,7 +1185,21 @@ class NegotiatedRouter:
                 Falls back to ``Net_<id>`` when missing or absent.
 
         Returns:
-            True if re-routing succeeded for all affected nets, False otherwise
+            True if re-routing succeeded for all affected nets, False otherwise.
+
+            Issue #2814: when the failed net's A* search returns ``None`` even
+            with all sibling routes already removed from the grid, the blocker
+            is geometric (pad-clearance keepouts, board-edge limits, fixed
+            escape routes, component bodies) rather than sibling traces.  In
+            this case we fast-fail: the sibling routes are restored using a
+            short probe timeout (``min(per_net_timeout, 10s)``) so the grid
+            is not left in a worse state than we found it, and we return
+            ``False`` without re-routing the siblings at full
+            ``per_net_timeout``.  The caller is expected to escalate to a
+            different strategy (e.g. layer escalation, escape rework).  This
+            drops wall-clock on geometric-blocker failures from
+            ``(1 + N) * per_net_timeout`` to
+            ``per_net_timeout + N * min(per_net_timeout, 10s)``.
         """
         if ripup_history is None:
             ripup_history = {}
@@ -1249,6 +1263,40 @@ class NegotiatedRouter:
                     self.grid.mark_route_usage(route)
                     routes_list.append(route)
                 failed_net_success = True  # Failed net was successfully routed
+
+        # Issue #2814: fast-fail when the failed net's A* still cannot find a
+        # path with the sibling routes already cleared from the grid (see the
+        # ``rip_up_nets`` call at the start of this method).  In that case the
+        # blocker is geometric -- pad-clearance keepouts, board-edge limits,
+        # fixed escape routes, or component bodies -- so re-routing every
+        # sibling with a full ``per_net_timeout`` cannot possibly help and
+        # would just waste ``len(siblings) * per_net_timeout`` wall-clock.
+        # Restore the sibling routes with a short probe timeout so we don't
+        # leave the grid in a worse state than we found it, then return
+        # False to let the caller (e.g.
+        # ``_attempt_blocked_component_ripup_negotiated``) escalate to a
+        # different strategy (layer escalation, escape rework).
+        if not failed_net_success:
+            sibling_probe_timeout = (
+                min(per_net_timeout, 10.0)
+                if per_net_timeout is not None
+                else 10.0
+            )
+            sibling_order = sorted(nets_to_ripup)
+            for sibling_index, net in enumerate(sibling_order, start=2):
+                net_pads = pads_by_net.get(net, [])
+                if net_pads and len(net_pads) >= 2:
+                    _emit_progress("sibling", net, sibling_index)
+                    routes = self.route_net_negotiated(
+                        net_pads, present_cost_factor, mark_route_callback,
+                        per_net_timeout=sibling_probe_timeout,
+                    )
+                    if routes:
+                        net_routes[net] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+            return False  # geometric blocker -- caller should escalate
 
         # Re-route the displaced nets
         success = failed_net_success  # Issue #858: Start with failed net success
