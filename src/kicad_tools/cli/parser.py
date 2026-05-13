@@ -173,6 +173,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_audit_parser(subparsers)
     _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
+    _add_fleet_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -4194,6 +4195,59 @@ def _add_net_status_parser(subparsers) -> None:
         dest="net_status_verbose",
         action="store_true",
         help="Show all pads with coordinates",
+    )
+
+
+def _add_fleet_parser(subparsers) -> None:
+    """Add fleet parent-subaction parser (fleet status; future fleet route-all)."""
+    fleet_parser = subparsers.add_parser(
+        "fleet",
+        help="Fleet-wide PCB status and operations",
+        description=(
+            "Survey every board under a fleet root in one shot. Reports routing "
+            "completion (via NetStatusAnalyzer) and manufacturing-artifact "
+            "readiness (gerbers, BOM, CPL, manifest) with staleness detection."
+        ),
+    )
+    fleet_subparsers = fleet_parser.add_subparsers(
+        dest="fleet_command", help="Fleet commands"
+    )
+
+    # fleet status
+    fleet_status = fleet_subparsers.add_parser(
+        "status",
+        help="Survey routing + manufacturing status for all boards",
+    )
+    fleet_status.add_argument(
+        "--boards-dir",
+        dest="fleet_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    fleet_status.add_argument(
+        "--format",
+        dest="fleet_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    fleet_status.add_argument(
+        "--ship-only",
+        dest="fleet_ship_only",
+        action="store_true",
+        help="Show only ship-ready boards in table output",
+    )
+    fleet_status.add_argument(
+        "--include-stale",
+        dest="fleet_include_stale",
+        action="store_true",
+        help="(Reserved) treat stale artifacts as not-shippable (already default)",
+    )
+    fleet_status.add_argument(
+        "--pattern",
+        dest="fleet_pattern",
+        default="*_routed.kicad_pcb",
+        help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
     )
 
 
