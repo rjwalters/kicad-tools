@@ -91,6 +91,7 @@ from .tuning import (
     tune_parameters,
 )
 from .congestion_estimator import CongestionEstimator
+from . import via_conflict as _via_conflict_module
 from .via_conflict import ViaConflictManager
 from .zones import ZoneManager
 
@@ -9119,8 +9120,24 @@ class Autorouter:
         # both branches are attempted on partial-success multi-edge nets where
         # some MST edges hit a via and others hit a trace.  Skip if the via
         # branch already routed the net to avoid spurious trace surgery.
+        #
+        # Issue #2864 round-2 feedback: this branch is gated on a feature
+        # flag (default-disabled) because the localized DRC safety check
+        # inside ``try_trace_rip_reroute`` cannot cover violations from
+        # long re-routed diff-pair traces (board 06 USB3, board 07
+        # DDR/MIPI) that land outside its 10 mm envelope, nor can it
+        # cover the post-success ``route_net`` retry below at line
+        # ``retry_routes = self.route_net(...)``.  Enable via
+        # ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1`` once the full
+        # transactional wrapper is in place.  See
+        # :func:`via_conflict._trace_rip_reroute_enabled_default` for
+        # the rationale and the follow-up plan.
         # =====================================================================
-        if has_trace_blocker and not any_resolved:
+        if (
+            has_trace_blocker
+            and not any_resolved
+            and _via_conflict_module.TRACE_RIP_REROUTE_ENABLED
+        ):
             all_trace_conflicts = []
             for pad in net_pads:
                 trace_conflicts = manager.find_blocking_traces(

@@ -231,6 +231,20 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not __import__(
+        "kicad_tools.router.via_conflict", fromlist=["TRACE_RIP_REROUTE_ENABLED"]
+    ).TRACE_RIP_REROUTE_ENABLED,
+    reason=(
+        "Issue #2864 round-2 feedback: the trace rip-reroute branch is "
+        "default-disabled because the localized DRC safety check inside "
+        "try_trace_rip_reroute cannot prevent boards 06/07 regressions "
+        "from long re-routed diff-pair traces.  Enable via "
+        "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to run this test.  "
+        "When the full transactional wrapper lands, the default flips "
+        "back to True and this skipif drops."
+    ),
+)
 def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
     """XTAL2 routes via ``ViaConflictManager`` trace rip-and-reroute.
 

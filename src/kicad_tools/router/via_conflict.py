@@ -30,6 +30,7 @@ Example::
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING
@@ -40,6 +41,55 @@ if TYPE_CHECKING:
 
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
+
+
+def _trace_rip_reroute_enabled_default() -> bool:
+    """Return the default enablement for the trace rip-reroute branch.
+
+    Issue #2864 second-round feedback: the trace rip-reroute branch
+    (Issue #2859) was found to regress DRC counts on boards 06 and 07
+    even with a localized pre-commit DRC safety check inside
+    :meth:`ViaConflictManager.try_trace_rip_reroute`.  Root causes:
+
+    1. The 10 mm validation envelope is too narrow for long re-routed
+       diff-pair traces (USB3 on board 06, DDR/MIPI on board 07);
+       violations land outside the envelope and slip through.
+    2. The post-success ``route_net`` retry at ``core.py`` (after
+       :meth:`Autorouter._resolve_via_conflicts_for_net` returns
+       success) emits new geometry that the helper's internal safety
+       check never sees.
+
+    A full transactional rewrite that snapshots and rolls back grid
+    state across both the helper and the post-success retry would be
+    invasive for this PR (route lists, ``routing_failures``, the C++
+    grid snapshot all need synchronized restoration).  The Judge's
+    explicit fallback recommendation was to **disable the trace branch
+    by default** behind a feature flag.  That closes the regression
+    while preserving:
+
+    - Unit-test coverage: synthetic tests in ``tests/test_via_conflict.py``
+      (``test_try_trace_rip_reroute_unblocks_pad``,
+      ``test_route_net_consults_trace_resolver_on_pin_access``,
+      ``test_find_blocking_traces_*``) call :class:`ViaConflictManager`
+      methods directly and bypass this flag entirely -- the dispatch
+      gate lives in ``Autorouter._resolve_via_conflicts_for_net``.
+    - Re-enable path: set
+      ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1`` in the environment
+      (also accepts ``true``/``yes``/``on``, case-insensitive).  When
+      a follow-up PR implements the full transactional wrapper, the
+      default can flip back to ``True`` here.
+
+    See Issue #2864 PR thread and the second-round Judge review
+    comment for the full rationale.
+    """
+    raw = os.environ.get("KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+# Feature flag (Issue #2864 round-2 feedback): trace rip-reroute branch
+# default-disabled to prevent boards 06/07 DRC regression.  See
+# :func:`_trace_rip_reroute_enabled_default` for full rationale.
+TRACE_RIP_REROUTE_ENABLED: bool = _trace_rip_reroute_enabled_default()
 
 
 class ViaConflictStrategy(Enum):
