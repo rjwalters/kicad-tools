@@ -1,0 +1,9 @@
+Comment,Designator,Footprint,LCSC Part #
+ADDR_HDR,J3,Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical,generic
+BGA49_HDMI,U4,Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm,generic
+FFC6_MIPI,J1,Connector_FFC:FFC_6P_1.0mm,generic
+HDMI19,J2,Connector_Video:HDMI_A_Receptacle,generic
+QFN24_MIPI,U3,Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm,generic
+QFN48_DDR_CTRL,U1,Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm,generic
+QFN48_DRAM,U2,Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm,generic
+QFP48_SRAM,U5,Package_QFP:LQFP-48_7x7mm_P0.5mm,generic
