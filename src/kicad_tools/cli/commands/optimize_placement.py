@@ -20,4 +20,5 @@ def run_optimize_placement_command(args) -> int:
         verbose=args.verbose,
         quiet=getattr(args, "quiet", False) or getattr(args, "global_quiet", False),
         no_slide_off=getattr(args, "no_slide_off", False),
+        anchor_weight=getattr(args, "anchor_weight", 0.0),
     )

@@ -917,3 +917,229 @@ class TestSlideOffOverlapDetails:
         _, result = slide_off_overlaps(vector, comps, board)
         assert result.overlaps_remaining == 0
         assert len(result.overlap_details) == 0
+
+
+# ---------------------------------------------------------------------------
+# Anchor-weight CLI behaviour (issue #2822)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def anchored_pcb(tmp_path: Path) -> Path:
+    """Synthetic PCB with one (locked) perimeter footprint and movable parts.
+
+    Layout (sheet-absolute coordinates, board origin 0,0):
+
+        J1 (locked, edge-mounted connector at (1, 25))
+            pad 1 -> NET_ANCHOR (also touches U1 in the centre)
+        U1 (movable, ~centre at (15, 15))
+            pad 1 -> NET_ANCHOR
+            pad 2 -> NET_INTERIOR
+        R1 (movable, near U1)
+            pad 1 -> NET_INTERIOR
+        R2 (movable, near U1)
+            pad 1 -> NET_INTERIOR
+
+    With ``--anchor-weight 0`` the optimizer is free to push U1 anywhere
+    that minimises the (R1, R2, U1) cluster wirelength, even if that
+    stretches NET_ANCHOR. With a non-zero anchor weight, NET_ANCHOR's
+    HPWL is amplified and the optimizer should keep U1 closer to J1.
+    """
+    pcb_content = """\
+(kicad_pcb (version 20230101) (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+  )
+  (net 0 "")
+  (net 1 "NET_ANCHOR")
+  (net 2 "NET_INTERIOR")
+  (footprint "Conn_J1" (layer "F.Cu")
+    (at 1.0 25.0 0)
+    (attr through_hole locked)
+    (property "Reference" "J1")
+    (fp_text reference "J1" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at 0.0 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET_ANCHOR"))
+  )
+  (footprint "U_Centre" (layer "F.Cu")
+    (at 15.0 15.0 0)
+    (property "Reference" "U1")
+    (fp_text reference "U1" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -0.5 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET_ANCHOR"))
+    (pad "2" smd rect (at 0.5 0.0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "NET_INTERIOR"))
+  )
+  (footprint "R_0805" (layer "F.Cu")
+    (at 18.0 15.0 0)
+    (property "Reference" "R1")
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at 0.0 0.0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "NET_INTERIOR"))
+  )
+  (footprint "R_0805" (layer "F.Cu")
+    (at 12.0 15.0 0)
+    (property "Reference" "R2")
+    (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at 0.0 0.0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "NET_INTERIOR"))
+  )
+  (gr_line (start 0 0) (end 30 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 0) (end 30 30) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 30 30) (end 0 30) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 30) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+)
+"""
+    pcb_file = tmp_path / "anchored_board.kicad_pcb"
+    pcb_file.write_text(pcb_content)
+    return pcb_file
+
+
+class TestAnchorWeight:
+    """Verify --anchor-weight CLI flag plumbs through to Net.weight."""
+
+    def test_read_board_data_default_zero_weight(self, anchored_pcb: Path) -> None:
+        """With anchor_weight=0, every Net.weight stays at the 1.0 default."""
+        _comps, nets, _board, _rules, _origin = _read_board_data(str(anchored_pcb))
+        assert nets, "expected at least one net"
+        for net in nets:
+            assert net.weight == 1.0, (
+                f"net {net.name!r} weight should be 1.0 with default anchor_weight"
+            )
+
+    def test_read_board_data_anchor_weight_inflates_locked_net(
+        self, anchored_pcb: Path,
+    ) -> None:
+        """Anchor weight inflates only the net touching the (locked) J1."""
+        _comps, nets, _board, _rules, _origin = _read_board_data(
+            str(anchored_pcb), anchor_weight=4.0,
+        )
+        nets_by_name = {n.name: n for n in nets}
+        assert "NET_ANCHOR" in nets_by_name, "anchored net missing"
+        assert "NET_INTERIOR" in nets_by_name, "interior net missing"
+
+        anchor_net = nets_by_name["NET_ANCHOR"]
+        interior_net = nets_by_name["NET_INTERIOR"]
+
+        # NET_ANCHOR has 2 pins (J1 pad1 + U1 pad1), 1 anchored -> fraction 0.5
+        # weight = 1 + 4.0 * 0.5 = 3.0
+        assert anchor_net.weight == pytest.approx(3.0)
+
+        # NET_INTERIOR has 3 pins (U1 pad2, R1, R2), 0 anchored -> weight 1.0
+        assert interior_net.weight == pytest.approx(1.0)
+
+    def test_anchor_weight_zero_is_regression_safe(
+        self, anchored_pcb: Path, tmp_path: Path,
+    ) -> None:
+        """Two runs with anchor_weight=0.0 must produce byte-identical PCBs.
+
+        The optimizer is deterministic (seed=42), and anchor_weight=0 is
+        the historical code path -- so back-to-back runs should agree
+        byte-for-byte. This pins the regression-safe default.
+        """
+        out_a = tmp_path / "out_a.kicad_pcb"
+        out_b = tmp_path / "out_b.kicad_pcb"
+
+        rc_a = run_optimize_placement(
+            str(anchored_pcb),
+            max_iterations=5,
+            output_path=str(out_a),
+            anchor_weight=0.0,
+            quiet=True,
+        )
+        rc_b = run_optimize_placement(
+            str(anchored_pcb),
+            max_iterations=5,
+            output_path=str(out_b),
+            anchor_weight=0.0,
+            quiet=True,
+        )
+        assert rc_a == 0
+        assert rc_b == 0
+        assert out_a.read_bytes() == out_b.read_bytes(), (
+            "anchor_weight=0.0 must be deterministic and equal to baseline"
+        )
+
+    def test_anchor_weight_preserves_locked_net(
+        self, anchored_pcb: Path, tmp_path: Path,
+    ) -> None:
+        """A non-zero anchor weight should not stretch NET_ANCHOR more than
+        the unweighted run does.
+
+        The optimizer is deterministic with seed=42, so this is a stable
+        comparison rather than a probabilistic one. The expectation is that
+        with anchor_weight>0 the optimizer pays a heavier price for moving
+        U1 away from the (locked) J1, so the final Manhattan distance from
+        U1 to J1 should be no greater than the unweighted run.
+        """
+        from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+        out_unweighted = tmp_path / "out_unweighted.kicad_pcb"
+        out_weighted = tmp_path / "out_weighted.kicad_pcb"
+
+        rc_u = run_optimize_placement(
+            str(anchored_pcb),
+            max_iterations=20,
+            output_path=str(out_unweighted),
+            anchor_weight=0.0,
+            quiet=True,
+        )
+        rc_w = run_optimize_placement(
+            str(anchored_pcb),
+            max_iterations=20,
+            output_path=str(out_weighted),
+            anchor_weight=10.0,
+            quiet=True,
+        )
+        assert rc_u == 0
+        assert rc_w == 0
+
+        def _u1_distance_to_j1(pcb_path: Path) -> float:
+            """Compute Manhattan distance from U1 to J1 in the saved PCB."""
+            pcb = SchemaPCB.load(str(pcb_path))
+            positions = {fp.reference: fp.position for fp in pcb.footprints}
+            u1 = positions["U1"]
+            j1 = positions["J1"]
+            return abs(u1[0] - j1[0]) + abs(u1[1] - j1[1])
+
+        d_unweighted = _u1_distance_to_j1(out_unweighted)
+        d_weighted = _u1_distance_to_j1(out_weighted)
+
+        # The weighted run should not stretch NET_ANCHOR farther than the
+        # unweighted one. Allow a tiny tolerance for floating-point and
+        # CMA-ES non-determinism on the rounding boundary.
+        assert d_weighted <= d_unweighted + 1e-3, (
+            f"anchor weight should keep U1 near J1: "
+            f"unweighted={d_unweighted:.3f} mm, weighted={d_weighted:.3f} mm"
+        )
+
+    def test_negative_anchor_weight_is_rejected(self, anchored_pcb: Path) -> None:
+        """Negative anchor_weight is invalid; the runner should exit non-zero."""
+        rc = run_optimize_placement(
+            str(anchored_pcb),
+            max_iterations=1,
+            anchor_weight=-1.0,
+            quiet=True,
+        )
+        assert rc == 1
+
+
+class TestAnchorWeightCLI:
+    """Verify the --anchor-weight argparse wiring."""
+
+    def test_default_is_zero(self) -> None:
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb"])
+        assert args.anchor_weight == 0.0
+
+    def test_explicit_value_parsed(self) -> None:
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            ["optimize-placement", "board.kicad_pcb", "--anchor-weight", "3.5"],
+        )
+        assert args.anchor_weight == pytest.approx(3.5)
