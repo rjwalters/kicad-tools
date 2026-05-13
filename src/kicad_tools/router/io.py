@@ -920,8 +920,6 @@ def _compute_zone_resolution_and_offset(
         # can't be refined below the coarse grid.
         return (max(coarse_resolution / 2.0, min_fine_resolution), 0.0, 0.0)
 
-    total = len(comp_pads)
-
     # Walk candidates coarsest -> finest, returning the first (R, O) that
     # places *all* of the component's pads on-grid.  This minimises the
     # fine zone's cell count while still being pad-position-aware.
