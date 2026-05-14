@@ -5122,13 +5122,16 @@ def _add_build_parser(subparsers) -> None:
         dest="build_step",
         choices=[
             "schematic",
+            "erc",
             "pcb",
+            "sync",
             "outline",
             "placement",
             "zones",
             "silkscreen",
             "route",
             "stitch",
+            "preflight-routing",
             "verify",
             "export",
             "all",
@@ -5158,11 +5161,49 @@ def _add_build_parser(subparsers) -> None:
         help="Show detailed output",
     )
     build_parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="build_quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    build_parser.add_argument(
         "-f",
         "--force",
         dest="build_force",
         action="store_true",
         help="Force rebuild, ignoring existing outputs and timestamp checks",
+    )
+    build_parser.add_argument(
+        "-o",
+        "--output",
+        dest="build_output",
+        help="Output directory for generated files (default: project directory)",
+    )
+    build_parser.add_argument(
+        "--optimize-placement",
+        dest="build_optimize_placement",
+        action="store_true",
+        help="Run CMA-ES placement optimization before routing (opt-in)",
+    )
+    build_parser.add_argument(
+        "--no-smoke-check",
+        dest="build_no_smoke_check",
+        action="store_true",
+        help=(
+            "Disable the per-step kicad-cli load smoke check that runs "
+            "after each PCB-write step.  Use to restore prior behaviour "
+            "when kicad-cli is misbehaving or pipeline speed matters."
+        ),
+    )
+    build_parser.add_argument(
+        "--allow-incomplete",
+        dest="build_allow_incomplete",
+        action="store_true",
+        help=(
+            "Skip the routing-completeness preflight "
+            "(advertised in failure messages; CI greppable)."
+        ),
     )
 
 
