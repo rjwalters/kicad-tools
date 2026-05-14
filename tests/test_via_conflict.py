@@ -2,10 +2,7 @@
 
 import math
 
-import pytest
-
-from kicad_tools.router import via_conflict as _via_conflict_module
-from kicad_tools.router.core import Autorouter
+from kicad_tools.router.core import Autorouter, _TraceResolverTransaction
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -1080,17 +1077,6 @@ class TestTraceConflictResolution:
         )
         assert manager.stats.trace_rip_reroutes_attempted >= 1
 
-    @pytest.mark.skipif(
-        not _via_conflict_module.TRACE_RIP_REROUTE_ENABLED,
-        reason=(
-            "Issue #2864 round-2 feedback: the trace rip-reroute "
-            "branch is default-disabled at the call site in "
-            "Autorouter._resolve_via_conflicts_for_net.  Set "
-            "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to enable.  The "
-            "synthetic direct-call test (test_try_trace_rip_reroute_"
-            "unblocks_pad) still runs and pins helper correctness."
-        ),
-    )
     def test_route_net_consults_trace_resolver_on_pin_access(self) -> None:
         """End-to-end: ``route_net`` dispatches to the trace resolver branch.
 
@@ -1147,3 +1133,280 @@ class TestTraceConflictResolution:
             f"N1 (the originally blocked net) is still in routing_failures "
             f"after the trace resolver claimed success: {n1_failures!r}."
         )
+
+    def test_transactional_wrapper_rolls_back_on_post_rip_drc_violation(
+        self,
+    ) -> None:
+        """Issue #2872 acceptance: transactional rollback on DRC regression.
+
+        Synthetic post-retry-regression test for the
+        :class:`_TraceResolverTransaction` introduced in #2872.  The
+        original PR #2864 trace resolver had two safety holes:
+
+        1. The 10 mm envelope inside ``try_trace_rip_reroute``
+           missed long re-routed diff-pair traces on boards 06/07.
+        2. The post-success ``route_net`` retry in
+           :meth:`Autorouter._resolve_via_conflicts_for_net`
+           emitted geometry the helper-local check never saw.
+
+        This test exercises the wrapper directly: it drives the
+        snapshot-rollback machinery with a hand-crafted scenario
+        where a "newly committed" route violates clearance against
+        a pre-existing pad.  The wrapper must:
+
+          (a) report the violation via
+              :meth:`_TraceResolverTransaction.validate_committed_geometry`;
+          (b) restore the pre-snapshot ``router.routes`` and
+              ``router.routing_failures`` on
+              :meth:`_TraceResolverTransaction.rollback`;
+          (c) leave the grid clean (the rolled-back route should
+              not be marked, and any pre-existing routes that were
+              snapshotted should remain marked).
+
+        Coverage gap closed: prior to #2872 there was no test for
+        the transactional wrapper at all.  Without this test, a
+        regression in the rollback path (route restoration order,
+        C++ stored-routes invalidation, ``routing_failures``
+        deepcopy semantics) would slip through every other test
+        because the wrapper happens to commit on the synthetic
+        XTAL2 fixture.
+        """
+        # Build a 1-net router with a single pre-existing pad on N2
+        # right where any candidate N1 trace would clip.
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        n1_id = 1
+        n2_id = 2
+        # N1 endpoints far apart, all on F.Cu.
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "N1",
+                },
+                {
+                    "number": "2",
+                    "x": 15.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "N1",
+                },
+            ],
+        )
+        # N2 has a pad parked at (10.0, 10.0) -- directly on the
+        # straight-line path between N1's two pads.  Any N1 segment
+        # passing through (10.0, 10.0) at trace-clearance distance
+        # would violate the N2 pad's clearance band.
+        router.add_component(
+            "Y1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n2_id,
+                    "net_name": "N2",
+                }
+            ],
+        )
+
+        # Snapshot the *initial* state -- no routes anywhere.  This
+        # is the pre-rip baseline the transaction will restore to
+        # on rollback.
+        initial_routes_snapshot = list(router.routes)
+        initial_failures_snapshot = list(router.routing_failures)
+
+        # Open the transaction.  Snapshot is now active.
+        transaction = _TraceResolverTransaction(router)
+        transaction.begin()
+
+        # Simulate a "post-rip emit" that produces a DRC-violating
+        # N1 segment passing directly over the N2 pad.  The
+        # segment's centerline runs through (10.0, 10.0) which is
+        # exactly the N2 pad center -- the seg-vs-pad clearance is
+        # negative (overlap), which the validator must flag.
+        violating_segment = Segment(
+            x1=5.0,
+            y1=10.0,
+            x2=15.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=n1_id,
+            net_name="N1",
+        )
+        bad_route = Route(
+            net=n1_id,
+            net_name="N1",
+            segments=[violating_segment],
+            vias=[],
+        )
+        router._mark_route(bad_route)
+        router.routes.append(bad_route)
+
+        # Verify the wrapper detects the violation -- this is the
+        # primary assertion the post-retry-regression test exists
+        # to pin.  Pre-#2872 (no transactional wrapper, no global
+        # validator) this regression slipped through silently.
+        assert not transaction.validate_committed_geometry(), (
+            "Transactional wrapper failed to detect a clearance "
+            "violation between a newly-committed N1 segment and the "
+            "pre-existing N2 pad at (10.0, 10.0).  The N1 segment "
+            "centerline passes directly over the N2 pad center "
+            "(0 mm distance, where minimum is "
+            f"trace_width/2 + pad_radius + trace_clearance = "
+            f"{rules.trace_width / 2 + 0.25 + rules.trace_clearance} mm).  "
+            "Either validate_segment_clearance is broken, or the "
+            "transaction's id-based new-route detection failed to "
+            "include bad_route in the validation set."
+        )
+
+        # Roll back.  Post-rollback state must equal pre-snapshot
+        # state.
+        transaction.rollback(reason="test_transactional_wrapper synthetic")
+
+        # Acceptance (a): router.routes restored to pre-snapshot.
+        assert router.routes == initial_routes_snapshot, (
+            f"Rollback did not restore router.routes.  Expected "
+            f"{len(initial_routes_snapshot)} route(s), got "
+            f"{len(router.routes)}.  Routes still present: "
+            f"{[(r.net, len(r.segments)) for r in router.routes]!r}."
+        )
+
+        # Acceptance (b): router.routing_failures restored.
+        assert router.routing_failures == initial_failures_snapshot, (
+            "Rollback did not restore router.routing_failures."
+        )
+
+        # Acceptance (c): the bad_route's grid cells must be
+        # cleared.  We verify by inspecting bad_route's segments
+        # are no longer in grid.routes.
+        assert bad_route not in router.grid.routes, (
+            "Rollback did not unmark bad_route from router.grid.routes.  "
+            "The grid still references the violating route, which "
+            "would cause subsequent A* runs to treat its cells as "
+            "blocked and the validator to flag it on the next "
+            "transaction."
+        )
+
+    def test_transactional_wrapper_commit_preserves_clean_state(self) -> None:
+        """Issue #2872: the wrapper does NOT rollback DRC-clean commits.
+
+        Negative companion to
+        :meth:`test_transactional_wrapper_rolls_back_on_post_rip_drc_violation`.
+        If the validator is overly strict (e.g., flags a route's
+        own geometry, or mis-applies ``exclude_net``) the wrapper
+        would rollback every commit and the trace branch would
+        never make progress.  This test pins the happy-path
+        commit behaviour: a route that does NOT violate clearance
+        must report ``valid=True`` and survive the transaction.
+        """
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        n1_id = 1
+        n2_id = 2
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 5.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "N1",
+                },
+                {
+                    "number": "2",
+                    "x": 15.0,
+                    "y": 5.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n1_id,
+                    "net_name": "N1",
+                },
+            ],
+        )
+        # N2 pad placed FAR from where any sensible N1 trace would
+        # go (different y-band by 10 mm, well outside the seg-pad
+        # clearance envelope of ~0.55 mm).
+        router.add_component(
+            "Y1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 15.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": n2_id,
+                    "net_name": "N2",
+                }
+            ],
+        )
+
+        transaction = _TraceResolverTransaction(router)
+        transaction.begin()
+
+        # Commit a clean N1 horizontal trace at y=5.0 (10 mm away
+        # from the N2 pad at y=15.0).
+        clean_segment = Segment(
+            x1=5.0,
+            y1=5.0,
+            x2=15.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=n1_id,
+            net_name="N1",
+        )
+        good_route = Route(
+            net=n1_id,
+            net_name="N1",
+            segments=[clean_segment],
+            vias=[],
+        )
+        router._mark_route(good_route)
+        router.routes.append(good_route)
+
+        # Validator must report DRC-clean.
+        assert transaction.validate_committed_geometry(), (
+            "Transactional wrapper falsely flagged a DRC-clean N1 "
+            "segment as a violation.  The N2 pad is 10 mm away from "
+            "the segment's y-band -- well outside any reasonable "
+            "clearance envelope.  Likely cause: validator is "
+            "ignoring exclude_net (and is comparing the segment to "
+            "its own trace), or is mis-sourcing the pad list."
+        )
+
+        # The route survives -- no rollback needed.  Post-validation
+        # state should be unchanged from the post-commit state.
+        assert good_route in router.routes
+        assert good_route in router.grid.routes
