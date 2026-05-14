@@ -2,6 +2,9 @@
 
 import math
 
+import pytest
+
+from kicad_tools.router import via_conflict as _via_conflict_module
 from kicad_tools.router.core import Autorouter, _TraceResolverTransaction
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
@@ -1077,6 +1080,23 @@ class TestTraceConflictResolution:
         )
         assert manager.stats.trace_rip_reroutes_attempted >= 1
 
+    @pytest.mark.skipif(
+        not _via_conflict_module.TRACE_RIP_REROUTE_ENABLED,
+        reason=(
+            "Issue #2872 round-2 (PR #2876 Judge feedback): the "
+            "trace rip-reroute branch is default-disabled at the "
+            "call site in Autorouter._resolve_via_conflicts_for_net "
+            "because the transactional wrapper's per-route "
+            "validate_segment_clearance primitives do not catch "
+            "diff-pair-intra / match-group length-skew violations "
+            "the trace branch produces on boards 06/07.  Set "
+            "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to enable.  "
+            "The synthetic direct-call test "
+            "(test_try_trace_rip_reroute_unblocks_pad) and the "
+            "transactional wrapper unit tests still run and pin "
+            "helper / wrapper correctness."
+        ),
+    )
     def test_route_net_consults_trace_resolver_on_pin_access(self) -> None:
         """End-to-end: ``route_net`` dispatches to the trace resolver branch.
 

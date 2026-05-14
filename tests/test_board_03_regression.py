@@ -231,6 +231,28 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not __import__(
+        "kicad_tools.router.via_conflict", fromlist=["TRACE_RIP_REROUTE_ENABLED"]
+    ).TRACE_RIP_REROUTE_ENABLED,
+    reason=(
+        "Issue #2872 round-2 (PR #2876 Judge feedback): the trace "
+        "rip-reroute branch is default-disabled because the "
+        "transactional wrapper's per-route validate_segment_clearance "
+        "/ validate_via_clearance primitives do not catch diff-pair "
+        "intra-pair clearance (rule_id diffpair_clearance_intra) or "
+        "match-group length-skew (rule_id match_group_length_skew) "
+        "violations -- both surfaced as +6 / +9 DRC errors on boards "
+        "06 / 07 in CI.  The transactional wrapper itself is sound "
+        "(snapshot/rollback covers all required state) and ships in "
+        "this PR; enabling the flag is deferred to a follow-up that "
+        "extends _TraceResolverTransaction.validate_committed_geometry "
+        "to detect the missing rule categories.  Set "
+        "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to run this test.  "
+        "When the validator extension lands, the default flips back "
+        "to True and this skipif drops."
+    ),
+)
 def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
     """XTAL2 routes via ``ViaConflictManager`` trace rip-and-reroute.
 

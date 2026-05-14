@@ -39,57 +39,70 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .rules import DesignRules
 
-from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 
 
 def _trace_rip_reroute_enabled_default() -> bool:
     """Return the default enablement for the trace rip-reroute branch.
 
-    Issue #2872 (this PR): the original Issue #2864 round-2 feedback
-    flagged DRC regressions on boards 06 (USB3 diff-pair) and 07 (DDR
-    match-group) when the trace branch was on, traced to two holes in
-    the original safety check inside
-    :meth:`ViaConflictManager.try_trace_rip_reroute`:
+    Issue #2872 (this PR, round 2): the transactional wrapper around
+    the trace rip-reroute window (``_TraceResolverTransaction`` in
+    ``core.py``) is correct for the snapshot/rollback machinery and
+    the per-route ``validate_segment_clearance`` /
+    ``validate_via_clearance`` primitives -- but those primitives do
+    not catch every regression the trace branch can introduce on real
+    boards.  Specifically (Judge round-2 feedback, PR #2876):
 
-    1. The 10 mm validation envelope was too narrow for long re-routed
-       diff-pair traces; violations landed outside the envelope and
-       slipped through.
-    2. The post-success ``route_net`` retry at ``core.py`` (after
-       :meth:`Autorouter._resolve_via_conflicts_for_net` returns
-       success) emitted new geometry the helper's internal safety
-       check never saw.
+    - **Diff-pair clearance intra-pair** (rule_id
+      ``diffpair_clearance_intra``, Issue #2560): per-route
+      ``validate_segment_clearance`` walks segments individually with
+      ``exclude_net=route.net`` and so cannot see violations that are
+      only meaningful at the *pair* level (the pair members share a
+      diff-pair group but have different net IDs).  Boards 06/07's
+      USB3 / DDR routing produces these violations after a trace rip
+      that the wrapper signs off as clean.
+    - **Match-group length skew** (rule_id
+      ``match_group_length_skew``, Issue #2649): post-route DRC.
+      Committing a single net successfully says nothing about
+      whether the *group's* skew now exceeds tolerance.
 
-    Both holes are now closed by the transactional wrapper in
-    :meth:`Autorouter._resolve_via_conflicts_for_net` (Issue #2872),
-    which snapshots grid + route + failure state before the trace
-    branch dispatch, validates the union of *all* newly committed
-    geometry (both the helper's emit and the post-success retry's
-    emit) without any envelope filter, and rolls back atomically on
-    any new clearance violation.  The default is therefore flipped
-    back to ``True``.
+    CI evidence (PR #2876 run 25838032565 vs main run 25832879571):
+
+    | Board | Main (flag off) | PR (flag on) | Delta |
+    |-------|----------------|--------------|-------|
+    | 06    | 31 errors PASS | 37 errors FAIL | +6   |
+    | 07    | 70 errors PASS | 79 errors FAIL | +9   |
+
+    The transactional wrapper still ships as foundation work --
+    snapshot/rollback covers all required state per the issue spec
+    -- but the flag stays at ``False`` until the validation step is
+    extended to detect the violation categories the per-route
+    clearance primitives cannot see.  Tracking issue: extend
+    ``_TraceResolverTransaction.validate_committed_geometry`` to
+    cover diff-pair and match-group rules (Phase 1.5 / Phase 2).
 
     The environment kill switch
     (``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED``) is preserved as a
-    runtime override -- set it to ``0``/``false``/``no``/``off`` to
-    force-disable the trace branch (e.g., for A/B comparison or to
-    bypass a regression in flight).  Any other value (including
+    runtime override -- set it to ``1``/``true``/``yes``/``on`` to
+    force-enable the trace branch (e.g., for A/B comparison or to
+    test the wrapper end-to-end).  Any other value (including
     unset) preserves the default.
-
-    See Issue #2872 PR for the transactional wrapper implementation.
     """
     raw = os.environ.get("KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED", "").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return True
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return False
 
 
-# Feature flag (Issue #2872): trace rip-reroute branch enabled by default.
-# Backed by the transactional wrapper in
-# ``Autorouter._resolve_via_conflicts_for_net`` which snapshots and
-# rolls back on any post-rip DRC regression.  Set
-# ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=0`` to force-disable as a
-# kill switch.  See :func:`_trace_rip_reroute_enabled_default`.
+# Feature flag (Issue #2872): trace rip-reroute branch DISABLED by
+# default pending validator extension to detect diff-pair and
+# match-group rule violations the per-route clearance primitives
+# cannot see (see PR #2876 Judge round-2 feedback).  The
+# transactional wrapper is foundation work and ships in this PR;
+# enabling the flag is deferred to a follow-up that completes the
+# validation step.  Set ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1``
+# to force-enable for testing.
+# See :func:`_trace_rip_reroute_enabled_default`.
 TRACE_RIP_REROUTE_ENABLED: bool = _trace_rip_reroute_enabled_default()
 
 
