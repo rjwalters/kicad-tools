@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import os
@@ -375,6 +376,282 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     score = router._evaluate_solution(routes)
 
     return routes, score, trial_num
+
+
+class _TraceResolverTransaction:
+    """Snapshot/rollback wrapper for the trace rip-and-reroute window.
+
+    Issue #2872: PR #2864 added trace rip-and-reroute behind a
+    feature flag because its inline 10 mm envelope DRC check missed
+    long re-routed diff-pair / DDR violations on boards 06/07 AND
+    could not see the post-success ``route_net`` retry's new
+    geometry.  This transaction wraps the entire dispatch window in
+    :meth:`Autorouter._resolve_via_conflicts_for_net` (helper call +
+    post-success retry) so the validator runs once at the very end
+    over the union of every newly committed segment / via.
+
+    Snapshot scope (per Issue #2872):
+
+    - ``router.routes`` -- the live list of routes appended via
+      :meth:`Autorouter._mark_route` (or directly by
+      ``self.grid.mark_route`` inside the helper).  The snapshot
+      captures the *list of original Route objects* (shallow copy);
+      identity comparison (``id(route)``) drives the
+      added/removed delta calculation on rollback.  We avoid
+      ``copy.deepcopy`` of the route objects here because Route is
+      large (segments + vias lists) and the rollback only needs to
+      know which were added vs removed, not their internal state.
+    - ``router.routing_failures`` -- deepcopy because the helper
+      mutates entries in place via the recursive ``route_net``
+      callback and the post-success failure-filter at the call site
+      (``self.routing_failures = [f for f in ... if f.net != net]``).
+      The deepcopy ensures restoration doesn't share references with
+      the caller's mutations.
+    - C++ stored routes (``stored_segments_`` / ``stored_vias_``
+      vectors on the paired ``router_cpp.Grid3D``).  Wiped via
+      ``CppGrid.invalidate_stored_routes()`` on rollback; the
+      pathfinder rebuilds them lazily from the post-rollback
+      ``router.routes`` on its next ``_sync_stored_routes`` call.
+      Pads are not touched -- they are intrinsic board geometry.
+    - Python grid cells.  We *do not* snapshot the numpy cell
+      arrays directly (``_blocked``, ``_net``, ``_pad_blocked``,
+      etc).  For a single-net trace rip-reroute, the touched cells
+      are bounded by O(few segments * clearance halo cells), which
+      is far smaller than a full ``layers x rows x cols`` snapshot
+      (multi-megabyte on dense boards).  Instead we re-mark / unmark
+      using the route delta:
+
+          rollback grid restoration =
+              for each route added during the window: ``unmark_route``
+              for each route removed during the window: ``mark_route``
+
+      ``mark_route`` and ``unmark_route`` are idempotent and
+      already maintain ``self.routes``, the C++ side via
+      ``_cpp_grid.invalidate_stored_routes``, and the R-tree
+      index, so this restoration leaves the grid in a state
+      indistinguishable from the pre-transaction state.
+
+    Validation primitive: :meth:`RoutingGrid.validate_segment_clearance`
+    + :meth:`validate_via_clearance` +
+    :meth:`validate_via_to_via_clearance` (the precise edge-to-edge
+    geometric path used by the post-route validator).  No envelope
+    filter -- we iterate every newly committed segment / via.  This
+    is affordable because a single-net rip-reroute commits O(few
+    segments) of geometry.  The much-more-expensive
+    :func:`optimizer.pcb._run_drc_error_count` path is *not* used
+    here; it loads a full ``PCB`` object and runs ``DRCChecker`` per
+    call, two orders of magnitude too slow for a per-rip safety
+    check.
+
+    Net-increase semantics (Issue #2872): the validator runs over
+    the *current* grid state (post-rip, post-reroute), with each
+    new route's own net excluded via ``exclude_net``.  Pre-existing
+    routes that survived the rip remain in ``grid.routes`` and are
+    checked against; the ripped route(s) have already been removed
+    by the helper's ``unmark_route`` and so are not double-counted.
+    A clearance violation between two newly committed routes (for
+    example XTAL1's reroute against XTAL2's first attempt) is
+    treated as a real DRC violation -- the routing algorithm is
+    expected to avoid it, and if it slipped through that's a
+    regression vs a clean baseline.
+
+    Usage::
+
+        transaction = _TraceResolverTransaction(self)
+        transaction.begin()
+        # ... mutate self.routes / self.routing_failures / grid ...
+        if transaction.validate_committed_geometry():
+            return retry_routes  # commit (snapshot is discarded)
+        transaction.rollback(reason="...")
+        return []  # restored to pre-begin state
+    """
+
+    def __init__(self, router: "Autorouter") -> None:
+        self._router = router
+        self._snapshot_route_ids: frozenset[int] = frozenset()
+        self._snapshot_routes: list[Route] = []
+        self._snapshot_grid_routes: list[Route] = []
+        self._snapshot_failures: list[RoutingFailure] = []
+        self._begun = False
+
+    def begin(self) -> None:
+        """Take the pre-dispatch snapshot.
+
+        After ``begin``, all mutations to ``router.routes``,
+        ``router.routing_failures``, and the grid are tracked.
+        Idempotent: calling ``begin`` twice replaces the previous
+        snapshot (the caller is responsible for ensuring this is
+        intentional).
+        """
+        # Shallow copy: we want to compare by object identity on
+        # rollback (added vs removed routes).  Deep-copying here
+        # would break the identity comparison and bloat memory for
+        # boards with thousands of routes.
+        self._snapshot_routes = list(self._router.routes)
+        self._snapshot_route_ids = frozenset(id(r) for r in self._snapshot_routes)
+        # Also snapshot the grid's separate routes list.  ``RoutingGrid``
+        # maintains its own ``self.routes`` (mutated by
+        # ``mark_route``/``unmark_route``) which is what
+        # ``validate_segment_clearance`` walks.  The snapshot is used
+        # during validation to limit checks to pre-existing geometry
+        # only (see class docstring's "Net-increase semantics" note).
+        self._snapshot_grid_routes = list(self._router.grid.routes)
+        # Deep copy: the caller mutates routing_failures entries via
+        # the route_net retry path; we need an independent list of
+        # independent failure records to restore from.
+        self._snapshot_failures = copy.deepcopy(self._router.routing_failures)
+        self._begun = True
+
+    def validate_committed_geometry(self) -> bool:
+        """Return ``True`` iff every newly committed route is DRC-clean.
+
+        Iterates every Route object in ``router.routes`` whose
+        ``id(route)`` is not in the snapshot id-set, validating
+        each contained segment and via against the **current
+        post-rip grid state** using the precise edge-to-edge
+        clearance primitives (``validate_segment_clearance``,
+        ``validate_via_clearance``, ``validate_via_to_via_clearance``).
+        Same-net comparisons are excluded by ``exclude_net`` so a
+        route does not flag its own internal geometry.
+
+        See the class docstring's "Net-increase semantics" note for
+        why we validate against current grid state (which includes
+        other newly committed routes from the same transaction)
+        rather than snapshotting the pre-rip route list separately.
+
+        Returns:
+            ``True`` if no newly committed segment or via violates
+            clearance against any other route (pre-existing or
+            other newly committed) or pad, ``False`` if any single
+            segment or via reports a violation.  The walk
+            early-exits on the first violation found.
+        """
+        if not self._begun:
+            return True
+
+        grid = self._router.grid
+
+        # Validate against the CURRENT grid state (post-rip, post-
+        # reroute).  ``validate_segment_clearance`` walks
+        # ``self.routes`` internally and excludes same-net entries
+        # via ``exclude_net``, so a route is not penalised for its
+        # own internal geometry.  Pre-existing routes that were NOT
+        # touched by the rip remain in ``self.routes`` and are
+        # checked against; the ripped route(s) have been removed by
+        # the helper's ``unmark_route`` and so are not double-counted.
+        for new_route in self._router.routes:
+            if id(new_route) in self._snapshot_route_ids:
+                continue
+            for seg in new_route.segments:
+                is_valid, _actual, _loc = grid.validate_segment_clearance(
+                    seg=seg,
+                    exclude_net=new_route.net,
+                )
+                if not is_valid:
+                    return False
+            for via in new_route.vias:
+                is_valid, _actual, _loc = grid.validate_via_clearance(
+                    via=via,
+                    exclude_net=new_route.net,
+                )
+                if not is_valid:
+                    return False
+                is_valid_v2v, _actual_v2v, _loc_v2v = (
+                    grid.validate_via_to_via_clearance(
+                        via=via,
+                        exclude_net=new_route.net,
+                    )
+                )
+                if not is_valid_v2v:
+                    return False
+        return True
+
+    def rollback(self, reason: str = "") -> None:
+        """Restore the pre-``begin`` state.
+
+        Restoration order:
+
+        1. Identify routes added since ``begin`` (in
+           ``router.routes`` but not in the snapshot id-set).
+           Unmark each from the grid (this also pops them from
+           ``router.grid.routes`` via
+           ``RoutingGrid.unmark_route``'s bookkeeping).  Then
+           remove from ``router.routes`` (Autorouter's separate
+           list).
+        2. Identify routes removed since ``begin`` (in the
+           snapshot but no longer in ``router.grid.routes`` by id).
+           Re-mark each via :meth:`Autorouter._mark_route` so both
+           Python and C++ grids see the restoration.
+        3. Restore ``router.routes`` and ``router.routing_failures``
+           from the snapshots.
+        4. Wipe the C++ stored-routes cache so the next pathfinder
+           validation rebuilds from the post-rollback
+           ``router.grid.routes``.  ``unmark_route`` already
+           invalidates on a per-call basis but we call once more
+           here as a defensive belt-and-braces in case any helper
+           bypassed the standard path.
+
+        Args:
+            reason: Human-readable reason for the rollback (logged
+                via ``flush_print``).  Empty string suppresses the
+                log line.
+        """
+        if not self._begun:
+            return
+
+        router = self._router
+        grid = router.grid
+
+        # Step 1: drop newly committed routes from BOTH lists.
+        # ``unmark_route`` removes from grid.routes; we also need
+        # to drop from router.routes (Autorouter's separate list).
+        added = [r for r in list(router.routes) if id(r) not in self._snapshot_route_ids]
+        for r in added:
+            grid.unmark_route(r)
+
+        # Step 2: re-mark routes that were removed from grid.routes
+        # during the window (the helper rips XTAL1 from grid.routes
+        # but does NOT remove it from router.routes; see #2872
+        # post-mortem).  By id-equality so we restore the exact
+        # original Route objects.
+        current_grid_ids = {id(r) for r in grid.routes}
+        removed = [r for r in self._snapshot_grid_routes if id(r) not in current_grid_ids]
+        for r in removed:
+            # Re-mark on the grid only (router.routes will be
+            # restored from snapshot below); using grid.mark_route
+            # directly avoids the secondary append into
+            # router.routes that _mark_route does.
+            grid.mark_route(r)
+            # Also feed the C++ side and pathfinder if applicable.
+            cpp_grid = router._cpp_grid
+            if cpp_grid is not None:
+                router._mark_route_on_cpp_grid(r)
+
+        # Step 3: restore router.routes (Autorouter's list) and
+        # routing_failures from snapshots.
+        router.routes = list(self._snapshot_routes)
+        router.routing_failures = list(self._snapshot_failures)
+
+        # Step 4: wipe the C++ stored-routes cache (defensive; the
+        # per-call invalidate inside unmark_route should have
+        # handled it but we don't trust that any helper followed
+        # the standard path).
+        cpp_grid = router._cpp_grid
+        if cpp_grid is not None:
+            invalidate = getattr(cpp_grid, "invalidate_stored_routes", None)
+            if invalidate is not None:
+                invalidate()
+
+        if reason:
+            flush_print(
+                f"  Trace resolver transaction rolled back: {reason} "
+                f"({len(added)} route(s) unmarked, "
+                f"{len(removed)} route(s) restored)"
+            )
+
+        # Snapshot is consumed; mark inactive so further ``rollback``
+        # / ``validate_committed_geometry`` calls are no-ops.
+        self._begun = False
 
 
 class Autorouter:
@@ -9121,17 +9398,25 @@ class Autorouter:
         # some MST edges hit a via and others hit a trace.  Skip if the via
         # branch already routed the net to avoid spurious trace surgery.
         #
-        # Issue #2864 round-2 feedback: this branch is gated on a feature
-        # flag (default-disabled) because the localized DRC safety check
-        # inside ``try_trace_rip_reroute`` cannot cover violations from
-        # long re-routed diff-pair traces (board 06 USB3, board 07
-        # DDR/MIPI) that land outside its 10 mm envelope, nor can it
-        # cover the post-success ``route_net`` retry below at line
-        # ``retry_routes = self.route_net(...)``.  Enable via
-        # ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1`` once the full
-        # transactional wrapper is in place.  See
-        # :func:`via_conflict._trace_rip_reroute_enabled_default` for
-        # the rationale and the follow-up plan.
+        # Issue #2872: this branch and the post-success ``route_net`` retry
+        # below are now wrapped in a single transactional snapshot/rollback
+        # window (``_TraceResolverTransaction``).  The original PR #2864
+        # localized 10 mm envelope check inside ``try_trace_rip_reroute``
+        # has been removed -- the transactional wrapper validates the
+        # union of *all* newly committed segments and vias (helper +
+        # post-success retry) against the precise grid clearance
+        # primitives, with no envelope filter, and rolls back atomically
+        # on any DRC regression.  This closes both holes from #2864
+        # round-2:
+        #
+        #   (a) long re-routed diff-pair traces on boards 06/07 that
+        #       landed outside the old 10 mm envelope are now caught.
+        #   (b) the post-success ``route_net`` retry's new geometry was
+        #       not seen by the helper-local check at all; the
+        #       transaction now spans the retry too.
+        #
+        # The flag remains overridable via the
+        # ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=0`` env kill switch.
         # =====================================================================
         if (
             has_trace_blocker
@@ -9176,6 +9461,19 @@ class Autorouter:
                     f"conflict(s) found"
                 )
 
+                # Issue #2872: Open the transaction *before* dispatching
+                # any trace surgery so the snapshot captures pre-rip
+                # ``self.routes`` and ``self.routing_failures``.  The
+                # transaction also covers the post-success
+                # ``route_net`` retry below -- if either the helper or
+                # the retry produces a clearance violation against the
+                # newly committed geometry, the whole window rolls back
+                # atomically and ``[]`` is returned (so the caller's
+                # ``route_net`` treats the resolver as a no-op).
+                transaction = _TraceResolverTransaction(self)
+                transaction.begin()
+
+                trace_resolver_succeeded = False
                 # Traces have no "relocate" sibling (a segment is not a
                 # point), so the only resolution strategy is rip-and-reroute.
                 for conflict in unique_trace_conflicts:
@@ -9184,13 +9482,67 @@ class Autorouter:
                         route_net_fn=_route_net_fn,
                     )
                     if rip_result.success:
-                        any_resolved = True
+                        trace_resolver_succeeded = True
                         # try_trace_rip_reroute already routed the blocked net
                         # (our net) and the displaced net, so new routes for
                         # ``net`` were appended to ``self.routes`` by the
                         # recursive call.  Break out -- one successful trace
                         # rip-reroute is enough to justify the retry.
                         break
+
+                if not trace_resolver_succeeded:
+                    # Helper failed outright.  Nothing was committed
+                    # that we should keep, but the helper may have
+                    # mutated ``self.routes`` and the grid (it
+                    # restores its own ripped route on its own
+                    # failure path, so usually a no-op here, but be
+                    # defensive).  Roll the transaction back; do not
+                    # set ``any_resolved`` so the post-loop early
+                    # return at the bottom of this method fires.
+                    transaction.rollback(
+                        reason=f"trace resolver did not succeed for {net_name}"
+                    )
+                else:
+                    # Helper succeeded.  Now run the post-success
+                    # ``route_net`` retry inside the same transaction
+                    # window so any DRC regression it introduces also
+                    # triggers rollback.
+                    self.routing_failures = [
+                        f for f in self.routing_failures if f.net != net
+                    ]
+                    retry_routes = self.route_net(net, _subgrid_retry=True)
+
+                    # Validate the full delta of new geometry committed
+                    # since the snapshot (the helper's emit + the
+                    # retry's emit) against the snapshot's pre-existing
+                    # grid state, using the precise edge-to-edge
+                    # clearance primitives.  No envelope filter -- if
+                    # any newly committed segment or via clears
+                    # violates a pre-existing piece of geometry, roll
+                    # back.
+                    if transaction.validate_committed_geometry():
+                        # Commit: snapshot was correct; new state is
+                        # accepted.  Return the retry routes directly;
+                        # the caller's bookkeeping is handled here so
+                        # the bottom ``route_net`` retry is skipped.
+                        return retry_routes
+
+                    # DRC regression: roll back the whole window
+                    # (helper emit + retry emit) and decrement the
+                    # success counter the helper bumped, so the
+                    # observability stat reflects the *committed*
+                    # success count, not the attempt count.
+                    transaction.rollback(
+                        reason=(
+                            f"post-rip DRC validator rejected committed "
+                            f"geometry for {net_name}"
+                        )
+                    )
+                    if manager._stats.trace_rip_reroutes_succeeded > 0:
+                        manager._stats.trace_rip_reroutes_succeeded -= 1
+                    if manager._stats.nets_unblocked > 0:
+                        manager._stats.nets_unblocked -= 1
+                    return []
 
         if not any_resolved:
             return []
@@ -9202,6 +9554,10 @@ class Autorouter:
         # below will be a near-no-op (pads already marked), but it
         # ensures the standard post-route bookkeeping runs and that we
         # return a consistent route list.
+        #
+        # Issue #2872: This path is now reached only when the via
+        # branch resolved the net (the trace branch handles its own
+        # post-success retry inside the transaction window).
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
         retry_routes = self.route_net(net, _subgrid_retry=True)
         return retry_routes

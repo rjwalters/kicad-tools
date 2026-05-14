@@ -39,56 +39,70 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .rules import DesignRules
 
-from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 
 
 def _trace_rip_reroute_enabled_default() -> bool:
     """Return the default enablement for the trace rip-reroute branch.
 
-    Issue #2864 second-round feedback: the trace rip-reroute branch
-    (Issue #2859) was found to regress DRC counts on boards 06 and 07
-    even with a localized pre-commit DRC safety check inside
-    :meth:`ViaConflictManager.try_trace_rip_reroute`.  Root causes:
+    Issue #2872 (this PR, round 2): the transactional wrapper around
+    the trace rip-reroute window (``_TraceResolverTransaction`` in
+    ``core.py``) is correct for the snapshot/rollback machinery and
+    the per-route ``validate_segment_clearance`` /
+    ``validate_via_clearance`` primitives -- but those primitives do
+    not catch every regression the trace branch can introduce on real
+    boards.  Specifically (Judge round-2 feedback, PR #2876):
 
-    1. The 10 mm validation envelope is too narrow for long re-routed
-       diff-pair traces (USB3 on board 06, DDR/MIPI on board 07);
-       violations land outside the envelope and slip through.
-    2. The post-success ``route_net`` retry at ``core.py`` (after
-       :meth:`Autorouter._resolve_via_conflicts_for_net` returns
-       success) emits new geometry that the helper's internal safety
-       check never sees.
+    - **Diff-pair clearance intra-pair** (rule_id
+      ``diffpair_clearance_intra``, Issue #2560): per-route
+      ``validate_segment_clearance`` walks segments individually with
+      ``exclude_net=route.net`` and so cannot see violations that are
+      only meaningful at the *pair* level (the pair members share a
+      diff-pair group but have different net IDs).  Boards 06/07's
+      USB3 / DDR routing produces these violations after a trace rip
+      that the wrapper signs off as clean.
+    - **Match-group length skew** (rule_id
+      ``match_group_length_skew``, Issue #2649): post-route DRC.
+      Committing a single net successfully says nothing about
+      whether the *group's* skew now exceeds tolerance.
 
-    A full transactional rewrite that snapshots and rolls back grid
-    state across both the helper and the post-success retry would be
-    invasive for this PR (route lists, ``routing_failures``, the C++
-    grid snapshot all need synchronized restoration).  The Judge's
-    explicit fallback recommendation was to **disable the trace branch
-    by default** behind a feature flag.  That closes the regression
-    while preserving:
+    CI evidence (PR #2876 run 25838032565 vs main run 25832879571):
 
-    - Unit-test coverage: synthetic tests in ``tests/test_via_conflict.py``
-      (``test_try_trace_rip_reroute_unblocks_pad``,
-      ``test_route_net_consults_trace_resolver_on_pin_access``,
-      ``test_find_blocking_traces_*``) call :class:`ViaConflictManager`
-      methods directly and bypass this flag entirely -- the dispatch
-      gate lives in ``Autorouter._resolve_via_conflicts_for_net``.
-    - Re-enable path: set
-      ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1`` in the environment
-      (also accepts ``true``/``yes``/``on``, case-insensitive).  When
-      a follow-up PR implements the full transactional wrapper, the
-      default can flip back to ``True`` here.
+    | Board | Main (flag off) | PR (flag on) | Delta |
+    |-------|----------------|--------------|-------|
+    | 06    | 31 errors PASS | 37 errors FAIL | +6   |
+    | 07    | 70 errors PASS | 79 errors FAIL | +9   |
 
-    See Issue #2864 PR thread and the second-round Judge review
-    comment for the full rationale.
+    The transactional wrapper still ships as foundation work --
+    snapshot/rollback covers all required state per the issue spec
+    -- but the flag stays at ``False`` until the validation step is
+    extended to detect the violation categories the per-route
+    clearance primitives cannot see.  Tracking issue: extend
+    ``_TraceResolverTransaction.validate_committed_geometry`` to
+    cover diff-pair and match-group rules (Phase 1.5 / Phase 2).
+
+    The environment kill switch
+    (``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED``) is preserved as a
+    runtime override -- set it to ``1``/``true``/``yes``/``on`` to
+    force-enable the trace branch (e.g., for A/B comparison or to
+    test the wrapper end-to-end).  Any other value (including
+    unset) preserves the default.
     """
     raw = os.environ.get("KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return False
 
 
-# Feature flag (Issue #2864 round-2 feedback): trace rip-reroute branch
-# default-disabled to prevent boards 06/07 DRC regression.  See
-# :func:`_trace_rip_reroute_enabled_default` for full rationale.
+# Feature flag (Issue #2872): trace rip-reroute branch DISABLED by
+# default pending validator extension to detect diff-pair and
+# match-group rule violations the per-route clearance primitives
+# cannot see (see PR #2876 Judge round-2 feedback).  The
+# transactional wrapper is foundation work and ships in this PR;
+# enabling the flag is deferred to a follow-up that completes the
+# validation step.  Set ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1``
+# to force-enable for testing.
+# See :func:`_trace_rip_reroute_enabled_default`.
 TRACE_RIP_REROUTE_ENABLED: bool = _trace_rip_reroute_enabled_default()
 
 
@@ -657,181 +671,26 @@ class ViaConflictManager:
             result.new_blocked_routes = []
             return result
 
-        # Step 4 (Judge feedback on PR #2864): pre-commit DRC safety check.
-        #
-        # The via branch (``try_relocate`` / ``try_rip_reroute``) is bounded
-        # by the grid's own collision check -- it only moves a via to a
-        # grid cell that is geometrically clear.  The trace branch is more
-        # destructive: it rips a multi-segment path and lets the
-        # negotiated router emit a *new* path which the grid's cost map
-        # accepts (positive cost) but which may still violate clearance
-        # rules against non-grid-mediated geometry (other-net pads, vias,
-        # segments that share a layer but were committed after the
-        # ripped route was originally marked).
-        #
-        # Without this check, boards 06 (USB3 diff-pair) and 07 (DDR
-        # match-group) regressed by +9 and +45 DRC errors respectively
-        # on PR #2864 (https://github.com/rjwalters/kicad-tools/pull/2864).
-        # Validate the newly committed geometry against the grid using
-        # the precise edge-to-edge clearance primitives
-        # (``validate_segment_clearance`` / ``validate_via_clearance``)
-        # before accepting the result; if any new segment or via on
-        # either ripped or blocked routes introduces a clearance
-        # violation against another net, restore the original geometry.
-        #
-        # Performance: the check is **localized** to a small envelope
-        # around the original rip site.  A trace rip-reroute can only
-        # introduce new clearance violations in the immediate
-        # neighbourhood of the rip (the rest of the re-routed path is
-        # constrained by the same A* clearance cost map that accepted
-        # the path), so iterating segments outside the local envelope is
-        # pure overhead.  The envelope radius
-        # :attr:`DRC_VALIDATION_RADIUS_MM` matches the resolver's blast
-        # radius.
-        all_new_routes: list[Route] = list(blocked_routes) + list(ripped_routes)
-        if not self._validate_new_routes_drc(
-            all_new_routes,
-            conflict_center=conflict.segment_position,
-            conflict_segment=conflict.segment,
-        ):
-            # DRC regression - roll back to the pre-call state.
-            for r in ripped_routes:
-                self.grid.unmark_route(r)
-            for r in blocked_routes:
-                self.grid.unmark_route(r)
-            self.grid.mark_route(route)
-            result.blocked_net_routed = False
-            result.ripped_net_rerouted = False
-            result.new_blocked_routes = []
-            result.new_ripped_routes = []
-            result.success = False
-            return result
-
+        # Issue #2872: the inline post-emit DRC safety check that lived
+        # here in PR #2864 (a 10 mm bbox envelope filter calling
+        # ``_validate_new_routes_drc``) has been removed.  The
+        # transactional wrapper in
+        # :meth:`Autorouter._resolve_via_conflicts_for_net` now
+        # snapshots the full grid + routes + failures state before the
+        # trace branch is dispatched and validates the union of every
+        # newly committed segment / via (both this helper's emit AND
+        # the post-success ``route_net`` retry's emit) without an
+        # envelope filter.  Any clearance regression triggers a single
+        # atomic rollback at the call site.  Keeping the inline check
+        # here would be redundant work and would also not see the
+        # post-success retry's geometry, which was the primary hole in
+        # the PR #2864 design.
         result.success = result.blocked_net_routed and result.ripped_net_rerouted
         if result.success:
             self._stats.trace_rip_reroutes_succeeded += 1
             self._stats.nets_unblocked += 1
 
         return result
-
-    # Localized DRC check radius (mm) around the conflict site.  A trace
-    # rip-reroute can displace geometry by at most a few times the trace
-    # pitch before the re-router would have given up; 10 mm is a
-    # conservative envelope that captures realistic blast radii without
-    # validating the whole board on every rip.  Issue #2864 Judge
-    # feedback: tighten further if regression coverage shows we are
-    # missing real violations beyond this radius.
-    DRC_VALIDATION_RADIUS_MM = 10.0
-
-    def _validate_new_routes_drc(
-        self,
-        routes: list[Route],
-        conflict_center: tuple[float, float],
-        conflict_segment: Segment,
-    ) -> bool:
-        """Validate that newly committed routes don't introduce DRC violations.
-
-        Issue #2864 Judge feedback: the trace rip-reroute branch
-        (``try_trace_rip_reroute``) lacks the implicit DRC safety the via
-        branch gets from its two-stage relocate-then-rip pattern.  This
-        helper validates each segment and via in *routes* that falls
-        within :attr:`DRC_VALIDATION_RADIUS_MM` of the original conflict
-        site against the grid using
-        :meth:`RoutingGrid.validate_segment_clearance` /
-        :meth:`validate_via_clearance` /
-        :meth:`validate_via_to_via_clearance`.
-
-        Same-net comparisons are excluded by ``validate_segment_clearance``
-        / ``validate_via_clearance`` via the ``exclude_net`` parameter, so
-        a route's own internal geometry (segments meeting at endpoints,
-        segment-to-its-own-via) does not register as a violation.
-
-        For performance, only segments and vias whose bounding box
-        intersects the conflict envelope are validated.  A trace
-        rip-reroute can only displace geometry in the local
-        neighbourhood of the rip site, so violations far from the
-        conflict are pre-existing and not the resolver's fault.
-
-        Args:
-            routes: Newly emitted routes to validate.  These are expected
-                to already be marked on the grid (``mark_route`` called
-                by the routing callback).
-            conflict_center: World coordinates of the closest point on
-                the originally-ripped segment to the blocked pad.  Used
-                as the centre of the localized validation envelope.
-            conflict_segment: The originally-ripped segment.  Its
-                endpoints expand the validation envelope so the full
-                length of the ripped trace is covered, not just the
-                single closest-point.
-
-        Returns:
-            ``True`` if all in-range segments and vias in *routes*
-            satisfy the design rules, ``False`` if any violation is
-            found.  Callers should treat ``False`` as a signal to roll
-            back to the pre-call grid state and report ``success=False``
-            on the outer rip-reroute result.
-        """
-        # Build the validation envelope: a bbox around the conflict
-        # centre and the ripped segment's endpoints, expanded by
-        # DRC_VALIDATION_RADIUS_MM.
-        radius = self.DRC_VALIDATION_RADIUS_MM
-        xs = [
-            conflict_center[0],
-            conflict_segment.x1,
-            conflict_segment.x2,
-        ]
-        ys = [
-            conflict_center[1],
-            conflict_segment.y1,
-            conflict_segment.y2,
-        ]
-        xmin = min(xs) - radius
-        xmax = max(xs) + radius
-        ymin = min(ys) - radius
-        ymax = max(ys) + radius
-
-        def _seg_in_envelope(seg: Segment) -> bool:
-            return not (
-                max(seg.x1, seg.x2) < xmin
-                or min(seg.x1, seg.x2) > xmax
-                or max(seg.y1, seg.y2) < ymin
-                or min(seg.y1, seg.y2) > ymax
-            )
-
-        def _via_in_envelope(via: Via) -> bool:
-            return xmin <= via.x <= xmax and ymin <= via.y <= ymax
-
-        for new_route in routes:
-            for seg in new_route.segments:
-                if not _seg_in_envelope(seg):
-                    continue
-                is_valid, _actual, _loc = self.grid.validate_segment_clearance(
-                    seg=seg,
-                    exclude_net=new_route.net,
-                )
-                if not is_valid:
-                    return False
-
-            for via in new_route.vias:
-                if not _via_in_envelope(via):
-                    continue
-                is_valid, _actual, _loc = self.grid.validate_via_clearance(
-                    via=via,
-                    exclude_net=new_route.net,
-                )
-                if not is_valid:
-                    return False
-
-                is_valid_v2v, _actual_v2v, _loc_v2v = (
-                    self.grid.validate_via_to_via_clearance(
-                        via=via,
-                        exclude_net=new_route.net,
-                    )
-                )
-                if not is_valid_v2v:
-                    return False
-
-        return True
 
     def try_relocate(
         self,
