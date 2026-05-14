@@ -2289,6 +2289,28 @@ def _add_route_parser(subparsers) -> None:
             "until routing succeeds or manufacturer limits are reached."
         ),
     )
+    # Issue #2881: Manufacturer-tier escalation -- opt-in (default off).
+    route_parser.add_argument(
+        "--auto-mfr-tier",
+        action="store_true",
+        default=False,
+        help=(
+            "Automatically escalate to a tighter manufacturer tier when "
+            "geometric infeasibility blocks routing on the current tier "
+            "(default: disabled). E.g. jlcpcb -> jlcpcb-tier1 to gain "
+            "via-in-pad for fine-pitch QFP escape."
+        ),
+    )
+    route_parser.add_argument(
+        "--mfr-tier-ladder",
+        type=str,
+        default=None,
+        help=(
+            "Explicit comma-separated manufacturer tier ladder for "
+            "--auto-mfr-tier (e.g. 'jlcpcb,jlcpcb-tier1'). Overrides the "
+            "default ladder registered for the current --mfr."
+        ),
+    )
     route_parser.add_argument(
         "--min-trace",
         type=float,

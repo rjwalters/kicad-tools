@@ -230,6 +230,41 @@ def cmd_show(args):
     # tier-1 vs base difference at a glance (issue #2635).
     print(f"  Via-in-pad support: {'yes' if rules.via_in_pad_supported else 'no'}")
 
+    # Issue #2881: Surface the registered tier-escalation ladder so users
+    # can see "what would --auto-mfr-tier do for this manufacturer".
+    try:
+        from kicad_tools.router.mfr_limits import (
+            get_mfr_limits,
+            get_mfr_tier_ladder,
+        )
+
+        ladder = get_mfr_tier_ladder(profile.id)
+        if len(ladder) > 1:
+            # Find this tier's position in the ladder and show the next
+            # tier (if any) as a concrete escalation suggestion.
+            cur_idx = 0
+            for i, t in enumerate(ladder):
+                if t == profile.id:
+                    cur_idx = i
+                    break
+            if cur_idx < len(ladder) - 1:
+                next_tier = ladder[cur_idx + 1]
+                try:
+                    next_limits = get_mfr_limits(next_tier)
+                    extras = []
+                    if next_limits.via_in_pad_supported and not rules.via_in_pad_supported:
+                        extras.append("+via-in-pad")
+                    note = f" ({', '.join(extras)})" if extras else ""
+                    print(f"  Next tier:          {next_tier}{note}")
+                    if next_limits.cost_note:
+                        print(f"  Tier cost note:     {next_limits.cost_note}")
+                except ValueError:
+                    pass
+            print(f"  Tier ladder:        {' -> '.join(ladder)}")
+    except (ImportError, ValueError):
+        # Router module unavailable or unknown manufacturer -- skip.
+        pass
+
     print(f"\n{'Holes':─^40}")
     print(f"  Min hole diameter:  {fmt.format(rules.min_hole_diameter_mm)}")
     print(f"  Max hole diameter:  {fmt.format(rules.max_hole_diameter_mm)}")

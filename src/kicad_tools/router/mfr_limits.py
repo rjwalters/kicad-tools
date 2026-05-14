@@ -37,6 +37,10 @@ class MfrLimits:
             When ``True``, the escape router may place vias dead-centre on
             fine-pitch SSOP/TSSOP pads to escape into an inner layer
             instead of deferring those pins to the main router.
+        cost_note: Optional human-readable note about cost implications of
+            choosing this tier (e.g., "Capability Plus surcharge ~$30/order").
+            Surfaced verbatim by ``--auto-mfr-tier`` escalation when this
+            tier is chosen over a cheaper base tier (Issue #2881).
     """
 
     name: str
@@ -46,6 +50,7 @@ class MfrLimits:
     min_via_annular: float
     min_edge_clearance: float = 0.0
     via_in_pad_supported: bool = False
+    cost_note: str | None = None
 
     @property
     def min_via_diameter(self) -> float:
@@ -78,6 +83,7 @@ MFR_JLCPCB_TIER1 = MfrLimits(
     min_via_annular=0.15,
     min_edge_clearance=0.3,
     via_in_pad_supported=True,
+    cost_note="Capability Plus surcharge ~$30/order over base jlcpcb",
 )
 
 MFR_OSHPARK = MfrLimits(
@@ -120,6 +126,127 @@ _MFR_ALIASES: dict[str, str] = {
     "jlcpcb-capability-plus": "jlcpcb-tier1",
     "jlcpcb_tier1": "jlcpcb-tier1",
 }
+
+# Issue #2881: Manufacturer tier-escalation ladders.
+#
+# Maps a base manufacturer name to the ordered ladder of tiers to attempt when
+# ``--auto-mfr-tier`` is engaged.  The ladder runs cheapest -> tightest; the
+# escalation loop walks the ladder from the user's current tier onward, trying
+# each subsequent tier when geometric infeasibility is detected on the current
+# one (e.g. fine-pitch QFP escape blocked because base jlcpcb lacks
+# via-in-pad).
+#
+# Single-tier families (pcbway, oshpark) have a single entry -- escalation is
+# a no-op for them today, but they still participate in the registry so the
+# CLI can report "no escalation available for this manufacturer family"
+# without special-casing.
+#
+# The architecture accepts additional tiers (e.g. a future ``pcbway-tier1``)
+# without further code changes: add the tier to ``MFR_LIMITS`` and extend the
+# relevant ladder here.
+MFR_TIER_LADDERS: dict[str, list[str]] = {
+    "jlcpcb": ["jlcpcb", "jlcpcb-tier1"],
+    "jlcpcb-tier1": ["jlcpcb-tier1"],  # already at the top
+    "seeed": ["seeed", "jlcpcb-tier1"],
+    "seeed-fusion": ["seeed-fusion", "jlcpcb-tier1"],
+    "pcbway": ["pcbway"],  # single-tier today
+    "oshpark": ["oshpark"],  # single-tier today
+}
+
+
+def get_mfr_tier_ladder(manufacturer: str) -> list[str]:
+    """Get the escalation ladder for a manufacturer.
+
+    Returns the ordered list of manufacturer tier names to attempt when
+    ``--auto-mfr-tier`` escalation is engaged.  The first entry is always
+    the input manufacturer (canonicalized through aliases); subsequent
+    entries are tighter tiers in escalation order.
+
+    Args:
+        manufacturer: Base manufacturer name (case-insensitive; aliases
+            are resolved via :data:`_MFR_ALIASES`).
+
+    Returns:
+        Ordered list of manufacturer tier names, starting with the input
+        manufacturer.  When no ladder is registered for the manufacturer
+        family, returns ``[canonical_name]`` (single-element ladder ==
+        no escalation available).
+
+    Raises:
+        ValueError: If ``manufacturer`` is not a recognized manufacturer.
+
+    Example:
+        >>> get_mfr_tier_ladder("jlcpcb")
+        ['jlcpcb', 'jlcpcb-tier1']
+        >>> get_mfr_tier_ladder("oshpark")
+        ['oshpark']
+        >>> get_mfr_tier_ladder("JLCPCB")  # case-insensitive
+        ['jlcpcb', 'jlcpcb-tier1']
+    """
+    mfr_lower = manufacturer.lower()
+    canonical = _MFR_ALIASES.get(mfr_lower, mfr_lower)
+
+    if canonical not in MFR_LIMITS:
+        # Validate the manufacturer is real so callers get a clear error
+        # rather than a silent "no escalation" fallback.
+        get_mfr_limits(manufacturer)  # raises ValueError with suggestions
+        return [canonical]  # unreachable; defensive fallthrough
+
+    ladder = MFR_TIER_LADDERS.get(canonical)
+    if ladder is None:
+        return [canonical]
+    return list(ladder)
+
+
+def can_escalate_via_in_pad(current_mfr: str, next_mfr: str) -> bool:
+    """True iff escalating from current_mfr to next_mfr gains via-in-pad.
+
+    Used by the auto-mfr-tier escalation loop as the canonical convergence
+    guard: when the next tier in the ladder offers no via-in-pad gain AND
+    no scalar relaxation, escalating is a no-op and should be skipped.
+
+    Args:
+        current_mfr: Current manufacturer tier name.
+        next_mfr: Candidate next-tier manufacturer name.
+
+    Returns:
+        True when ``next_mfr`` supports via-in-pad and ``current_mfr``
+        does not.  Both manufacturers must be in :data:`MFR_LIMITS`.
+    """
+    try:
+        cur = get_mfr_limits(current_mfr)
+        nxt = get_mfr_limits(next_mfr)
+    except ValueError:
+        return False
+    return nxt.via_in_pad_supported and not cur.via_in_pad_supported
+
+
+def can_escalate_scalar(current_mfr: str, next_mfr: str) -> bool:
+    """True iff escalating from current_mfr to next_mfr relaxes scalar limits.
+
+    Returns True when ``next_mfr`` offers a strictly smaller min_clearance OR
+    min_trace OR min_via_drill compared to ``current_mfr``.  Used alongside
+    :func:`can_escalate_via_in_pad` to determine whether escalation can ever
+    help with the current failure mode.
+
+    Args:
+        current_mfr: Current manufacturer tier name.
+        next_mfr: Candidate next-tier manufacturer name.
+
+    Returns:
+        True when ``next_mfr`` has tighter scalar capability than
+        ``current_mfr``.  Both manufacturers must be in :data:`MFR_LIMITS`.
+    """
+    try:
+        cur = get_mfr_limits(current_mfr)
+        nxt = get_mfr_limits(next_mfr)
+    except ValueError:
+        return False
+    return (
+        nxt.min_clearance < cur.min_clearance
+        or nxt.min_trace < cur.min_trace
+        or nxt.min_via_drill < cur.min_via_drill
+    )
 
 
 def get_mfr_limits(manufacturer: str) -> MfrLimits:
