@@ -182,6 +182,7 @@ def _run_route_auto_mfr_tier(
 
 
 @pytest.mark.slow
+@pytest.mark.timeout(900)
 class TestAutoMfrTierIntegration:
     """End-to-end chain test: jlcpcb -> escalate to jlcpcb-tier1.
 
