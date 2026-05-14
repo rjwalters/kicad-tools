@@ -436,3 +436,179 @@ class TestNameUnfixableConstraint:
         msg = name_unfixable_constraint(FailureCause.UNKNOWN, manufacturer="jlcpcb")
         # Should still produce a non-empty string
         assert isinstance(msg, str) and msg
+
+
+class TestLadderExhaustionDiagnostic:
+    """Issue #2884: tier-ladder exhaustion must emit per-component diagnostic.
+
+    When ``route_with_mfr_tier_escalation`` exhausts the ladder without a
+    successful routing attempt, the printed summary must include a line
+    composed by ``name_unfixable_constraint()`` that names the specific
+    component / constraint blocking progress -- not just the generic
+    4-option remediation menu.
+    """
+
+    def _make_args(self, **overrides):
+        base = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            manufacturer="jlcpcb",
+            auto_mfr_tier=True,
+            mfr_tier_ladder=None,
+            auto_layers=True,
+            adaptive_rules=False,
+            quiet=False,  # diagnostic only prints when not quiet
+            timeout=None,
+            _wall_clock_deadline=None,
+        )
+        for k, v in overrides.items():
+            setattr(base, k, v)
+        return base
+
+    def test_exhaustion_emits_named_constraint_line(self, capsys):
+        """Walking the full ladder with PIN_ACCESS-style failures prints
+        the ``name_unfixable_constraint`` diagnostic before the generic
+        4-option list."""
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+
+        args = self._make_args()
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            # Simulate a fine-pitch QFP escape failure: missed via-in-pad
+            # rescues on U2 -> PIN_ACCESS-mode constraint.
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 4
+            mock_router._escape_router.missed_via_in_pad_components = {"U2"}
+            args._last_router = mock_router
+            return 2  # always fail so ladder exhausts
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+
+        out = capsys.readouterr().out
+        # Ladder exhausted -> non-zero exit, summary printed.
+        assert rc != 0
+        assert "MANUFACTURER-TIER ESCALATION SUMMARY" in out
+        # Issue #2884 acceptance criterion: the named-constraint diagnostic
+        # appears in the printed output, identifying the affected component
+        # and the constraint (via-in-pad / PIN_ACCESS).
+        assert "Diagnosis" in out
+        assert "U2" in out
+        assert "via-in-pad" in out.lower() or "via_in_pad" in out
+        # Named line precedes the generic Options list.
+        assert out.index("Diagnosis") < out.index("Options:")
+
+    def test_exhaustion_with_multiple_affected_components_reports_count(
+        self, capsys
+    ):
+        """When more than one component shares the unfixable constraint,
+        the diagnostic mentions the extra-affected count so the user knows
+        the scope of the problem."""
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+
+        args = self._make_args()
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 7
+            mock_router._escape_router.missed_via_in_pad_components = {
+                "U2",
+                "U5",
+                "U11",
+            }
+            args._last_router = mock_router
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "Diagnosis" in out
+        # Deterministic representative pick: sorted refs -> U11 first.
+        assert "U11" in out
+        # 2 other components affected.
+        assert "2 other component" in out
+
+    def test_exhaustion_without_missed_rescues_suppresses_named_line(
+        self, capsys
+    ):
+        """When the EscapeRouter has no missed-rescue signal we don't have
+        a confident named constraint to surface; the Diagnosis section is
+        suppressed but the generic Options list still prints."""
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+
+        args = self._make_args()
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 0
+            mock_router._escape_router.missed_via_in_pad_components = set()
+            args._last_router = mock_router
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "MANUFACTURER-TIER ESCALATION SUMMARY" in out
+        assert "Options:" in out
+        # No confident signal -> no false-positive Diagnosis line.
+        assert "Diagnosis" not in out
+
+    def test_named_constraint_helper_handles_missing_router(self):
+        """The diagnostic helper degrades gracefully when last_router is
+        None (e.g. ladder never produced a complete attempt)."""
+        from kicad_tools.cli.route_cmd import (
+            _name_dominant_unfixable_constraint,
+        )
+
+        assert _name_dominant_unfixable_constraint(
+            last_router=None, manufacturer="jlcpcb"
+        ) is None
+
+    def test_named_constraint_helper_handles_missing_escape_router(self):
+        """The diagnostic helper degrades gracefully when the Autorouter
+        never wired up its EscapeRouter (e.g. a crash before escape)."""
+        from kicad_tools.cli.route_cmd import (
+            _name_dominant_unfixable_constraint,
+        )
+
+        # MagicMock returns a child mock for any attribute by default.
+        # We need to explicitly stub _escape_router to None.
+        broken_router = MagicMock()
+        broken_router._escape_router = None
+        assert _name_dominant_unfixable_constraint(
+            last_router=broken_router, manufacturer="jlcpcb"
+        ) is None
