@@ -1862,12 +1862,26 @@ class EscapeRouter:
                 # (0.2 mm available, 0.381 mm required) -- the only
                 # viable along-edge escape is vertical via-in-pad.
                 escape_is_along_edge = direction != primary_dir
-                pin_boxed = (
+                # Issue #2890: OR in the direction-aware variant #3
+                # predicate.  The strict predicate (#2880) requires
+                # BOTH same-edge neighbours to be plane pads; variant
+                # #3 widens the trigger to "the neighbour on the
+                # escape-direction side is a plane pad".  Both are
+                # gated by ``escape_is_along_edge`` -- perpendicular
+                # escapes are never forced to the in-pad rescue.
+                pin_boxed_strict = (
                     escape_is_along_edge
                     and self._is_pin_boxed_by_plane_neighbours(
                         pad, package,
                     )
                 )
+                pin_blocked_directional = (
+                    escape_is_along_edge
+                    and self._is_pin_blocked_in_escape_direction(
+                        pad, package, direction,
+                    )
+                )
+                pin_boxed = pin_boxed_strict or pin_blocked_directional
                 if try_in_pad_fallback and unclipped_escape.segments:
                     surface_seg = unclipped_escape.segments[0]
                     violation = self._segment_violates_pad_clearance(
@@ -1886,15 +1900,31 @@ class EscapeRouter:
                         )
                         if in_pad_route is not None:
                             if pin_boxed and not violation:
+                                # Distinguish which predicate fired so
+                                # post-hoc analysis can tell strict
+                                # #2880 triggers from directional #2890
+                                # triggers.
+                                if pin_boxed_strict:
+                                    trigger_label = (
+                                        "boxed between same-component "
+                                        "plane-net neighbours on "
+                                        f"{package.package_type.name} edge "
+                                        "(Issue #2880)"
+                                    )
+                                else:
+                                    trigger_label = (
+                                        "plane neighbour on the chosen "
+                                        "escape-direction side of "
+                                        f"{package.package_type.name} edge "
+                                        "(Issue #2890)"
+                                    )
                                 logger.info(
                                     "In-pad rescue forced for %s pin %s "
-                                    "(net %s): boxed between same-component "
-                                    "plane-net neighbours on %s edge "
-                                    "(Issue #2880).",
+                                    "(net %s): %s.",
                                     package.ref,
                                     pad.pin,
                                     pad.net_name,
-                                    package.package_type.name,
+                                    trigger_label,
                                 )
                             escapes.append(in_pad_route)
                             continue
@@ -2800,6 +2830,156 @@ class EscapeRouter:
             prev_pad.net in plane_nets
             and next_pad.net in plane_nets
         )
+
+    @staticmethod
+    def _is_pin_blocked_in_escape_direction(
+        pad: Pad,
+        package: PackageInfo,
+        direction: EscapeDirection,
+        *,
+        plane_nets: set[int] | None = None,
+    ) -> bool:
+        """Variant #3 of the plane-sandwich predicate (Issue #2890).
+
+        Returns True when ``pad`` is a signal pin AND the same-edge
+        neighbour ON the escape-direction side is a plane pad.  Unlike
+        the strict predicate (Issue #2880), the OTHER same-edge
+        neighbour is ignored -- the dispatcher only routes through the
+        chosen side, so the opposite side's net assignment cannot
+        affect the escape segment's clearance.
+
+        This is the looser-but-direction-aware predicate that targets
+        signal pins whose strict predicate misses them because they
+        have only one plane neighbour and the dispatcher chose the
+        direction toward that plane neighbour.  PR #2889's empirical
+        "any plane neighbour on the same edge" broadening regressed
+        board-04 from 9/9 to 7/9 because it forced via-in-pad on pins
+        whose chosen escape direction was toward the *signal* side --
+        variant #3 only fires when the chosen direction matches the
+        plane side, so the clean-side escapes are preserved.
+
+        Args:
+            pad: The signal pad we are about to escape.
+            package: The QFP/QFN package info; ``package.pads`` includes
+                plane-net pads (net=0).
+            direction: The escape direction chosen by the dispatcher.
+                Perpendicular directions (matching the edge's primary
+                direction) always return False -- they do not traverse
+                the same-edge channel.
+            plane_nets: Optional override of which net ids count as
+                plane nets.  Defaults to ``{0}``.
+
+        Returns:
+            True if ``pad`` is a signal pin AND the chosen escape
+            direction's same-edge neighbour is a plane pad.
+        """
+        if plane_nets is None:
+            plane_nets = {0}
+
+        # Only signal pads can be plane-blocked (we never rescue a
+        # plane pad with a via-in-pad escape -- plane pads are
+        # stitched).
+        if pad.net in plane_nets:
+            return False
+
+        min_x, min_y, max_x, max_y = package.bounding_box
+        center_x, center_y = package.center
+
+        edge_margin = min(max_x - min_x, max_y - min_y) * 0.2
+
+        def _classify_edge(p: Pad) -> str | None:
+            if (
+                abs(p.x - center_x) < edge_margin
+                and abs(p.y - center_y) < edge_margin
+            ):
+                return None
+            dists = {
+                "north": abs(p.y - max_y),
+                "south": abs(p.y - min_y),
+                "east": abs(p.x - max_x),
+                "west": abs(p.x - min_x),
+            }
+            edge = min(dists, key=lambda k: dists[k])
+            if dists[edge] >= edge_margin:
+                return None
+            return edge
+
+        pad_edge = _classify_edge(pad)
+        if pad_edge is None:
+            return False
+
+        # Direction → neighbour-side mapping table.  The dispatcher
+        # sorts each edge's pads along the edge's primary axis
+        # (north/south by x ascending, east/west by y ascending).
+        # The escape direction determines which side of ``pad`` the
+        # escape segment exits past; only that side's neighbour matters
+        # to the clearance check.
+        #
+        # | edge  | sort axis | direction → side  |
+        # |-------|-----------|-------------------|
+        # | north | x ascending | EAST → idx+1, WEST → idx-1 |
+        # | south | x ascending | EAST → idx+1, WEST → idx-1 |
+        # | east  | y ascending | NORTH → idx+1, SOUTH → idx-1 |
+        # | west  | y ascending | NORTH → idx+1, SOUTH → idx-1 |
+        #
+        # All other directions (perpendicular escapes or diagonals)
+        # return False -- perpendicular escapes exit the package
+        # outward and never cross the same-edge channel.
+        neighbour_offset_table: dict[str, dict[EscapeDirection, int]] = {
+            "north": {
+                EscapeDirection.EAST: +1,
+                EscapeDirection.WEST: -1,
+            },
+            "south": {
+                EscapeDirection.EAST: +1,
+                EscapeDirection.WEST: -1,
+            },
+            "east": {
+                EscapeDirection.NORTH: +1,
+                EscapeDirection.SOUTH: -1,
+            },
+            "west": {
+                EscapeDirection.NORTH: +1,
+                EscapeDirection.SOUTH: -1,
+            },
+        }
+        offset = neighbour_offset_table.get(pad_edge, {}).get(direction)
+        if offset is None:
+            # Perpendicular escape (matches primary_dir) or diagonal:
+            # variant #3 is not applicable.  The strict predicate
+            # already excludes this case via the ``escape_is_along_edge``
+            # gate in the rescue trigger, but we also short-circuit
+            # here so the predicate is independently safe to call.
+            return False
+
+        # Gather all pads classified on the same edge (including plane
+        # pads; the dispatcher filters net=0 from its iteration list
+        # but plane neighbours still occupy the geometric channel).
+        same_edge: list[Pad] = []
+        for p in package.pads:
+            if p is pad:
+                same_edge.append(p)
+                continue
+            if _classify_edge(p) == pad_edge:
+                same_edge.append(p)
+
+        if pad_edge in ("north", "south"):
+            same_edge.sort(key=lambda q: q.x)
+        else:  # east, west
+            same_edge.sort(key=lambda q: q.y)
+
+        try:
+            idx = same_edge.index(pad)
+        except ValueError:
+            return False
+
+        neighbour_idx = idx + offset
+        if neighbour_idx < 0 or neighbour_idx >= len(same_edge):
+            # Corner pin escaping toward the open package corner --
+            # no neighbour to block, so variant #3 does not fire.
+            return False
+
+        return same_edge[neighbour_idx].net in plane_nets
 
     @staticmethod
     def _other_footprint_pads(
