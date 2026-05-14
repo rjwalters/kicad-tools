@@ -96,7 +96,7 @@ pcb.save()
 As of PR #2830, all five footprint attribute fields **round-trip cleanly**
 through `PCB.save` — set them on the Python side and the resulting
 `.kicad_pcb` will reflect the change exactly. Source of truth:
-[`src/kicad_tools/schema/pcb.py:459-461`](../../src/kicad_tools/schema/pcb.py).
+[`src/kicad_tools/schema/pcb.py:459-462`](../../src/kicad_tools/schema/pcb.py).
 
 | Field | Type | Effect in KiCad |
 |-------|------|-----------------|

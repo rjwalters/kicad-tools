@@ -399,8 +399,11 @@ stitching, manufacturing artefacts and verification in order. Implemented in
 [`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py).
 
 ```bash
-kct build [--spec SPEC] [--step STEP] [options]
+kct build [SPEC] [--step STEP] [options]
 ```
+
+`SPEC` is a positional argument (`.kct` file or project directory). Defaults
+to the current working directory if omitted.
 
 | Step (`--step`) | Purpose |
 |-----------------|---------|
@@ -425,21 +428,30 @@ for the full semantics.
 
 > **Note:** `kct build --help` from the top-level parser is currently stale
 > (the outer parser does not list `erc`, `sync`, or `preflight-routing` as
-> `--step` choices and is missing `--allow-incomplete` / `--optimize-placement`).
-> The authoritative parser is `build_cmd._build_parser` at
-> [`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py)
-> around line 2473.
+> `--step` choices and is missing `--allow-incomplete` /
+> `--optimize-placement`). Tracked in issue #2888. The authoritative parser
+> is constructed inline in `main()` at
+> [`src/kicad_tools/cli/build_cmd.py:2452`](../../src/kicad_tools/cli/build_cmd.py).
+> Until #2888 lands, exercise the missing choices/flags via
+> `python -m kicad_tools.cli.build_cmd ...`.
 
 **Examples:**
 ```bash
-# Full pipeline driven by the project spec
-kct build --spec boards/05-bldc/spec.yaml
+# Full pipeline driven by the project spec. `SPEC` is positional.
+kct build boards/05-bldc-motor-controller/project.kct
 
-# Skip the routing-completeness gate (escape hatch for known-incomplete WIP)
-kct build --spec boards/05-bldc/spec.yaml --allow-incomplete
+# Skip the routing-completeness gate (WIP escape hatch). Goes through the
+# inner parser until issue #2888 surfaces --allow-incomplete on the outer
+# CLI.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --allow-incomplete
 
-# Run a single stage
-kct build --spec boards/05-bldc/spec.yaml --step preflight-routing
+# Run a single stage. Same caveat: --step preflight-routing is only
+# accepted by the inner parser today.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --step preflight-routing
 ```
 
 ---
@@ -912,8 +924,8 @@ kct net-status <pcb_file> [options]
 | `--by-class` | Group output by net class |
 | `-v`, `--verbose` | Per-segment / per-pad detail |
 
-Exit code semantics are reused by `kct build --step preflight-routing` and
-by `kct fleet status` to decide "ship-ready vs. not".
+Exit code semantics are reused by the `preflight-routing` step in
+`kct build` and by `kct fleet status` to decide "ship-ready vs. not".
 
 **Examples:**
 ```bash
@@ -1051,6 +1063,17 @@ apart from clean routing with DRC issues. Source of truth: the epilog at
 | 1 | Final placement infeasible — overlap / DRC / boundary violations remain (issue #2821). Override with `--allow-infeasible`. |
 | 2 | Invalid arguments |
 | 130 | Interrupted (Ctrl+C) |
+
+### `kct fleet status`
+
+Source of truth: module docstring at
+[`src/kicad_tools/cli/fleet_cmd.py:17-21`](../../src/kicad_tools/cli/fleet_cmd.py).
+
+| Code | Meaning |
+|------|---------|
+| 0 | All surveyed boards are ship-ready |
+| 1 | Argparse / IO error |
+| 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
 
 ---
 

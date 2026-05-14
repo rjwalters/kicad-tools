@@ -58,9 +58,9 @@ See also: [CLI Reference → fleet status](../reference/cli.md#fleet-status).
 
 ## Routing Completeness Preflight
 
-`kct build --step preflight-routing` (and the default `kct build` sequence,
-which runs it between `stitch` and `verify`) blocks the build if any nets
-are incomplete or unrouted. This closes the gap where `kct build` would emit
+The default `kct build` sequence runs a routing-completeness preflight
+between `stitch` and `verify` that blocks the build if any nets are
+incomplete or unrouted. This closes the gap where `kct build` would emit
 gerbers, BOM, and CPL even when nets were unconnected.
 
 On failure the build prints, for example:
@@ -79,18 +79,32 @@ Two escape hatches are recognised:
 - `--allow-incomplete` — the advertised, CI-greppable opt-out. Use this for
   intentional WIP builds (e.g. preview gerbers for a board still in
   routing). Failure becomes a warning, the build continues.
-- `--force` — global build override; parity with `kct build --step sync
-  --force`. Also converts the failure into a warning.
+- `--force` — global build override; parity with `--step sync --force`.
+  Also converts the failure into a warning.
+
+> **Heads-up:** the outer `kct build` parser is currently stale — it does
+> not yet surface `--step preflight-routing`, `--step erc`, `--step sync`,
+> or `--allow-incomplete` (tracked in issue #2888). To exercise just the
+> preflight step or the WIP escape hatch today, invoke the inner parser
+> directly via `python -m kicad_tools.cli.build_cmd`. The default
+> end-to-end `kct build` invocation runs the preflight automatically.
 
 ```bash
-# Default: refuse to ship gerbers for a board with unrouted nets
-kct build --spec boards/05-bldc/spec.yaml
+# Default end-to-end build (preflight runs automatically between stitch
+# and verify; refuses to ship gerbers for a board with unrouted nets).
+# `spec` is positional, not a flag.
+kct build boards/05-bldc-motor-controller/project.kct
 
-# Run only the preflight check (read-only, no side-effects)
-kct build --spec boards/05-bldc/spec.yaml --step preflight-routing
+# Run only the preflight check (read-only, no side-effects).
+# Goes through the inner parser until issue #2888 lands.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --step preflight-routing
 
-# Bypass for an intentional WIP preview
-kct build --spec boards/05-bldc/spec.yaml --allow-incomplete
+# Bypass for an intentional WIP preview. Same caveat as above.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --allow-incomplete
 ```
 
 The check is read-only and uses `NetStatusAnalyzer` in-process (no subprocess
