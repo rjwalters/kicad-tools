@@ -1488,11 +1488,19 @@ class RoutingGrid:
             if pad.net == exclude_net:
                 continue
 
-            # Issue #1764: Skip pads on the same component as start/end pads.
-            # When routing to a pad, adjacent pads on the same component (e.g.,
-            # net=0 unconnected pads) should not cause clearance violations for
-            # the connecting trace segment.
-            if exclude_refs and pad.ref in exclude_refs:
+            # Issue #1764 + #2874: The same-component-ref exclusion is intended
+            # to permit signal-pin escape routing through the chip's own
+            # perimeter (Issue #1764 reachability fix). It must NOT permit
+            # signal traces to clip plane-net pads on the same chip. Keep
+            # plane-net pads (``pad.net == 0``, the SKIPPED-net convention
+            # threaded through ``cpp_backend.py:596-605``) in the validator
+            # even when their component is in the exclude set. This mirrors
+            # the C++ guard at ``cpp/src/grid.cpp:376`` (PR #2873) and the
+            # canonical ``component_inherent`` filter at
+            # ``io.py:1818-1822``. ``Pad.net: int`` (see
+            # ``primitives.py:245``), so the direct ``!= 0`` comparison is
+            # clean.
+            if exclude_refs and pad.net != 0 and pad.ref in exclude_refs:
                 continue
 
             # Skip pads on different layers (unless PTH)
