@@ -224,6 +224,12 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--min-completion", str(args.min_completion)])
     if getattr(args, "adaptive_rules", False):
         sub_argv.append("--adaptive-rules")
+    # Issue #2881: --auto-mfr-tier / --mfr-tier-ladder forwarding.  Both
+    # are opt-in (default off / None) so we forward only when set.
+    if getattr(args, "auto_mfr_tier", False):
+        sub_argv.append("--auto-mfr-tier")
+    if getattr(args, "mfr_tier_ladder", None):
+        sub_argv.extend(["--mfr-tier-ladder", args.mfr_tier_ladder])
     if getattr(args, "min_trace", None) is not None:
         sub_argv.extend(["--min-trace", str(args.min_trace)])
     if getattr(args, "min_clearance_floor", None) is not None:

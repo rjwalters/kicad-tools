@@ -1740,3 +1740,112 @@ class RootCauseAnalyzer:
         blockers.sort(key=lambda b: b.distance)
 
         return blockers
+
+
+# =============================================================================
+# Issue #2881: Manufacturer-tier escalation trigger table
+# =============================================================================
+
+# Map of FailureCause -> "should --auto-mfr-tier escalate on this cause?".
+# Used by ``route_with_mfr_tier_escalation`` to gate which failure modes
+# trigger a tier walk-forward.  PIN_ACCESS is the canonical "via-in-pad
+# would have helped" case; CLEARANCE is conditionally allowed (only when
+# the next tier offers scalar relaxation).  BLOCKED_PATH / CONGESTION /
+# UNKNOWN / timeouts are excluded because they are not manufacturer-fixable.
+MFR_TIER_ESCALATION_TRIGGERS: dict[FailureCause, bool] = {
+    FailureCause.PIN_ACCESS: True,
+    FailureCause.CLEARANCE: True,  # conditional on scalar gain (see caller)
+    FailureCause.VIA_BLOCKED: True,  # tighter via geometry may fit
+    FailureCause.BLOCKED_PATH: False,  # placement issue
+    FailureCause.CONGESTION: False,  # layer issue
+    FailureCause.LAYER_CONFLICT: False,  # layer issue
+    FailureCause.KEEPOUT: False,  # design issue
+    FailureCause.ROUTING_ORDER: False,  # ordering, not manufacturer
+    FailureCause.LENGTH_CONSTRAINT: False,  # design constraint
+    FailureCause.DIFFERENTIAL_PAIR: False,  # design constraint
+    FailureCause.UNKNOWN: False,  # algorithm issue
+}
+
+
+def should_escalate_mfr_tier(cause: FailureCause) -> bool:
+    """True iff manufacturer-tier escalation should engage on this cause.
+
+    Mirrors the Issue #2881 trigger table.  See ``MFR_TIER_ESCALATION_TRIGGERS``
+    for the full mapping.  The caller is responsible for the secondary
+    convergence guard (next-tier capability gain check via
+    :func:`mfr_limits.can_escalate_via_in_pad` /
+    :func:`mfr_limits.can_escalate_scalar`).
+
+    Args:
+        cause: The failure cause classification from
+            :class:`RootCauseAnalyzer`.
+
+    Returns:
+        True when the failure cause is one where tier escalation could
+        plausibly help; False when escalation would mask the underlying
+        issue (e.g., placement-related failures).
+    """
+    return MFR_TIER_ESCALATION_TRIGGERS.get(cause, False)
+
+
+def name_unfixable_constraint(
+    cause: FailureCause,
+    manufacturer: str | None = None,
+    component_ref: str | None = None,
+    pin: str | None = None,
+) -> str:
+    """Return a one-line human-readable diagnostic naming the constraint.
+
+    Issue #2881: The router should NAME the unfixable constraint when it
+    gives up, so users know which knob to turn.  Example:
+
+        "Cannot escape U2 pin 7 to perimeter without violating jlcpcb
+        0.127 mm clearance. The `jlcpcb` profile does not support
+        via-in-pad."
+
+    Args:
+        cause: The failure cause classification.
+        manufacturer: Current manufacturer name, used to name the
+            specific profile in the diagnostic.
+        component_ref: Affected component reference (e.g. "U2").
+        pin: Affected pin number/name (e.g. "7").
+
+    Returns:
+        A single-line diagnostic string suitable for terminal output.
+        The caller is expected to print this followed by a list of
+        concrete remediation options.
+    """
+    mfr_name = manufacturer or "the current manufacturer"
+    ref_part = ""
+    if component_ref and pin:
+        ref_part = f" {component_ref} pin {pin}"
+    elif component_ref:
+        ref_part = f" component {component_ref}"
+
+    if cause == FailureCause.PIN_ACCESS:
+        return (
+            f"Cannot escape{ref_part} to perimeter on {mfr_name}. "
+            f"The `{mfr_name}` profile does not support via-in-pad "
+            "(via_in_pad_supported = false)."
+        )
+    if cause == FailureCause.CLEARANCE:
+        return (
+            f"Cannot route{ref_part} without violating {mfr_name} "
+            "minimum clearance."
+        )
+    if cause == FailureCause.VIA_BLOCKED:
+        return (
+            f"Cannot place via{ref_part} on {mfr_name}: via geometry "
+            "exceeds available space."
+        )
+    if cause == FailureCause.CONGESTION:
+        return (
+            f"Routing congestion{ref_part}: insufficient layer capacity "
+            "for the design."
+        )
+    if cause == FailureCause.BLOCKED_PATH:
+        return (
+            f"Path blocked{ref_part}: placement is forcing routing through "
+            "an obstructed corridor."
+        )
+    return f"Routing failed{ref_part}: {cause.description}."

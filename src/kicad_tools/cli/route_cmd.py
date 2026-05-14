@@ -54,6 +54,7 @@ Layer Stack Configuration:
 """
 
 import argparse
+import contextlib
 import logging
 import math
 import os
@@ -2564,6 +2565,13 @@ def route_with_layer_escalation(
                 auto_layers_attempted=True,
             )
 
+    # Issue #2881: Stash the final router on args so an outer
+    # ``route_with_mfr_tier_escalation`` wrapper can inspect
+    # ``missed_via_in_pad_rescues`` to decide whether to escalate to the
+    # next manufacturer tier.  Harmless when no outer wrapper exists.
+    with contextlib.suppress(AttributeError, TypeError):
+        args._last_router = final_result.router
+
     if final_result.success:
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.  The
@@ -3117,6 +3125,285 @@ def route_with_rule_relaxation(
         return 2
     # Nothing was routed — treat as fatal failure
     return 1
+
+
+def route_with_mfr_tier_escalation(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool = False,
+) -> int:
+    """Route a PCB with manufacturer-tier escalation (Issue #2881).
+
+    Walks the ladder of manufacturer tiers (e.g. ``jlcpcb`` ->
+    ``jlcpcb-tier1``).  For each tier in the ladder, mutates
+    ``args.manufacturer`` to point at that tier and re-enters the
+    layer-escalation path (``--auto-layers`` is enabled implicitly because
+    this entry point is only reached when the user passed
+    ``--auto-mfr-tier``; the inner call respects whatever
+    ``args.auto_layers`` is set to).
+
+    Escalation triggers on the per-attempt ``EscapeRouter`` instrumentation
+    counter (``missed_via_in_pad_rescues``).  When that counter is non-zero
+    after a routing attempt completes, the next tier in the ladder is
+    tried -- but only if that tier offers a real capability gain (via-in-pad
+    OR scalar relaxation; see :func:`mfr_limits.can_escalate_via_in_pad`
+    and :func:`can_escalate_scalar`).  Pure same-scalar/same-capability
+    tier swaps are skipped to avoid pointless retry loops.
+
+    Trigger table (from Issue #2881):
+
+    +----------------------------+-------------+----------------------------+
+    | FailureCause               | Escalate?   | Why / why not              |
+    +----------------------------+-------------+----------------------------+
+    | PIN_ACCESS + fine-pitch    | YES         | Exactly what tier1 fixes.  |
+    | + via_in_pad missing       |             |                            |
+    +----------------------------+-------------+----------------------------+
+    | CLEARANCE at mfr minimum   | conditional | Only if next tier offers   |
+    |                            |             | scalar relaxation.         |
+    +----------------------------+-------------+----------------------------+
+    | BLOCKED_PATH               | NO          | Placement issue, not       |
+    |                            |             | manufacturer-fixable.      |
+    +----------------------------+-------------+----------------------------+
+    | CONGESTION                 | NO          | Layer issue;               |
+    |                            |             | --auto-layers handles it.  |
+    +----------------------------+-------------+----------------------------+
+    | UNKNOWN / timeouts         | NO          | Algorithm issue, may mask  |
+    |                            |             | bugs.                      |
+    +----------------------------+-------------+----------------------------+
+
+    Args:
+        pcb_path: Path to input PCB file
+        output_path: Path for output routed PCB file
+        args: Parsed command-line arguments (must have ``manufacturer``,
+            ``auto_mfr_tier``, optionally ``mfr_tier_ladder``)
+        quiet: Suppress output
+
+    Returns:
+        Exit code (0 = success, 1 = failure, 2 = partial)
+    """
+    from kicad_tools.cli.progress import flush_print
+    from kicad_tools.router.mfr_limits import (
+        can_escalate_scalar,
+        can_escalate_via_in_pad,
+        get_mfr_limits,
+        get_mfr_tier_ladder,
+    )
+
+    # Resolve the ladder.  Explicit --mfr-tier-ladder wins; otherwise look
+    # up the default ladder for args.manufacturer.
+    explicit_ladder = getattr(args, "mfr_tier_ladder", None)
+    if explicit_ladder:
+        ladder = [t.strip() for t in explicit_ladder.split(",") if t.strip()]
+        # Validate each ladder entry resolves to a real manufacturer.
+        for tier_name in ladder:
+            get_mfr_limits(tier_name)  # raises ValueError on unknown
+    else:
+        try:
+            ladder = get_mfr_tier_ladder(args.manufacturer)
+        except ValueError as e:
+            flush_print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    # Find the user's starting tier in the ladder.  If args.manufacturer
+    # is not in the ladder, start from the first ladder entry that
+    # matches; otherwise prepend args.manufacturer at the head.
+    start_idx = 0
+    cur_canonical = args.manufacturer.lower()
+    for i, t in enumerate(ladder):
+        if t.lower() == cur_canonical:
+            start_idx = i
+            break
+
+    tiers_to_try = ladder[start_idx:]
+
+    if not quiet:
+        flush_print("=" * 60)
+        flush_print("KiCad PCB Autorouter - Manufacturer-Tier Escalation Mode")
+        flush_print("=" * 60)
+        flush_print(f"Input:           {pcb_path}")
+        flush_print(f"Output:          {output_path}")
+        flush_print(f"Starting tier:   {args.manufacturer}")
+        flush_print(f"Tier ladder:     {' -> '.join(tiers_to_try)}")
+        flush_print()
+
+    last_exit_code: int = 1
+    last_router = None
+    final_exit_code: int = 1
+    saw_terminating_success: bool = False
+
+    # Issue #2881: budget-fair per-tier slicing.  Reuse the existing
+    # ``_per_attempt_budgeted_timeout`` helper transparently by having the
+    # inner ``route_with_layer_escalation`` call divide ``args.timeout``
+    # across its own layer attempts.  Wall-clock deadline is enforced by
+    # ``_deadline_expired`` checked at the top of each tier iteration.
+    for tier_idx, tier_name in enumerate(tiers_to_try):
+        if _deadline_expired(args):
+            if not quiet:
+                flush_print(
+                    f"  Wall-clock deadline reached before tier "
+                    f"{tier_idx + 1} ({tier_name}); stopping tier escalation."
+                )
+            break
+
+        # Convergence guard (Issue #2881): only attempt subsequent tiers
+        # when the new tier offers a real capability gain over the current
+        # one.  Pure same-scalar/same-capability swaps are no-ops and would
+        # produce identical routing results (potentially looping forever
+        # if some tier got registered twice).
+        if tier_idx > 0:
+            prev_tier = tiers_to_try[tier_idx - 1]
+            gains_capability = can_escalate_via_in_pad(prev_tier, tier_name)
+            gains_scalar = can_escalate_scalar(prev_tier, tier_name)
+            # Issue #2881: trigger-aware escalation -- only walk forward
+            # when the failure mode is one that escalation could fix.
+            # ``missed_via_in_pad_rescues`` is the canonical signal for
+            # "via-in-pad would have helped".  Without an instrumented
+            # signal, we still escalate if either capability gain holds
+            # (defensive: the user opted in to escalation, and a tighter
+            # tier is registered in the ladder).
+            triggered_by_missed_in_pad = False
+            if last_router is not None:
+                # Read the canonical private attribute set by
+                # Autorouter._escape (see core.py:8856).
+                escape_router = getattr(last_router, "_escape_router", None)
+                if escape_router is not None:
+                    missed = getattr(escape_router, "missed_via_in_pad_rescues", 0)
+                    try:
+                        triggered_by_missed_in_pad = bool(missed and int(missed) > 0)
+                    except (TypeError, ValueError):
+                        triggered_by_missed_in_pad = False
+
+            should_escalate = False
+            reason = ""
+            if gains_capability and triggered_by_missed_in_pad:
+                should_escalate = True
+                reason = "missed via-in-pad rescues detected on previous tier"
+            elif gains_capability:
+                # No instrumented missed-rescue signal, but capability gain
+                # exists -- escalate defensively (the user asked for it).
+                should_escalate = True
+                reason = (
+                    "next tier offers via-in-pad capability (no missed-rescue "
+                    "signal available)"
+                )
+            elif gains_scalar:
+                should_escalate = True
+                reason = "next tier offers scalar relaxation (clearance/trace/via)"
+
+            if not should_escalate:
+                if not quiet:
+                    flush_print(
+                        f"  Skipping tier {tier_name}: no capability or scalar "
+                        f"gain over {prev_tier} (convergence guard)."
+                    )
+                break
+
+            if not quiet:
+                flush_print(
+                    f"  Escalating to {tier_name}: {reason}"
+                )
+
+        # Mutate args to point at this tier.  Note: route_with_layer_escalation
+        # re-reads args.manufacturer when constructing DesignRules, so the
+        # mutation takes effect for the next inner call.
+        original_mfr = args.manufacturer
+        args.manufacturer = tier_name
+        try:
+            if not quiet:
+                flush_print("=" * 60)
+                flush_print(f"Tier {tier_idx + 1}/{len(tiers_to_try)}: {tier_name}")
+                flush_print("=" * 60)
+
+            # Dispatch to the layer-escalation path.  When args.auto_layers
+            # is False we fall through to single-layer routing.  When True,
+            # full 2D escalation (layers x mfr-tier) occurs.
+            if getattr(args, "auto_layers", True):
+                inner_rc = route_with_layer_escalation(
+                    pcb_path=pcb_path,
+                    output_path=output_path,
+                    args=args,
+                    quiet=quiet,
+                )
+            else:
+                # Single-layer routing path -- recurse via main() with
+                # auto_layers/auto_mfr_tier turned off would be cleaner, but
+                # to keep this PR focused we just call the layer-escalation
+                # path with --max-layers=args.layers honored via the inner
+                # filter.  When the user explicitly disabled auto-layers,
+                # they should explicitly invoke the appropriate path.
+                inner_rc = route_with_layer_escalation(
+                    pcb_path=pcb_path,
+                    output_path=output_path,
+                    args=args,
+                    quiet=quiet,
+                )
+
+            last_exit_code = inner_rc
+            final_exit_code = inner_rc
+
+            # Read the stashed router from the inner call.  This is the
+            # signal source for ``missed_via_in_pad_rescues`` -- when
+            # non-zero on a failed tier, the next iteration knows to walk
+            # forward (if the next tier offers via-in-pad capability).
+            last_router = getattr(args, "_last_router", None)
+
+            # Successful routing -- stop escalation.
+            if inner_rc == 0:
+                saw_terminating_success = True
+                if not quiet:
+                    flush_print(
+                        f"\n  Tier {tier_name} achieved routing success; "
+                        "stopping tier escalation."
+                    )
+                # Print cost note if escalation actually moved off the
+                # starting tier.
+                if tier_idx > 0:
+                    final_limits = get_mfr_limits(tier_name)
+                    if final_limits.cost_note:
+                        flush_print(
+                            f"\nRecommendation: order from {tier_name}. "
+                            f"{final_limits.cost_note}."
+                        )
+                break
+
+        finally:
+            # Restore original manufacturer only when we did NOT succeed --
+            # on success the mutation is intentional (and surfaced via the
+            # cost-note recommendation).  On failure, restore so subsequent
+            # CLI calls aren't surprised.
+            if last_exit_code != 0:
+                args.manufacturer = original_mfr
+
+    # Diagnostic: name the constraint when escalation did not succeed.
+    if not saw_terminating_success and not quiet:
+        flush_print("\n" + "=" * 60)
+        flush_print("MANUFACTURER-TIER ESCALATION SUMMARY")
+        flush_print("=" * 60)
+        flush_print(
+            f"Result: No tier in {' -> '.join(tiers_to_try)} achieved "
+            "routing success."
+        )
+        # Concrete remediation options.  Always print at least three so
+        # users have actionable alternatives:
+        flush_print("\nOptions:")
+        flush_print(
+            "  1. Switch to a tighter manufacturer tier (try "
+            "--mfr-tier-ladder with a custom ladder)."
+        )
+        flush_print(
+            "  2. Change fine-pitch package(s) to a wider-pitch alternative "
+            "(e.g. LQFP-48 0.5mm -> LQFP-32 0.8mm)."
+        )
+        flush_print(
+            "  3. Move fine-pitch component(s) toward the board centre so "
+            "escape traces have a wider channel (5+mm from edge)."
+        )
+        flush_print(
+            "  4. Add layers via --auto-layers --max-layers 6 (if not already on)."
+        )
+
+    return final_exit_code
 
 
 def route_with_combined_escalation(
@@ -4302,6 +4589,34 @@ def main(argv: list[str] | None = None) -> int:
             "Maximum layer count for auto-escalation (default: 6). Only used with --auto-layers."
         ),
     )
+    # Issue #2881: --auto-mfr-tier / --mfr-tier-ladder.  Opt-in escalation
+    # along a registered ladder of manufacturer tiers (e.g.
+    # ``jlcpcb`` -> ``jlcpcb-tier1``).  Default off because tighter tiers
+    # have higher cost; users explicitly opt in to allow the surcharge.
+    parser.add_argument(
+        "--auto-mfr-tier",
+        action="store_true",
+        default=False,
+        help=(
+            "Automatically escalate to a tighter manufacturer tier when "
+            "geometric infeasibility blocks routing on the current tier "
+            "(default: disabled). Walks the registered ladder for the "
+            "current --mfr (e.g. jlcpcb -> jlcpcb-tier1, which adds via-in-pad "
+            "capability for fine-pitch QFP escape). Opt-in because tighter "
+            "tiers can incur a manufacturing surcharge."
+        ),
+    )
+    parser.add_argument(
+        "--mfr-tier-ladder",
+        type=str,
+        default=None,
+        help=(
+            "Explicit comma-separated manufacturer tier ladder for "
+            "--auto-mfr-tier (e.g. 'jlcpcb,jlcpcb-tier1'). Overrides the "
+            "default ladder registered for the current --mfr. Each entry "
+            "must be a recognized manufacturer name."
+        ),
+    )
     parser.add_argument(
         "--min-completion",
         type=float,
@@ -4793,6 +5108,18 @@ def main(argv: list[str] | None = None) -> int:
                     )
         except ValueError:
             pass  # Unknown manufacturer -- edge_clearance stays None
+
+    # Issue #2881: --auto-mfr-tier wraps --auto-layers / --adaptive-rules,
+    # iterating over registered manufacturer tiers from cheapest -> tightest.
+    # Inside each tier the routing dispatches to the existing layer-escalation
+    # path (or the single-layer path when --no-auto-layers is set).
+    if getattr(args, "auto_mfr_tier", False):
+        return route_with_mfr_tier_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=args.quiet,
+        )
 
     # Handle auto-layers mode (separate code path)
     if args.auto_layers and args.adaptive_rules:

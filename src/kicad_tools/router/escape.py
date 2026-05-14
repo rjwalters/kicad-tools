@@ -800,6 +800,21 @@ class EscapeRouter:
             self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
         )
 
+        # Issue #2881: Counter for "would-have-rescued" events -- bumped
+        # every time the escape router would have invoked
+        # ``_try_in_pad_escape`` for a fine-pitch QFP/SSOP pin but the
+        # current manufacturer's ``via_in_pad_supported`` is False.  When
+        # this counter is non-zero after a routing attempt, the
+        # ``--auto-mfr-tier`` escalation loop knows that switching to a
+        # via-in-pad-capable manufacturer would unblock those pins, and
+        # the diagnostic surface can name the constraint that is blocking
+        # progress.  Tracked per EscapeRouter instance and reset between
+        # routing attempts by ``Autorouter.reset_attempt_state``.
+        self.missed_via_in_pad_rescues: int = 0
+        # Per-component refs whose pins would have been rescued -- used
+        # for the named-constraint diagnostic line.
+        self.missed_via_in_pad_components: set[str] = set()
+
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.
 
@@ -1760,6 +1775,19 @@ class EscapeRouter:
             and self.via_in_pad_supported
         )
 
+        # Issue #2881: Track whether this package is a "would-have-rescued"
+        # candidate -- fine-pitch enough to need via-in-pad rescue, but the
+        # manufacturer doesn't support it.  This flag drives the
+        # ``missed_via_in_pad_rescues`` counter increment inside the per-pad
+        # loop when surface escapes would have been blocked by neighbour
+        # clearance.  The counter is consumed by ``--auto-mfr-tier`` to
+        # decide whether escalating to a via-in-pad-capable tier would
+        # help.
+        wants_in_pad_but_unavailable = (
+            package.pin_pitch <= 0.55
+            and not self.via_in_pad_supported
+        )
+
         # Effective clearance and escape width for the in-pad rescue
         # fallback.  We mirror the values used inside
         # ``_create_fine_pitch_row_escapes`` so the in-pad routes are
@@ -1831,6 +1859,26 @@ class EscapeRouter:
                         if in_pad_route is not None:
                             escapes.append(in_pad_route)
                             continue
+
+                # Issue #2881: Missed-rescue detection.  When the package is
+                # fine-pitch enough to need via-in-pad rescue but the
+                # manufacturer doesn't support it, AND the unclipped surface
+                # escape would have violated neighbour-pad clearance,
+                # increment the missed-rescue counter so ``--auto-mfr-tier``
+                # can see that switching to a via-in-pad-capable manufacturer
+                # would help.  Note: we do this BEFORE the clearance-clip
+                # short-segment skip below, because both the "clipped to
+                # nothing" and "clipped but stub kept" cases are equally
+                # rescue-able by an in-pad via.
+                if wants_in_pad_but_unavailable and unclipped_escape.segments:
+                    surface_seg = unclipped_escape.segments[0]
+                    if self._segment_violates_pad_clearance(
+                        surface_seg, i, pads, effective_clearance,
+                        extra_pads=self._other_footprint_pads(package, pads),
+                    ):
+                        self.missed_via_in_pad_rescues += 1
+                        if package.ref:
+                            self.missed_via_in_pad_components.add(package.ref)
 
                 # Issue #2756: clip the segment endpoint against
                 # neighbour-pad clearance.  When the manufacturer does
