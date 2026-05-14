@@ -497,6 +497,25 @@ def _run_stitch_command(args) -> int:
         sub_argv.append("--blanket")
     if hasattr(args, "stitch_spacing") and args.stitch_spacing != 3.0:
         sub_argv.extend(["--spacing", str(args.stitch_spacing)])
+    if hasattr(args, "stitch_thermal") and args.stitch_thermal:
+        sub_argv.append("--thermal")
+    if hasattr(args, "stitch_vias_per_pad") and args.stitch_vias_per_pad != 4:
+        sub_argv.extend(["--vias-per-pad", str(args.stitch_vias_per_pad)])
+    if hasattr(args, "stitch_thermal_radius") and args.stitch_thermal_radius != 2.5:
+        sub_argv.extend(["--thermal-radius", str(args.stitch_thermal_radius)])
+    if (
+        hasattr(args, "stitch_thermal_min_pad_size")
+        and args.stitch_thermal_min_pad_size != 2.0
+    ):
+        sub_argv.extend(
+            ["--thermal-min-pad-size", str(args.stitch_thermal_min_pad_size)]
+        )
+    if (
+        hasattr(args, "stitch_thermal_component_prefixes")
+        and args.stitch_thermal_component_prefixes
+    ):
+        for prefix in args.stitch_thermal_component_prefixes:
+            sub_argv.extend(["--thermal-component-prefix", prefix])
     if hasattr(args, "stitch_dry_run") and args.stitch_dry_run:
         sub_argv.append("--dry-run")
     if hasattr(args, "stitch_output") and args.stitch_output:
