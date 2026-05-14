@@ -664,3 +664,111 @@ class TestNoViaInPadErrorPath:
             "When via-in-pad is supported, no #2880 ERROR records should "
             f"be emitted; got: {[r.getMessage() for r in sandwich_errors]}"
         )
+
+
+class TestAutoMfrTierLogSuppression:
+    """Issue #2891: when ``--auto-mfr-tier`` escalation is in flight on a
+    lower tier that lacks via-in-pad, the per-attempt #2880 ERROR is a
+    false alarm -- the outer wrapper will retry on a tier that supports
+    via-in-pad.  Demote the log to DEBUG while escalation is in flight,
+    but re-surface it on the FINAL ladder attempt so a fully-exhausted
+    ladder still names the unfixable constraint."""
+
+    def test_error_suppressed_during_escalation(self, caplog):
+        """When ``rules.auto_mfr_tier_in_progress`` is True, the #2880
+        message must NOT appear at ERROR level (the outer wrapper will
+        retry on a via-in-pad-capable tier).  It must still appear at
+        DEBUG so log forensics can find it via grep."""
+        rules = _make_rules(manufacturer="jlcpcb")
+        rules.auto_mfr_tier_in_progress = True
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules)
+        assert not router.via_in_pad_supported, (
+            "Fixture sanity: plain jlcpcb should not support via-in-pad"
+        )
+        pads = _make_lqfp48_along_edge_sandwich()
+        package = router.analyze_package(pads)
+
+        # Capture both DEBUG and ERROR so we can assert demotion.
+        with caplog.at_level(logging.DEBUG, logger="kicad_tools.router.escape"):
+            router.generate_escapes(package)
+
+        sandwich_errors = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+        ]
+        assert sandwich_errors == [], (
+            "Escalation-in-progress must suppress the #2880 ERROR; "
+            f"got: {[r.getMessage() for r in sandwich_errors]}"
+        )
+
+        sandwich_debugs = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and "#2880" in r.getMessage()
+        ]
+        assert len(sandwich_debugs) >= 1, (
+            "Escalation-in-progress must still log #2880 at DEBUG so log "
+            "forensics can locate the diagnostic; got records: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+
+    def test_error_resurfaces_on_ladder_exhaustion(self, caplog):
+        """When the outer wrapper has cleared ``auto_mfr_tier_in_progress``
+        for the FINAL tier attempt (i.e. the ladder is about to be
+        exhausted), the #2880 ERROR must re-surface so the user sees the
+        unfixable constraint.  Without this, a real failure would go
+        silent.  Modelled as: explicit ``auto_mfr_tier_in_progress=False``
+        on a non-via-in-pad rules object yields the same behavior as the
+        pre-#2891 baseline."""
+        rules = _make_rules(manufacturer="jlcpcb")
+        # Explicitly cleared (matches the FINAL-tier code path).
+        rules.auto_mfr_tier_in_progress = False
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules)
+        assert not router.via_in_pad_supported
+        pads = _make_lqfp48_along_edge_sandwich()
+        package = router.analyze_package(pads)
+
+        with caplog.at_level(logging.ERROR, logger="kicad_tools.router.escape"):
+            router.generate_escapes(package)
+
+        sandwich_errors = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+        ]
+        assert len(sandwich_errors) >= 1, (
+            "When escalation is NOT in progress (final-tier attempt), the "
+            "#2880 ERROR must re-surface so the user sees the unfixable "
+            f"constraint; got records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_default_preserves_error_for_non_escalation_callers(self, caplog):
+        """A plain ``kct route --manufacturer jlcpcb`` invocation (no
+        ``--auto-mfr-tier``) must still surface the #2880 ERROR.  This is
+        the degenerate single-tier / no-ladder edge case: ``DesignRules``
+        defaults to ``auto_mfr_tier_in_progress=False`` so the demotion
+        never triggers."""
+        rules = _make_rules(manufacturer="jlcpcb")
+        # Sanity: the default must be False so non-escalation callers
+        # are unaffected by #2891.
+        assert rules.auto_mfr_tier_in_progress is False
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules)
+        pads = _make_lqfp48_along_edge_sandwich()
+        package = router.analyze_package(pads)
+
+        with caplog.at_level(logging.ERROR, logger="kicad_tools.router.escape"):
+            router.generate_escapes(package)
+
+        sandwich_errors = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+        ]
+        assert len(sandwich_errors) >= 1, (
+            "Non-escalation callers must still see the #2880 ERROR "
+            f"(pre-#2891 non-regression); got: {[r.getMessage() for r in caplog.records]}"
+        )

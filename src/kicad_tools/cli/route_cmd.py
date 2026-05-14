@@ -1921,6 +1921,10 @@ def route_with_layer_escalation(
         # to in-pad escape for fine-pitch LQFP/QFP (and SSOP/TSSOP) when the
         # manufacturer supports via-in-pad processing.
         manufacturer=getattr(args, "manufacturer", None),
+        # Issue #2891: forward escalation-in-progress flag so the escape
+        # router demotes the #2880 ERROR log when an outer wrapper will
+        # retry on a tier that supports via-in-pad.
+        auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
     )
 
     # Parse skip nets
@@ -2729,6 +2733,8 @@ def route_with_rule_relaxation(
             # in to in-pad escape for fine-pitch LQFP/QFP/SSOP/TSSOP when
             # the manufacturer supports via-in-pad processing.
             manufacturer=getattr(args, "manufacturer", None),
+            # Issue #2891: forward escalation-in-progress flag.
+            auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
         )
 
         # Load PCB
@@ -3296,6 +3302,14 @@ def route_with_mfr_tier_escalation(
     final_exit_code: int = 1
     saw_terminating_success: bool = False
 
+    # Issue #2891: suppress the per-attempt "does not support via-in-pad"
+    # ERROR log (#2880) while escalation is in flight.  The flag is read
+    # by ``EscapeRouter`` via ``rules.auto_mfr_tier_in_progress`` (set by
+    # the DesignRules construction sites elsewhere in this module).  We
+    # explicitly clear it before the FINAL tier attempt so a fully-
+    # exhausted ladder still surfaces the diagnostic on its last try.
+    last_tier_idx = len(tiers_to_try) - 1
+
     # Issue #2881: budget-fair per-tier slicing.  Reuse the existing
     # ``_per_attempt_budgeted_timeout`` helper transparently by having the
     # inner ``route_with_layer_escalation`` call divide ``args.timeout``
@@ -3404,6 +3418,19 @@ def route_with_mfr_tier_escalation(
         # mutation takes effect for the next inner call.
         original_mfr = args.manufacturer
         args.manufacturer = tier_name
+
+        # Issue #2891: declare whether escalation is in flight for THIS
+        # tier attempt.  All tiers except the final one are escalation-in-
+        # progress (the inner ERROR is a false alarm because we will retry
+        # on the next tier).  The FINAL tier is NOT escalation-in-progress:
+        # if it fails, the user must see the ERROR.  The DesignRules
+        # construction sites in this module read this attribute via
+        # ``getattr(args, "_auto_mfr_tier_in_progress", False)`` and
+        # forward it onto ``DesignRules.auto_mfr_tier_in_progress``,
+        # which gates the demotion in
+        # ``EscapeRouter._escape_qfp_alternating``.
+        is_final_tier = tier_idx == last_tier_idx
+        args._auto_mfr_tier_in_progress = not is_final_tier
         try:
             if not quiet:
                 flush_print("=" * 60)
@@ -3467,6 +3494,10 @@ def route_with_mfr_tier_escalation(
             # CLI calls aren't surprised.
             if last_exit_code != 0:
                 args.manufacturer = original_mfr
+            # Issue #2891: always clear the escalation-in-progress flag
+            # on exit so callers that re-use ``args`` aren't surprised by
+            # log demotion in unrelated code paths.
+            args._auto_mfr_tier_in_progress = False
 
     # Diagnostic: name the constraint when escalation did not succeed.
     if not saw_terminating_success and not quiet:
@@ -3766,6 +3797,8 @@ def route_with_combined_escalation(
                 # can opt in to in-pad escape for fine-pitch LQFP/QFP/SSOP/
                 # TSSOP when the manufacturer supports via-in-pad processing.
                 manufacturer=getattr(args, "manufacturer", None),
+                # Issue #2891: forward escalation-in-progress flag.
+                auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             )
 
             # Load PCB
@@ -5432,6 +5465,10 @@ def main(argv: list[str] | None = None) -> int:
         # to in-pad escape for fine-pitch SSOP/TSSOP when the manufacturer
         # supports via-in-pad processing.
         manufacturer=getattr(args, "manufacturer", None),
+        # Issue #2891: forward escalation-in-progress flag so the escape
+        # router demotes the #2880 ERROR log when an outer wrapper will
+        # retry on a tier that supports via-in-pad.
+        auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
     )
 
     # Import progress helpers
