@@ -426,31 +426,23 @@ default `all` sequence. It re-uses `kct net-status` semantics in-process and
 [Routing Completeness Preflight](../guides/manufacturing-export.md#routing-completeness-preflight)
 for the full semantics.
 
-> **Note:** `kct build --help` from the top-level parser is currently stale
-> (the outer parser does not list `erc`, `sync`, or `preflight-routing` as
-> `--step` choices and is missing `--allow-incomplete` /
-> `--optimize-placement`). Tracked in issue #2888. The authoritative parser
-> is constructed inline in `main()` at
-> [`src/kicad_tools/cli/build_cmd.py:2452`](../../src/kicad_tools/cli/build_cmd.py).
-> Until #2888 lands, exercise the missing choices/flags via
-> `python -m kicad_tools.cli.build_cmd ...`.
+The outer `kct build` parser is kept in lockstep with the authoritative
+inner parser at
+[`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py)
+by [`tests/test_build_parser_parity.py`](../../tests/test_build_parser_parity.py),
+which fails if a new flag or `--step` choice is added to the inner parser
+without also being surfaced on the outer CLI.
 
 **Examples:**
 ```bash
 # Full pipeline driven by the project spec. `SPEC` is positional.
 kct build boards/05-bldc-motor-controller/project.kct
 
-# Skip the routing-completeness gate (WIP escape hatch). Goes through the
-# inner parser until issue #2888 surfaces --allow-incomplete on the outer
-# CLI.
-python -m kicad_tools.cli.build_cmd \
-    boards/05-bldc-motor-controller/project.kct \
-    --allow-incomplete
+# Skip the routing-completeness gate (WIP escape hatch).
+kct build boards/05-bldc-motor-controller/project.kct --allow-incomplete
 
-# Run a single stage. Same caveat: --step preflight-routing is only
-# accepted by the inner parser today.
-python -m kicad_tools.cli.build_cmd \
-    boards/05-bldc-motor-controller/project.kct \
+# Run a single stage.
+kct build boards/05-bldc-motor-controller/project.kct \
     --step preflight-routing
 ```
 

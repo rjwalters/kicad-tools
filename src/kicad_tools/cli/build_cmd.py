@@ -2447,8 +2447,15 @@ def _smoke_check_pcb(
     return None
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point for kct build command."""
+def _build_inner_parser() -> argparse.ArgumentParser:
+    """Build the inner (authoritative) ``kct build`` argument parser.
+
+    Extracted from ``main()`` so the parity test in
+    ``tests/test_build_parser_parity.py`` can introspect this parser without
+    invoking the full ``main()`` entry point.  The outer parser at
+    ``src/kicad_tools/cli/parser.py::_add_build_parser`` must mirror every
+    long option string and ``--step`` choice declared here.
+    """
     parser = argparse.ArgumentParser(
         prog="kct build",
         description="Build from spec to manufacturable design",
@@ -2550,6 +2557,12 @@ Examples:
         ),
     )
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kct build command."""
+    parser = _build_inner_parser()
     args = parser.parse_args(argv)
     console = Console(quiet=args.quiet)
 

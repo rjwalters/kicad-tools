@@ -82,13 +82,6 @@ Two escape hatches are recognised:
 - `--force` — global build override; parity with `--step sync --force`.
   Also converts the failure into a warning.
 
-> **Heads-up:** the outer `kct build` parser is currently stale — it does
-> not yet surface `--step preflight-routing`, `--step erc`, `--step sync`,
-> or `--allow-incomplete` (tracked in issue #2888). To exercise just the
-> preflight step or the WIP escape hatch today, invoke the inner parser
-> directly via `python -m kicad_tools.cli.build_cmd`. The default
-> end-to-end `kct build` invocation runs the preflight automatically.
-
 ```bash
 # Default end-to-end build (preflight runs automatically between stitch
 # and verify; refuses to ship gerbers for a board with unrouted nets).
@@ -96,15 +89,11 @@ Two escape hatches are recognised:
 kct build boards/05-bldc-motor-controller/project.kct
 
 # Run only the preflight check (read-only, no side-effects).
-# Goes through the inner parser until issue #2888 lands.
-python -m kicad_tools.cli.build_cmd \
-    boards/05-bldc-motor-controller/project.kct \
+kct build boards/05-bldc-motor-controller/project.kct \
     --step preflight-routing
 
-# Bypass for an intentional WIP preview. Same caveat as above.
-python -m kicad_tools.cli.build_cmd \
-    boards/05-bldc-motor-controller/project.kct \
-    --allow-incomplete
+# Bypass for an intentional WIP preview.
+kct build boards/05-bldc-motor-controller/project.kct --allow-incomplete
 ```
 
 The check is read-only and uses `NetStatusAnalyzer` in-process (no subprocess
