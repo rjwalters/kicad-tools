@@ -87,7 +87,28 @@ tolerances:
   # rect-aware bound and the disc bound agree to within an epsilon.
   # Tracked: #2757 (residual diff-pair partner cases), #2672
   # (impedance-width selection), #2677, Epic #2556 Phase 4N (#2660).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 31
+  #
+  # Bumped 31 -> 32 by PR #2875 / issue #2874: the Python validator's
+  # narrowed same-component-ref exclusion (signal-pad-only; plane-net
+  # ``net == 0`` pads on a chip now participate in pad-vs-segment
+  # validation again -- mirrors the C++ side from #2871 / PR #2873)
+  # re-engages a previously-hidden plane-net pad violation on this
+  # board.  The +1 error is the validator working as designed: a
+  # signal trace rooted at a chip clips one of that chip's plane-net
+  # pads -- the same class as the board-04 cluster surfaced by
+  # #2871, and exactly the kind of defect the prior over-broad
+  # exclusion was concealing.  Parallel to the board-04 floor pattern
+  # this PR already exercises (#2871 / #2873 / #2874 share the
+  # narrowing rationale).
+  #
+  # Exit clause: this entry can drop back to 31 once the underlying
+  # signal-trace-through-plane-pad violation on board 06 is also
+  # fixed.  This rides with the same routing-strategy follow-up the
+  # Judge flagged for board 04 (#2834 manufacturing-ready, plus the
+  # narrow-channel chain #2842 / #2865 / #2867 / #2869 that needs to
+  # compose with validator parity); the board-06 follow-up tracks
+  # under the existing #2757 / #2660 cluster.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 32
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
