@@ -1841,15 +1841,43 @@ class EscapeRouter:
                 # The alternating scheme alone cannot fit traces between
                 # 0.5mm-pitch pads, so without this rescue inner pins
                 # never reach the main router successfully.
+                #
+                # Issue #2880: Additionally, force the in-pad rescue when
+                # a fine-pitch signal pin is sandwiched between two
+                # same-component plane-net pads on its immediate same-edge
+                # neighbour positions AND its escape direction is along
+                # the edge (alternating-direction odd-indexed pin).  For
+                # plane-sandwiched pins escaping PERPENDICULAR to the
+                # edge the surface escape is geometrically clean (it
+                # exits the package immediately and does not cross any
+                # same-edge pads), so the in-pad rescue is unnecessary
+                # cost; we only force the rescue when the dispatcher
+                # would otherwise emit an along-edge segment that would
+                # have to thread between same-component plane pads.
+                # The row-level violation check can miss this case when
+                # the unclipped escape segment is short enough to stop
+                # before reaching the next plane pad, but at 0.5 mm
+                # LQFP pitch + jlcpcb-tier1 0.127 mm clearance the
+                # channel between plane pads is geometrically too narrow
+                # (0.2 mm available, 0.381 mm required) -- the only
+                # viable along-edge escape is vertical via-in-pad.
+                escape_is_along_edge = direction != primary_dir
+                pin_boxed = (
+                    escape_is_along_edge
+                    and self._is_pin_boxed_by_plane_neighbours(
+                        pad, package,
+                    )
+                )
                 if try_in_pad_fallback and unclipped_escape.segments:
                     surface_seg = unclipped_escape.segments[0]
-                    if self._segment_violates_pad_clearance(
+                    violation = self._segment_violates_pad_clearance(
                         surface_seg, i, pads, effective_clearance,
                         # Issue #2755: Also check against pads on the OTHER
                         # edges of this QFP plus plane-net pads (net==0)
                         # that were filtered out of ``pads`` above.
                         extra_pads=self._other_footprint_pads(package, pads),
-                    ):
+                    )
+                    if violation or pin_boxed:
                         in_pad_route = self._try_in_pad_escape(
                             pad=pad,
                             direction=direction,
@@ -1857,6 +1885,17 @@ class EscapeRouter:
                             escape_width=escape_width,
                         )
                         if in_pad_route is not None:
+                            if pin_boxed and not violation:
+                                logger.info(
+                                    "In-pad rescue forced for %s pin %s "
+                                    "(net %s): boxed between same-component "
+                                    "plane-net neighbours on %s edge "
+                                    "(Issue #2880).",
+                                    package.ref,
+                                    pad.pin,
+                                    pad.net_name,
+                                    package.package_type.name,
+                                )
                             escapes.append(in_pad_route)
                             continue
 
@@ -1879,6 +1918,34 @@ class EscapeRouter:
                         self.missed_via_in_pad_rescues += 1
                         if package.ref:
                             self.missed_via_in_pad_components.add(package.ref)
+
+                # Issue #2880: If the pin is boxed by same-component plane
+                # neighbours AND its dispatcher direction is along-edge,
+                # but via-in-pad is unavailable, no surface escape can
+                # satisfy the clearance constraints at this pitch.  Emit
+                # a clear error pointing at the unfixable constraint
+                # rather than producing a route that DRC will later
+                # reject.  (The ``pin_boxed`` flag above already gates on
+                # along-edge direction.)
+                if pin_boxed and not self.via_in_pad_supported:
+                    mfr_label = self.manufacturer or "<unknown manufacturer>"
+                    logger.error(
+                        "Cannot escape %s pin %s (net %s) to perimeter "
+                        "without violating clearance against same-component "
+                        "plane-net pads at %.2fmm %s pitch. Manufacturer "
+                        "profile %s does not support via-in-pad. "
+                        "Resolution options: (a) switch to a manufacturer "
+                        "profile that supports via-in-pad "
+                        "(e.g. jlcpcb-tier1, pcbway), "
+                        "(b) re-route on a 4-layer stackup with inner-layer "
+                        "escape, (c) increase pin pitch. (Issue #2880)",
+                        package.ref,
+                        pad.pin,
+                        pad.net_name,
+                        package.pin_pitch,
+                        package.package_type.name,
+                        mfr_label,
+                    )
 
                 # Issue #2756: clip the segment endpoint against
                 # neighbour-pad clearance.  When the manufacturer does
@@ -2557,6 +2624,165 @@ class EscapeRouter:
 
         # Edge-to-edge gap = centre-to-rect distance minus half-segment-width
         return rect_dist - seg.width / 2
+
+    @staticmethod
+    def _is_pin_boxed_by_plane_neighbours(
+        pad: Pad,
+        package: PackageInfo,
+        plane_nets: set[int] | None = None,
+    ) -> bool:
+        """Detect a fine-pitch QFP signal pin sandwiched between same-edge
+        same-component plane-net pads (Issue #2880).
+
+        A signal pin is "plane-sandwiched" when its two IMMEDIATE
+        same-edge neighbours -- BEFORE the plane-net filter applied
+        inside ``_escape_qfp_alternating`` -- are both on plane nets.
+
+        Worked example (synthetic LQFP-48 fixture, west-edge pinout
+        designed to mirror the board-04 STM32F103 plane-sandwich
+        condition):
+
+            pin 6 +3.3V (plane), pin 7 NRST (signal), pin 8 GND (plane)
+
+        ``pin 7`` is plane-sandwiched -- its immediate same-edge
+        neighbours on either side are both plane pads.
+
+        The grid's standard pathfinder uses the cell ``net`` field plus
+        the ``blocked`` flag; same-net traffic passes through, so the
+        signal pad's clearance envelope was painted with its own net
+        before the plane pad later marked the cells as ``is_obstacle``
+        (without overwriting ``cell.net``).  The pathfinder happily
+        threads the signal through the plane pad's envelope and DRC
+        catches the resulting trace post-hoc.  The geometric channel is
+        too narrow to admit a trace at full manufacturer clearance
+        (LQFP-48 0.5mm pitch leaves 0.2 mm gap; jlcpcb-tier1 needs
+        0.381 mm), so we cannot fix this on the surface layer -- we
+        must escape vertically via via-in-pad.
+
+        This predicate is the trigger for the forced in-pad rescue in
+        ``_escape_qfp_alternating`` (Issue #2880).  It is intentionally
+        narrow:
+
+        * The pad must NOT itself be on a plane net (we only rescue
+          signal pads -- plane pads are stitched via planes).
+        * BOTH immediate same-edge neighbours must be on plane nets
+          (edge-corner pins with only one neighbour cannot be
+          plane-sandwiched and fall through to the standard rescue
+          gate which uses the row-level violation check).
+        * The neighbours must be on the same footprint (handled
+          implicitly: we iterate ``package.pads`` only).
+
+        Note on board-04 applicability: On the current board-04 STM32
+        layout the signal pins (OSC_IN, OSC_OUT, NRST) each have at
+        least one signal-net immediate neighbour, so this predicate
+        does NOT fire on those pins.  Their existing rescue path is
+        the row-level violation check in
+        ``_escape_qfp_alternating``.  The forced predicate matters
+        most for future boards whose pin assignments place plane-net
+        pads at BOTH immediate adjacencies -- a configuration that
+        is geometrically infeasible at fine pitch and which the
+        existing violation check can miss when the unclipped escape
+        segment is too short to reach the surrounding plane pads.
+
+        Args:
+            pad: The signal pad we are about to escape.
+            package: The QFP/QFN package info; ``package.pads`` includes
+                the plane-net pads that ``_escape_qfp_alternating``
+                filtered out of its iteration list.
+            plane_nets: Optional override of which net ids count as
+                plane nets.  Defaults to ``{0}`` (matching the io.py
+                convention from ``skip_nets`` rewriting at
+                ``io.py:2819-2820``).
+
+        Returns:
+            True if ``pad`` is a signal pin whose immediate same-edge
+            neighbours are both plane-net pads.
+        """
+        if plane_nets is None:
+            plane_nets = {0}
+
+        # Only signal pads can be plane-sandwiched (we never rescue a
+        # plane pad with a via-in-pad escape -- plane pads are stitched).
+        if pad.net in plane_nets:
+            return False
+
+        min_x, min_y, max_x, max_y = package.bounding_box
+        center_x, center_y = package.center
+
+        # Edge classification: pick the CLOSEST of the four edges so
+        # corner pads get a single canonical edge.  The dispatcher's
+        # ordered ``elif`` chain in ``_escape_qfp_alternating`` can
+        # mis-classify e.g. west-edge corner pads as "south" because
+        # they sit within both edge_margins -- that asymmetry doesn't
+        # bite the dispatcher (it filters plane-net pads first), but it
+        # would cause this predicate to pull pads from an adjacent edge
+        # into the wrong neighbour list and report spurious sandwich
+        # hits on the corner of an unrelated edge.
+        edge_margin = min(max_x - min_x, max_y - min_y) * 0.2
+
+        def _classify_edge(p: Pad) -> str | None:
+            # Skip thermal/center pads.
+            if (
+                abs(p.x - center_x) < edge_margin
+                and abs(p.y - center_y) < edge_margin
+            ):
+                return None
+            dists = {
+                "north": abs(p.y - max_y),
+                "south": abs(p.y - min_y),
+                "east": abs(p.x - max_x),
+                "west": abs(p.x - min_x),
+            }
+            edge = min(dists, key=lambda k: dists[k])
+            # Reject pads that are not actually near any edge (e.g. an
+            # unexpected interior pad that slipped past the thermal
+            # check above).
+            if dists[edge] >= edge_margin:
+                return None
+            return edge
+
+        pad_edge = _classify_edge(pad)
+        if pad_edge is None:
+            return False
+
+        # Sort same-edge pads (from the FULL package.pads list -- this
+        # is the asymmetry that makes the dispatcher's per-edge
+        # iteration miss plane neighbours) along the edge's primary
+        # axis.  Note this mirrors the sort keys in
+        # ``_escape_qfp_alternating`` (north/south by x, east/west by y).
+        same_edge: list[Pad] = []
+        for p in package.pads:
+            if p is pad:
+                same_edge.append(p)
+                continue
+            if _classify_edge(p) == pad_edge:
+                same_edge.append(p)
+
+        if pad_edge in ("north", "south"):
+            same_edge.sort(key=lambda q: q.x)
+        else:  # east, west
+            same_edge.sort(key=lambda q: q.y)
+
+        try:
+            idx = same_edge.index(pad)
+        except ValueError:
+            return False
+
+        # Strict trigger: BOTH immediate same-edge neighbours must be
+        # plane-net pads.  Edge-end signal pins (idx 0 or last) cannot
+        # be plane-sandwiched -- they have an open exit toward the
+        # package corner -- and fall through to the standard rescue
+        # gate which uses the row-level violation check.
+        if idx == 0 or idx >= len(same_edge) - 1:
+            return False
+
+        prev_pad = same_edge[idx - 1]
+        next_pad = same_edge[idx + 1]
+
+        return (
+            prev_pad.net in plane_nets
+            and next_pad.net in plane_nets
+        )
 
     @staticmethod
     def _other_footprint_pads(
