@@ -1120,13 +1120,8 @@ def _run_auto_fix(
                 "  Auto-fix: rolled back due to connectivity regression "
                 "(nudges would have broken at least one net)."
             )
-            print(
-                "  Run 'kct fix-drc <pcb> --no-connectivity-check' to apply "
-                "the nudges anyway"
-            )
-            print(
-                "  (only safe when partial-completion regressions are acceptable)."
-            )
+            print("  Run 'kct fix-drc <pcb> --no-connectivity-check' to apply the nudges anyway")
+            print("  (only safe when partial-completion regressions are acceptable).")
         elif result == 2:
             print("  Auto-fix: partial repair; some violations remain.")
         elif result == 1:
@@ -3127,6 +3122,71 @@ def route_with_rule_relaxation(
     return 1
 
 
+def _classify_dominant_failure_cause(router):
+    """Pick the most-common FailureCause across ``router.routing_failures``.
+
+    Issue #2883: the outer ``--auto-mfr-tier`` loop needs to consult the
+    :data:`router.failure_analysis.MFR_TIER_ESCALATION_TRIGGERS` registry
+    before walking forward.  That requires picking a single dominant cause
+    from the (possibly heterogeneous) set of per-net failures returned by
+    the inner routing attempt.
+
+    The rule used here:
+
+    1. If the router has no ``routing_failures`` attribute (e.g. the inner
+       call was stubbed in tests or returned before classification), return
+       ``None`` so callers fall back to the legacy
+       ``missed_via_in_pad_rescues`` signal.
+    2. Otherwise, tally :class:`FailureCause` values across all failures
+       and return the most common.  Ties are broken by the registry order
+       in :data:`MFR_TIER_ESCALATION_TRIGGERS` (triggering causes win), so
+       that an even split between e.g. PIN_ACCESS and BLOCKED_PATH still
+       lets escalation engage.
+
+    Args:
+        router: Inner ``Autorouter`` instance (may be ``None`` or a mock
+            that lacks ``routing_failures``).
+
+    Returns:
+        The dominant :class:`FailureCause`, or ``None`` if no failure
+        records were available.
+    """
+    from collections import Counter
+
+    if router is None:
+        return None
+    failures = getattr(router, "routing_failures", None)
+    if not failures:
+        return None
+
+    # Tally causes; ignore entries without a recognized FailureCause.
+    causes = []
+    for f in failures:
+        cause = getattr(f, "failure_cause", None)
+        if cause is not None:
+            causes.append(cause)
+    if not causes:
+        return None
+
+    counter = Counter(causes)
+    most_common_count = counter.most_common(1)[0][1]
+
+    # Find all causes tied for most common.
+    tied = [c for c, n in counter.items() if n == most_common_count]
+    if len(tied) == 1:
+        return tied[0]
+
+    # Tie-break: prefer a triggering cause so escalation isn't suppressed
+    # by an arbitrary tally tie.  Lazy import to avoid module cycles.
+    from kicad_tools.router.failure_analysis import MFR_TIER_ESCALATION_TRIGGERS
+
+    for cause in tied:
+        if MFR_TIER_ESCALATION_TRIGGERS.get(cause, False):
+            return cause
+    # No triggering cause present in the tie; return any (the first).
+    return tied[0]
+
+
 def route_with_mfr_tier_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -3183,6 +3243,10 @@ def route_with_mfr_tier_escalation(
         Exit code (0 = success, 1 = failure, 2 = partial)
     """
     from kicad_tools.cli.progress import flush_print
+    from kicad_tools.router.failure_analysis import (
+        MFR_TIER_ESCALATION_TRIGGERS,
+        should_escalate_mfr_tier,
+    )
     from kicad_tools.router.mfr_limits import (
         can_escalate_scalar,
         can_escalate_via_in_pad,
@@ -3274,9 +3338,40 @@ def route_with_mfr_tier_escalation(
                     except (TypeError, ValueError):
                         triggered_by_missed_in_pad = False
 
+            # Issue #2883: consult MFR_TIER_ESCALATION_TRIGGERS on the
+            # dominant failure cause from the previous tier.  When the
+            # router reports a placement-class failure (BLOCKED_PATH,
+            # CONGESTION, KEEPOUT, ROUTING_ORDER, UNKNOWN, ...) the
+            # trigger table returns False, and we suppress escalation
+            # regardless of whether the next tier offers a capability /
+            # scalar gain -- escalation cannot fix a placement problem.
+            #
+            # When ``routing_failures`` is unavailable (e.g. in unit
+            # tests that stub the inner call), ``dominant_cause`` is
+            # None and we fall back to the legacy
+            # ``missed_via_in_pad_rescues`` / capability-gain heuristic
+            # exactly as before.
+            dominant_cause = _classify_dominant_failure_cause(last_router)
+            trigger_table_vetoes = False
+            if dominant_cause is not None:
+                # The cause is recognized AND the registry explicitly
+                # excludes it from escalation -- veto.
+                if dominant_cause in MFR_TIER_ESCALATION_TRIGGERS and not should_escalate_mfr_tier(
+                    dominant_cause
+                ):
+                    trigger_table_vetoes = True
+
             should_escalate = False
             reason = ""
-            if gains_capability and triggered_by_missed_in_pad:
+            if trigger_table_vetoes:
+                # Trigger table says this failure category is not
+                # manufacturer-fixable.  Suppress escalation even if
+                # capability / scalar gain exists.
+                reason = (
+                    f"dominant failure cause ({dominant_cause.value}) is not "
+                    "manufacturer-fixable (trigger table veto)"
+                )
+            elif gains_capability and triggered_by_missed_in_pad:
                 should_escalate = True
                 reason = "missed via-in-pad rescues detected on previous tier"
             elif gains_capability:
@@ -3284,8 +3379,7 @@ def route_with_mfr_tier_escalation(
                 # exists -- escalate defensively (the user asked for it).
                 should_escalate = True
                 reason = (
-                    "next tier offers via-in-pad capability (no missed-rescue "
-                    "signal available)"
+                    "next tier offers via-in-pad capability (no missed-rescue signal available)"
                 )
             elif gains_scalar:
                 should_escalate = True
@@ -3293,16 +3387,17 @@ def route_with_mfr_tier_escalation(
 
             if not should_escalate:
                 if not quiet:
-                    flush_print(
-                        f"  Skipping tier {tier_name}: no capability or scalar "
-                        f"gain over {prev_tier} (convergence guard)."
-                    )
+                    if trigger_table_vetoes:
+                        flush_print(f"  Skipping tier {tier_name}: {reason}.")
+                    else:
+                        flush_print(
+                            f"  Skipping tier {tier_name}: no capability or scalar "
+                            f"gain over {prev_tier} (convergence guard)."
+                        )
                 break
 
             if not quiet:
-                flush_print(
-                    f"  Escalating to {tier_name}: {reason}"
-                )
+                flush_print(f"  Escalating to {tier_name}: {reason}")
 
         # Mutate args to point at this tier.  Note: route_with_layer_escalation
         # re-reads args.manufacturer when constructing DesignRules, so the
@@ -3353,8 +3448,7 @@ def route_with_mfr_tier_escalation(
                 saw_terminating_success = True
                 if not quiet:
                     flush_print(
-                        f"\n  Tier {tier_name} achieved routing success; "
-                        "stopping tier escalation."
+                        f"\n  Tier {tier_name} achieved routing success; stopping tier escalation."
                     )
                 # Print cost note if escalation actually moved off the
                 # starting tier.
@@ -3362,8 +3456,7 @@ def route_with_mfr_tier_escalation(
                     final_limits = get_mfr_limits(tier_name)
                     if final_limits.cost_note:
                         flush_print(
-                            f"\nRecommendation: order from {tier_name}. "
-                            f"{final_limits.cost_note}."
+                            f"\nRecommendation: order from {tier_name}. {final_limits.cost_note}."
                         )
                 break
 
@@ -3380,10 +3473,7 @@ def route_with_mfr_tier_escalation(
         flush_print("\n" + "=" * 60)
         flush_print("MANUFACTURER-TIER ESCALATION SUMMARY")
         flush_print("=" * 60)
-        flush_print(
-            f"Result: No tier in {' -> '.join(tiers_to_try)} achieved "
-            "routing success."
-        )
+        flush_print(f"Result: No tier in {' -> '.join(tiers_to_try)} achieved routing success.")
 
         # Issue #2884: name the dominant unfixable constraint surfaced by
         # the last inner attempt before printing the generic remediation
@@ -3413,9 +3503,7 @@ def route_with_mfr_tier_escalation(
             "  3. Move fine-pitch component(s) toward the board centre so "
             "escape traces have a wider channel (5+mm from edge)."
         )
-        flush_print(
-            "  4. Add layers via --auto-layers --max-layers 6 (if not already on)."
-        )
+        flush_print("  4. Add layers via --auto-layers --max-layers 6 (if not already on).")
 
     return final_exit_code
 
