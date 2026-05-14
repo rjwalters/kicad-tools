@@ -1927,9 +1927,17 @@ class EscapeRouter:
                 # rather than producing a route that DRC will later
                 # reject.  (The ``pin_boxed`` flag above already gates on
                 # along-edge direction.)
+                #
+                # Issue #2891: when ``--auto-mfr-tier`` is escalating, demote
+                # the ERROR to DEBUG -- the outer wrapper recovers by walking
+                # forward to a tier that supports via-in-pad, so the inner
+                # message is a false alarm from the user's perspective.  The
+                # wrapper is responsible for clearing the flag before the
+                # FINAL tier attempt so a fully-exhausted ladder still
+                # surfaces the diagnostic.
                 if pin_boxed and not self.via_in_pad_supported:
                     mfr_label = self.manufacturer or "<unknown manufacturer>"
-                    logger.error(
+                    msg = (
                         "Cannot escape %s pin %s (net %s) to perimeter "
                         "without violating clearance against same-component "
                         "plane-net pads at %.2fmm %s pitch. Manufacturer "
@@ -1938,7 +1946,9 @@ class EscapeRouter:
                         "profile that supports via-in-pad "
                         "(e.g. jlcpcb-tier1, pcbway), "
                         "(b) re-route on a 4-layer stackup with inner-layer "
-                        "escape, (c) increase pin pitch. (Issue #2880)",
+                        "escape, (c) increase pin pitch. (Issue #2880)"
+                    )
+                    msg_args = (
                         package.ref,
                         pad.pin,
                         pad.net_name,
@@ -1946,6 +1956,13 @@ class EscapeRouter:
                         package.package_type.name,
                         mfr_label,
                     )
+                    # Issue #2891: demote during in-flight tier escalation.
+                    # Keep the wording identical so log forensics still
+                    # locate the diagnostic via grep.
+                    if getattr(self.rules, "auto_mfr_tier_in_progress", False):
+                        logger.debug(msg, *msg_args)
+                    else:
+                        logger.error(msg, *msg_args)
 
                 # Issue #2756: clip the segment endpoint against
                 # neighbour-pad clearance.  When the manufacturer does

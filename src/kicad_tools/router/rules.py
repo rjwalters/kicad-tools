@@ -81,6 +81,19 @@ class DesignRules:
     # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
     manufacturer: str | None = None
 
+    # Manufacturer-tier escalation in progress flag (Issue #2891)
+    # When True, the escape router demotes the "Cannot escape ... does not
+    # support via-in-pad" ERROR log (escape.py Issue #2880) to DEBUG level
+    # because the outer ``route_with_mfr_tier_escalation`` wrapper
+    # (route_cmd.py) will recover by switching to a manufacturer tier that
+    # DOES support via-in-pad.  Must be cleared by the wrapper before the
+    # FINAL tier attempt so that, on a fully-exhausted ladder, the ERROR
+    # re-surfaces and the user sees the unfixable constraint.  Threaded
+    # through DesignRules rather than the EscapeRouter constructor to keep
+    # the change surface small (one new field, one read in escape.py,
+    # writes localized to route_cmd.py's escalation wrapper).
+    auto_mfr_tier_in_progress: bool = False
+
     # Per-component clearance overrides (Issue #1016)
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins
