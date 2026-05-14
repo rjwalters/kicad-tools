@@ -612,3 +612,282 @@ class TestLadderExhaustionDiagnostic:
         assert _name_dominant_unfixable_constraint(
             last_router=broken_router, manufacturer="jlcpcb"
         ) is None
+
+class TestTriggerTableWiring:
+    """Issue #2883: trigger table is wired into the outer escalation loop.
+
+    PR #2882 added :data:`MFR_TIER_ESCALATION_TRIGGERS` and
+    :func:`should_escalate_mfr_tier` but only unit-tested the table.  This
+    suite confirms the dispatcher in ``route_with_mfr_tier_escalation``
+    actually consults the table -- specifically that a placement-class
+    failure such as ``BLOCKED_PATH`` suppresses escalation even when the
+    next tier offers a real capability gain.
+    """
+
+    def _make_args(self, **overrides):
+        base = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            manufacturer="jlcpcb",
+            auto_mfr_tier=True,
+            mfr_tier_ladder=None,
+            auto_layers=True,
+            adaptive_rules=False,
+            quiet=True,
+            timeout=None,
+            _wall_clock_deadline=None,
+        )
+        for k, v in overrides.items():
+            setattr(base, k, v)
+        return base
+
+    def _make_failure(self, cause):
+        """Build a minimal stand-in for ``RoutingFailure`` with a cause."""
+        return SimpleNamespace(failure_cause=cause)
+
+    def test_pin_access_dominant_cause_triggers_escalation(self):
+        """PIN_ACCESS-dominated failures escalate even with capability gain.
+
+        Regression for the wiring: trigger table says PIN_ACCESS=True, and
+        the outer loop should not veto.
+        """
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 2
+            # Populate routing_failures with PIN_ACCESS records (the
+            # canonical "via-in-pad would have helped" case).
+            mock_router.routing_failures = [
+                self._make_failure(FailureCause.PIN_ACCESS),
+                self._make_failure(FailureCause.PIN_ACCESS),
+            ]
+            args._last_router = mock_router
+            if args.manufacturer == "jlcpcb-tier1":
+                return 0  # success on tier1
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Escalation engaged: both tiers visited, success returned.
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+        assert rc == 0
+
+    def test_blocked_path_dominant_cause_suppresses_escalation(self):
+        """BLOCKED_PATH-dominated failures should NOT escalate.
+
+        Mirrors the shape of ``test_skips_tier_with_no_gain`` but tests
+        the trigger-table veto instead of the convergence guard.  Even
+        though the default jlcpcb -> jlcpcb-tier1 ladder offers a real
+        via-in-pad capability gain (which would otherwise escalate
+        defensively), the trigger table marks BLOCKED_PATH as
+        non-manufacturer-fixable and vetoes the walk-forward.
+        """
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            # Even with non-zero missed_via_in_pad_rescues (so the
+            # legacy heuristic would escalate), the trigger table must
+            # override and suppress.
+            mock_router._escape_router.missed_via_in_pad_rescues = 5
+            mock_router.routing_failures = [
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+            ]
+            args._last_router = mock_router
+            return 2  # always fail; loop must still stop after tier 0
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Only the starting tier ran; trigger table vetoed escalation.
+        assert seen_tiers == ["jlcpcb"]
+
+    def test_congestion_dominant_cause_suppresses_escalation(self):
+        """CONGESTION (a layer-budget issue) should not trigger escalation."""
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 1
+            mock_router.routing_failures = [
+                self._make_failure(FailureCause.CONGESTION),
+                self._make_failure(FailureCause.CONGESTION),
+            ]
+            args._last_router = mock_router
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        assert seen_tiers == ["jlcpcb"]
+
+    def test_no_failure_records_falls_back_to_legacy(self):
+        """When router has no routing_failures, fall back to legacy logic.
+
+        Backward-compatibility: existing tests (e.g.
+        ``test_walks_default_jlcpcb_ladder``) stub the inner call without
+        populating ``routing_failures``; those must continue to escalate
+        on the ``missed_via_in_pad_rescues`` signal alone.
+        """
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 3
+            # Critical: explicitly empty list -- legacy behaviour path.
+            mock_router.routing_failures = []
+            args._last_router = mock_router
+            if args.manufacturer == "jlcpcb-tier1":
+                return 0
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Legacy missed-rescue path engaged; escalation proceeded.
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+        assert rc == 0
+
+    def test_mixed_failures_tiebreak_picks_triggering_cause(self):
+        """Even tally between PIN_ACCESS and BLOCKED_PATH escalates.
+
+        The tie-break rule prefers the triggering cause so that escalation
+        engages on borderline cases instead of being silently suppressed.
+        """
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 2
+            # 1-1 tie between triggering and non-triggering causes.
+            mock_router.routing_failures = [
+                self._make_failure(FailureCause.PIN_ACCESS),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+            ]
+            args._last_router = mock_router
+            if args.manufacturer == "jlcpcb-tier1":
+                return 0
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+        assert rc == 0
+
+    def test_classify_dominant_failure_cause_helper(self):
+        """Direct unit test of the dominant-cause classifier."""
+        from kicad_tools.cli.route_cmd import _classify_dominant_failure_cause
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        # None router -> None
+        assert _classify_dominant_failure_cause(None) is None
+
+        # No routing_failures attribute -> None
+        bare = SimpleNamespace()
+        assert _classify_dominant_failure_cause(bare) is None
+
+        # Empty failures -> None
+        empty = SimpleNamespace(routing_failures=[])
+        assert _classify_dominant_failure_cause(empty) is None
+
+        # Single-cause majority
+        single = SimpleNamespace(
+            routing_failures=[
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.PIN_ACCESS),
+            ]
+        )
+        assert _classify_dominant_failure_cause(single) == FailureCause.BLOCKED_PATH
+
+        # Tie: triggering cause wins (PIN_ACCESS over BLOCKED_PATH)
+        tied = SimpleNamespace(
+            routing_failures=[
+                self._make_failure(FailureCause.PIN_ACCESS),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+            ]
+        )
+        assert _classify_dominant_failure_cause(tied) == FailureCause.PIN_ACCESS
