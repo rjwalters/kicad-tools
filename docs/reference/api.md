@@ -91,6 +91,59 @@ pcb.save()
 
 ---
 
+### Footprint attributes (locked, dnp, exclude_from)
+
+As of PR #2830, all five footprint attribute fields **round-trip cleanly**
+through `PCB.save` — set them on the Python side and the resulting
+`.kicad_pcb` will reflect the change exactly. Source of truth:
+[`src/kicad_tools/schema/pcb.py:459-462`](../../src/kicad_tools/schema/pcb.py).
+
+| Field | Type | Effect in KiCad |
+|-------|------|-----------------|
+| `attr` | `str` | Footprint type token: `"smd"`, `"through_hole"`, or `""` |
+| `locked` | `bool` | Footprint cannot be moved (`(locked)` token inside `(attr ...)`) |
+| `dnp` | `bool` | Do Not Place (`(dnp)` token inside `(attr ...)`) |
+| `exclude_from_pos_files` | `bool` | Omit from CPL / pick-and-place export |
+| `exclude_from_bom` | `bool` | Omit from BOM export |
+
+Unknown tokens inside `(attr ...)` — `board_only`, `allow_missing_courtyard`,
+`allow_soldermask_bridges` — are **preserved verbatim** via the internal
+`_attr_unknown_tokens` list, so the parser will not silently drop them on
+round-trip.
+
+```python
+from kicad_tools.schema.pcb import PCB
+
+pcb = PCB.load("board.kicad_pcb")
+
+# Lock perimeter footprints so the optimizer / router won't move them
+for fp in pcb.footprints:
+    if fp.reference in {"J1", "J2", "U10"}:
+        fp.locked = True
+
+# Mark a DNP, exclude it from CPL and BOM
+tp1 = pcb.footprints.by_ref("TP1")
+tp1.dnp = True
+tp1.exclude_from_pos_files = True
+tp1.exclude_from_bom = True
+
+pcb.save("board.kicad_pcb")
+```
+
+After save, all five fields survive a round-trip:
+
+```python
+pcb2 = PCB.load("board.kicad_pcb")
+assert pcb2.footprints.by_ref("J1").locked is True
+assert pcb2.footprints.by_ref("TP1").dnp is True
+assert pcb2.footprints.by_ref("TP1").exclude_from_pos_files is True
+```
+
+This is what unlocks the perimeter-lock placement recipe in
+[Placement Optimization → Anchoring Perimeter Footprints](../guides/placement-optimization.md#anchoring-perimeter-footprints).
+
+---
+
 ### `Project`
 
 Unified interface for complete KiCad projects.

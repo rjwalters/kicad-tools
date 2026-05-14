@@ -31,6 +31,9 @@ kct [--help] [--version] <command> [options]
 | | `validate` | Schematic-to-PCB sync validation |
 | **Manufacturing** | `bom` | Generate bill of materials |
 | | `mfr` | Manufacturer tools and rules |
+| | `fleet status` | Fleet-wide routing + manufacturing readiness survey |
+| | `stitch` | Add via stitching to power planes |
+| | `build` | One-shot pipeline (schematic → PCB → manufacturing) |
 | **Libraries** | `lib` | Symbol library tools |
 | | `footprint` | Footprint generation tools |
 | | `parts` | LCSC parts lookup and search |
@@ -38,6 +41,7 @@ kct [--help] [--version] <command> [options]
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
+| | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
 | | `optimize-traces` | Optimize PCB traces |
 | **AI Integration** | `reason` | LLM-driven PCB layout reasoning |
 | | `mcp` | MCP server for AI agent integration |
@@ -296,6 +300,162 @@ kct mfr dru jlcpcb -o jlcpcb.dru
 
 ---
 
+### `fleet status`
+
+Survey routing and manufacturing readiness across every board in the repo.
+Implemented in [`src/kicad_tools/cli/fleet_cmd.py`](../../src/kicad_tools/cli/fleet_cmd.py).
+
+```text
+usage: kicad-tools fleet status [-h] [--boards-dir FLEET_BOARDS_DIR]
+                                [--format {table,json}] [--ship-only]
+                                [--include-stale] [--pattern FLEET_PATTERN]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--boards-dir DIR` | Root containing per-board subdirs (default: `boards`) |
+| `--format {table,json}` | Output format (default: `table`) |
+| `--ship-only` | Show only ship-ready boards in table output |
+| `--include-stale` | (Reserved) treat stale artifacts as not shippable |
+| `--pattern GLOB` | Glob to identify the routed PCB inside `output/` (default: `*_routed.kicad_pcb`) |
+
+Each board is scored on net completion, DRC status, and presence of the
+required manufacturing artifacts (gerbers, BOM, CPL). A board is "ship-ready"
+when every gate is green; otherwise the row lists the first blocker. The
+table view summarises one board per line; `--format json` emits the full
+per-board breakdown for downstream tooling.
+
+**Examples:**
+```bash
+# Quick "what's shippable?" overview across the fleet
+kct fleet status
+
+# CI-friendly machine output
+kct fleet status --format json > fleet.json
+
+# Restrict to a custom layout (boards live under hardware/v2/...)
+kct fleet status --boards-dir hardware/v2 --pattern '*-final.kicad_pcb'
+
+# Only show what is ready to ship
+kct fleet status --ship-only
+```
+
+See also: [Manufacturing Export → ship-ready check](../guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
+
+---
+
+### `stitch`
+
+Add via stitching to power-plane nets. Implemented in
+[`src/kicad_tools/cli/stitch_cmd.py`](../../src/kicad_tools/cli/stitch_cmd.py).
+
+```bash
+kct stitch <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--net NET`, `-n` | Net to stitch (repeatable). Default: auto-detect power-plane nets from zones |
+| `--via-size MM` | Via pad diameter in mm (default: 0.45) |
+| `--drill MM` | Via drill in mm (default: 0.2) |
+| `--clearance MM` | Minimum clearance from existing copper (default: 0.2) |
+| `--offset MM` | Max distance from pad center for via placement (default: 0.5) |
+| `--target-layer LAYER`, `-t` | Target plane layer (e.g. `In1.Cu`). Default: auto |
+| `--trace-width MM` | Width of pad-to-via trace segments (default: 0.2) |
+| `--escape-distance MM` | Max escape trace length for dense IC pads (default: 3.0) |
+| `--blanket`, `-b` | Place vias on a grid across zone polygons |
+| `--spacing MM` | Grid spacing for blanket stitching (default: 3.0) |
+| `--mfr NAME`, `--manufacturer NAME` | Manufacturer profile (e.g. `jlcpcb`, `jlcpcb-tier1`) — overrides `--via-size`/`--drill` |
+| `--copper OZ` | Outer copper weight in oz (default: 1.0); selects the correct row from the manufacturer YAML |
+| `--dry-run`, `-d` | Show changes without applying |
+| `-o`, `--output PATH` | Output file (default: modify in place) |
+| `--drc` | Run DRC after stitching (fills zones via `kicad-cli`) |
+
+**Manufacturer-driven via dimensions.** When `--mfr` is set the stitch via
+size and drill are resolved from the manufacturer YAML using the board's
+actual copper layer count, **overriding** `--via-size` and `--drill`. This
+keeps stitching dimensions consistent with the rules the router and DRC are
+already enforcing. Use `--copper` to pick the right stackup row (1.0 oz vs.
+2.0 oz).
+
+**Examples:**
+```bash
+# Auto-detect power nets and stitch with default 0.45/0.2 vias
+kct stitch board.kicad_pcb
+
+# Use the JLCPCB tier-1 profile (smaller vias, fine-pitch friendly)
+kct stitch board.kicad_pcb --mfr jlcpcb-tier1 --copper 1.0
+
+# Blanket-stitch a specific net on a 3mm grid
+kct stitch board.kicad_pcb --net GND --blanket --spacing 3.0
+```
+
+---
+
+### `build`
+
+One-shot pipeline that runs schematic generation, sync, PCB layout, routing,
+stitching, manufacturing artefacts and verification in order. Implemented in
+[`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py).
+
+```bash
+kct build [SPEC] [--step STEP] [options]
+```
+
+`SPEC` is a positional argument (`.kct` file or project directory). Defaults
+to the current working directory if omitted.
+
+| Step (`--step`) | Purpose |
+|-----------------|---------|
+| `schematic` | Generate `.kicad_sch` from the design spec |
+| `erc` | Run ERC against the schematic |
+| `pcb` | Generate a fresh `.kicad_pcb` skeleton |
+| `sync` | Sync footprints/nets from schematic into the PCB |
+| `outline` / `placement` / `zones` / `silkscreen` | Layout-stage passes |
+| `route` | Autoroute |
+| `stitch` | Add power-plane via stitching |
+| `preflight-routing` | **Routing-completeness gate** before manufacturing |
+| `verify` | Final connectivity + DRC validation |
+| `export` | Emit gerbers / BOM / CPL |
+| `all` (default) | Run the whole sequence |
+
+The `preflight-routing` step runs between `stitch` and `verify` in the
+default `all` sequence. It re-uses `kct net-status` semantics in-process and
+**blocks the build** if any nets are incomplete. Override with
+`--allow-incomplete` (advertised; CI-greppable) or the global `--force`. See
+[Routing Completeness Preflight](../guides/manufacturing-export.md#routing-completeness-preflight)
+for the full semantics.
+
+> **Note:** `kct build --help` from the top-level parser is currently stale
+> (the outer parser does not list `erc`, `sync`, or `preflight-routing` as
+> `--step` choices and is missing `--allow-incomplete` /
+> `--optimize-placement`). Tracked in issue #2888. The authoritative parser
+> is constructed inline in `main()` at
+> [`src/kicad_tools/cli/build_cmd.py:2452`](../../src/kicad_tools/cli/build_cmd.py).
+> Until #2888 lands, exercise the missing choices/flags via
+> `python -m kicad_tools.cli.build_cmd ...`.
+
+**Examples:**
+```bash
+# Full pipeline driven by the project spec. `SPEC` is positional.
+kct build boards/05-bldc-motor-controller/project.kct
+
+# Skip the routing-completeness gate (WIP escape hatch). Goes through the
+# inner parser until issue #2888 surfaces --allow-incomplete on the outer
+# CLI.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --allow-incomplete
+
+# Run a single stage. Same caveat: --step preflight-routing is only
+# accepted by the inner parser today.
+python -m kicad_tools.cli.build_cmd \
+    boards/05-bldc-motor-controller/project.kct \
+    --step preflight-routing
+```
+
+---
+
 ## Library Commands
 
 ### `lib`
@@ -408,25 +568,80 @@ kct datasheet parse atmega328p.pdf --pins
 
 ### `route`
 
-Autoroute a PCB.
+Autoroute a PCB. See [Routing Guide](../guides/routing.md) for strategy
+choices and worked examples. Implemented in
+[`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py).
 
 ```bash
 kct route <pcb_file> [options]
 ```
 
+Common flags (the full surface lives in `kct route --help`):
+
 | Option | Description |
 |--------|-------------|
-| `--output`, `-o` | Output file |
-| `--net NET` | Route specific net only |
-| `--width WIDTH` | Trace width in mm |
-| `--clearance CLEARANCE` | Clearance in mm |
-| `--via-size SIZE` | Via size in mm |
-| `--layers LAYERS` | Routing layers |
+| `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
+| `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
+| `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |
+| `--via-diameter MM` / `--via-drill MM` | Via geometry |
+| `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |
+| `--layers {auto,2,4,4-sig,4-all,6}` | Layer stack configuration (default: `auto`) |
+| `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
+| `--timeout SEC` / `--per-net-timeout SEC` | Global / per-net wall-clock caps |
+| `--seed N` | Seed Python `random` for reproducible routing (#2589) |
+| `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
+| `--skip-drc` | Skip post-route DRC validation |
+
+#### Strategy escalation flags
+
+| Option | Description |
+|--------|-------------|
+| `--auto-layers` / `--no-auto-layers` | Escalate layer count on routing failure. **Default: enabled.** Tries 2 → 4 → 6 until success or `--max-layers` is reached. Pass `--no-auto-layers` to opt out. |
+| `--max-layers {2,4,6}` | Upper bound for `--auto-layers` (default: 6) |
+| `--auto-mfr-tier` | Escalate to a tighter manufacturer tier when geometry blocks routing (e.g. `jlcpcb` → `jlcpcb-tier1` to gain via-in-pad). Default: disabled. |
+| `--mfr-tier-ladder LIST` | Explicit comma-separated tier ladder, e.g. `'jlcpcb,jlcpcb-tier1'`. Overrides the default ladder registered for `--mfr`. |
+| `--adaptive-rules` | Progressively relax trace width / clearance until routing succeeds or manufacturer limits are reached. |
+| `--min-trace MM` / `--min-clearance-floor MM` | Floors for `--adaptive-rules` |
+
+See [Routing Guide → Strategy Escalation](../guides/routing.md#strategy-escalation).
+
+#### Long-running routes
+
+| Option | Description |
+|--------|-------------|
+| `--checkpoint-interval SEC` | Interval between best-so-far checkpoint writes to `--output`. Default: 30. Pass `0` to disable. |
+| `--export-failed-nets PATH` | Write failed-net names (one per line) for follow-up. |
+| `--strict` | Exit non-zero if the written PCB has any disconnected net. |
+
+`--output` writes are atomic; combined with `--checkpoint-interval` this means
+a long route can be safely interrupted (SIGINT) and the partial result on
+disk remains valid for inspection or resume. See
+[Routing Guide → Long-Running Routes](../guides/routing.md#long-running-routes-checkpointing).
+
+#### Auto-fix and exit codes
+
+`--auto-fix` runs the DRC repair pass after routing. If repair cannot be
+applied cleanly the partial output is **rolled back** so the file on disk
+matches what the router actually produced (issue #2852, #2853, #2861). The
+rollback path is wired through all four routing code paths
+(`Autorouter`, `RoutingOrchestrator`, MCP, reasoning agent) and surfaces as
+exit code 3. See the [Exit Codes](#exit-codes) table.
 
 **Examples:**
 ```bash
+# Default escalation: 2L → 4L → 6L, atomic checkpoint every 30s
 kct route board.kicad_pcb -o routed.kicad_pcb
-kct route board.kicad_pcb --net CLK --width 0.2
+
+# Stay at 2L (e.g. for cost) but allow manufacturer-tier escalation for fine-pitch QFP
+kct route board.kicad_pcb --no-auto-layers --auto-mfr-tier --mfr jlcpcb
+
+# Explicit ladder; long timeout; auto-fix DRC; reproducible
+kct route board.kicad_pcb \
+  --auto-mfr-tier --mfr-tier-ladder 'jlcpcb,jlcpcb-tier1' \
+  --timeout 1500 --auto-fix --seed 42 -o routed.kicad_pcb
+
+# CI-friendly checkpointing every 10s
+kct route board.kicad_pcb --checkpoint-interval 10 -o routed.kicad_pcb
 ```
 
 ---
@@ -472,6 +687,66 @@ kct placement check board.kicad_pcb
 kct placement optimize board.kicad_pcb -o optimized.kicad_pcb
 kct placement suggestions board.kicad_pcb --format json
 ```
+
+---
+
+### `optimize-placement`
+
+CMA-ES placement optimizer. Distinct from `kct placement optimize` (physics
+/ evolutionary): this command runs a CMA-ES loop with explicit anchor and
+feasibility semantics. Implemented in
+[`src/kicad_tools/cli/optimize_placement_cmd.py`](../../src/kicad_tools/cli/optimize_placement_cmd.py).
+
+```bash
+kct optimize-placement <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--strategy {cmaes}` | Optimization strategy (default: `cmaes`) |
+| `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
+| `--seed {force-directed,random}` | Seed placement method |
+| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area` |
+| `--dry-run` | Evaluate current placement without optimizing |
+| `--progress N` | Print score every N iterations (0 disables) |
+| `--checkpoint DIR` | Directory for checkpoint save/resume |
+| `--no-slide-off` | Disable slide-off overlap pre-processing on the seed |
+| `--anchor-weight FLOAT` | Per-net HPWL multiplier boost for nets that touch `(locked)` footprints. Scales each qualifying net's HPWL by `1 + anchor_weight * (anchored_pins / total_pins)`. **Default 0.0**. |
+| `--time-budget SEC` | Wall-clock budget (bounds the feasibility-gated convergence loop) |
+| `--allow-infeasible` | Exit 0 even when overlap/DRC/boundary violations remain |
+| `-v` / `-q` | Verbose / quiet |
+
+**Anchor-weight discrepancy to know about.** The `--help` text recommends
+`2.0 .. 5.0` as a starting range. The validated recipe in
+[Placement Optimization → Anchoring Perimeter Footprints](../guides/placement-optimization.md#anchoring-perimeter-footprints)
+uses `--anchor-weight 1.0` — the help-text range is the conservative knob
+designers would reach for; `1.0` is the value that actually lifted board-05
+BLDC from 40% → 60% routing completion in practice. Treat help text as the
+ceiling and the guide as the proven floor.
+
+**Feasibility gate.** By default the optimizer exits **1** with
+`FATAL: optimizer exited with infeasible placement (...)` on stderr if the
+final placement still has overlap/DRC/boundary violations (issue #2821). Use
+`--allow-infeasible` to override (recommended only when the next step is a
+router that can absorb residual boundary violations). Use `--time-budget` to
+bound the "keep going past plateau while infeasible" loop.
+
+**Examples:**
+```bash
+# Anchored optimization — perimeter parts already marked locked=true
+kct optimize-placement board.kicad_pcb \
+  --anchor-weight 1.0 --max-iterations 400 --time-budget 120 \
+  --allow-infeasible -o optim.kicad_pcb
+
+# Evaluate the seed placement without moving anything
+kct optimize-placement board.kicad_pcb --dry-run -v
+
+# Resume from a checkpoint dir
+kct optimize-placement board.kicad_pcb --checkpoint .optim_state/
+```
+
+See [Placement Optimization Guide](../guides/placement-optimization.md).
 
 ---
 
@@ -633,7 +908,9 @@ kct constraints check <pcb_file> [options]
 
 ### `net-status`
 
-Validate net connectivity (unrouted, islands, isolated pads).
+Validate net connectivity (unrouted, islands, isolated pads). The
+`preflight-routing` step of `kct build` and the readiness check inside
+`kct fleet status` both delegate to this analyzer in-process.
 
 ```bash
 kct net-status <pcb_file> [options]
@@ -642,7 +919,19 @@ kct net-status <pcb_file> [options]
 | Option | Description |
 |--------|-------------|
 | `--format {table,json}` | Output format |
-| `--net NET` | Check specific net |
+| `--net NET` | Check a specific net |
+| `--incomplete` | Show only incomplete / unrouted nets |
+| `--by-class` | Group output by net class |
+| `-v`, `--verbose` | Per-segment / per-pad detail |
+
+Exit code semantics are reused by the `preflight-routing` step in
+`kct build` and by `kct fleet status` to decide "ship-ready vs. not".
+
+**Examples:**
+```bash
+kct net-status board.kicad_pcb --incomplete --format json
+kct net-status board.kicad_pcb --by-class
+```
 
 ---
 
@@ -742,12 +1031,49 @@ kct symbols project.kicad_sch --format json
 
 ## Exit Codes
 
+### Default (most commands)
+
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
 | 1 | Error (invalid input, file not found, etc.) |
 | 2 | Invalid arguments |
 | 130 | Interrupted (Ctrl+C) |
+
+### `kct route` ladder
+
+The router exposes a finer-grained ladder so CI can tell partial routing
+apart from clean routing with DRC issues. Source of truth: the epilog at
+[`src/kicad_tools/cli/route_cmd.py:4051-4059`](../../src/kicad_tools/cli/route_cmd.py).
+
+| Code | Meaning |
+|------|---------|
+| 0 | All nets routed (or meets `--min-completion`), DRC clean |
+| 1 | Fatal failure — no nets routed |
+| 2 | Partial routing — below `--min-completion` threshold |
+| 3 | Routing meets threshold **but** DRC violations remain — **also** returned when `--auto-fix` rollback fires (issue #2852). Both meanings share this code by design (see `route_cmd.py:2576-2580`). |
+| 4 | Partial routing **and** segment-segment clearance violations |
+| 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
+
+### `kct optimize-placement`
+
+| Code | Meaning |
+|------|---------|
+| 0 | Optimizer converged to a feasible placement (or `--allow-infeasible` was set) |
+| 1 | Final placement infeasible — overlap / DRC / boundary violations remain (issue #2821). Override with `--allow-infeasible`. |
+| 2 | Invalid arguments |
+| 130 | Interrupted (Ctrl+C) |
+
+### `kct fleet status`
+
+Source of truth: module docstring at
+[`src/kicad_tools/cli/fleet_cmd.py:17-21`](../../src/kicad_tools/cli/fleet_cmd.py).
+
+| Code | Meaning |
+|------|---------|
+| 0 | All surveyed boards are ship-ready |
+| 1 | Argparse / IO error |
+| 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
 
 ---
 
