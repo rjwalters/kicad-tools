@@ -3384,6 +3384,20 @@ def route_with_mfr_tier_escalation(
             f"Result: No tier in {' -> '.join(tiers_to_try)} achieved "
             "routing success."
         )
+
+        # Issue #2884: name the dominant unfixable constraint surfaced by
+        # the last inner attempt before printing the generic remediation
+        # list.  This points the user at the specific component / pin /
+        # constraint that blocked progress rather than leaving them to
+        # guess from a categorical 4-option menu.
+        named_line = _name_dominant_unfixable_constraint(
+            last_router=last_router,
+            manufacturer=args.manufacturer,
+        )
+        if named_line:
+            flush_print("\nDiagnosis:")
+            flush_print(f"  {named_line}")
+
         # Concrete remediation options.  Always print at least three so
         # users have actionable alternatives:
         flush_print("\nOptions:")
@@ -3404,6 +3418,87 @@ def route_with_mfr_tier_escalation(
         )
 
     return final_exit_code
+
+
+def _name_dominant_unfixable_constraint(
+    last_router,
+    manufacturer: str | None,
+) -> str | None:
+    """Compose the per-component diagnostic for tier-ladder exhaustion.
+
+    Issue #2884: When ``--auto-mfr-tier`` walks the full ladder and still
+    fails, surface a single human-readable line identifying *which*
+    component (and, where available, which pin) carried the unfixable
+    constraint -- using :func:`name_unfixable_constraint` from
+    ``failure_analysis``.
+
+    The dominant signal we have at this surface is the EscapeRouter's
+    ``missed_via_in_pad_rescues`` counter and the companion
+    ``missed_via_in_pad_components`` ref set.  A non-zero counter means
+    one or more fine-pitch pins would have been rescued by an in-pad
+    via -- the canonical PIN_ACCESS failure mode for the mfr-tier
+    trigger table.
+
+    Args:
+        last_router: The Autorouter instance from the last inner attempt
+            (may be ``None`` if no attempt completed cleanly).
+        manufacturer: Manufacturer name at the time of the final failure.
+
+    Returns:
+        A one-line diagnostic string suitable for terminal output, or
+        ``None`` when no signal is available (caller suppresses the
+        Diagnosis section in that case).
+    """
+    from kicad_tools.router.failure_analysis import (
+        FailureCause,
+        name_unfixable_constraint,
+    )
+
+    if last_router is None:
+        return None
+
+    escape_router = getattr(last_router, "_escape_router", None)
+    if escape_router is None:
+        return None
+
+    # Primary signal: missed via-in-pad rescues -> PIN_ACCESS failure mode.
+    missed = getattr(escape_router, "missed_via_in_pad_rescues", 0) or 0
+    try:
+        missed_int = int(missed)
+    except (TypeError, ValueError):
+        missed_int = 0
+
+    if missed_int <= 0:
+        return None
+
+    # Pick a representative component ref from the per-attempt set.
+    # Sorted to keep the diagnostic deterministic across runs.
+    refs = getattr(escape_router, "missed_via_in_pad_components", None) or set()
+    try:
+        ref_list = sorted(refs)
+    except TypeError:
+        ref_list = []
+    component_ref = ref_list[0] if ref_list else None
+
+    # Compose the canonical named-constraint line.  We do not yet have
+    # per-pin attribution at this surface -- the EscapeRouter tracks
+    # component refs only -- so we pass ``pin=None`` and let
+    # name_unfixable_constraint fall back to component-level phrasing.
+    base = name_unfixable_constraint(
+        FailureCause.PIN_ACCESS,
+        manufacturer=manufacturer,
+        component_ref=component_ref,
+        pin=None,
+    )
+
+    # When multiple components shared the same fault, mention the count
+    # so users know whether they're chasing one outlier or a board-wide
+    # problem.
+    extras = len(ref_list) - 1
+    if extras > 0:
+        base = f"{base} ({extras} other component(s) affected by the same constraint.)"
+
+    return base
 
 
 def route_with_combined_escalation(
