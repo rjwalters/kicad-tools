@@ -119,26 +119,26 @@ tolerances:
   # Tracked: Phase 3N (#2726), match-group tuning (#2723).
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70
 
-  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Reduced from 100 -> 60
-  # by issue #2871 (the C++ validator's same-component-ref exclusion
-  # is now narrowed to signal pads only -- plane-net (net == 0) pads
-  # on the chip are validated again).  The C++ patch is correct in
-  # isolation (parity test ``test_exclude_ref_hash_blocks_plane_net_pad``
-  # confirms the validator now rejects such routes), but a re-routed
-  # board 04 still reports the same 44 ``clearance_pad_segment`` errors
-  # (plus 4 each of segment_via, pad_via, segment_segment for 56 total).
-  # The post-route validator now correctly rejects these routes, but
-  # the router falls back to the Python pathfinder, which contains the
-  # twin of the same-component-ref exclusion bug at
-  # ``grid.py:1495`` (Python ``validate_segment_clearance``) and
-  # ``pathfinder.py:2627`` (Python ``_validate_route_clearance``).
-  # The Python paths still skip plane-net pads on the same component,
-  # so the Python fallback produces the same violating routes.
-  #
-  # The joint exit clause for #2842 + #2866 + #2868 + #2869 + #2871
-  # therefore needs a Python-side mirror of this fix before the
-  # board-04 entry can be removed entirely.  Filed as a follow-up
-  # below the C++ patch in #2871's PR description.
-  # Tracked: #2834 (manufacturing-ready), #2871 (C++ side), follow-up
-  # for Python side.
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Held at 60 (post-#2871
+  # floor).  Issue #2874 (this PR) lands the Python-side mirror of
+  # #2871/PR #2873: both the C++ validator (``cpp/src/grid.cpp:376``)
+  # and the Python validator (``src/kicad_tools/router/grid.py:1503``)
+  # now narrow the same-component-ref exclusion to signal pads only --
+  # plane-net (``net == 0``) pads on the chip participate in
+  # pad-vs-segment validation again.  Validator parity is now closed,
+  # but re-routing the source PCB with the C++ backend still yields
+  # the same 56 errors (44 ``clearance_pad_segment`` + 4 each of
+  # ``segment_via``, ``pad_via``, ``segment_segment``) -- the C++
+  # pathfinder finds a route that fits under its post-route validator
+  # (after avoidance-cost retries) without falling back to Python, so
+  # the Python validator narrowing does not alter the routing yield on
+  # this board in isolation.  The remaining 56 errors are real
+  # geometry violations the C++ pathfinder cannot avoid in this
+  # corridor; reducing them to 0 requires the chained narrow-channel
+  # fixes (#2842 / #2865 / #2867 / #2869) to compose with the
+  # validator parity here, plus follow-up routing-strategy changes.
+  # The board-04 floor is therefore held at 60 until a re-route
+  # achieves the joint exit clause for #2834 (manufacturing-ready).
+  # Tracked: #2834 (manufacturing-ready), #2871 (C++ side), #2874
+  # (Python side, this PR).
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 60
