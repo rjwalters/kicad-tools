@@ -1014,6 +1014,49 @@ class RoutingGrid:
                 layers_to_block=layers_to_block,
             )
 
+        # Issue #2878: proactive narrow-channel halo.
+        #
+        # When two same-component pads sit at fine pitch but the
+        # manufacturer clearance rules make the inter-pad channel too
+        # narrow to host a foreign trace at full clearance,
+        # ``_clearance_for_pin_pitch`` (PR #2866) already declines the
+        # shrink and returns the standard envelope so the channel ends up
+        # blocked.  But ``_relax_same_component_clearance`` (PR for
+        # #2452, called above) then UNBLOCKS the overlap region between
+        # same-component pads to permit chip escape routing.  That
+        # relaxation, while necessary for boards like Y1 crystal escapes,
+        # also re-opens the channel to FOREIGN nets on fine-pitch
+        # packages -- the root cause of the 44 ``clearance_pad_segment``
+        # errors on board 04's STM32 LQFP-48 west edge (foreign NRST /
+        # OSC_OUT / SWCLK traces threading through U2's own plane-net
+        # pad clearance).
+        #
+        # The fix: after the relaxation, walk the channel between the
+        # newly-added pad and each previously-added same-component pad
+        # on a different net.  If the geometric narrow-channel guard
+        # would have rejected the shrink (same predicate as
+        # ``_clearance_for_pin_pitch``), re-block the channel cells in
+        # a NET-AWARE way: cells owned by either same-component pad's
+        # net are marked ``_is_obstacle = True`` (preserving own-net
+        # escape -- the cell's net == routing net path), while foreign
+        # nets see the cells as blocked obstacles.  This mirrors the
+        # net-aware sibling-envelope carve-out in
+        # ``_apply_stitch_via_halo`` (#2869 / PR #2870).
+        # Trigger for every pad on a known component with a known pin_pitch
+        # (signal AND plane-net pads alike).  Narrow-channel infeasibility
+        # is symmetric: a foreign trace cannot thread between two
+        # same-component pads regardless of whether either is plane or
+        # signal.  The helper itself decides which neighbour pairs trip
+        # the guard.
+        if pad.ref and pin_pitch is not None:
+            self._apply_narrow_channel_halo(
+                pad,
+                effective_width=effective_width,
+                effective_height=effective_height,
+                pin_pitch=pin_pitch,
+                layers_to_block=layers_to_block,
+            )
+
     def _apply_stitch_via_halo(
         self,
         pad: Pad,
@@ -1251,6 +1294,290 @@ class RoutingGrid:
                         # leave its net assignment intact so its owner can
                         # still route through it.
                         self._is_obstacle[layer_idx, gy, gx] = True
+
+    def _apply_narrow_channel_halo(
+        self,
+        pad: Pad,
+        effective_width: float,
+        effective_height: float,
+        pin_pitch: float,
+        layers_to_block: list[int],
+    ) -> None:
+        """Re-block the channel between two same-component pads when the
+        manufacturer clearance rules make it geometrically infeasible to
+        host a foreign trace there (Issue #2878).
+
+        Background.  PR #2866's ``_clearance_for_pin_pitch`` narrow-channel
+        guard already detects the infeasibility condition at the pad-add
+        site and returns the *standard* envelope instead of the
+        fine-pitch shrink.  That alone would close the channel -- except
+        that ``_relax_same_component_clearance`` (PR for #2452, called
+        immediately before us in ``_add_pad_unsafe``) UNBLOCKS the
+        overlap region between same-component pads to preserve chip
+        escape routing.  The relaxation is correct for Y1-style crystal
+        escapes (wide pitch, OSC_IN / OSC_OUT routed through the same
+        component), but on fine-pitch packages such as LQFP-48 0.5 mm
+        pitch with jlcpcb-tier1 rules (``trace = clearance = 0.127 mm``)
+        the relaxation re-opens a channel that DRC then rejects when a
+        foreign net (e.g. NRST, OSC_OUT, SWCLK) threads through.  Result:
+        44 ``clearance_pad_segment`` errors on routed board 04 before
+        this fix.
+
+        Strategy.  After the relaxation runs, walk each same-component
+        sibling pad on a different net.  Test the same infeasibility
+        predicate that ``_clearance_for_pin_pitch`` uses; if the channel
+        cannot host a trace at full clearance, mark cells in the
+        inter-pad rectangle as ``_blocked = True`` AND
+        ``_is_obstacle = True``, preserving each cell's existing
+        ``cell.net`` assignment.  This is the same net-aware blocking
+        pattern that ``_apply_stitch_via_halo`` (#2842) uses for foreign
+        traces in plane-net halos:
+
+        - Cell owned by either same-component pad's net
+          (``cell.net == pad.net`` or ``cell.net == sibling.net``):
+          ``_is_obstacle`` keeps the cell rejected for foreign nets
+          (``cell.blocked & cell.is_obstacle & cell.net != routing_net``
+          in pathfinder ``_is_trace_blocked`` standard mode and the
+          C++ ``Pathfinder::is_trace_blocked`` mirror) while leaving
+          the cell passable for its OWN net (``cell.net == net``).
+          The chip's own escape between the two pads survives.
+        - Cell currently unclaimed (``cell.net == 0``): re-block it
+          for everyone with the standard static-obstacle pattern
+          (``blocked = True`` with ``cell.net == 0`` rejects all
+          non-zero nets in both standard and negotiated modes).
+        - Cell owned by a foreign component / foreign net: leave
+          alone.  That cell is already part of another pad's
+          clearance contract; we have no right to alter its state.
+
+        Safety constraints (mirror the contracts of ``_add_pad_unsafe``
+        and ``_apply_stitch_via_halo``):
+        - Cells inside any pad's metal area (``_pad_blocked == True``)
+          are NEVER touched -- they are already maximally blocked and
+          their state must not be perturbed.
+        - The cell's ``net`` assignment is preserved.  We only flip
+          two booleans: ``_blocked`` and ``_is_obstacle``.  Validator
+          code reads ``cell.original_net`` for post-route DRC truth;
+          we do not touch that either.
+
+        Net-pair semantics.  The helper is called once per ``add_pad``
+        and inspects every *previously-added* same-component pad on a
+        different net (mirrors ``_relax_same_component_clearance`` at
+        line 1289 / ``_apply_stitch_via_halo`` sibling iteration).
+        When the newly-added pad is the second of a pair, the iteration
+        sees the first pad and the channel between them is processed.
+        When subsequent pads are added the helper re-evaluates every
+        pair; the operations are idempotent (setting an already-set
+        boolean to True has no effect).
+
+        Args:
+            pad: The newly-added pad on a known component.
+            effective_width: The pad's effective width in mm (mirrors the
+                ``_add_pad_unsafe`` computation -- through-hole pads get
+                their drill-derived dimensions when no rectangular
+                geometry is set).
+            effective_height: As above for height.
+            pin_pitch: The component pin pitch in mm.  Drives the
+                same-component infeasibility predicate.
+            layers_to_block: Layer indices to apply the halo to (PTH pads
+                hit all layers; SMD pads hit only their layer).
+        """
+        # Predicate: would the narrow-channel guard at
+        # ``_clearance_for_pin_pitch`` (PR #2866) reject the fine-pitch
+        # shrink at this pin_pitch?  We use the same gate so the two
+        # pieces stay synchronised: the guard returns the standard
+        # envelope (closes the channel) and *we* re-close it after the
+        # same-component relaxation re-opens it.  No-op when the
+        # geometry is feasible at the shrunk envelope (chorus-test
+        # 0.65 mm BGA escapes etc).
+        if pin_pitch >= self.rules.fine_pitch_threshold:
+            return
+        if self.rules.min_trace_width is None:
+            return
+        shrunk = self.rules.min_trace_width / 2.0
+        effective_channel = pin_pitch - 2.0 * shrunk - self.rules.trace_width
+        required_channel = 2.0 * self.rules.trace_clearance + self.rules.trace_width
+        if effective_channel >= required_channel:
+            # Channel is geometrically wide enough at the fine-pitch
+            # shrink -- the relaxation is sound and we have nothing to
+            # tighten.  This matches the same predicate
+            # ``_clearance_for_pin_pitch`` uses at lines 833-836.
+            return
+
+        # Walk each previously-added same-component pad on a different
+        # net.  This mirrors the iteration shape of
+        # ``_relax_same_component_clearance`` (line 1289) -- the
+        # symmetry guarantees both helpers see the same neighbour set.
+        component_pads = self._component_pads.get(pad.ref, [])
+        if len(component_pads) < 2:
+            # Only this pad exists for the component; no neighbour to
+            # form a channel with.  Defensive guard against the
+            # single-pad component case (e.g. a lone test point).
+            return
+
+        for other_pad in component_pads:
+            if other_pad is pad:
+                continue
+            if other_pad.net == pad.net:
+                # Same net on both pads (rare for signal pads, common
+                # for plane fan-outs) -- there is no foreign-net
+                # channel here, the cells are all available to the
+                # shared net.  Skip.
+                continue
+
+            # Reproduce the other pad's effective dimensions exactly
+            # as ``_add_pad_unsafe`` did when it was added.  Mirrors
+            # the same computation in ``_relax_same_component_clearance``
+            # and ``_apply_stitch_via_halo`` sibling iteration.
+            if other_pad.through_hole:
+                if other_pad.width > 0 and other_pad.height > 0:
+                    other_ew = other_pad.width
+                    other_eh = other_pad.height
+                elif other_pad.drill > 0:
+                    other_ew = other_pad.drill + 0.7
+                    other_eh = other_ew
+                else:
+                    other_ew = 1.7
+                    other_eh = 1.7
+            else:
+                other_ew = other_pad.width
+                other_eh = other_pad.height
+
+            # Inter-pad rectangle in world coordinates -- bounded by
+            # the two pads' inner metal edges along the pitch axis and
+            # the union of their metal extents along the perpendicular
+            # axis.  This is the strip a foreign trace would have to
+            # cross to thread between them; if the narrow-channel guard
+            # rejected the shrink, every cell here must be foreign-net
+            # blocked.
+            inner_x1 = min(pad.x + effective_width / 2.0, other_pad.x + other_ew / 2.0)
+            inner_x2 = max(pad.x - effective_width / 2.0, other_pad.x - other_ew / 2.0)
+            inner_y1 = min(pad.y + effective_height / 2.0, other_pad.y + other_eh / 2.0)
+            inner_y2 = max(pad.y - effective_height / 2.0, other_pad.y - other_eh / 2.0)
+
+            # Two channel orientations: pads stacked vertically (the
+            # gap is between top-of-lower and bottom-of-upper) OR
+            # stacked horizontally (gap between left-of-right and
+            # right-of-left).  The metal extents along the channel
+            # axis bound the channel rectangle; along the pitch axis
+            # the bounds are the inner pad edges.
+            #
+            # We classify by which axis has positive separation
+            # between the two metals; the orthogonal axis bounds the
+            # channel strip width.  Diagonal pad arrangements (where
+            # both axes have positive separation) get treated as the
+            # axis with the larger gap (less risk of mis-bounding).
+            gap_x = inner_x2 - inner_x1  # positive iff horizontally separated
+            gap_y = inner_y2 - inner_y1  # positive iff vertically separated
+            if gap_x <= 0.0 and gap_y <= 0.0:
+                # Pads overlap on both axes (e.g. metal collision --
+                # should never happen on a manufacturable board but
+                # be defensive).  No channel to define.
+                continue
+
+            # Adjacency guard.  ``component_pads`` contains EVERY pad
+            # on the component, not just geometric neighbours -- on an
+            # LQFP-48 that is 48 pads, but only ~4 of them are the
+            # current pad's pitch-axis neighbours.  Without this guard
+            # we would re-block the FULL inter-pad rectangle for
+            # widely-separated pairs (e.g. pin 1 and pin 7 on the same
+            # LQFP edge, 3 mm apart), which would consume a huge band
+            # of the chip's exterior routing space and break legitimate
+            # foreign-trace escape routes.  The narrow-channel
+            # infeasibility predicate is about the channel between
+            # *adjacent* pads at ``pin_pitch``; if the channel-axis
+            # gap is much wider than ``pin_pitch``, there is no narrow
+            # channel and the helper has nothing to do.  Use a slack
+            # tolerance of 1.5x the pitch to absorb minor measurement
+            # rounding (we want to catch true neighbours and skip
+            # everything else).
+            gap = max(gap_x, gap_y)
+            if gap > 1.5 * pin_pitch:
+                continue
+
+            if gap_y >= gap_x:
+                # Vertical stack: pitch axis is y, channel strip
+                # spans the union of the two pads' x extents.
+                channel_x1 = min(
+                    pad.x - effective_width / 2.0,
+                    other_pad.x - other_ew / 2.0,
+                )
+                channel_x2 = max(
+                    pad.x + effective_width / 2.0,
+                    other_pad.x + other_ew / 2.0,
+                )
+                channel_y1 = inner_y1
+                channel_y2 = inner_y2
+            else:
+                # Horizontal stack: pitch axis is x, channel strip
+                # spans the union of the two pads' y extents.
+                channel_x1 = inner_x1
+                channel_x2 = inner_x2
+                channel_y1 = min(
+                    pad.y - effective_height / 2.0,
+                    other_pad.y - other_eh / 2.0,
+                )
+                channel_y2 = max(
+                    pad.y + effective_height / 2.0,
+                    other_pad.y + other_eh / 2.0,
+                )
+
+            cgx1, cgy1 = self.world_to_grid(channel_x1, channel_y1)
+            cgx2, cgy2 = self.world_to_grid(channel_x2, channel_y2)
+
+            for layer_idx in layers_to_block:
+                for gy in range(cgy1, cgy2 + 1):
+                    for gx in range(cgx1, cgx2 + 1):
+                        if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+                            continue
+
+                        # Never overwrite another pad's metal area.
+                        # ``_pad_blocked`` cells are already in the
+                        # strongest state (blocked + pad-owned) and
+                        # must not be perturbed -- they are the chip's
+                        # own pin metal which the chip's escape
+                        # routing must start from.
+                        if self._pad_blocked[layer_idx, gy, gx]:
+                            continue
+
+                        cell_net = int(self._net[layer_idx, gy, gx])
+                        # Net-aware re-block.  The cell's existing net
+                        # assignment classifies it into one of three
+                        # buckets:
+                        if cell_net == pad.net or cell_net == other_pad.net:
+                            # Bucket A: owned by one of the two
+                            # same-component pads' nets.  Mark it
+                            # ``blocked`` + ``is_obstacle`` so foreign
+                            # nets are rejected in standard mode
+                            # (``cell.net != routing_net``) and
+                            # negotiated mode (``is_obstacle &&
+                            # different_net``), while the cell's own
+                            # net can still traverse it
+                            # (``cell.net == routing_net`` passes both
+                            # checks).  Preserve cell.net.
+                            self._blocked[layer_idx, gy, gx] = True
+                            self._is_obstacle[layer_idx, gy, gx] = True
+                        elif cell_net == 0:
+                            # Bucket B: unclaimed cell.  Re-block it
+                            # with the standard static-obstacle
+                            # pattern (``blocked=True`` with
+                            # ``cell.net == 0``) which rejects all
+                            # non-zero nets in both modes.  This is
+                            # the same pattern ``_apply_stitch_via_halo``
+                            # uses at line 1286 for unclaimed halo
+                            # cells.  Leave ``is_obstacle`` alone so
+                            # the cell remains a passive obstacle
+                            # rather than a hard one (preserves
+                            # nuance for the negotiated-mode shared
+                            # net flow).
+                            self._blocked[layer_idx, gy, gx] = True
+                        else:
+                            # Bucket C: foreign component / foreign
+                            # net already owns this cell.  Leave it
+                            # alone -- another pad has already
+                            # claimed the cell under its own
+                            # clearance contract and we have no
+                            # business altering its state.
+                            continue
 
     def _relax_same_component_clearance(
         self,
