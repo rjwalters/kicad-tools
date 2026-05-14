@@ -195,9 +195,7 @@ class TestAutoMfrTierIntegration:
     """
 
     @pytest.fixture(scope="class")
-    def auto_mfr_tier_result(
-        self, unrouted_pcb_path: Path
-    ) -> subprocess.CompletedProcess[str]:
+    def auto_mfr_tier_result(self, unrouted_pcb_path: Path) -> subprocess.CompletedProcess[str]:
         """Run with ``--auto-mfr-tier --max-layers 2`` and capture output."""
         proc = _run_route_auto_mfr_tier(unrouted_pcb_path, timeout_seconds=480)
         # Fatal exit codes (config error, internal crash) -- bail with detail.
