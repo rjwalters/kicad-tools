@@ -21,6 +21,83 @@ pip install kicad-tools
 
 You'll also need KiCad 8+ installed for Gerber generation via `kicad-cli`.
 
+## Are We Ship-Ready? (`kct fleet status`)
+
+Before generating manufacturing artefacts, ask the repo whether every board
+is actually ready to ship. `kct fleet status` walks every per-board
+subdirectory under `boards/`, inspects the routed PCB, DRC report, and
+manufacturing outputs, and surfaces a one-line verdict per board.
+
+```bash
+# Plain summary (default: --boards-dir boards, table output)
+kct fleet status
+
+# CI-friendly JSON for downstream tooling
+kct fleet status --format json > fleet.json
+
+# Only show what is actually ready to ship right now
+kct fleet status --ship-only
+```
+
+A board is "ship-ready" when **all** gates are green:
+
+1. Routed PCB exists at the expected glob (`*_routed.kicad_pcb` by default).
+2. Net status (the same check `kct net-status` runs) is clean — no
+   incomplete or unrouted nets.
+3. DRC report exists and has zero errors.
+4. Manufacturing artefacts (gerbers, BOM, CPL) are present and not stale
+   relative to the routed PCB.
+
+If any gate fails, the table view lists the first blocker; `--format json`
+emits the full per-board breakdown. Treat `kct fleet status --ship-only`
+returning a non-empty list as "go" for the export pipeline below.
+
+See also: [CLI Reference → fleet status](../reference/cli.md#fleet-status).
+
+---
+
+## Routing Completeness Preflight
+
+`kct build --step preflight-routing` (and the default `kct build` sequence,
+which runs it between `stitch` and `verify`) blocks the build if any nets
+are incomplete or unrouted. This closes the gap where `kct build` would emit
+gerbers, BOM, and CPL even when nets were unconnected.
+
+On failure the build prints, for example:
+
+```text
+preflight-routing: 3/214 nets incomplete
+  /SDA: incomplete (2 segments missing)
+  /SCL: incomplete (1 segment missing)
+  /HALL_B: unrouted
+```
+
+…and halts before any manufacturing artefact is written.
+
+Two escape hatches are recognised:
+
+- `--allow-incomplete` — the advertised, CI-greppable opt-out. Use this for
+  intentional WIP builds (e.g. preview gerbers for a board still in
+  routing). Failure becomes a warning, the build continues.
+- `--force` — global build override; parity with `kct build --step sync
+  --force`. Also converts the failure into a warning.
+
+```bash
+# Default: refuse to ship gerbers for a board with unrouted nets
+kct build --spec boards/05-bldc/spec.yaml
+
+# Run only the preflight check (read-only, no side-effects)
+kct build --spec boards/05-bldc/spec.yaml --step preflight-routing
+
+# Bypass for an intentional WIP preview
+kct build --spec boards/05-bldc/spec.yaml --allow-incomplete
+```
+
+The check is read-only and uses `NetStatusAnalyzer` in-process (no subprocess
+overhead). See [CLI Reference → build](../reference/cli.md#build).
+
+---
+
 ## Quick Start: One-Command Export
 
 The fastest way to export everything:
@@ -181,6 +258,24 @@ kct bom board.kicad_sch --format jlcpcb -o bom_jlcpcb.csv
 # Generic CSV
 kct bom board.kicad_sch --format csv --group -o bom.csv
 ```
+
+### Via Stitching for Power Planes
+
+`kct stitch` adds via stitching to power-plane nets between layers. When you
+pass `--mfr`, the via diameter and drill are resolved from the manufacturer
+YAML using the board's actual copper layer count — so stitching stays
+consistent with the rules the router and DRC are enforcing. See
+[CLI Reference → stitch](../reference/cli.md#stitch) for the full flag list.
+
+```bash
+# Auto-detect power nets, JLCPCB tier-1 via geometry
+kct stitch board.kicad_pcb --mfr jlcpcb-tier1 --copper 1.0
+
+# Blanket-stitch GND on a 3mm grid
+kct stitch board.kicad_pcb --net GND --blanket --spacing 3.0
+```
+
+---
 
 ## Complete JLCPCB Workflow
 

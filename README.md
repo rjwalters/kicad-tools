@@ -513,6 +513,37 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `layout` | Layout preservation for PCB regeneration |
 
+## What's New (May 2026)
+
+Recent additions an agent reading these docs cold should know about:
+
+- **`kct fleet status`** — survey routing + manufacturing readiness across every
+  board in `boards/`. The "are we ship-ready?" entry point. See
+  [Manufacturing Export → ship-ready check](docs/guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
+- **`kct route --auto-layers` / `--auto-mfr-tier`** — automatic layer-count
+  and manufacturer-tier escalation when routing hits a wall. `--auto-layers`
+  defaults to **enabled**; opt out with `--no-auto-layers`. See
+  [Routing → Strategy Escalation](docs/guides/routing.md#strategy-escalation).
+- **`kct route --checkpoint-interval`** — atomic best-so-far writes every N
+  seconds; SIGINT leaves a valid PCB on disk. See
+  [Routing → Long-Running Routes](docs/guides/routing.md#long-running-routes-checkpointing).
+- **`kct optimize-placement --anchor-weight`** — CMA-ES placement optimizer
+  biased toward locked footprints. The validated recipe (lock perimeter
+  parts only, weight `1.0`, `--allow-infeasible`) lifted board-05 BLDC from
+  40% → 60% routing completion. See
+  [Placement Optimization → Anchoring Perimeter Footprints](docs/guides/placement-optimization.md#anchoring-perimeter-footprints).
+- **`kct stitch --mfr` / `--copper`** — stackup-aware via dimensions; the
+  manufacturer YAML drives via geometry. See
+  [CLI Reference → stitch](docs/reference/cli.md#stitch).
+- **`kct build --step preflight-routing`** — routing-completeness gate that
+  blocks manufacturing artefacts when nets are unrouted. Override with
+  `--allow-incomplete`. See
+  [Manufacturing Export → Routing Completeness Preflight](docs/guides/manufacturing-export.md#routing-completeness-preflight).
+- **`Footprint.locked` + siblings round-trip** through `PCB.save` (locked,
+  dnp, exclude_from_pos_files, exclude_from_bom, plus preserved unknown
+  `(attr ...)` tokens). See
+  [API → Footprint attributes](docs/reference/api.md#footprint-attributes-locked-dnp-exclude_from).
+
 ## Features
 
 - **Pure Python parsing** - No KiCad installation needed

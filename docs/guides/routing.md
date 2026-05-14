@@ -188,6 +188,83 @@ router.set_net_class_rules("HighSpeed", clearance=0.2)
 
 ---
 
+## Strategy Escalation
+
+When a route hits a wall, the autorouter can climb two orthogonal ladders
+before giving up: **layer count** and **manufacturer tier**. Both are off-by-
+default in the legacy Python `Router` API but on by default (layer-only) in
+`kct route`. Documented exit codes live in
+[CLI Reference → Exit Codes](../reference/cli.md#kct-route-ladder).
+
+### Layer escalation: `--auto-layers`
+
+Defaults: **enabled**. Tries 2 → 4 → 6 layers until routing succeeds or
+`--max-layers` is reached.
+
+```text
+--auto-layers, --no-auto-layers
+                      Automatically escalate layer count on routing failure
+                      (default: enabled). Tries 2 -> 4 -> 6 layers until
+                      routing succeeds or --max-layers is reached. Use --no-
+                      auto-layers to disable and route at a fixed layer
+                      count.
+--max-layers {2,4,6}  Maximum layer count for auto-escalation (default: 6)
+```
+
+Because this is the default, the opt-**out** is `--no-auto-layers`. Pin a
+fixed layer count when you want cost certainty (a 2-layer board must stay
+2-layer) or when comparing baselines across runs.
+
+```bash
+# Default: escalate as needed up to 6 layers
+kct route board.kicad_pcb -o routed.kicad_pcb
+
+# Cost-locked: stay at 2 layers, accept partial routing
+kct route board.kicad_pcb --no-auto-layers --layers 2 -o routed.kicad_pcb
+```
+
+### Manufacturer-tier escalation: `--auto-mfr-tier`
+
+Defaults: **disabled**. When set, the router jumps to a tighter tier of the
+current manufacturer profile when geometric infeasibility (typically QFP/QFN
+fine-pitch escape) blocks routing.
+
+```text
+--auto-mfr-tier       Automatically escalate to a tighter manufacturer tier
+                      when geometric infeasibility blocks routing on the
+                      current tier (default: disabled). E.g. jlcpcb ->
+                      jlcpcb-tier1 to gain via-in-pad for fine-pitch QFP
+                      escape.
+--mfr-tier-ladder MFR_TIER_LADDER
+                      Explicit comma-separated manufacturer tier ladder for
+                      --auto-mfr-tier (e.g. 'jlcpcb,jlcpcb-tier1').
+                      Overrides the default ladder registered for the
+                      current --mfr.
+```
+
+The default ladder for each manufacturer is registered with the rules
+package; `--mfr-tier-ladder` lets you pin a specific climb (useful in CI to
+keep cost differences predictable).
+
+### Combining both ladders
+
+The two flags compose. A typical "make this board route at any cost" recipe:
+
+```bash
+kct route board.kicad_pcb \
+  --mfr jlcpcb \
+  --auto-layers --max-layers 4 \
+  --auto-mfr-tier --mfr-tier-ladder 'jlcpcb,jlcpcb-tier1' \
+  --timeout 1500 -o routed.kicad_pcb
+```
+
+The router will first try the cheaper tier at 2 layers, escalate to 4
+layers, and only as a last resort climb to `jlcpcb-tier1` for via-in-pad. If
+you also pass `--adaptive-rules`, trace width / clearance are relaxed within
+the chosen tier's floor before either ladder advances.
+
+---
+
 ## Differential Pairs
 
 Diff-pair routing is configured per net class on
@@ -388,9 +465,58 @@ for net in result.failed_nets:
 | "Via limit exceeded" | Complex routing | Allow more vias or add layers |
 | "Length mismatch" | Serpentine needed | Enable serpentine routing |
 
+### Reading the exit code
+
+`kct route` returns a structured exit code (see
+[CLI Reference → Exit Codes](../reference/cli.md#kct-route-ladder) for the full
+ladder). The two non-obvious cases:
+
+- **Exit 3** means "routing met `--min-completion` but DRC violations remain"
+  **or** "auto-fix tried to clean DRC and rolled back" (issue #2852). When
+  you see exit 3, re-run with `--auto-fix --auto-fix-passes 5` or inspect the
+  DRC report — the partial result on disk is still routable input.
+- **Exit 5** is a graceful SIGINT — the file on disk is the most recent
+  checkpoint and is safe to feed back into `kct route` or KiCad.
+
 ---
 
 ## Performance
+
+### Long-Running Routes (Checkpointing)
+
+Multi-layer boards with hundreds of nets can run for minutes. `kct route`
+writes the current best-so-far to `--output` on a timer so that a SIGINT
+(Ctrl+C) or a wall-clock `--timeout` leaves a valid PCB on disk you can
+inspect, route again, or hand to KiCad.
+
+```text
+--checkpoint-interval CHECKPOINT_INTERVAL
+                      Interval in seconds between best-so-far checkpoint
+                      writes to --output. Default: 30. Use 0 to disable.
+```
+
+Key behaviours:
+
+- Writes are **atomic** (write-then-rename), so a crash mid-checkpoint never
+  corrupts the file.
+- On SIGINT the router exits **5** with the most recent checkpoint already on
+  disk; the partial result is valid input for another `kct route` pass.
+- `--checkpoint-interval 0` disables checkpointing (slightly faster on small
+  boards where the cost of serialising the PCB every 30 s dominates).
+
+Pair with `--seed` for reproducible long routes and with
+`--export-failed-nets path.txt` to capture the unrouted-nets list at every
+checkpoint for post-hoc analysis.
+
+```bash
+# 25-minute route with a checkpoint every 10s and a failed-net log
+kct route board.kicad_pcb \
+  --timeout 1500 --checkpoint-interval 10 \
+  --export-failed-nets failed.txt \
+  -o routed.kicad_pcb
+```
+
+---
 
 ### Grid Resolution Strategies
 
