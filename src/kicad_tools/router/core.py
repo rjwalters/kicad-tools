@@ -3411,6 +3411,172 @@ class Autorouter:
 
         return (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
 
+    def _interleave_match_groups(self, net_order: list[int]) -> list[int]:
+        """Reserve a front-loaded representative for each match group.
+
+        Issue #2914: The base priority sort (``_get_net_priority``) groups
+        nets first by class priority, then by complexity tier, then by
+        bbox-diagonal (shortest first).  On boards where one match group
+        sits in a lower priority class than another (e.g. board 07 where
+        ADDR_BUS sits in priority class 2 while DDR / MIPI / HDMI occupy
+        class 1, or where one group's members all happen to be
+        longer-span than another's), the lower-priority group is fully
+        scheduled AFTER every member of the higher-priority group(s).
+        With a finite wall-clock budget that's exhausted by the dense
+        higher-priority groups, the lower-priority group is never
+        attempted at all -- A0..A7 on board 07 receive zero "Routing
+        net..." log lines across multiple escalation attempts.
+
+        This helper applies a *front-loaded representative* pass on the
+        priority-sorted order:
+
+        1.  Detect match groups (explicit declarations + suffix
+            inference; see :func:`detect_match_groups`).
+        2.  Build a "front" segment containing the first
+            priority-sorted member of each match group, in
+            priority-sorted order across groups.
+        3.  Build a "tail" segment containing all remaining nets in
+            their original priority-sorted order.
+        4.  Concatenate ``front + tail``.
+
+        The crucial properties:
+
+        - **AC1 attempted-not-skipped**: Every match group's first
+          member is in the first ``G`` slots (where ``G`` is the
+          number of detected groups).  Even when the wall-clock fires
+          after ``K`` nets with ``K >= G``, every group is attempted.
+        - **Diff-pair / coupled-routing preservation**: Apart from the
+          single front-loaded representative, all other group
+          members route consecutively in the tail segment.  This
+          preserves the dense-local-routing locality the curator
+          flagged (#2914 design note) -- the previous full round-robin
+          variant of this helper hurt diff-pair throughput by
+          scattering pair members across the entire schedule.
+        - **Boards without match groups**: degenerates to the identity
+          ordering (the front segment is empty).
+
+        Why this satisfies the design constraint:
+
+        - We do NOT invert the bbox-diagonal tiebreaker.  Shortest-
+          first ordering within each group remains intact.
+        - We do NOT prescribe a per-net budget model -- the existing
+          ``per_net_timeout`` and wall-clock ``timeout`` plumbing
+          remain authoritative.  This helper only changes the
+          *order* in which nets are visited.
+        - We do NOT change priority semantics for non-grouped nets.
+
+        Args:
+            net_order: Priority-sorted list of net ids.  The relative
+                order of non-front-loaded nets is preserved from the
+                input.
+
+        Returns:
+            Re-ordered list: one representative per match group at the
+            front, followed by the remaining nets in input order.  The
+            output is a permutation of the input (same length, same
+            membership).
+        """
+        if not net_order:
+            return net_order
+
+        # Best-effort: locate this net's match group.  Failures (missing
+        # detector module, malformed declarations) degrade gracefully to
+        # the identity ordering -- the worst-case is the pre-fix
+        # behaviour, never a hard failure inside the routing pipeline.
+        net_to_group: dict[int, str] = {}
+        try:
+            from .match_group_detection import detect_match_groups
+
+            # ``self.net_class_map`` is keyed on NET NAMES (see
+            # ``rules.create_net_class_map`` and the runtime
+            # ``router.net_class_map.update(net_class_map)`` board-side
+            # idiom in ``boards/07-matchgroup-test/generate_design.py``).
+            # ``detect_match_groups`` (via ``_gather_explicit_groups``)
+            # expects ``net_class_routing`` keyed on CLASS NAMES, with
+            # ``net_to_class`` providing the {net_name: class_name} view.
+            # The bridging idiom is borrowed from
+            # ``kicad_tools.validate.match_group_skew.derive_group_skew_data``
+            # (``synth_routing`` construction at ``match_group_skew.py:175-181``):
+            # populate the dict under BOTH net-name and class-name keys
+            # so the lookup succeeds regardless of which side the caller
+            # uses.
+            net_to_class: dict[str, str] = {}
+            synth_routing: dict = dict(self.net_class_map)
+            for net_name, net_class in self.net_class_map.items():
+                cls_name = getattr(net_class, "name", None)
+                if cls_name is None:
+                    continue
+                net_to_class[net_name] = cls_name
+                synth_routing.setdefault(cls_name, net_class)
+
+            # ``enable_suffix_inference=True``: For routing-order purposes,
+            # match-group detection feeds the *interleave* fairness step
+            # only -- false-positives (e.g. a coincidental ``A0..A7`` pattern
+            # on a board that doesn't intend them as a bus) just change the
+            # order in which nets are visited, they do NOT introduce
+            # constraints.  The default-off semantic in
+            # ``update_match_group_skew`` and ``derive_group_skew_data`` is
+            # warranted there because those consumers feed DRC rules and
+            # serpentine tuning where false-positives have real cost.  Here
+            # the cost is essentially zero, while the upside is significant:
+            # ``kct route`` does not propagate the explicit
+            # ``length_match_group`` declarations made in board scripts (it
+            # uses ``classify_and_apply_rules`` heuristics that don't set
+            # the field), so without suffix inference the helper would
+            # collapse to a no-op on every board that hasn't manually called
+            # ``Autorouter.add_match_group()``.  This was the silent root
+            # cause of the first iteration of issue #2914's fix not engaging
+            # on board 07.
+            detected_groups = detect_match_groups(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                length_tracker=self._length_tracker,
+                enable_suffix_inference=True,
+            )
+            for grp in detected_groups:
+                for nid in grp.net_ids:
+                    net_to_group[nid] = grp.name
+        except Exception:
+            # Defensive: any failure in detection collapses to the
+            # identity ordering.  This mirrors the per-block try/except
+            # in update_match_group_skew (Issue #2690 / Phase 1D).
+            return net_order
+
+        if not net_to_group:
+            return net_order
+
+        # Walk net_order once in priority-sorted order.  For each match
+        # group, record the FIRST member encountered (this is the
+        # priority-sorted "leader" of the group -- typically the most
+        # constrained / shortest member).  All other nets (including
+        # non-leader group members and non-grouped nets) are appended
+        # to the tail in their original priority-sorted order.
+        seen_groups: set[str] = set()
+        front: list[int] = []
+        tail: list[int] = []
+        for nid in net_order:
+            grp = net_to_group.get(nid)
+            if grp is not None and grp not in seen_groups:
+                seen_groups.add(grp)
+                front.append(nid)
+            else:
+                tail.append(nid)
+
+        # If no group leaders were promoted (all nets were ungrouped),
+        # short-circuit to the input identity.  This is also the
+        # ``front`` is empty case which falls out naturally below.
+        if not front:
+            return net_order
+
+        out = front + tail
+        # Length-preservation invariant: catches accidental drops.
+        assert len(out) == len(net_order), (
+            f"_interleave_match_groups dropped nets: "
+            f"in={len(net_order)} out={len(out)}"
+        )
+        return out
+
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
 
@@ -3675,6 +3841,14 @@ class Autorouter:
         self._detect_and_apply_matrix_preferences(net_order)
         # Re-sort after matrix priority boost
         net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
+
+        # Issue #2914: Front-load one representative per match group so no
+        # group can be fully starved by the wall-clock budget.  Same hook
+        # as in route_all_negotiated / TwoPhaseRouter -- see the
+        # ``_interleave_match_groups`` docstring for the design rationale.
+        # Boards without match-group declarations (and without nets that
+        # match suffix-inference patterns) receive an identity ordering.
+        net_order = self._interleave_match_groups(net_order)
 
         if parallel:
             return self.route_all_parallel(
@@ -4848,6 +5022,15 @@ class Autorouter:
                     return (base[0], flag) + base[1:]
 
                 net_order = sorted(net_order, key=_sibling_aware_priority)
+
+        # Issue #2914: Front-load one representative per match group so
+        # no group can be fully starved by the wall-clock budget.
+        # Without this, board 07 ADDR_BUS (priority class 2) was fully
+        # scheduled after DDR / MIPI / HDMI (class 1) and the 600 s
+        # budget was exhausted before A0..A7 received any "Routing
+        # net..." log line.  See ``_interleave_match_groups`` docstring
+        # for the fairness-vs-priority trade-off rationale.
+        net_order = self._interleave_match_groups(net_order)
 
         total_nets = len(net_order)
 
@@ -6798,6 +6981,12 @@ class Autorouter:
             attempt_blocked_component_ripup=self._attempt_blocked_component_ripup_negotiated,
             build_pads_by_net=_build_pads_by_net,
             get_partially_routed_nets=self._get_partially_routed_nets,
+            # Issue #2914: Share the match-group fairness pass with the
+            # two-phase detailed-routing loop so board 07's ADDR_BUS group
+            # is not starved even when routing goes through
+            # ``route_all_two_phase`` (the default ``kct route`` entry point
+            # via :meth:`route_with_escape`).
+            interleave_match_groups=self._interleave_match_groups,
         )
 
     def route_all_two_phase(
