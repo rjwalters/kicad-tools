@@ -89,6 +89,7 @@ from .escape import (
     get_package_info,
     is_dense_package,
     is_fine_pitch_ssop,
+    is_usb_c_class_connector,
 )
 from .failure_analysis import (
     BlockingElement,
@@ -493,6 +494,7 @@ __all__ = [
     "PackageInfo",
     "is_dense_package",
     "is_fine_pitch_ssop",
+    "is_usb_c_class_connector",
     "detect_package_type",
     "get_package_info",
     # Net Class Auto-Detection (Issue #634)
