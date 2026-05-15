@@ -69,6 +69,8 @@ from kicad_tools.exceptions import RoutingError
 
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
+)
+from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerStack
@@ -86,12 +88,12 @@ class RoutedNetsUnblocker:
     by routed traces are cleared on entry and restored on exit.
     """
 
-    def __init__(self, grid: "RoutingGrid") -> None:
+    def __init__(self, grid: RoutingGrid) -> None:
         self._grid = grid
         self._saved_blocked: np.ndarray | None = None
         self._saved_net: np.ndarray | None = None
 
-    def __enter__(self) -> "RoutedNetsUnblocker":
+    def __enter__(self) -> RoutedNetsUnblocker:
         # Save full copies of the blocked and net arrays
         self._saved_blocked = self._grid._blocked.copy()
         self._saved_net = self._grid._net.copy()
@@ -119,7 +121,7 @@ class _CellView:
 
     __slots__ = ("_grid", "_x", "_y", "_layer")
 
-    def __init__(self, grid: "RoutingGrid", x: int, y: int, layer: int):
+    def __init__(self, grid: RoutingGrid, x: int, y: int, layer: int):
         self._grid = grid
         self._x = x
         self._y = y
@@ -223,11 +225,11 @@ class _LayerView:
 
     __slots__ = ("_grid", "_layer")
 
-    def __init__(self, grid: "RoutingGrid", layer: int):
+    def __init__(self, grid: RoutingGrid, layer: int):
         self._grid = grid
         self._layer = layer
 
-    def __getitem__(self, y: int) -> "_RowView":
+    def __getitem__(self, y: int) -> _RowView:
         return _RowView(self._grid, self._layer, y)
 
 
@@ -236,7 +238,7 @@ class _RowView:
 
     __slots__ = ("_grid", "_layer", "_y")
 
-    def __init__(self, grid: "RoutingGrid", layer: int, y: int):
+    def __init__(self, grid: RoutingGrid, layer: int, y: int):
         self._grid = grid
         self._layer = layer
         self._y = y
@@ -250,7 +252,7 @@ class _GridView:
 
     __slots__ = ("_grid",)
 
-    def __init__(self, grid: "RoutingGrid"):
+    def __init__(self, grid: RoutingGrid):
         self._grid = grid
 
     def __getitem__(self, layer: int) -> _LayerView:
@@ -620,7 +622,7 @@ class RoutingGrid:
         return self._thread_safe
 
     @contextmanager
-    def locked(self) -> Iterator["RoutingGrid"]:
+    def locked(self) -> Iterator[RoutingGrid]:
         """Context manager for exclusive grid access.
 
         Use this when performing multiple grid operations that must be atomic.
@@ -1050,6 +1052,47 @@ class RoutingGrid:
         # the guard.
         if pad.ref and pin_pitch is not None:
             self._apply_narrow_channel_halo(
+                pad,
+                effective_width=effective_width,
+                effective_height=effective_height,
+                pin_pitch=pin_pitch,
+                layers_to_block=layers_to_block,
+            )
+
+        # Issue #2902: exterior-side halo for same-component plane-net
+        # pads.
+        #
+        # The narrow-channel halo above re-blocks the INTER-PAD channel
+        # between same-component pads.  But the failure mode on
+        # board-04's STM32 west edge has 44 ``clearance_pad_segment``
+        # errors against the EXTERIOR side of plane-net pads -- the
+        # side facing away from any same-component sibling.  For LQFP-48
+        # pin 1 (top-west corner) this is the NORTH side (no sibling
+        # north of pin 1 within the chip body).  For middle pins (e.g.
+        # pin 8) it is the radial-outward side (WEST, the pad-tip
+        # direction away from the package body).
+        #
+        # The validator at ``_validate_route_clearance`` uses the pad's
+        # ``max(width, height) / 2`` as a CIRCULAR radius (line 1849)
+        # while the grid's pad envelope is rectangular.  For LQFP-style
+        # long-thin pads (1.475 x 0.3 mm) the circular model is much
+        # more conservative on the SHORT axis -- a trace placed just
+        # outside the rectangular envelope on the pad's short axis can
+        # still violate the circular validator measurement.  The
+        # exterior halo extends the grid's blocking on the open
+        # exterior side(s) of plane-net pads out to a radius matching
+        # the validator's circular check (``pad_radius + clearance +
+        # trace_width / 2``) so A* never produces routes the validator
+        # will reject post-hoc.
+        #
+        # Plane-net selection: in the router, plane pads have
+        # ``pad.net == 0`` (skip_nets folds power/ground KiCad nets to
+        # net 0 in ``io.py:2819-2820``).  Signal pads keep their
+        # routable net id and are NOT re-blocked here -- the chip's own
+        # signal-pin escape (NRST, OSC_OUT, SWCLK etc.) must remain
+        # passable on the exterior side.
+        if pad.ref and pin_pitch is not None:
+            self._apply_exterior_plane_pad_halo(
                 pad,
                 effective_width=effective_width,
                 effective_height=effective_height,
@@ -1579,6 +1622,300 @@ class RoutingGrid:
                             # business altering its state.
                             continue
 
+    def _apply_exterior_plane_pad_halo(
+        self,
+        pad: Pad,
+        effective_width: float,
+        effective_height: float,
+        pin_pitch: float,
+        layers_to_block: list[int],
+    ) -> None:
+        """Re-block the EXTERIOR-side corridor of same-component plane-net
+        pads when narrow-channel infeasibility forces the fine-pitch
+        shrink off (Issue #2902).
+
+        Background.  ``_apply_narrow_channel_halo`` (#2878) re-blocks the
+        inter-pad channel between two same-component pads after
+        ``_relax_same_component_clearance`` opens it for chip-escape
+        routing.  That handles the channel side.  But on board-04's
+        STM32 LQFP-48 west edge under jlcpcb-tier1 rules
+        (``trace=clearance=0.127 mm``) the residual 44
+        ``clearance_pad_segment`` errors live on the **exterior** side
+        of same-component plane-net pads -- the side facing AWAY from
+        any same-component sibling.  Pin 1 (top-west corner) has no
+        sibling on its NORTH side, so a foreign signal stub (NRST /
+        OSC_OUT / SWCLK) routed across F.Cu can clip pin 1's metal from
+        the exterior north corridor.
+
+        Validator semantics.  ``_validate_route_clearance``
+        (pathfinder.py:2597) measures distance from a segment to a pad
+        using ``pad_radius = max(width, height) / 2`` (line 1849) -- a
+        CIRCULAR model.  For LQFP-style long-thin pads (1.475 x 0.3 mm)
+        the circular radius (0.7375 mm) is much larger than the
+        rectangular short-axis half-extent (0.15 mm); a trace placed
+        just outside the rectangular envelope can still violate the
+        circular check.  The grid-side rectangular envelope and the
+        validator's circular envelope DISAGREE; the validator wins in
+        external DRC.
+
+        Strategy.  Walk every same-component plane-net pad
+        (``pad.net == 0``).  For each, compute the radial extent
+        matching the validator's circular check
+        (``pad_radius + clearance + trace_width/2``) and re-block grid
+        cells on the EXTERIOR side(s) -- the cardinal directions
+        without a same-component sibling within ~1.5 * pin_pitch.  Use
+        the same net-aware bucketing as
+        ``_apply_narrow_channel_halo``: cells owned by the plane pad's
+        component nets stay passable for those nets; foreign cells get
+        re-blocked; foreign-component cells are left alone.
+
+        Same-net preservation.  Because plane-net pads have
+        ``pad.net == 0`` in the router context (per
+        ``io.py:2819-2820``), their "own net" is 0 -- the standard
+        static-obstacle pattern (``blocked=True`` with ``cell.net==0``)
+        already permits the plane to claim those cells during the
+        stitch pass.  Foreign nets (any non-zero routing net) are
+        rejected.
+
+        Args:
+            pad: The newly-added pad on a known component.  May be a
+                plane-net pad (we re-evaluate its exterior) or a
+                signal-net pad (we re-evaluate all previously-added
+                plane-net siblings; the per-pair walk makes the
+                operation order-invariant).
+            effective_width: The newly-added pad's effective width in mm
+                (mirrors the ``_add_pad_unsafe`` computation).
+            effective_height: As above for height.
+            pin_pitch: The component's pin pitch in mm.  Drives the
+                narrow-channel infeasibility predicate AND the
+                sibling-adjacency search radius.
+            layers_to_block: Layer indices to apply the halo to.
+        """
+        # Same predicate as ``_apply_narrow_channel_halo`` (and
+        # ``_clearance_for_pin_pitch`` line 833-836).  The exterior
+        # halo only fires when the narrow-channel guard rejects the
+        # fine-pitch shrink -- the same regime where the grid's
+        # rectangular envelope risks under-reserving the cells the
+        # circular validator demands.  For wide pitches (>=
+        # ``fine_pitch_threshold``) the standard envelope already
+        # matches the validator's circular check on the long axis;
+        # short-axis pads at wide pitch are typically passives where
+        # the chip-exterior failure mode does not apply.
+        if pin_pitch >= self.rules.fine_pitch_threshold:
+            return
+        if self.rules.min_trace_width is None:
+            return
+        shrunk = self.rules.min_trace_width / 2.0
+        effective_channel = pin_pitch - 2.0 * shrunk - self.rules.trace_width
+        required_channel = 2.0 * self.rules.trace_clearance + self.rules.trace_width
+        if effective_channel >= required_channel:
+            return
+
+        component_pads = self._component_pads.get(pad.ref, [])
+        if len(component_pads) < 2:
+            return
+
+        # Adjacency search radius.  A sibling pad whose center is
+        # within ``1.5 * pin_pitch`` of the plane pad's center along an
+        # axis counts as "occupying" that axis side, so the exterior
+        # halo should NOT engage on that side (the narrow-channel halo
+        # already covers the inter-pad channel there).  The same slack
+        # tolerance is used by ``_apply_narrow_channel_halo`` line 1493.
+        adjacency_radius = 1.5 * pin_pitch
+
+        # Iterate every plane-net pad on this component (newly-added
+        # one included if it's a plane pad).  Per-pair re-evaluation is
+        # idempotent and order-invariant.
+        for plane_pad in component_pads:
+            if plane_pad.net != 0:
+                # Only plane-net pads need this exterior halo.  Signal
+                # pads route OUT of their pad metal in the escape
+                # phase; re-blocking their exterior would kill chip
+                # escape routing.  The validator excludes signal
+                # same-component pads via ``exclude_refs`` at
+                # ``pathfinder.py:2776-2780``, so any A* route past
+                # them is accepted post-hoc.  Plane-net pads are the
+                # ONLY same-component pads validated against, hence
+                # the only ones that benefit from this pre-block.
+                continue
+
+            # Reproduce the plane pad's effective dimensions (mirrors
+            # ``_add_pad_unsafe`` and the sibling iteration in the
+            # narrow-channel halo above).
+            if plane_pad.through_hole:
+                if plane_pad.width > 0 and plane_pad.height > 0:
+                    pl_ew = plane_pad.width
+                    pl_eh = plane_pad.height
+                elif plane_pad.drill > 0:
+                    pl_ew = plane_pad.drill + 0.7
+                    pl_eh = pl_ew
+                else:
+                    pl_ew = 1.7
+                    pl_eh = 1.7
+            else:
+                pl_ew = plane_pad.width
+                pl_eh = plane_pad.height
+
+            # Determine which cardinal sides of the plane pad are
+            # "exterior" -- i.e. have no same-component sibling within
+            # ``adjacency_radius`` on that side.  Sides with a sibling
+            # nearby are already handled by ``_apply_narrow_channel_halo``
+            # (the inter-pad channel); we must not double-block them
+            # because the channel halo's net-aware semantics permit the
+            # sibling's own escape.
+            has_north_sibling = False  # smaller y
+            has_south_sibling = False  # larger y
+            has_west_sibling = False  # smaller x
+            has_east_sibling = False  # larger x
+            for sib in component_pads:
+                if sib is plane_pad:
+                    continue
+                dx = sib.x - plane_pad.x
+                dy = sib.y - plane_pad.y
+                # Classify by dominant axis -- a sibling at the same
+                # x-coordinate (perpendicular axis distance ~ 0) along
+                # the y axis occupies the north or south side.  The
+                # cross-axis tolerance (half of pin_pitch) keeps
+                # diagonal pads (e.g. corner-to-corner of a QFN) from
+                # being mis-classified as edge neighbours.
+                if abs(dy) <= adjacency_radius and abs(dx) <= 0.5 * pin_pitch:
+                    if dy < 0:
+                        has_north_sibling = True
+                    elif dy > 0:
+                        has_south_sibling = True
+                if abs(dx) <= adjacency_radius and abs(dy) <= 0.5 * pin_pitch:
+                    if dx < 0:
+                        has_west_sibling = True
+                    elif dx > 0:
+                        has_east_sibling = True
+
+            # Validator-equivalent circular keep-out radius from pad
+            # center.  Mirror of ``pad_radius = max(width, height) / 2``
+            # at ``grid.py:1849`` plus the manufacturer's required
+            # clearance and trace half-width margin.  Using the
+            # validator's exact formula prevents the grid-vs-validator
+            # rectangular-vs-circular disagreement that produces the
+            # 44 residual board-04 errors.
+            pad_radius = max(pl_ew, pl_eh) / 2.0
+            halo_radius = (
+                pad_radius + self.rules.trace_clearance + self.rules.trace_width / 2.0
+            )
+
+            # Pad half-extents (rectangular metal bounds).  The
+            # exterior halo extends beyond these on the open side(s).
+            half_w = pl_ew / 2.0
+            half_h = pl_eh / 2.0
+
+            # Bounding-box of the circular halo around the plane pad.
+            halo_x1 = plane_pad.x - halo_radius
+            halo_y1 = plane_pad.y - halo_radius
+            halo_x2 = plane_pad.x + halo_radius
+            halo_y2 = plane_pad.y + halo_radius
+
+            hgx1, hgy1 = self.world_to_grid(halo_x1, halo_y1)
+            hgx2, hgy2 = self.world_to_grid(halo_x2, halo_y2)
+
+            for layer_idx in layers_to_block:
+                for gy in range(hgy1, hgy2 + 1):
+                    for gx in range(hgx1, hgx2 + 1):
+                        if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+                            continue
+
+                        # Never overwrite another pad's metal area --
+                        # same contract as the narrow-channel halo.
+                        if self._pad_blocked[layer_idx, gy, gx]:
+                            continue
+
+                        wx, wy = self.grid_to_world(gx, gy)
+
+                        # Skip cells inside the pad's metal rectangle
+                        # (pad_blocked handles the strict metal, but
+                        # the rectangular envelope corners may slip
+                        # through grid quantisation).  We are only
+                        # blocking the EXTERIOR halo annulus.
+                        in_metal_rect = (
+                            plane_pad.x - half_w <= wx <= plane_pad.x + half_w
+                            and plane_pad.y - half_h <= wy <= plane_pad.y + half_h
+                        )
+                        if in_metal_rect:
+                            continue
+
+                        # Circular distance from cell center to pad
+                        # center -- mirror of the validator's
+                        # point-to-pad-center distance check.
+                        d2 = (wx - plane_pad.x) ** 2 + (wy - plane_pad.y) ** 2
+                        if d2 > halo_radius * halo_radius:
+                            # Outside the circular halo radius --
+                            # nothing to do.
+                            continue
+
+                        # Determine which side of the pad this cell
+                        # falls on, and only re-block when that side
+                        # is EXTERIOR (no sibling).  Sides with a
+                        # sibling are handled by the narrow-channel
+                        # halo (and the relaxation must remain
+                        # permissive for the chip's own escape).
+                        #
+                        # A cell at (wx, wy) is on the "north" side
+                        # when wy < pad.y - half_h (above the pad's
+                        # top edge); on the "south" side when
+                        # wy > pad.y + half_h; etc.  Cells diagonally
+                        # outside (corner annulus) are exterior only
+                        # if BOTH the dominant-axis side and the
+                        # cross-axis side are exterior.
+                        is_north = wy < plane_pad.y - half_h
+                        is_south = wy > plane_pad.y + half_h
+                        is_west = wx < plane_pad.x - half_w
+                        is_east = wx > plane_pad.x + half_w
+
+                        # Cell is in the exterior corridor if EVERY
+                        # cardinal side it falls on is open (no
+                        # sibling).  This conservatively avoids
+                        # encroaching on the inter-pad channel that
+                        # the narrow-channel halo owns.
+                        cell_exterior = True
+                        if is_north and has_north_sibling:
+                            cell_exterior = False
+                        if is_south and has_south_sibling:
+                            cell_exterior = False
+                        if is_west and has_west_sibling:
+                            cell_exterior = False
+                        if is_east and has_east_sibling:
+                            cell_exterior = False
+                        # The cell must be strictly outside the metal
+                        # rect on at least one axis to be in the
+                        # exterior halo (already guaranteed because
+                        # in_metal_rect=False above means at least one
+                        # of is_{north,south,east,west} is True).
+                        if not cell_exterior:
+                            continue
+
+                        # Net-aware re-block.  Mirror of
+                        # ``_apply_narrow_channel_halo`` bucketing.
+                        cell_net = int(self._net[layer_idx, gy, gx])
+                        if cell_net == plane_pad.net or cell_net == 0:
+                            # plane_pad.net is 0 here (only plane pads
+                            # reach this branch), so cell_net==0
+                            # covers both Bucket A (owned by the plane
+                            # net) and Bucket B (unclaimed).  In both
+                            # cases mark blocked with cell.net==0 so
+                            # foreign routing nets are rejected
+                            # (cell.net != routing_net) while the
+                            # plane (net=0) can still claim the cell
+                            # during stitch-pass bonding.
+                            self._blocked[layer_idx, gy, gx] = True
+                        else:
+                            # Foreign-component / foreign-signal cell
+                            # owns this cell already (almost certainly
+                            # a same-component signal pad's escape
+                            # corridor or a different component's
+                            # clearance envelope).  Leave its net
+                            # assignment intact; mark is_obstacle so
+                            # foreign-net traces are rejected in
+                            # negotiated mode while the cell's owner
+                            # can still route through.
+                            self._is_obstacle[layer_idx, gy, gx] = True
+
     def _relax_same_component_clearance(
         self,
         pad: Pad,
@@ -1788,7 +2125,6 @@ class RoutingGrid:
             - actual_clearance: Minimum clearance found (negative if overlapping)
             - violation_location: (x, y) of worst violation, or None if valid
         """
-        import math
 
         if min_clearance is None:
             min_clearance = self.rules.trace_clearance
@@ -2002,7 +2338,7 @@ class RoutingGrid:
 
     def validate_via_clearance(
         self,
-        via: "Via",
+        via: Via,
         exclude_net: int,
         min_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -2074,7 +2410,7 @@ class RoutingGrid:
 
     def validate_via_to_via_clearance(
         self,
-        via: "Via",
+        via: Via,
         exclude_net: int,
         min_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -2131,7 +2467,7 @@ class RoutingGrid:
 
     def validate_same_net_drill_spacing(
         self,
-        via: "Via",
+        via: Via,
         same_net: int,
         min_drill_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -3236,7 +3572,7 @@ class RoutingGrid:
     # NEIGHBORHOOD RIP-UP SUPPORT (Issue #2274)
     # =========================================================================
 
-    def temporarily_unblock_routed_nets(self) -> "RoutedNetsUnblocker":
+    def temporarily_unblock_routed_nets(self) -> RoutedNetsUnblocker:
         """Return a context manager that temporarily unblocks routed-net cells.
 
         Static obstacles (pads, board edges, zones marked with ``pad_blocked``)
@@ -3258,7 +3594,7 @@ class RoutingGrid:
 
     def add_zone_cells(
         self,
-        zone: "Zone",
+        zone: Zone,
         filled_cells: set[tuple[int, int]],
         layer_index: int,
     ) -> None:
@@ -3575,8 +3911,8 @@ class RoutingGrid:
         rules: DesignRules,
         origin_x: float = 0,
         origin_y: float = 0,
-        layer_stack: "LayerStack | None" = None,
-    ) -> "RoutingGrid":
+        layer_stack: LayerStack | None = None,
+    ) -> RoutingGrid:
         """Create a grid with expanded obstacles for faster routing.
 
         This factory method creates a grid optimized for performance:
@@ -3616,9 +3952,9 @@ class RoutingGrid:
         rules: DesignRules,
         origin_x: float = 0,
         origin_y: float = 0,
-        layer_stack: "LayerStack | None" = None,
+        layer_stack: LayerStack | None = None,
         target_cells: int = 500000,
-    ) -> "RoutingGrid":
+    ) -> RoutingGrid:
         """Create a grid with adaptive resolution based on board size.
 
         Automatically calculates resolution to keep total cells near target,
