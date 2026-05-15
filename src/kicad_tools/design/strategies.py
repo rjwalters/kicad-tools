@@ -21,6 +21,7 @@ Example::
 from __future__ import annotations
 
 import math
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -29,6 +30,16 @@ from kicad_tools.design.subsystems import OptimizationGoal, SubsystemType
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+
+# Regex pattern matching net names that indicate a crystal/oscillator pin
+# on an MCU footprint. Matches XTAL, XTAL1/XTAL2, XTALIN/XTALOUT, OSC_IN,
+# OSC_OUT, OSC32_IN, OSC32_OUT etc. Case-insensitive. Designed to be
+# permissive enough to catch common STM32, AVR, PIC and TI naming
+# conventions without false positives like "FAST_GPIO".
+_XTAL_NET_PATTERN = re.compile(
+    r"(?:^|[^A-Z0-9])(?:XTAL(?:IN|OUT|\d?)|OSC(?:32)?(?:_?IN|_?OUT|\d?))(?:$|[^A-Z0-9])",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -287,6 +298,96 @@ class MCUCoreStrategy(PlacementStrategy):
     def supported_patterns(self) -> list[str]:
         return ["mcu_bypass", "crystal", "reset"]
 
+    @staticmethod
+    def _xtal_edge_angle(pcb: PCB, mcu_ref: str) -> float | None:
+        """Determine the edge of an MCU package that carries XTAL/OSC pads.
+
+        Inspects the MCU footprint, finds all pads whose ``net_name``
+        matches a crystal-oscillator naming pattern (XTAL, XTAL1/2,
+        XTALIN/OUT, OSC_IN/OUT, OSC32_IN/OUT, etc.), computes their
+        centroid in the world frame (applying the footprint's rotation),
+        and snaps the centroid direction to the nearest cardinal edge.
+
+        Args:
+            pcb: PCB containing the footprint.
+            mcu_ref: Reference designator of the MCU (e.g. ``"U1"``).
+
+        Returns:
+            One of {0.0, 90.0, 180.0, 270.0} in the same screen-Y angle
+            convention used by :meth:`_calculate_position`
+            (0=east, 90=south, 180=west, 270=north). Returns ``None`` if
+            the footprint cannot be located, has no pads, or has no
+            pads whose net names match the XTAL/OSC pattern. Returning
+            ``None`` signals the caller to fall back to the legacy
+            default (270.0).
+        """
+        # Locate the footprint in the PCB. We tolerate missing pcb
+        # attributes / empty PCBs so test harnesses that pass a minimal
+        # stub PCB continue to work (the strategy was already permissive
+        # — see existing tests in tests/test_design.py).
+        footprints = getattr(pcb, "footprints", None)
+        if not footprints:
+            return None
+
+        mcu_fp = None
+        for fp in footprints:
+            if getattr(fp, "reference", None) == mcu_ref:
+                mcu_fp = fp
+                break
+        if mcu_fp is None:
+            return None
+
+        pads = getattr(mcu_fp, "pads", None) or []
+        if not pads:
+            return None
+
+        # Collect pad-local coordinates of XTAL/OSC pads.
+        xtal_offsets: list[tuple[float, float]] = []
+        for pad in pads:
+            net_name = getattr(pad, "net_name", "") or ""
+            if not net_name:
+                continue
+            if _XTAL_NET_PATTERN.search(net_name):
+                px, py = pad.position
+                xtal_offsets.append((float(px), float(py)))
+
+        if not xtal_offsets:
+            return None
+
+        # Rotate pad-local offsets into the world frame using the
+        # footprint's rotation. KiCad rotation is positive CCW; the
+        # standard 2D rotation matrix applies directly (no negation).
+        # This matches PCB.get_pad_position and the router's
+        # adaptive._add_component_to_router transform.
+        rotation_deg = float(getattr(mcu_fp, "rotation", 0.0) or 0.0)
+        rot_rad = math.radians(rotation_deg)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        sum_x = 0.0
+        sum_y = 0.0
+        for px, py in xtal_offsets:
+            rx = px * cos_r - py * sin_r
+            ry = px * sin_r + py * cos_r
+            sum_x += rx
+            sum_y += ry
+
+        n = len(xtal_offsets)
+        cx = sum_x / n
+        cy = sum_y / n
+
+        # Snap the centroid direction to the nearest cardinal edge.
+        # Note: screen-Y convention (Y grows downward), so
+        # 0=east(+x), 90=south(+y), 180=west(-x), 270=north(-y).
+        # If the centroid is essentially at the MCU centre (extremely
+        # unlikely but possible for a 1-pad XTAL or a fully symmetric
+        # placement), fall back to the legacy default.
+        if abs(cx) < 1e-9 and abs(cy) < 1e-9:
+            return None
+
+        if abs(cx) >= abs(cy):
+            return 0.0 if cx > 0 else 180.0
+        return 90.0 if cy > 0 else 270.0
+
     def compute_placements(
         self,
         components: list[str],
@@ -356,22 +457,44 @@ class MCUCoreStrategy(PlacementStrategy):
 
         # Place crystal (typically near OSC pins on one side)
         if crystal:
-            pos = self._calculate_position(anchor_position, 5.0, 270.0)  # Above MCU
+            # Inspect the MCU footprint's XTAL/OSC pads to choose a side.
+            # Falls back to 270 deg ("above MCU" in screen-Y convention)
+            # when the footprint has no XTAL-named pins or when the MCU
+            # can't be located in the PCB.
+            xtal_angle = self._xtal_edge_angle(pcb, anchor)
+            crystal_angle = xtal_angle if xtal_angle is not None else 270.0
+            pos = self._calculate_position(anchor_position, 5.0, crystal_angle)
+            rationale = (
+                f"Crystal placed on MCU XTAL-pin edge (angle {crystal_angle:.0f} deg)"
+                if xtal_angle is not None
+                else "Crystal close to OSC pins (fallback: no XTAL pads found)"
+            )
             placements[crystal] = Placement(
                 ref=crystal,
                 x=pos[0],
                 y=pos[1],
                 rotation=0.0,
-                rationale="Crystal close to OSC pins",
+                rationale=rationale,
             )
 
-            # Place load caps near crystal
+            # Place load caps near crystal. The two caps straddle the
+            # crystal along the axis perpendicular to the MCU-to-crystal
+            # vector (so each load cap sits adjacent to one crystal
+            # pad/MCU XTAL pin) and are nudged 1.5mm back toward the MCU
+            # so their GND pads sit closest to the MCU ground.
+            perp_rad = math.radians(crystal_angle + 90.0)
+            perp_dx = math.cos(perp_rad)
+            perp_dy = math.sin(perp_rad)
+            # Unit vector from crystal back toward MCU centre (= -outward).
+            inward_rad = math.radians(crystal_angle + 180.0)
+            inward_dx = math.cos(inward_rad)
+            inward_dy = math.sin(inward_rad)
             for i, cap in enumerate(load_caps):
                 offset = 1.5 if i == 0 else -1.5
                 placements[cap] = Placement(
                     ref=cap,
-                    x=pos[0] + offset,
-                    y=pos[1] + 1.5,
+                    x=pos[0] + offset * perp_dx + 1.5 * inward_dx,
+                    y=pos[1] + offset * perp_dy + 1.5 * inward_dy,
                     rotation=0.0,
                     rationale="Load capacitor near crystal",
                 )
