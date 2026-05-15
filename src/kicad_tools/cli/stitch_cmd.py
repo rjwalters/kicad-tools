@@ -1747,7 +1747,7 @@ def calculate_extended_escape_position(
     via_size: float,
     existing_vias: list[tuple[float, float, int]],
     clearance: float,
-    escape_distance: float = 3.0,
+    escape_distance: float = 4.0,
     other_net_tracks: list[TrackSegment] | None = None,
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
@@ -1771,7 +1771,11 @@ def calculate_extended_escape_position(
         via_size: Via pad diameter in mm
         existing_vias: Same-net vias as (x, y, net_num) for via-to-via spacing
         clearance: Minimum clearance from existing copper in mm
-        escape_distance: Maximum total escape trace length in mm (default 3.0)
+        escape_distance: Maximum total escape trace length in mm (default 4.0).
+            For 7-row 1.27mm-pitch BGAs the corner-to-clear distance is ~4mm,
+            so the search radius must reach that far. ``_check_via_position``
+            still rejects collisions, so widening the search cannot create
+            new clearance violations.
         other_net_tracks: Track segments on other nets for clearance checking
         other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
         other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
@@ -1821,18 +1825,25 @@ def calculate_extended_escape_position(
         axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         escape_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
 
-    # Progressive axial distances for the first leg (along the pin row)
-    # These are larger than dogleg to escape past multiple neighboring pins
-    axial_distances = [0.5, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5, 3.0, 3.5, 4.0]
+    # Progressive axial distances for the first leg (along the pin row).
+    # These are larger than dogleg to escape past multiple neighboring pins.
+    # Extended to 5.0mm to accommodate outer-ring pads on large (7+ row) BGAs
+    # whose corner-to-clear distance exceeds 4mm; entries are filtered by the
+    # caller-supplied ``escape_distance`` so callers can still tighten the
+    # search.
+    axial_distances = [0.5, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
     axial_distances = [d for d in axial_distances if d <= escape_distance]
 
-    # Escape offsets for the final breakout leg (perpendicular to pin row)
+    # Escape offsets for the final breakout leg (perpendicular to pin row).
+    # Extra rings (k=4) help when the inner rings collide with neighboring
+    # pads; ``_check_via_position`` rejects bad placements regardless.
     breakout_offsets = [
         pad_radius + offset,
         pad_radius + offset * 1.5,
         pad_radius + offset * 2,
         pad_radius + offset * 2.5,
         pad_radius + offset * 3,
+        pad_radius + offset * 4,
     ]
     breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
 
@@ -2007,6 +2018,100 @@ def calculate_extended_escape_position(
                             (wp2_x, wp2_y),
                         ]
                         return (via_x, via_y, waypoints)
+
+    # Strategy 4: Polar-grid via sampler with layer-aware 2-segment routing.
+    # The three L/Z strategies above search only the 4 cardinal directions,
+    # which leaves diagonal escape paths untested, AND they check trace
+    # clearance against tracks on every copper layer.  The pad-to-via trace
+    # is on the pad's layer (F.Cu or B.Cu), so an In*.Cu track cannot
+    # actually collide with it; the conservative all-layer check forced the
+    # earlier strategies to reject feasible escapes for outer-ring BGA pads
+    # whose escape corridors are full of inner-layer signal traces.
+    #
+    # This strategy samples candidate via positions on a polar grid (16
+    # angular steps x progressive radii) and, for each clearance-valid
+    # candidate, attempts a 2-segment routing path (pad -> halfway
+    # waypoint -> via).  Trace clearance is checked only against tracks
+    # on the pad's layer.  Via clearance still considers every layer
+    # (vias span F.Cu through B.Cu).
+    trace_layer = pad.layer
+    same_layer_tracks = [seg for seg in other_net_tracks if seg.layer == trace_layer]
+
+    def _check_path_layer_aware(pts: list[tuple[float, float]]) -> bool:
+        """Path clearance using only tracks on the pad's layer.
+
+        Vias and pads are not layer-filtered: vias span all copper layers
+        and SMD/through-hole pads can collide with traces from above/below
+        via copper exposure.  This is the same model used by the
+        layer-agnostic helper for those obstacle classes.
+        """
+        if trace_width <= 0:
+            return True
+        for i in range(len(pts) - 1):
+            sx, sy = pts[i]
+            ex, ey = pts[i + 1]
+            for seg in same_layer_tracks:
+                dist = segment_to_segment_distance(
+                    sx,
+                    sy,
+                    ex,
+                    ey,
+                    seg.start_x,
+                    seg.start_y,
+                    seg.end_x,
+                    seg.end_y,
+                )
+                if dist < trace_half_width + seg.width / 2 + clearance:
+                    return False
+            for ovx, ovy, ov_size, _onet in other_net_vias:
+                dist = point_to_segment_distance(ovx, ovy, sx, sy, ex, ey)
+                if dist < trace_half_width + ov_size / 2 + clearance:
+                    return False
+            for px, py, p_radius, _pnet in other_net_pads:
+                dist = point_to_segment_distance(px, py, sx, sy, ex, ey)
+                if dist < trace_half_width + p_radius + clearance:
+                    return False
+        return True
+
+    angular_steps = 16  # 22.5deg increments — covers diagonals
+    polar_radii = [
+        pad_radius + offset * 2.0,
+        pad_radius + offset * 2.5,
+        pad_radius + offset * 3.0,
+        pad_radius + offset * 4.0,
+        pad_radius + offset * 5.0,
+        pad_radius + offset * 6.0,
+        pad_radius + offset * 7.0,
+        pad_radius + offset * 8.0,
+    ]
+    polar_radii = [r for r in polar_radii if r <= escape_distance]
+    if not polar_radii:
+        polar_radii = [min(pad_radius + offset * 2.0, escape_distance)]
+
+    for radius in polar_radii:
+        for k in range(angular_steps):
+            theta = (2 * math.pi * k) / angular_steps
+            via_x = pad.x + radius * math.cos(theta)
+            via_y = pad.y + radius * math.sin(theta)
+
+            if not _check_via_position(via_x, via_y):
+                continue
+
+            # Intermediate waypoint at half-radius on the same bearing
+            wp_x = pad.x + (radius * 0.5) * math.cos(theta)
+            wp_y = pad.y + (radius * 0.5) * math.sin(theta)
+
+            path_points = [
+                (pad.x, pad.y),
+                (wp_x, wp_y),
+                (via_x, via_y),
+            ]
+
+            if not _check_path_layer_aware(path_points):
+                continue
+
+            waypoints = [(wp_x, wp_y)]
+            return (via_x, via_y, waypoints)
 
     return None
 
@@ -3294,7 +3399,7 @@ def run_stitch(
     target_layer: str | None = None,
     trace_width: float = 0.2,
     dry_run: bool = False,
-    escape_distance: float = 3.0,
+    escape_distance: float = 4.0,
     micro_via: bool = False,
     micro_via_size: float = 0.3,
     micro_via_drill: float = 0.15,
@@ -3311,7 +3416,7 @@ def run_stitch(
         target_layer: Target plane layer (auto-detect from zones if None)
         trace_width: Width of pad-to-via trace segments in mm
         dry_run: If True, don't modify the file
-        escape_distance: Maximum escape trace length in mm for dense IC pads (default 3.0)
+        escape_distance: Maximum escape trace length in mm for dense IC pads (default 4.0)
         micro_via: If True, retry failed pads with smaller micro-vias
         micro_via_size: Micro-via pad diameter in mm (default 0.3)
         micro_via_drill: Micro-via drill diameter in mm (default 0.15)
@@ -3954,10 +4059,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--escape-distance",
         type=float,
-        default=3.0,
-        help="Maximum escape trace length in mm for dense IC pads (default: 3.0). "
+        default=4.0,
+        help="Maximum escape trace length in mm for dense IC pads (default: 4.0). "
         "When both straight-line and dog-leg placement fail, extended escape traces "
-        "up to this length are tried to navigate between dense pin fields.",
+        "up to this length are tried to navigate between dense pin fields. The "
+        "default of 4.0mm covers outer-ring pads on 7-row 1.27mm-pitch BGAs whose "
+        "corner-to-clear distance is ~4mm.",
     )
     parser.add_argument(
         "--micro-via",
