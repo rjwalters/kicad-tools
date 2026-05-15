@@ -1400,6 +1400,26 @@ class EscapeRouter:
         nearest inner-ring partner via that ``_escape_bga_rings`` would
         place (``via_offset = via_spacing`` at the next ring).
 
+        Pathfinder integration (Issue #2911): The reservation is
+        consulted by ``RoutingGrid.get_corridor_attractor_bonus`` and
+        applied as a NEGATIVE step cost in the A* pathfinder, biasing
+        the main routing pipeline toward dropping a via into the
+        corridor and continuing on the reserved layer.  This is the
+        "attractor" mechanism — without it, the protection from #2677
+        was a no-blockade region but not preferentially used by the
+        pathfinder.
+
+        Envelope robustness (Issue #2911 AC6): The reservation map is
+        consulted PER CELL by ``RoutingGrid._mark_via`` -- a partner via
+        whose centre sits OUTSIDE the corridor but whose clearance
+        envelope overlaps the corridor will have its in-corridor cells
+        skipped (the centre cell itself is still blocked, but the
+        envelope is harmless to the reservation).  No additional halo
+        widening of ``lat_half`` is required for this -- and in fact
+        widening it starves neighbouring single-ended nets of routing
+        channels on dense match-group boards (e.g. board 07's DDR data
+        byte).
+
         Args:
             members: Paired EscapeRoutes (2 for a diff pair, N for a
                 match group). Must contain at least 2 members; an empty
@@ -1514,6 +1534,24 @@ class EscapeRouter:
         )
         lat_pad = intra_pair_clearance + max_trace_w
         lat_half = lat_extent + lat_pad
+
+        # Issue #2911 (AC6 envelope robustness): The corridor reservation
+        # is consulted PER CELL by ``RoutingGrid._mark_via`` -- when a
+        # partner via's envelope (radius
+        # ``(via_diameter/2 + via_clearance + trace_w/2)/resolution + 1``)
+        # overlaps the corridor, the CELLS inside the corridor are skipped
+        # individually, even if the via centre is outside the corridor.
+        # That means the existing per-cell protection already absorbs the
+        # partner-via clearance halo: a partner via just outside the
+        # corridor can still place its centre cell, but none of its
+        # envelope cells inside the corridor will be blocked.  We
+        # therefore do NOT widen ``lat_half`` to include the partner-via
+        # halo -- doing so would over-reserve the inner layer and starve
+        # neighbouring single-ended nets of routing channels (board 07
+        # match-group regression observed during PR-2911 development).
+        # The halo widening from earlier #2911 iterations is intentionally
+        # NOT applied here; AC6 is satisfied by the per-cell skip in
+        # ``_mark_via`` instead.
 
         # Corridor length: extrude forward by ~3 launch-distance steps
         # so the corridor outlasts the nearest partner via.  The launch

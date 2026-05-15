@@ -153,6 +153,27 @@ class DesignRules:
     # to disable corridor guidance.
     cost_corridor_deviation: float = 5.0
 
+    # Diff-pair / match-group corridor attractor (Issue #2911)
+    # Cells reserved by ``EscapeRouter._reserve_pair_continuation_corridor`` for
+    # a paired set of nets receive a NEGATIVE cost bonus when the route's net is
+    # in the reservation's owner set.  This complements the corridor reservation
+    # primitive from #2677 (which protects reserved cells against partner-net
+    # vias but does NOT tell the pathfinder to use the reserved layer).  Without
+    # this attractor the main pathfinder treats the reserved channel as just
+    # another empty layer and may not bother diving into the inner corridor at
+    # all -- the board 06 USB3_TX1+/- pair stayed unrouted on top of an
+    # otherwise-vacant reserved corridor.
+    #
+    # The bonus is applied as ``-cost_corridor_attractor`` per cell, capped at
+    # the cell's positive cost so the total g_score never goes negative
+    # (negative costs would corrupt A* admissibility).  A value of 3.0 makes
+    # the attractor comparable to ``cost_straight`` (=1.0) and roughly 30% of
+    # ``cost_via`` (=10.0) -- enough to bias the search through the reserved
+    # corridor without overruling DRC or congestion constraints.  Set to 0.0
+    # to disable the attractor entirely (reservations still protect against
+    # partner vias).
+    cost_corridor_attractor: float = 3.0
+
     # Corridor penalty decay parameters (Issue #2308)
     # Controls how quickly the corridor penalty relaxes during negotiated
     # rip-up iterations, allowing the detailed router to escape suboptimal
