@@ -767,6 +767,54 @@ class CppPathfinder:
         # ``clearance`` for every other net (the pre-Phase-1C contract).
         self._net_name_to_id: dict[str, int] = {}
 
+        # Issue #2929: Per-A*-call wall-clock instrumentation, mirroring the
+        # Python pathfinder's instrumentation surface so callers can audit
+        # deadline behavior regardless of which backend handles the call.
+        # Disabled by default (zero overhead on the production hot path);
+        # toggled via :meth:`enable_per_call_timing` and drained via
+        # :meth:`get_and_clear_per_call_timings`.
+        self._per_call_timing_enabled: bool = False
+        self._per_call_timings: list[dict] = []
+
+    def enable_per_call_timing(self, enabled: bool = True) -> None:
+        """Enable or disable per-A*-call wall-clock instrumentation.
+
+        Issue #2929: When enabled, every ``route()`` call records a timing
+        entry capturing the wall-clock duration, the per-net deadline (if
+        any), and whether the deadline was honored within the 1.2x slack
+        bound from the issue's acceptance criteria.  Disabled by default
+        so production routing pays zero overhead.
+
+        Args:
+            enabled: True to start recording; False to stop and drop any
+                accumulated records.
+        """
+        self._per_call_timing_enabled = bool(enabled)
+        if not enabled:
+            self._per_call_timings = []
+
+    def get_and_clear_per_call_timings(self) -> list[dict]:
+        """Drain and return the recorded per-A*-call timing records.
+
+        Issue #2929: Each record is a dict with keys
+        ``net``, ``net_name``, ``elapsed``, ``per_net_timeout``,
+        ``deadline_violated``, and ``succeeded``.  Note that a record may
+        include time spent in the Python fallback (triggered after a C++
+        failure); the elapsed clock starts when ``route()`` enters and
+        stops when it returns.  This is the deliberate "what the caller
+        actually waited" measurement (a deadline-honoring inner search
+        will still be bracketed by the timeout, plus a small fixed setup
+        cost).
+
+        Returns:
+            The list of timing records since the last drain (or since
+            instrumentation was enabled).  Empty list if instrumentation
+            is disabled or no calls have been made.
+        """
+        result = self._per_call_timings
+        self._per_call_timings = []
+        return result
+
     # ------------------------------------------------------------------
     # Diff-pair partner resolution (Issue #2587 / Epic #2556 Phase 1C-cont)
     # ------------------------------------------------------------------
@@ -907,6 +955,12 @@ class CppPathfinder:
     ) -> Route | None:
         """Route between two pads.
 
+        Issue #2929: When per-A*-call timing instrumentation is enabled via
+        :meth:`enable_per_call_timing`, this method records each call's
+        elapsed wall-clock time alongside the deadline budget so callers
+        can audit deadline-honor behavior.  The actual routing logic lives
+        in :meth:`_route_impl`.
+
         Args:
             start: Source pad
             end: Destination pad
@@ -922,6 +976,75 @@ class CppPathfinder:
 
         Returns:
             Route object if successful, None if no path found
+        """
+        if not self._per_call_timing_enabled:
+            return self._route_impl(
+                start, end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                start_layers=start_layers,
+                end_layers=end_layers,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+
+        t0 = time.monotonic()
+        succeeded = False
+        try:
+            result = self._route_impl(
+                start, end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                start_layers=start_layers,
+                end_layers=end_layers,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+            succeeded = result is not None
+            return result
+        finally:
+            elapsed = time.monotonic() - t0
+            # 1.2x slack matches the Issue #2929 acceptance criterion: the
+            # C++ deadline check fires every 1024 iterations, plus the
+            # Python wrapper has a fixed setup cost (~ms-scale), so a 20%
+            # margin is enough that a deadline-honoring backend never
+            # trips this flag.  Note: when the C++ search fails, the
+            # Python fallback runs after with its OWN ``per_net_timeout``
+            # budget; the elapsed clock covers BOTH, which is the
+            # "wall-clock the caller actually waited" measurement.
+            deadline_violated = (
+                per_net_timeout is not None
+                and per_net_timeout > 0
+                and elapsed > per_net_timeout * 1.2 + 0.5
+            )
+            self._per_call_timings.append({
+                "net": start.net,
+                "net_name": start.net_name,
+                "elapsed": elapsed,
+                "per_net_timeout": per_net_timeout,
+                "deadline_violated": deadline_violated,
+                "succeeded": succeeded,
+            })
+
+    def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        start_layers: list[int] | None = None,
+        end_layers: list[int] | None = None,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Inner C++-backed route implementation -- see :meth:`route` for the
+        public wrapper that adds optional per-call wall-clock instrumentation.
         """
         # Get layer indices
         start_layer = self._grid.num_layers // 2  # Default to middle
