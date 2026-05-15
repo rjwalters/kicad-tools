@@ -55,7 +55,7 @@ from .diffpair_routing import DiffPairRouter
 from .match_group_length import MatchGroup, MatchGroupTracker
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
-from .subgrid import SubGridResult, SubGridRouter
+from .subgrid import SubGridResult, SubGridRouter, compute_subgrid_resolution
 from .failure_analysis import (
     CongestionMap,
     FailureAnalysis,
@@ -1671,13 +1671,19 @@ class Autorouter:
                 (target_pad.x - tgt_world[0]) ** 2 + (target_pad.y - tgt_world[1]) ** 2
             ) ** 0.5
             # Use tighter threshold to catch pads that are "slightly" off-grid
+            # Issue #2910: Skip pads that have adaptive-grid coverage (a
+            # FineZone or a pitch-compatible sub-grid).  Those pads are
+            # not structurally unroutable -- the sub-grid escape or
+            # waypoint injection paths can reach them -- so emitting
+            # PADS_OFF_GRID here would push them onto the rip-up blacklist
+            # and prevent recovery.  See _pad_has_adaptive_grid_coverage.
             grid_threshold = self.grid.resolution / 10
 
             # Collect all off-grid pads to report them together
             off_grid_pads: list[str] = []
-            if src_dist > grid_threshold:
+            if src_dist > grid_threshold and not self._pad_has_adaptive_grid_coverage(source_pad):
                 off_grid_pads.append(f"{_format_pad_ref(source_pad)} off by {src_dist:.3f}mm")
-            if tgt_dist > grid_threshold:
+            if tgt_dist > grid_threshold and not self._pad_has_adaptive_grid_coverage(target_pad):
                 off_grid_pads.append(f"{_format_pad_ref(target_pad)} off by {tgt_dist:.3f}mm")
 
             if off_grid_pads:
@@ -1788,11 +1794,20 @@ class Autorouter:
 
         if use_mst and len(pad_objs) > 2:
             # Issue #2329: Disable Steiner tree decomposition for nets with
-            # off-grid pads.  RSMT Steiner points inherit off-grid coordinates
-            # (the median of terminal positions), creating virtual pads that
-            # the sub-grid prepass doesn't know about and the A* pathfinder
-            # cannot reach.  Plain MST connects real pads directly, avoiding
-            # the off-grid Steiner point failure mode.
+            # structurally off-grid pads.  RSMT Steiner points inherit
+            # off-grid coordinates (the median of terminal positions),
+            # creating virtual pads at coordinates the A* pathfinder
+            # cannot reach when the pad has no sub-grid coverage.  Plain
+            # MST connects real pads directly, avoiding the off-grid
+            # Steiner point failure mode.
+            #
+            # Issue #2910: ``_net_has_off_grid_pads`` now consults
+            # :meth:`_pad_has_adaptive_grid_coverage` first, so nets whose
+            # terminals are reachable via an explicit FineZone or a
+            # pitch-compatible sub-grid (e.g. 2.54 mm THT headers) keep
+            # Steiner decomposition enabled.  In that case the
+            # waypoint-injection path (Issue #2330) handles the Steiner
+            # medians the same way it handles the terminals themselves.
             has_off_grid = self._net_has_off_grid_pads(net)
             new_routes = mst_router.route_net(
                 pad_objs, mark_route, record_failure,
@@ -2226,12 +2241,149 @@ class Autorouter:
 
         return score
 
+    def _pad_offset_from_coarse_grid(self, pad: Pad) -> float:
+        """Return the maximum-axis offset (mm) of *pad* from the coarse grid.
+
+        Helper for :meth:`_pad_has_adaptive_grid_coverage` and
+        :meth:`_net_has_off_grid_pads`.  Returns the larger of |dx| and |dy|
+        between the pad coordinate and its nearest coarse-grid intersection.
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+        return max(abs(pad.x - snap_x), abs(pad.y - snap_y))
+
+    def _pad_has_adaptive_grid_coverage(self, pad: "Pad") -> bool:
+        """Return True if *pad* is reachable via the adaptive-grid prepass.
+
+        Issue #2910: The per-edge ``PADS_OFF_GRID`` emit historically used
+        a hard ``grid.resolution / 10`` threshold against the coarse grid,
+        which misclassified 2.54mm-pitch through-hole connector pads as
+        "structurally unroutable" -- their coordinates land 0.030mm off
+        a 0.1mm coarse grid, exceeding the 0.01mm threshold, but they
+        align perfectly to the sub-grid resolution (0.02mm) that the
+        adaptive-grid pre-pass would build for them.
+
+        A pad is considered to have adaptive-grid coverage when either:
+
+        1. An existing :class:`FineZone` covers the pad's position and the
+           pad coordinate aligns to that zone's resolution (with optional
+           ``x_offset``/``y_offset``).  This is the explicit-coverage case
+           used today for fine-pitch ICs (TSSOP, SSOP, etc.).
+
+        2. The pad's component has a minimum pin pitch for which
+           :func:`compute_subgrid_resolution` produces a fine resolution
+           that the pad coordinate divides into evenly.  This is the
+           *implicit*-coverage case: even if no ``FineZone`` was built up
+           front (because the pitch exceeds ``fine_pitch_threshold``), the
+           adaptive-grid system can refine the pad via per-net sub-grid
+           retry or waypoint injection.
+
+        Returns ``False`` only when both the explicit and implicit
+        adaptive-grid mechanisms cannot reach the pad -- i.e. when the pad
+        is genuinely off any grid the router can synthesise.
+
+        This predicate is consulted by:
+
+        - The per-edge ``PADS_OFF_GRID`` emit site at
+          :meth:`route_net` so adaptive-covered pads do NOT enter the
+          rip-up blacklist via ``self.routing_failures``.
+        - :meth:`_net_has_off_grid_pads`, which the Steiner-decomposition
+          gate (line ~1811) and tier-0 promotion (line ~3545) both call.
+
+        All three sites consequently agree on which pads are
+        structurally off-grid (Issue #2910 acceptance criterion #4).
+        """
+        # Tolerance for "aligns to fine grid" -- use a generous fraction of
+        # the fine resolution so float drift on derived offsets (e.g.
+        # 1.27mm pitch / 0.02mm fine = 63.5 -> nearest integer) doesn't
+        # produce false negatives.
+        tol_factor = 0.1
+
+        # Case 1: existing fine-zone coverage.  Iterate explicit zones first
+        # because they're the authoritative source -- if a zone was built
+        # for this pad, the router *will* use it for escape routing.
+        for zone in self.fine_zones:
+            if not zone.contains(pad.x, pad.y):
+                continue
+            res = zone.resolution
+            if res <= 0:
+                continue
+            dx = (pad.x - zone.x_offset) / res
+            dy = (pad.y - zone.y_offset) / res
+            if (
+                abs(dx - round(dx)) <= tol_factor
+                and abs(dy - round(dy)) <= tol_factor
+            ):
+                return True
+
+        # Case 2: implicit coverage via the pad's component pitch.  Even
+        # when no FineZone was pre-built (the pitch exceeds the
+        # fine_pitch_threshold), the adaptive-grid prepass can refine the
+        # pad if invoked with the pitch-derived resolution.  We accept
+        # the pad as covered when:
+        #   - the component has a known pitch, AND
+        #   - ``compute_subgrid_resolution(pitch, coarse)`` produces a
+        #     finer-than-coarse resolution that aligns to the pad's
+        #     offset from the nearest coarse-grid intersection.
+        # For a 2.54mm-pitch THT connector on a 0.1mm coarse grid this
+        # yields fine_res = 0.005mm, into which the 0.030mm offset
+        # divides exactly (offset/fine_res = 6).
+        if pad.ref:
+            pitch = self.component_pitches.get(pad.ref)
+            if pitch is not None and pitch > 0:
+                fine_res = compute_subgrid_resolution(pitch, self.grid.resolution)
+                if 0 < fine_res < self.grid.resolution:
+                    gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+                    snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+                    dx_units = (pad.x - snap_x) / fine_res
+                    dy_units = (pad.y - snap_y) / fine_res
+                    if (
+                        abs(dx_units - round(dx_units)) <= tol_factor
+                        and abs(dy_units - round(dy_units)) <= tol_factor
+                    ):
+                        return True
+
+        return False
+
     def _net_has_off_grid_pads(self, net_id: int) -> bool:
-        """Return True if any pad in *net_id* is off the routing grid.
+        """Return True if any pad in *net_id* is *structurally* off-grid.
+
+        A pad is considered structurally off-grid only when both:
+
+        - its offset from the nearest coarse-grid intersection exceeds
+          ``grid.resolution / 10`` (the original strict threshold), AND
+        - it has no adaptive-grid coverage (no FineZone and no
+          pitch-compatible sub-grid) -- see
+          :meth:`_pad_has_adaptive_grid_coverage`.
 
         Issue #2329: Used by :meth:`_get_net_priority` to promote nets with
-        off-grid pads to complexity tier 0 so they route before unconstrained
-        nets and get first pick of grid resources.
+        off-grid pads to complexity tier 0, and by :meth:`route_net` to
+        disable RSMT Steiner decomposition.
+
+        Issue #2910: The historical strict-threshold-only check
+        misclassified 2.54mm-pitch THT connector pads (0.030mm off a
+        0.1mm coarse grid) as structurally unroutable.  Those pads
+        align perfectly to the 0.005mm sub-grid that the adaptive-grid
+        prepass would build for them.  Calling this predicate without
+        the adaptive-grid filter caused two regressions:
+
+        1. The per-edge ``PADS_OFF_GRID`` emit fired for any failed
+           edge involving such a pad, pushing the whole net onto the
+           rip-up blacklist at ``route_all_negotiated``'s ``off_grid_nets``
+           set (board 01 GND/VOUT silently excluded from recovery).
+        2. Both the Steiner gate at :meth:`route_net` and tier-0
+           promotion at :meth:`_get_net_priority` consult the same
+           predicate; without an adaptive-grid filter they disagreed
+           with the per-edge emit's filtered view, undermining the
+           "both callers must agree" invariant from Issue #2910's
+           acceptance criteria.
+
+        The fix consults :meth:`_pad_has_adaptive_grid_coverage` so
+        adaptive-covered pads (1.27 / 2.00 / 2.54 mm pitch THT and
+        FineZone-covered fine-pitch ICs) are NOT classified as
+        structurally off-grid.  Genuinely unreachable pads (no zone,
+        no compatible pitch) still flip the predicate to True, so the
+        Issue #1605 rip-up exclusion path remains intact.
         """
         grid_threshold = self.grid.resolution / 10
         pad_keys = self.nets.get(net_id, [])
@@ -2239,10 +2391,11 @@ class Autorouter:
             pad = self.pads.get(pad_key)
             if pad is None:
                 continue
-            gx, gy = self.grid.world_to_grid(pad.x, pad.y)
-            snap_x, snap_y = self.grid.grid_to_world(gx, gy)
-            offset = max(abs(pad.x - snap_x), abs(pad.y - snap_y))
-            if offset > grid_threshold:
+            if self._pad_offset_from_coarse_grid(pad) <= grid_threshold:
+                continue
+            # Above the strict threshold -- check adaptive coverage
+            # before declaring the net structurally off-grid.
+            if not self._pad_has_adaptive_grid_coverage(pad):
                 return True
         return False
 
