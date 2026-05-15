@@ -4343,6 +4343,17 @@ def _add_fleet_parser(subparsers) -> None:
         default="*_routed.kicad_pcb",
         help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
     )
+    fleet_status.add_argument(
+        "--drc-tolerance-file",
+        dest="fleet_drc_tolerance_file",
+        default=".github/routed-drc-tolerance.yml",
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml). Boards exceeding the listed "
+            "tolerance -- or any board not listed with errors > 0 -- block "
+            "ship-ready. Missing file is treated as a strict 0-error gate."
+        ),
+    )
 
 
 def _add_clean_parser(subparsers) -> None:
