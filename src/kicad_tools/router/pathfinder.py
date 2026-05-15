@@ -2888,6 +2888,21 @@ class Router:
         # Convert path to segments and vias
         self._convert_path_to_route(path, route, start_pad, end_pad)
 
+        # Issue #2934: Reject Route objects with no segments.
+        # ``_convert_path_to_route`` silently no-ops when ``len(path) < 2``.
+        # This happens when the A* search terminates on the start cell itself,
+        # which Issue #2306's incremental-Steiner early-termination can do when
+        # ``extra_goal_cells`` already contains the start cell (e.g., a later
+        # RSMT edge whose start pad shares a grid cell with the previously
+        # routed tree).  The resulting ``Route(segments=[], vias=[])`` is
+        # geometrically empty and provides no connectivity, but callers using
+        # ``if route:`` (a truthy check) silently accept it and the connectivity
+        # validator later reports the pad as un-routed.  Return ``None`` so the
+        # caller falls back to its failure branch (e.g., recording the failure
+        # in ``routing_failures`` and firing ``failure_callback``).
+        if not route.segments and not route.vias:
+            return None
+
         # Issue #1782: Merge vias that overlap with existing same-net vias
         self._merge_same_net_vias(route)
 
@@ -3565,6 +3580,11 @@ class Router:
         # Convert path to segments and vias using shared helper
         # Issue #972: Helper includes inline segment merging optimization
         self._convert_path_to_route(full_path, route, start_pad, end_pad)
+
+        # Issue #2934: Reject empty Routes - same rationale as the
+        # unidirectional path in ``_reconstruct_route``.
+        if not route.segments and not route.vias:
+            return None
 
         # Validate layer transitions
         route.validate_layer_transitions(
