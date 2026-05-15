@@ -58,6 +58,7 @@ class PackageType(Enum):
     SOT = auto()  # Small Outline Transistor
     DIP = auto()  # Dual In-line Package
     MULTI_ROW_CONNECTOR = auto()  # Multi-row through-hole connector (2xN, 3xN, 4xN, >= 20 pins)
+    USB_C_CONNECTOR = auto()  # Fine-pitch (<= 0.6mm) 2-row SMT connector with mounting tabs
     THROUGH_HOLE = auto()  # Generic through-hole
 
 
@@ -183,6 +184,12 @@ def is_dense_package(
     if len(pads) >= 20 and _is_multi_row(pads):
         return True
 
+    # Issue #2919: USB-C-class fine-pitch SMT connectors with mounting tabs
+    # are always dense -- adjacent USB_D+ / USB_D- pads at 0.5mm pitch
+    # cannot host a between-pin trace at jlcpcb tier-1 clearance.
+    if is_usb_c_class_connector(pads):
+        return True
+
     # Calculate minimum pin pitch
     min_pitch = _calculate_min_pitch(pads)
     if min_pitch <= 0:
@@ -278,6 +285,60 @@ def is_fine_pitch_ssop(pads: list[Pad], pitch_threshold: float = 0.75) -> bool:
     return 0 < min_pitch <= pitch_threshold
 
 
+def is_usb_c_class_connector(pads: list[Pad]) -> bool:
+    """Detect a USB-C-class fine-pitch SMT connector with mounting tabs.
+
+    Issue #2919: USB-C receptacles (e.g., GCT_USB4105) have a 2-row SMT signal
+    pad cluster at 0.5mm pitch plus 2 through-hole shield/mounting tabs.  The
+    mounting tabs introduce a third Y coordinate, so ``_is_dual_row()`` (which
+    requires exactly two unique Y values) returns False and the package falls
+    through ``detect_package_type`` to ``UNKNOWN``.  The ``UNKNOWN`` dispatcher
+    invokes ``_escape_radial`` which cannot resolve the 0.123mm channel between
+    adjacent USB_D+/USB_D- pads at jlcpcb tier-1 clearance (0.127mm).
+
+    A package qualifies as USB-C-class when:
+
+    - It has at least 8 SMT (non-through-hole) pads (USB-C has 14-16 SMT
+      signals in a fully-populated footprint; conservative lower bound covers
+      reduced pinouts).
+    - It has at least one through-hole pad (mounting tab).  Pure SMT dual-row
+      packages with no PTH tabs are TSSOP/SSOP and already handled by
+      ``_is_dual_row``.
+    - The SMT pads form a dual-row arrangement (``_is_dual_row`` returns True
+      when applied to the SMT subset).
+    - The SMT row pitch is fine (<= 0.6mm).  This excludes 2.54mm headers
+      (which already route via the multi-row connector or radial paths).
+
+    Args:
+        pads: All pads from a single component (SMT + through-hole).
+
+    Returns:
+        True when the pads form a USB-C-class fine-pitch 2-row SMT connector.
+    """
+    if len(pads) < 4:
+        return False
+
+    smt_pads = [p for p in pads if not p.through_hole]
+    pth_pads = [p for p in pads if p.through_hole]
+
+    # Need both SMT signal pads and through-hole tabs (the latter is what
+    # distinguishes USB-C-class from plain TSSOP/SSOP).
+    if not pth_pads or len(smt_pads) < 8:
+        return False
+
+    # The SMT subset must look like a dual-row package.
+    if not _is_dual_row(smt_pads):
+        return False
+
+    # Fine pitch check (USB-C is 0.5mm; allow slack up to 0.6mm to cover
+    # near-USB-C connectors like some 0.5mm-pitch FFC/FPC headers).
+    smt_pitch = _calculate_min_pitch(smt_pads)
+    if smt_pitch <= 0 or smt_pitch > 0.6:
+        return False
+
+    return True
+
+
 def detect_package_type(pads: list[Pad]) -> PackageType:
     """Detect the package type from pad arrangement.
 
@@ -304,6 +365,13 @@ def detect_package_type(pads: list[Pad]) -> PackageType:
         if _is_dual_row(pads):
             return PackageType.DIP
         return PackageType.THROUGH_HOLE
+
+    # Issue #2919: USB-C-class connectors mix SMT signal rows with through-hole
+    # mounting tabs.  The mounting tabs prevent ``_is_dual_row`` from firing on
+    # the SMT subset when run over the full pad list, so we test the SMT subset
+    # explicitly before falling through to the SMT-only dispatchers below.
+    if is_usb_c_class_connector(pads):
+        return PackageType.USB_C_CONNECTOR
 
     # Calculate bounding box and center
     xs = [p.x for p in pads]
@@ -942,6 +1010,14 @@ class EscapeRouter:
             elif package.package_type in (PackageType.SSOP, PackageType.TSSOP):
                 # Fine-pitch SSOP/TSSOP needs alternating layer escape for adjacent pins
                 escapes = self._escape_fine_pitch_dual_row(remaining_package)
+            elif package.package_type == PackageType.USB_C_CONNECTOR:
+                # Issue #2919: USB-C-class fine-pitch SMT connectors -- route the
+                # SMT signal cluster through the alternating-layer escape so
+                # adjacent USB_D+ / USB_D- (and CC1/CC2) pads land on different
+                # layers.  Through-hole shield/mounting tabs are handled by the
+                # main router (they're typically GND and connect to a stitched
+                # plane, so no per-pin escape is required).
+                escapes = self._escape_usb_c_connector(remaining_package)
             elif package.package_type == PackageType.SOP:
                 escapes = self._escape_sop_staggered(remaining_package)
             elif package.package_type == PackageType.MULTI_ROW_CONNECTOR:
@@ -2205,10 +2281,18 @@ class EscapeRouter:
         return lo
 
     def _escape_fine_pitch_dual_row(self, package: PackageInfo) -> list[EscapeRoute]:
-        """Generate escape routes with alternating layer escapes for fine-pitch SSOP/TSSOP.
+        """Generate escape routes with alternating layer escapes for fine-pitch dual-row packages.
 
-        For fine-pitch dual-row packages (SSOP, TSSOP with 0.65mm or finer pitch),
-        adjacent signal pins cannot route on the same layer due to clearance conflicts.
+        For fine-pitch dual-row packages this includes:
+
+        - SSOP / TSSOP (0.65mm or 0.5mm pitch, no mounting tabs).
+        - USB-C-class connectors (Issue #2919): 14-16 SMT signal pads at 0.5mm
+          pitch arranged in two rows.  USB-C footprints additionally have
+          through-hole mounting tabs that are NOT included in the ``package``
+          passed here -- ``_escape_usb_c_connector`` filters them out before
+          delegation.
+
+        Adjacent signal pins cannot route on the same layer due to clearance conflicts.
         This method implements alternating layer escape routing:
 
         - Even-indexed pins (0, 2, 4, ...): Escape on F.Cu (top layer)
@@ -2303,6 +2387,68 @@ class EscapeRouter:
             )
 
         return escapes
+
+    def _escape_usb_c_connector(self, package: PackageInfo) -> list[EscapeRoute]:
+        """Generate alternating-layer escape routes for a USB-C-class connector.
+
+        Issue #2919: USB-C receptacles (e.g., GCT_USB4105) have 14-16 SMT
+        signal pads at 0.5mm pitch in two rows, plus 2 through-hole shield /
+        mounting tabs.  The channel between adjacent SMT pads (e.g., A6/A7 =
+        USB_D+/USB_D-) is 0.5mm pitch - 0.25mm pad = 0.25mm, which after a
+        2x0.127mm jlcpcb tier-1 clearance leaves zero room for an
+        in-channel trace.  The fix is to alternate layers across adjacent
+        pads (one stays on F.Cu, the next vias to In1.Cu) so adjacent escape
+        traces never share a copper layer.
+
+        This routine:
+
+        1. Filters out through-hole shield/mount pads -- they don't need
+           per-pin escape (they're typically GND and connect to a stitched
+           plane via the main router's normal pathfinder).
+        2. Builds a synthetic ``PackageInfo`` containing only the SMT pads
+           with package metadata recomputed (center, bounding box, pitch).
+        3. Delegates to ``_escape_fine_pitch_dual_row`` for the actual
+           alternating-layer escape generation.  This reuses the SSOP/TSSOP
+           code path including its in-pad-via rescue fallback so that at
+           higher manufacturer tiers (jlcpcb-tier1+, PCBWay) deferred pins
+           still escape via in-pad vias instead of failing silently.
+
+        Args:
+            package: USB_C_CONNECTOR package info (mixed SMT + through-hole).
+
+        Returns:
+            List of escape routes covering only the SMT signal pads.  The
+            through-hole shield/mount pads are intentionally omitted -- the
+            main router handles them via standard pathfinding.
+        """
+        # Filter to SMT pads only -- shield/mounting through-hole tabs are
+        # handled by the main router via standard pathfinding.
+        smt_pads = [p for p in package.pads if not p.through_hole]
+
+        if not smt_pads:
+            return []
+
+        # Rebuild package metadata against the SMT subset so
+        # ``_escape_fine_pitch_dual_row`` sees the correct centre / bounding
+        # box (the original package centre is biased by the through-hole
+        # tabs at y=1.5mm, which would skew "is_horizontal" detection).
+        xs = [p.x for p in smt_pads]
+        ys = [p.y for p in smt_pads]
+        center = ((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2)
+        bounding_box = (min(xs), min(ys), max(xs), max(ys))
+        smt_pitch = _calculate_min_pitch(smt_pads)
+
+        from dataclasses import replace as _replace
+        smt_package = _replace(
+            package,
+            pads=smt_pads,
+            center=center,
+            pin_count=len(smt_pads),
+            pin_pitch=smt_pitch,
+            bounding_box=bounding_box,
+        )
+
+        return self._escape_fine_pitch_dual_row(smt_package)
 
     def _create_fine_pitch_row_escapes(
         self,
