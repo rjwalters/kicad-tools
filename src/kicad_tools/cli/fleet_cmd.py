@@ -34,6 +34,11 @@ from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
 SCHEMA_VERSION = "1.0"
 
+# Default location for the per-board DRC tolerance allowlist (mirrors
+# ``scripts/ci/check_routed_drc.py``). Boards listed here have a
+# grandfathered non-zero error count; boards NOT listed must report 0.
+_DRC_TOLERANCE_PATH = Path(".github/routed-drc-tolerance.yml")
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -115,6 +120,39 @@ class ManufacturingStatus:
 
 
 @dataclass
+class DRCStatus:
+    """DRC report presence + error count for a single board.
+
+    A board is DRC-clean when ``report_exists`` is True AND ``errors``
+    does not exceed ``tolerance``. When ``report_exists`` is False the
+    DRC step has not yet run for this board, so it must NOT block
+    ship-ready (issue #2932 backwards-compat rule).
+    """
+
+    report_exists: bool = False
+    errors: int = 0
+    tolerance: int = 0
+    # Per ``.github/routed-drc-tolerance.yml`` schema, this is the
+    # repo-relative path used to look up the tolerance. Surfaced so
+    # JSON consumers can correlate.
+    tolerance_key: str | None = None
+
+    @property
+    def over_tolerance(self) -> bool:
+        """True iff a real DRC report exists AND it exceeds tolerance."""
+        return self.report_exists and self.errors > self.tolerance
+
+    def to_dict(self) -> dict:
+        return {
+            "report_exists": self.report_exists,
+            "errors": self.errors,
+            "tolerance": self.tolerance,
+            "tolerance_key": self.tolerance_key,
+            "over_tolerance": self.over_tolerance,
+        }
+
+
+@dataclass
 class BoardStatus:
     """Aggregated status for a single board."""
 
@@ -123,6 +161,7 @@ class BoardStatus:
     routed_mtime: float | None
     routing: RoutingStatus
     manufacturing: ManufacturingStatus
+    drc: DRCStatus = field(default_factory=DRCStatus)
     blockers: list[str] = field(default_factory=list)
 
     @property
@@ -136,6 +175,7 @@ class BoardStatus:
             "routed_mtime": _iso_or_none(self.routed_mtime),
             "routing": self.routing.to_dict(),
             "manufacturing": self.manufacturing.to_dict(),
+            "drc": self.drc.to_dict(),
             "ship_ready": self.ship_ready,
             "blockers": list(self.blockers),
         }
@@ -220,6 +260,104 @@ def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
     return mfg
 
 
+def _load_drc_tolerances(
+    tolerance_path: Path = _DRC_TOLERANCE_PATH,
+) -> dict[str, int]:
+    """Load per-board DRC tolerance allowlist.
+
+    Mirrors the loader in ``scripts/ci/check_routed_drc.py`` but kept
+    self-contained here to avoid importing CI utility code from the CLI
+    surface. Missing/unreadable/malformed files yield an empty mapping
+    (every board must report 0 errors), matching the safer default.
+    """
+    if not tolerance_path.exists():
+        return {}
+    try:
+        import yaml  # local import: optional dep at call site
+    except ImportError:  # pragma: no cover - pyyaml is a hard dep
+        return {}
+    try:
+        data = yaml.safe_load(tolerance_path.read_text())
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    tolerances = data.get("tolerances", {})
+    if not isinstance(tolerances, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, value in tolerances.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            continue
+        result[key] = value
+    return result
+
+
+def _drc_tolerance_for(
+    routed_pcb: Path,
+    tolerances: dict[str, int],
+) -> tuple[int, str | None]:
+    """Look up the tolerance for ``routed_pcb`` in ``tolerances``.
+
+    Tolerances are keyed by repo-relative path (e.g.
+    ``boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb``).
+    We accept any suffix match so the lookup is robust to absolute paths
+    passed in by callers (the CI script writes repo-relative; the CLI
+    typically resolves ``--boards-dir`` to absolute).
+
+    Returns ``(tolerance, matched_key_or_None)``. When no entry matches
+    we return ``(0, None)`` -- absence means strict 0-error gate per the
+    allowlist's policy.
+    """
+    if not tolerances:
+        return (0, None)
+    # Normalize once for suffix comparison.
+    pcb_str = str(routed_pcb)
+    pcb_posix = routed_pcb.as_posix()
+    for key, value in tolerances.items():
+        if pcb_str.endswith(key) or pcb_posix.endswith(key):
+            return (value, key)
+    return (0, None)
+
+
+def _detect_drc(
+    routed_pcb: Path,
+    tolerances: dict[str, int],
+) -> DRCStatus:
+    """Read ``<routed_pcb>.parent/drc_report.json`` and return DRC status.
+
+    Backwards-compat rule (issue #2932): if the report does not exist,
+    return a status with ``report_exists=False`` and ``errors=0``. The
+    blocker computation must then NOT treat the board as failing DRC,
+    so boards that have not yet been DRC'd retain their pre-fix
+    classification.
+    """
+    drc = DRCStatus()
+    report_path = routed_pcb.parent / "drc_report.json"
+    tolerance, matched_key = _drc_tolerance_for(routed_pcb, tolerances)
+    drc.tolerance = tolerance
+    drc.tolerance_key = matched_key
+    if not report_path.is_file():
+        return drc
+    try:
+        with report_path.open() as fh:
+            report = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        # Treat a malformed report identically to a missing one --
+        # don't regress ship-ready when the DRC stage is broken
+        # for unrelated reasons.
+        return drc
+    summary = report.get("summary") if isinstance(report, dict) else None
+    if isinstance(summary, dict):
+        errors = summary.get("errors", 0)
+        if isinstance(errors, int) and not isinstance(errors, bool):
+            drc.errors = errors
+    drc.report_exists = True
+    return drc
+
+
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     """Run NetStatusAnalyzer on a routed PCB and tally pads/nets."""
     status = RoutingStatus()
@@ -243,8 +381,19 @@ def _compute_blockers(
     routing: RoutingStatus,
     mfg: ManufacturingStatus,
     routed_pcb: Path | None,
+    drc: DRCStatus | None = None,
 ) -> list[str]:
-    """First-failing list of reasons a board cannot ship."""
+    """First-failing list of reasons a board cannot ship.
+
+    DRC handling (issue #2932): when a ``drc_report.json`` exists AND its
+    error count exceeds the per-board tolerance allowlist (see
+    ``.github/routed-drc-tolerance.yml``), a ``DRC errors: N`` blocker
+    is appended. Boards with no DRC report keep their pre-#2932
+    classification (no blocker added). The DRC blocker is ordered after
+    routing/manufacturing-artifact blockers so the first-failure reason
+    in the table stays consistent with prior behavior; DRC surfaces
+    when those upstream gates already pass.
+    """
     blockers: list[str] = []
     if routed_pcb is None:
         blockers.append("no routed PCB")
@@ -270,15 +419,27 @@ def _compute_blockers(
         blockers.append("no manifest")
     if mfg.stale:
         blockers.append("artifacts stale")
+    if drc is not None and drc.over_tolerance:
+        if drc.tolerance > 0:
+            blockers.append(
+                f"DRC errors: {drc.errors} (allowed {drc.tolerance})"
+            )
+        else:
+            blockers.append(f"DRC errors: {drc.errors}")
     return blockers
 
 
-def _survey_board(board_dir: Path, pattern: str) -> BoardStatus:
+def _survey_board(
+    board_dir: Path,
+    pattern: str,
+    drc_tolerances: dict[str, int] | None = None,
+) -> BoardStatus:
     """Build a BoardStatus for a single board directory."""
     routed_pcb = _discover_routed_pcb(board_dir, pattern)
     routed_mtime: float | None = None
     routing = RoutingStatus()
     mfg = ManufacturingStatus()
+    drc = DRCStatus()
 
     if routed_pcb is not None:
         try:
@@ -293,8 +454,9 @@ def _survey_board(board_dir: Path, pattern: str) -> BoardStatus:
             and routed_mtime > mfg.manifest_mtime
         ):
             mfg.stale = True
+        drc = _detect_drc(routed_pcb, drc_tolerances or {})
 
-    blockers = _compute_blockers(routing, mfg, routed_pcb)
+    blockers = _compute_blockers(routing, mfg, routed_pcb, drc)
 
     return BoardStatus(
         name=board_dir.name,
@@ -302,11 +464,16 @@ def _survey_board(board_dir: Path, pattern: str) -> BoardStatus:
         routed_mtime=routed_mtime,
         routing=routing,
         manufacturing=mfg,
+        drc=drc,
         blockers=blockers,
     )
 
 
-def _discover_boards(boards_dir: Path, pattern: str) -> list[BoardStatus]:
+def _discover_boards(
+    boards_dir: Path,
+    pattern: str,
+    drc_tolerance_path: Path | None = None,
+) -> list[BoardStatus]:
     """Survey every board sub-directory of ``boards_dir``.
 
     A board is discovered if it contains a routed PCB matching ``pattern``
@@ -315,6 +482,9 @@ def _discover_boards(boards_dir: Path, pattern: str) -> list[BoardStatus]:
     """
     if not boards_dir.is_dir():
         return []
+    tolerances = _load_drc_tolerances(
+        drc_tolerance_path if drc_tolerance_path is not None else _DRC_TOLERANCE_PATH
+    )
     boards: list[BoardStatus] = []
     for entry in sorted(boards_dir.iterdir()):
         if not entry.is_dir():
@@ -330,7 +500,7 @@ def _discover_boards(boards_dir: Path, pattern: str) -> list[BoardStatus]:
         # Skip directories with no routed PCB matching the pattern.
         if _discover_routed_pcb(entry, pattern) is None:
             continue
-        boards.append(_survey_board(entry, pattern))
+        boards.append(_survey_board(entry, pattern, tolerances))
     return boards
 
 
@@ -360,6 +530,21 @@ def _stale_label(mfg: ManufacturingStatus) -> str:
     return "STALE" if mfg.stale else "fresh"
 
 
+def _drc_label(drc: DRCStatus) -> str:
+    """Render the DRC column cell.
+
+    ``-``       : no ``drc_report.json`` yet (backwards-compat: do not
+                  block ship-ready).
+    ``N``       : N errors, within tolerance (N <= allowance).
+    ``N!``      : N errors, exceeds tolerance (drives the ship-ready
+                  ``NO`` blocker).
+    """
+    if not drc.report_exists:
+        return "-"
+    suffix = "!" if drc.over_tolerance else ""
+    return f"{drc.errors}{suffix}"
+
+
 def _format_table(
     boards: list[BoardStatus],
     boards_dir: Path,
@@ -368,7 +553,10 @@ def _format_table(
 ) -> str:
     """Format a fixed-width plain-ASCII table."""
     lines: list[str] = []
-    header = f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} Ship?"
+    header = (
+        f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} "
+        f"{'DRC':>5} Ship?"
+    )
     sep = "-" * len(header)
     lines.append(header)
     lines.append(sep)
@@ -386,12 +574,14 @@ def _format_table(
             pct = f"{b.routing.completion_pct:.0f}%"
             mfr = _mfr_letters(b.manufacturing)
             stale = _stale_label(b.manufacturing)
+            drc_cell = _drc_label(b.drc)
             if b.ship_ready:
                 ship = "YES"
             else:
                 ship = f"NO  ({b.blockers[0]})"
             lines.append(
-                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {ship}"
+                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} "
+                f"{drc_cell:>5} {ship}"
             )
 
     # Footer (always uses full board list, not filtered view).
@@ -404,9 +594,11 @@ def _format_table(
             if not b.routing.routing_complete and b.routing.error is None
         )
         stale_count = sum(1 for b in boards if b.manufacturing.stale)
+        drc_failing = sum(1 for b in boards if b.drc.over_tolerance)
         lines.append(
             f"{len(boards)} boards surveyed, {ship_ready} ship-ready, "
-            f"{incomplete} incomplete, {stale_count} artifacts stale"
+            f"{incomplete} incomplete, {stale_count} artifacts stale, "
+            f"{drc_failing} DRC over tolerance"
         )
         lines.append(f"boards-dir: {boards_dir}")
 
@@ -428,6 +620,7 @@ def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
             for b in boards
             if not b.manufacturing.has_all
         ),
+        "drc_over_tolerance": sum(1 for b in boards if b.drc.over_tolerance),
     }
     doc = {
         "schema_version": SCHEMA_VERSION,
@@ -487,13 +680,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default="*_routed.kicad_pcb",
         help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
     )
+    status_parser.add_argument(
+        "--drc-tolerance-file",
+        default=str(_DRC_TOLERANCE_PATH),
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml). Boards exceeding the listed "
+            "tolerance -- or any board not listed with errors > 0 -- block "
+            "ship-ready."
+        ),
+    )
     return parser
 
 
 def run_status(args: argparse.Namespace) -> int:
     """Execute the ``fleet status`` sub-action."""
     boards_dir = Path(args.boards_dir)
-    boards = _discover_boards(boards_dir, args.pattern)
+    tolerance_path = Path(getattr(args, "drc_tolerance_file", _DRC_TOLERANCE_PATH))
+    boards = _discover_boards(boards_dir, args.pattern, tolerance_path)
 
     if args.format == "json":
         print(_format_json(boards, boards_dir))

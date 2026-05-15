@@ -41,4 +41,8 @@ def run_fleet_command(args) -> int:
         if pattern:
             sub_argv.extend(["--pattern", pattern])
 
+        drc_tolerance_file = getattr(args, "fleet_drc_tolerance_file", None)
+        if drc_tolerance_file:
+            sub_argv.extend(["--drc-tolerance-file", drc_tolerance_file])
+
     return fleet_main(sub_argv)
