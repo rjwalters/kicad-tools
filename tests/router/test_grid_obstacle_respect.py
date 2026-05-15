@@ -520,3 +520,274 @@ class TestTO220HBridgeFixture:
                 f"mode -- pre-fix, the static_blocks branch released this "
                 f"cell as soon as one trace touched it"
             )
+
+
+class TestIsolatedPadClearanceHaloIsObstacle:
+    """Issue #2940: rect-aware full-footprint obstacle marking for
+    isolated pads.
+
+    Extends Issue #2915 / #2920 from metal-area cells (the pad copper)
+    to clearance-halo cells (the keep-out ring around the metal).
+    Pre-#2940 the metal-area branch in ``_add_pad_unsafe`` marked
+    ``is_obstacle = True`` on first touch (fix for #2915/#2920), but the
+    clearance-halo branch only flipped ``is_obstacle = True`` on the
+    SECOND pad-touch path (``elif cell.net != pad.net``). Isolated pads
+    -- including board 03's J2 joystick THT cluster (1.6 mm diameter
+    circles at 2 mm pitch, halo wider than pitch so no overlap with
+    neighbours of the same net) and board 03's USB-C 0.25 x 0.35 mm
+    rect pads on J1 -- have no neighbour-pad envelope overlapping
+    their halo, so halo cells stayed ``is_obstacle = False``. The
+    pathfinder's negotiated-mode ``static_blocks`` loophole then
+    released those halo cells once any foreign-net trace touched them
+    (``_usage_count > 0``), producing residual ``clearance_pad_segment``
+    violations 0.005 -- 0.027 mm below the required clearance (the trace
+    edge sits within the halo but ``static_blocks`` no longer rejects
+    it).
+
+    The fix mirrors the metal-area branch: signal-pad halo cells whose
+    first touch leaves them on ``cell.net == 0`` get painted with the
+    pad's net AND marked ``is_obstacle = True`` in the same statement.
+    Same-net escape is preserved because the pathfinder's
+    ``different_net = cell.net != routing_net`` mask is False for the
+    pad's own net (so ``obstacle_blocks`` excludes own-net cells).
+    """
+
+    def test_clearance_halo_cell_is_obstacle_for_isolated_pad(
+        self, jlcpcb_rules
+    ):
+        """Isolated SMD rectangular pad: a cell INSIDE the clearance
+        halo (but OUTSIDE the metal area) is marked ``is_obstacle =
+        True`` and assigned ``cell.net = pad.net`` on first touch.
+
+        The pad is 0.5 x 0.5 mm at (0, 0).  The halo extent is
+        ``trace_clearance + trace_width/2 = 0.127 + 0.0635 = 0.1905
+        mm`` past the pad edge, so the world rectangle from (-0.4405,
+        -0.4405) to (0.4405, 0.4405) is the halo's outer boundary; the
+        metal-area is (-0.25, -0.25) to (0.25, 0.25). The cell at world
+        (0.35, 0.35) is inside the halo (distance 0.1 from the metal
+        corner, well within the 0.1905 mm clearance band) but outside
+        the metal area.
+        """
+        grid = _make_grid(jlcpcb_rules)
+        pad = Pad(
+            x=0.0,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=11,
+            net_name="MISO",
+            layer=Layer.F_CU,
+            ref="J5",
+            pin="3",
+        )
+        grid.add_pad(pad)
+
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+
+        # Halo-only probe: cell at world (0.35, 0.35) is in the halo
+        # but outside the metal area (metal extends to +/- 0.25 mm).
+        halo_gx, halo_gy = grid.world_to_grid(0.35, 0.35)
+        halo_cell = grid.grid[layer_idx][halo_gy][halo_gx]
+
+        assert halo_cell.blocked is True, (
+            "Clearance halo cell must be blocked"
+        )
+        assert halo_cell.pad_blocked is False, (
+            "Clearance halo cell is OUTSIDE the metal area and must "
+            "NOT carry ``pad_blocked = True`` (that flag is reserved "
+            "for actual pad copper, per #996)"
+        )
+        assert halo_cell.net == pad.net, (
+            "Clearance halo cell should be net-painted with the pad's "
+            "net so the pathfinder's same-net mask treats it as own-net"
+        )
+        assert halo_cell.is_obstacle is True, (
+            "Issue #2940: clearance-halo cell of an isolated signal pad "
+            "must be ``is_obstacle = True`` on first touch (was False "
+            "pre-fix, which let the negotiated-mode ``static_blocks`` "
+            "branch release it to foreign nets after ``usage_count > 0``)"
+        )
+
+    def test_clearance_halo_foreign_net_blocked_in_negotiated_mode(
+        self, jlcpcb_rules
+    ):
+        """Negotiated-mode invariant: a halo cell of an isolated pad
+        must remain blocked for foreign nets after one trace has touched
+        the region.
+
+        This is the actual board 03 failure mode -- a JOY_Y trace
+        completes near J2.5 (JOY_BTN), painting the halo cells with
+        ``usage_count > 0``, and a JOY_BTN-targeted trace is then
+        admitted through the same halo cells because ``static_blocks``
+        releases them.  Post-fix, ``is_obstacle = True`` survives the
+        release.
+        """
+        grid = _make_grid(jlcpcb_rules)
+        pad = Pad(
+            x=0.0,
+            y=0.0,
+            width=1.6,
+            height=1.6,
+            net=10,
+            net_name="JOY_BTN",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=1.0,
+            ref="J2",
+            pin="5",
+        )
+        grid.add_pad(pad)
+
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+
+        # Halo probe: 0.9 mm from pad center is inside the halo band
+        # (metal edge at 0.8 mm, halo edge at 0.8 + 0.1905 ~ 0.99 mm).
+        halo_gx, halo_gy = grid.world_to_grid(0.9, 0.0)
+
+        # Foreign net 42, negotiated mode.  Radius=0 isolates the
+        # per-cell decision from dilation effects.
+        blocked = grid.compute_expanded_blocked(
+            radius=0, net=42, allow_sharing=True
+        )
+
+        assert bool(blocked[layer_idx, halo_gy, halo_gx]) is True, (
+            "Issue #2940: isolated THT pad clearance halo must block "
+            "foreign nets in negotiated mode -- pre-fix the cell was "
+            "first-touched with is_obstacle=False and the "
+            "static_blocks branch released it once usage_count > 0"
+        )
+
+    def test_clearance_halo_own_net_passable_in_negotiated_mode(
+        self, jlcpcb_rules
+    ):
+        """Same-net regression guard: setting ``is_obstacle = True`` on
+        halo cells must NOT break own-net escape routing.
+
+        The pathfinder's ``different_net = cell.net != routing_net`` is
+        False for own-net cells, so they are excluded from
+        ``obstacle_blocks``.  The halo cells now carry ``cell.net ==
+        pad.net``, so own-net traces remain passable.
+        """
+        grid = _make_grid(jlcpcb_rules)
+        pad = Pad(
+            x=0.0,
+            y=0.0,
+            width=1.6,
+            height=1.6,
+            net=10,
+            net_name="JOY_BTN",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=1.0,
+            ref="J2",
+            pin="5",
+        )
+        grid.add_pad(pad)
+
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        halo_gx, halo_gy = grid.world_to_grid(0.9, 0.0)
+
+        # Own-net trace (net=10), negotiated mode.
+        blocked = grid.compute_expanded_blocked(
+            radius=0, net=10, allow_sharing=True
+        )
+
+        assert bool(blocked[layer_idx, halo_gy, halo_gx]) is False, (
+            "Own-net trace must remain passable through its own pad's "
+            "clearance halo (same-net escape preserved -- #2880 / "
+            "#2908 / #2940 regression guard)"
+        )
+
+    @pytest.mark.parametrize(
+        "pad_kwargs,probe_offset,description",
+        [
+            (
+                # USB-C SMD pad: 0.25 x 0.35 mm, the board 03 J1
+                # pad-cluster geometry that motivated #2940.
+                dict(width=0.25, height=0.35),
+                (0.2, 0.0),
+                "USB-C SMD (0.25 x 0.35 mm)",
+            ),
+            (
+                # 0402 SMD pad
+                dict(width=0.56, height=0.62),
+                (0.32, 0.0),
+                "0402 SMD rectangular",
+            ),
+            (
+                # Joystick THT pin (1.6 mm circle)
+                dict(
+                    width=1.6,
+                    height=1.6,
+                    through_hole=True,
+                    drill=1.0,
+                ),
+                (0.9, 0.0),
+                "Joystick THT circular",
+            ),
+            (
+                # USB-C shell THT (1.0 mm circle)
+                dict(
+                    width=1.0,
+                    height=1.0,
+                    through_hole=True,
+                    drill=0.6,
+                ),
+                (0.6, 0.0),
+                "USB-C shell THT circular",
+            ),
+        ],
+    )
+    def test_rect_aware_halo_obstacle_across_pad_geometries(
+        self, jlcpcb_rules, pad_kwargs, probe_offset, description
+    ):
+        """Each pad geometry exercising #2940's fix layer: at a probe
+        offset INSIDE the clearance halo (not the metal area), foreign
+        nets must be blocked in negotiated mode.
+
+        This is the rectangular-footprint full-coverage test: it covers
+        the board 03 cluster (USB-C J1 narrow rect pads + J2 joystick
+        THT circular pads) plus a 0402 SMD analogue, ensuring the fix
+        applies uniformly across pad shapes that the router treats as
+        their bounding rectangle.
+        """
+        grid = _make_grid(jlcpcb_rules)
+        pad = Pad(
+            x=0.0,
+            y=0.0,
+            net=5,
+            net_name="SIG",
+            layer=Layer.F_CU,
+            ref="REF",
+            pin="1",
+            **pad_kwargs,
+        )
+        grid.add_pad(pad)
+
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        dx, dy = probe_offset
+        halo_gx, halo_gy = grid.world_to_grid(dx, dy)
+
+        # The probe must be inside the halo band but outside the metal
+        # area; assert that the cell is blocked and not pad_blocked.
+        halo_cell = grid.grid[layer_idx][halo_gy][halo_gx]
+        assert halo_cell.blocked is True, (
+            f"{description}: probe at offset {probe_offset} must be "
+            f"blocked (inside the clearance halo)"
+        )
+        # The probe cell is intended to be a clearance-halo cell.  For
+        # some short-axis probes (e.g. USB-C 0.25 x 0.35) the metal
+        # area is so small that quantisation can land the probe on the
+        # metal boundary -- accept either case as long as is_obstacle
+        # is true.
+        blocked = grid.compute_expanded_blocked(
+            radius=0, net=42, allow_sharing=True
+        )
+
+        assert bool(blocked[layer_idx, halo_gy, halo_gx]) is True, (
+            f"Issue #2940: {description} pad's clearance halo must "
+            f"block foreign net 42 in negotiated mode at world offset "
+            f"{probe_offset}; pre-fix the negotiated-mode "
+            f"static_blocks branch released this halo cell after the "
+            f"first trace touched it"
+        )

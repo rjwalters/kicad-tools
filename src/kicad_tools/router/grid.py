@@ -1274,11 +1274,52 @@ class RoutingGrid:
                             if pad.net != 0:
                                 cell.is_obstacle = True
                         else:
+                            # Issue #2940: rect-aware full-footprint obstacle
+                            # marking for isolated pads.  The pre-fix code only
+                            # flipped ``is_obstacle = True`` on clearance-halo
+                            # cells on the SECOND pad-touch path
+                            # (``elif cell.net != pad.net``).  For isolated
+                            # pads (board 03's USB-C 0.25 x 0.35 mm pads,
+                            # joystick THT pads, west-edge U1 pads), no
+                            # neighbour-pad envelope overlaps the halo, so
+                            # cells stayed ``is_obstacle = False`` and the
+                            # pathfinder's negotiated-mode ``static_blocks``
+                            # branch released them to foreign-net traces once
+                            # ``_usage_count > 0`` -- producing 6 residual
+                            # ``clearance_pad_segment`` violations against the
+                            # J2 joystick THT pad cluster on board 03 (the
+                            # foreign-net through-pad family #2928 targeted
+                            # but did not fully cover for clearance-halo
+                            # geometry).
+                            #
+                            # The fix mirrors the metal-area branch above:
+                            # set ``is_obstacle = True`` on first touch for
+                            # signal pads.  Net-aware semantics are preserved
+                            # by setting ``cell.net = pad.net`` first, so the
+                            # pathfinder's ``different_net = cell.net !=
+                            # routing_net`` mask is False for own-net traces
+                            # (same-net escape #2880 / #2908 remains intact).
+                            # The clearance halo's ``blocked = True`` flag is
+                            # what keeps foreign-net traces out; making
+                            # ``is_obstacle = True`` simply prevents the
+                            # negotiated-mode loophole from releasing the
+                            # cell once it has been touched.
+                            #
+                            # For plane pads (``pad.net == 0``), the existing
+                            # first branch already marked ``is_obstacle =
+                            # True`` whenever the cell carried a foreign net,
+                            # and a no-net-overlap first touch falls through
+                            # naturally to the ``cell.net == 0`` second branch
+                            # which still does not need ``is_obstacle`` (the
+                            # ``static_blocks`` clause with ``usage_count ==
+                            # 0`` and the ``pad_blocked`` short-circuit handle
+                            # plane-net halo cells; see #2758).
                             if pad.net == 0:
                                 if cell.net != 0:
                                     cell.is_obstacle = True
                             elif cell.net == 0:
                                 cell.net = pad.net
+                                cell.is_obstacle = True
                             elif cell.net != pad.net:
                                 cell.is_obstacle = True
 
