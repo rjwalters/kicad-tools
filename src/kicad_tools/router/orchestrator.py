@@ -538,16 +538,27 @@ class RoutingOrchestrator:
         """Execute global routing strategy.
 
         Uses the GlobalRouter to find a corridor assignment through the
-        region graph, then converts the result to a RoutingResult with
-        metrics computed from the corridor waypoints.
+        region graph, then materialises the corridor centreline into
+        :class:`Segment` objects so the caller (e.g. ``route_net_auto``) can
+        persist them to the PCB.  Prior to issue #2913 this method returned
+        ``success=True`` with an empty ``segments`` list, which silently
+        produced PCBs with zero new tracks.
+
+        The global router is a coarse planner; the segments produced here
+        follow the tile-corridor centreline and are not guaranteed to be
+        DRC-clean.  They give the user something concrete to inspect and
+        repair instead of the previous silent data loss.
 
         Args:
             net: Net identifier
             pads: Optional list of pads
 
         Returns:
-            RoutingResult from global routing
+            RoutingResult from global routing with populated ``segments``
         """
+        # Local import to avoid circular import at module load time
+        from .primitives import Segment as RouterSegment
+
         if pads is None or len(pads) < 2:
             return RoutingResult(
                 success=False,
@@ -557,7 +568,15 @@ class RoutingOrchestrator:
             )
 
         pad_positions = [(p.x, p.y) for p in pads]
-        net_id = net if isinstance(net, int) else abs(hash(str(net))) % 100000 + 1
+        # Resolve the integer net ID from the pads themselves when ``net``
+        # is a string (the previous ``hash(str(net))`` trick produced bogus
+        # net numbers that would not round-trip into the PCB).  Falling
+        # back to 0 means the segment will land on the "unconnected" net,
+        # which is at least visible to the user.
+        if isinstance(net, int):
+            net_id = net
+        else:
+            net_id = pads[0].net if pads[0].net else 0
 
         assignment = self.global_router.route_net(net_id, pad_positions)
 
@@ -572,18 +591,62 @@ class RoutingOrchestrator:
                 ),
             )
 
-        # Calculate total length from corridor waypoints
-        total_length = 0.0
+        # Materialise corridor centreline into Segment objects so the
+        # caller can persist them.  Each consecutive pair of waypoint
+        # coordinates becomes a trace segment on the assignment's layer
+        # (defaults to F.Cu when ``assignment.layer == 0``).
         waypoints = assignment.waypoint_coords
+        trace_width = getattr(self.rules, "trace_width", 0.2)
+        # Map the GlobalRouter's integer layer index to a router Layer enum.
+        try:
+            from .layers import Layer as RouterLayer
+
+            seg_layer = (
+                RouterLayer.B_CU
+                if getattr(assignment, "layer", 0) and assignment.layer != 0
+                else RouterLayer.F_CU
+            )
+        except Exception:  # pragma: no cover - import safety
+            seg_layer = None  # type: ignore[assignment]
+
+        net_name = ""
+        if pads and pads[0].net_name:
+            net_name = pads[0].net_name
+        elif isinstance(net, str):
+            net_name = net
+
+        segments: list = []
+        total_length = 0.0
         for i in range(len(waypoints) - 1):
-            dx = waypoints[i + 1][0] - waypoints[i][0]
-            dy = waypoints[i + 1][1] - waypoints[i][1]
-            total_length += math.sqrt(dx * dx + dy * dy)
+            x1, y1 = waypoints[i]
+            x2, y2 = waypoints[i + 1]
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.sqrt(dx * dx + dy * dy)
+            if length == 0.0:
+                # Skip degenerate zero-length segments emitted by the
+                # corridor builder at region transitions.
+                continue
+            total_length += length
+            if seg_layer is not None:
+                segments.append(
+                    RouterSegment(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=trace_width,
+                        layer=seg_layer,
+                        net=net_id,
+                        net_name=net_name,
+                    )
+                )
 
         return RoutingResult(
             success=True,
             net=net,
             strategy_used=RoutingStrategy.GLOBAL_WITH_REPAIR,
+            segments=segments,
             metrics=RoutingMetrics(
                 total_length_mm=total_length,
                 via_count=0,
@@ -623,7 +686,9 @@ class RoutingOrchestrator:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
                 self._escape = EscapeRouter(
-                    grid=grid, rules=self.rules, net_class_map=self.net_class_map,
+                    grid=grid,
+                    rules=self.rules,
+                    net_class_map=self.net_class_map,
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
                     manufacturer=getattr(self.rules, "manufacturer", None),
@@ -776,14 +841,24 @@ class RoutingOrchestrator:
 
         Uses AdaptiveGridRouter for two-phase routing:
         Phase 1: Fine-grid escape routing for off-grid pads
-        Phase 2: Coarse-grid channel routing for all connections
+        Phase 2: Coarse-grid channel routing handled by ``_route_global``
+
+        Issue #2913: previously this method returned ``success=True`` even
+        when no escape segments were generated, then never produced
+        coarse-grid segments either, leading to silent data loss in
+        ``route_net_auto``.  The fix chains a ``_route_global`` call when
+        no fine-pitch components are detected (or when the sub-grid grid
+        is unavailable), and surfaces the escape segments in
+        ``result.segments`` so the caller can persist them.
 
         Args:
             net: Net identifier
             pads: List of pads
 
         Returns:
-            RoutingResult from adaptive grid routing
+            RoutingResult from adaptive grid routing.  ``segments`` carries
+            any escape segments + the global-router corridor segments so
+            the caller can persist them via ``add_trace``.
         """
         if pads is None or len(pads) < 2:
             return RoutingResult(
@@ -800,6 +875,7 @@ class RoutingOrchestrator:
         )
 
         escape_count = 0
+        escape_segments: list = []
         if fine_components:
             # Initialize sub-grid router for escape phase
             if self._subgrid is None:
@@ -813,6 +889,10 @@ class RoutingOrchestrator:
                 if fine_pads:
                     subgrid_result = self._subgrid.route_with_subgrid(fine_pads)
                     escape_count = subgrid_result.success_count
+                    # Surface escape segments so the caller can persist them.
+                    for esc in subgrid_result.escapes:
+                        if esc.segment is not None:
+                            escape_segments.append(esc.segment)
 
             logger.info(
                 "Sub-grid adaptive: %d fine-pitch components, %d escapes generated",
@@ -820,14 +900,23 @@ class RoutingOrchestrator:
                 escape_count,
             )
 
-        # Phase 2 would be handled by the caller's main routing loop
+        # Phase 2: global routing for the remaining inter-component path.
+        global_result = self._route_global(net, pads)
+
         return RoutingResult(
-            success=True,
+            success=global_result.success,
             net=net,
             strategy_used=RoutingStrategy.SUBGRID_ADAPTIVE,
+            segments=escape_segments + global_result.segments,
+            vias=global_result.vias,
             metrics=RoutingMetrics(
+                total_length_mm=global_result.metrics.total_length_mm,
+                via_count=global_result.metrics.via_count,
+                layer_changes=global_result.metrics.layer_changes,
                 escape_segments=escape_count,
             ),
+            error_message=global_result.error_message,
+            alternative_strategies=global_result.alternative_strategies,
         )
 
     def _route_with_via_resolution(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:
@@ -1249,7 +1338,9 @@ class RoutingOrchestrator:
             grid = getattr(self.pcb, "grid", None)
             if grid is not None:
                 self._escape = EscapeRouter(
-                    grid=grid, rules=self.rules, net_class_map=self.net_class_map,
+                    grid=grid,
+                    rules=self.rules,
+                    net_class_map=self.net_class_map,
                     edge_clearance=getattr(self.pcb, "_edge_clearance", None),
                     board_bounds=getattr(self.pcb, "_board_bbox", None),
                     manufacturer=getattr(self.rules, "manufacturer", None),

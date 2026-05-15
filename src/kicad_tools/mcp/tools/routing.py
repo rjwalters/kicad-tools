@@ -564,8 +564,34 @@ def route_net_auto(
     result_dict = result.to_dict()
     result_dict["net_name"] = net_name
 
-    # Save output if requested and routing succeeded
+    # Save output if requested and routing succeeded.
+    #
+    # Issue #2913: the orchestrator's RoutingResult carries the produced
+    # segments + vias in ``result.segments`` / ``result.vias`` but the
+    # PCB object is *not* mutated by the orchestrator.  Prior to this
+    # fix we called ``pcb.save(output_path)`` directly on the un-mutated
+    # PCB which silently produced a board with zero new tracks for the
+    # net while reporting ``success=True``.  We now persist the segments
+    # and vias via the PCB schema's ``add_trace`` / ``add_via`` helpers
+    # before saving, and surface a clear failure when the orchestrator
+    # reports success but produced no physical segments.
     if output_path and result.success:
+        segments_written, vias_written = _persist_routing_result_to_pcb(pcb, result, net_name)
+        result_dict["segments_written"] = segments_written
+        result_dict["vias_written"] = vias_written
+
+        if segments_written == 0 and vias_written == 0:
+            # Orchestrator claimed success but produced nothing physical.
+            # Refuse to silently save an empty PCB -- mark the call as a
+            # failure with a clear error message instead.
+            result_dict["success"] = False
+            result_dict["error_message"] = (
+                "Routing reported success but no physical segments or "
+                "vias were produced; refusing to save un-modified PCB "
+                "(issue #2913)."
+            )
+            return result_dict
+
         try:
             pcb.save(output_path)
             result_dict["output_path"] = output_path
@@ -575,6 +601,70 @@ def route_net_auto(
             ]
 
     return result_dict
+
+
+def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int, int]:
+    """Persist orchestrator result segments + vias into the PCB object.
+
+    Issue #2913: the orchestrator returns segments/vias on the
+    :class:`RoutingResult` but does not mutate the PCB.  This helper
+    materialises them via ``pcb.add_trace`` / ``pcb.add_via`` so a
+    subsequent ``pcb.save`` writes the physical traces to disk.
+
+    Args:
+        pcb: Loaded PCB object (will be mutated).
+        result: Orchestrator ``RoutingResult`` (carries ``segments``/``vias``).
+        net_name: Net name to associate with the new traces.
+
+    Returns:
+        Tuple of ``(segments_written, vias_written)``.
+    """
+    segments_written = 0
+    vias_written = 0
+
+    # Persist segments.  The orchestrator's Segment uses router.layers.Layer
+    # (KiCad name accessor: ``layer.kicad_name``).  ``add_trace`` accepts
+    # the layer as a KiCad string (e.g. "F.Cu").
+    for seg in getattr(result, "segments", []) or []:
+        try:
+            layer_name = (
+                seg.layer.kicad_name if hasattr(seg.layer, "kicad_name") else str(seg.layer)
+            )
+            pcb.add_trace(
+                start=(float(seg.x1), float(seg.y1)),
+                end=(float(seg.x2), float(seg.y2)),
+                width=float(getattr(seg, "width", 0.2)),
+                layer=layer_name,
+                net=net_name,
+            )
+            segments_written += 1
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to persist segment for net %s: %s", net_name, e)
+
+    # Persist vias.
+    for via in getattr(result, "vias", []) or []:
+        try:
+            layers = getattr(via, "layers", None)
+            if layers and len(layers) >= 2:
+                layer_pair = (
+                    layers[0].kicad_name if hasattr(layers[0], "kicad_name") else str(layers[0]),
+                    layers[1].kicad_name if hasattr(layers[1], "kicad_name") else str(layers[1]),
+                )
+            else:
+                layer_pair = ("F.Cu", "B.Cu")
+            pcb.add_via(
+                x=float(via.x),
+                y=float(via.y),
+                size=float(getattr(via, "diameter", 0.6)),
+                drill=float(getattr(via, "drill", 0.3)),
+                layers=layer_pair,
+                net=net_name,
+            )
+            vias_written += 1
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to persist via for net %s: %s", net_name, e)
+
+    return segments_written, vias_written
 
 
 def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:

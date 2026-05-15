@@ -136,6 +136,14 @@ def run_route_auto_command(args) -> int:
                 print(f"  Vias: {vias}")
             if repairs:
                 print(f"  Repairs applied: {repairs}")
+        # Issue #2913: surface physical track count delta so silent
+        # data loss (success=True with no tracks written) is visible.
+        segs_written = result.get("segments_written")
+        vias_written = result.get("vias_written")
+        if segs_written is not None:
+            print(f"  Segments written: {segs_written}")
+        if vias_written:
+            print(f"  Vias written: {vias_written}")
         for warning in result.get("warnings", []):
             print(f"  Warning: {warning}")
         if result.get("output_path"):
