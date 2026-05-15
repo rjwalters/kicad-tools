@@ -398,9 +398,24 @@ def generate_button(ref: str, pos: tuple, net_name: str) -> str:
 
 
 def generate_crystal() -> str:
-    """Generate crystal oscillator footprint."""
-    x = BOARD_ORIGIN_X + 55  # Right of MCU
-    y = BOARD_ORIGIN_Y + 28
+    """Generate crystal oscillator footprint.
+
+    The MCU (U1) sits at (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 32).  Its
+    XTAL pins (2 = XTAL1, 3 = XTAL2) are on the LEFT/west side of the QFP
+    package (pad_offset = -4.5 mm from U1 center, so absolute x ≈ centre-4.5).
+    Placing the crystal to the RIGHT of U1 forces the router to run 17–22 mm
+    traces from those west-edge pads around or through the MCU body — a
+    channel-blocked failure confirmed in board-03 routing audit (2026-05-15).
+
+    Fix: place Y1 to the LEFT of U1 (BOARD_ORIGIN_X + 22), with its centre
+    vertically aligned with the XTAL pad row (BOARD_ORIGIN_Y + 30, midway
+    between pins 2 and 3 at y offsets -2.0 and -1.2 mm from U1 centre).
+    The gap between Y1 pin 2 (x ≈ BOARD_ORIGIN_X + 24.4) and U1 pin 2
+    (x ≈ BOARD_ORIGIN_X + 35.5) is ≈11 mm — plenty of room for a short
+    direct trace on F.Cu without crossing any other signal.
+    """
+    x = BOARD_ORIGIN_X + 22  # Left of MCU (XTAL pins 2/3 are on U1's west edge)
+    y = BOARD_ORIGIN_Y + 30  # Aligned with U1 XTAL pad row
 
     # HC49 crystal, 2 pins
     return f"""  (footprint "Crystal:Crystal_HC49-U_Vertical"
@@ -487,14 +502,14 @@ def generate_xtal_load_caps() -> str:
     C6 (XTAL2 -> GND). Without them on the PCB, ``kct validate --sync``
     flags schematic-only refs and the BOM<->PCB preflight blocks export.
 
-    Crystal Y1 sits at ``(BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 28)`` with
+    Crystal Y1 sits at ``(BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 30)`` with
     pads at x = +/-2.44 mm relative to its center (XTAL1 on pad 1, XTAL2 on
     pad 2). Place C5 ~4 mm below the XTAL1 pad and C6 ~4 mm below the XTAL2
     pad so each load cap is adjacent to its crystal pin with a short trace
     to GND.
     """
-    xtal_cx = BOARD_ORIGIN_X + 55
-    xtal_cy = BOARD_ORIGIN_Y + 28
+    xtal_cx = BOARD_ORIGIN_X + 22
+    xtal_cy = BOARD_ORIGIN_Y + 30
     cap_dy = 4.0  # mm below crystal center
 
     parts = [
