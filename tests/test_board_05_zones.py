@@ -1,8 +1,15 @@
 """Regression test: board 05 ships >=4 filled copper-pour zones in its routed PCB.
 
 Issue #2899 (umbrella #2746 child) — ``boards/05-bldc-motor-controller`` is
-the canonical regression vehicle for the zone-generation pipeline.  Prior
-to this issue the committed routed PCB carried zero ``(zone ...)`` blocks
+the canonical regression vehicle for the zone-generation pipeline.  Also
+serves acceptance criteria #1 and #2 of issue #2901 (zone count >=4 and
+required nets VMOTOR/+5V/+3.3V/GND each owning a zone) -- both ACs are
+already covered by the tests in this module; #2901 extends coverage to
+the DRC allowlist (``tests/test_board_05_drc_allowlist.py``), thermal
+stitching (``tests/test_board_05_thermal_stitch.py``), and export
+preflight (``tests/test_board_05_export.py``).
+
+Prior to issue #2899 the committed routed PCB carried zero ``(zone ...)`` blocks
 because ``design.py``'s self-contained pipeline ran the router straight
 after PCB creation, never invoking the zone generator.  The build also
 could not patch over the gap: ``design.py`` registers as both the
