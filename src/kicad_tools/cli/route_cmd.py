@@ -1730,6 +1730,188 @@ def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> li
     return removed
 
 
+def _detect_pcb_layer_profile(pcb_path: Path) -> tuple[int, bool]:
+    """Inspect the PCB's declared ``(layers ...)`` block and inner-layer zones.
+
+    Returns the number of copper layers and whether any *inner* copper layer
+    has a zone definition (the canonical signature of a board that was
+    designed against power/ground planes on ``In1.Cu``/``In2.Cu``).  These two
+    pieces of information are what the layer-escalation loops need to refuse
+    structurally-invalid 2L probes on a 4L board (issue #2916) and to put the
+    plane-aware 4L variant ahead of the all-signal variant when planes exist.
+
+    The parsing matches :func:`kicad_tools.router.io.detect_layer_stack` -- we
+    reuse the same regexes so the two paths agree on what counts as a copper
+    layer and what counts as a plane zone.
+
+    Args:
+        pcb_path: Path to the input ``.kicad_pcb`` file.
+
+    Returns:
+        ``(num_copper_layers, has_inner_plane_zones)``.  Returns
+        ``(2, False)`` on any parse failure so the escalation loops fall
+        through to legacy behaviour (start at 2L) rather than crashing.
+    """
+    import re
+
+    # Accept str or Path (a few callers pass string paths, mirroring
+    # ``_cleanup_stale_layer_artifacts``).
+    pcb_path = Path(pcb_path)
+    try:
+        pcb_text = pcb_path.read_text()
+    except OSError as exc:
+        logger.debug("Could not read %s for layer detection: %s", pcb_path, exc)
+        return (2, False)
+
+    # Parse the (layers ...) section to find copper layers -- mirrors the
+    # regex used by ``detect_layer_stack`` so both paths agree.
+    copper_names: list[str] = []
+    layers_match = re.search(r"\(layers\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
+    if layers_match:
+        for layer_match in re.finditer(
+            r'\((\d+)\s+"([^"]+\.Cu)"\s+(\w+)', layers_match.group(1)
+        ):
+            copper_names.append(layer_match.group(2))
+
+    num_copper = len(copper_names) if copper_names else 2
+
+    # Detect zones on inner layers (anything that is not F.Cu or B.Cu).
+    has_inner_planes = False
+    for zone_match in re.finditer(
+        r'\(zone\s+.*?\(layer\s+"([^"]+)"\)',
+        pcb_text,
+        re.DOTALL,
+    ):
+        layer_name = zone_match.group(1)
+        if layer_name.endswith(".Cu") and layer_name not in ("F.Cu", "B.Cu"):
+            has_inner_planes = True
+            break
+
+    return (num_copper, has_inner_planes)
+
+
+def _filter_layer_configs_for_pcb(
+    layer_configs: list[tuple[int, "LayerStack"]],
+    pcb_path: Path,
+    max_layers: int,
+    quiet: bool = False,
+) -> list[tuple[int, "LayerStack"]]:
+    """Filter and reorder *layer_configs* to honour the PCB's declared stackup.
+
+    Issue #2916: ``--auto-layers`` previously started at 2L for every board
+    regardless of the PCB's declared copper count.  On a 4L board (e.g.
+    chorus-test-revA with ``In1.Cu``/``In2.Cu`` plane zones already drawn) the
+    2L probe burns a fair share of the wall-clock budget on a configuration
+    that cannot succeed, leaving the real 4L attempt to start against an
+    exhausted deadline (issue #2823 + #2802).
+
+    This helper applies three transformations:
+
+    1. **Floor by detected copper count.**  Entries whose ``layer_count`` is
+       below the PCB's declared count are dropped.  A 4-copper-layer PCB has
+       4L as its minimum sensible probe; 2L is never tried.
+    2. **Promote plane-aware variants.**  When inner-layer zones are present
+       in the PCB (the ``four_layer_sig_gnd_pwr_sig`` shape), reorder so the
+       plane-aware 4L variant runs before ``four_layer_all_signal``.  This
+       matches what the single-pass path already does via
+       :func:`detect_layer_stack`.
+    3. **Honour ``--max-layers``.**  If the user-requested cap is below the
+       detected count, emit a warning and keep the cap (the user's explicit
+       wish wins, but they are told that it is structurally below the
+       declared stackup so a partial/failed result is expected).
+
+    Args:
+        layer_configs: The unfiltered escalation ladder
+            ``[(n_layers, LayerStack), ...]``.
+        pcb_path: Path to the input ``.kicad_pcb`` file (used to probe the
+            declared copper count and inner-zone presence).
+        max_layers: User-requested ``--max-layers`` cap.
+        quiet: Suppress informational output.
+
+    Returns:
+        A new list with entries below ``detected_count`` removed, plane-aware
+        variants promoted (when applicable), and capped at ``max_layers``.
+        Falls through to the input list unchanged when detection fails or the
+        detected count is <= 2 (the natural starting point for the ladder).
+    """
+    from kicad_tools.cli.progress import flush_print
+
+    detected_count, has_inner_planes = _detect_pcb_layer_profile(pcb_path)
+
+    # Honour ``--max-layers`` even when it falls below the declared count --
+    # but warn loudly so the user knows their cap is structurally too low.
+    effective_floor = detected_count
+    if max_layers < detected_count:
+        if not quiet:
+            flush_print(
+                f"  Warning: --max-layers={max_layers} is below the PCB's "
+                f"declared copper count ({detected_count}).  Using the "
+                f"requested cap, but the board was designed for "
+                f"{detected_count} layers so routing will likely fail or "
+                "produce a partial result (issue #2916)."
+            )
+        # User's explicit cap wins -- relax the floor so the ladder still
+        # has at least one rung.
+        effective_floor = min(detected_count, max_layers)
+
+    # Apply max_layers cap as before.
+    filtered = [(n, s) for n, s in layer_configs if n <= max_layers]
+
+    # Drop entries below the detected floor (or the user's cap if lower).
+    filtered = [(n, s) for n, s in filtered if n >= effective_floor]
+
+    # When inner-layer plane zones exist, promote the plane-aware 4L variant
+    # ahead of the all-signal variant.  This matches the single-pass path
+    # which calls ``detect_layer_stack`` and returns the plane-aware shape.
+    if has_inner_planes:
+        plane_aware = []
+        all_signal = []
+        other = []
+        for n, s in filtered:
+            if n == 4 and "ALL-SIG" in s.name.upper():
+                all_signal.append((n, s))
+            elif n == 4:
+                plane_aware.append((n, s))
+            else:
+                other.append((n, s))
+        # Preserve overall layer-count ordering: 4L (plane-aware then
+        # all-signal) sandwiched between any 2L (none after floor) and 6L.
+        # ``other`` already preserves the relative ordering of the original
+        # list, so we splice the 4L entries back at their natural position.
+        if plane_aware or all_signal:
+            result = []
+            inserted_four = False
+            for n, s in other:
+                if n > 4 and not inserted_four:
+                    result.extend(plane_aware)
+                    result.extend(all_signal)
+                    inserted_four = True
+                result.append((n, s))
+            if not inserted_four:
+                result.extend(plane_aware)
+                result.extend(all_signal)
+            filtered = result
+
+    # Defensive: if the filter wiped the ladder (e.g. detected count > 6 and
+    # max_layers < detected), fall back to the original list capped at
+    # max_layers so the loop still has something to try.  The warning above
+    # already alerted the user.
+    if not filtered:
+        filtered = [(n, s) for n, s in layer_configs if n <= max_layers]
+
+    if not quiet and detected_count > 2:
+        dropped = len(layer_configs) - len(filtered)
+        if dropped > 0 or has_inner_planes:
+            ladder_str = ", ".join(f"{n}L" for n, _ in filtered)
+            flush_print(
+                f"  Detected {detected_count}-copper-layer PCB"
+                f"{' with inner plane zones' if has_inner_planes else ''}; "
+                f"escalation ladder: [{ladder_str}] (issue #2916)"
+            )
+
+    return filtered
+
+
 def _auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
@@ -1962,8 +2144,13 @@ def route_with_layer_escalation(
         (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
     ]
 
-    # Filter by max_layers
-    layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
+    # Issue #2916: filter and reorder by the PCB's declared stackup.
+    # Drops entries below the detected copper count (so a 4L board never
+    # wastes budget on a 2L probe) and promotes the plane-aware 4L variant
+    # ahead of all-signal when inner plane zones exist.
+    layer_configs = _filter_layer_configs_for_pcb(
+        layer_configs, pcb_path, args.max_layers, quiet=quiet
+    )
 
     if not quiet:
         flush_print("=" * 60)
@@ -3705,8 +3892,13 @@ def route_with_combined_escalation(
         (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
     ]
 
-    # Filter by max_layers
-    layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
+    # Issue #2916: filter and reorder by the PCB's declared stackup.
+    # Drops entries below the detected copper count (so a 4L board never
+    # wastes budget on a 2L probe) and promotes the plane-aware 4L variant
+    # ahead of all-signal when inner plane zones exist.
+    layer_configs = _filter_layer_configs_for_pcb(
+        layer_configs, pcb_path, args.max_layers, quiet=quiet
+    )
 
     if not quiet:
         flush_print("=" * 60)

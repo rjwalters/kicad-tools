@@ -1638,3 +1638,328 @@ class TestPlacementFeedbackOnPartial:
             f"Placement-feedback should not run on SUCCESS, got "
             f"{mock_feedback.call_count} invocations"
         )
+
+
+class TestLayerConfigsFilterForStackup:
+    """Issue #2916: ``--auto-layers`` must honour the PCB's declared stackup.
+
+    Both escalation loops in ``route_cmd.py`` (1D layer escalation and 2D
+    combined escalation) historically started at ``(2, two_layer())`` for
+    every input PCB.  On a board whose ``(layers ...)`` block declares
+    F.Cu / In1.Cu / In2.Cu / B.Cu (4 copper layers), the 2L probe is
+    structurally invalid — yet under ``_per_attempt_budgeted_timeout``
+    (#2823) it consumes a fair share of the wall-clock budget, leaving the
+    real 4L attempt to die against ``_deadline_expired`` (#2802).
+
+    These tests drive the new ``_filter_layer_configs_for_pcb`` helper
+    directly on synthetic PCB files so the assertion is independent of
+    the full router pipeline.
+    """
+
+    # Minimal PCBs covering the three cases we care about.
+    PCB_2L = """(kicad_pcb
+  (version 20240101)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+)"""
+
+    PCB_4L_NO_ZONES = """(kicad_pcb
+  (version 20240101)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+)"""
+
+    PCB_4L_PLANE_ZONES = """(kicad_pcb
+  (version 20240101)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu")
+    (hatch edge 0.5)
+    (filled_areas_thickness no)
+    (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))
+  (zone (net 2) (net_name "+3.3V") (layer "In2.Cu")
+    (hatch edge 0.5)
+    (filled_areas_thickness no)
+    (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))
+)"""
+
+    PCB_6L = """(kicad_pcb
+  (version 20240101)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (3 "In3.Cu" signal)
+    (4 "In4.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+)"""
+
+    def _full_ladder(self):
+        """Return the unfiltered escalation ladder used by both loops."""
+        from kicad_tools.router import LayerStack
+
+        return [
+            (2, LayerStack.two_layer()),
+            (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+            (4, LayerStack.four_layer_all_signal()),
+            (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+        ]
+
+    def test_2l_pcb_keeps_full_ladder(self, tmp_path):
+        """A 2-layer PCB must keep the legacy ladder starting at 2L.
+
+        This is the regression test for the existing fleet: boards 01-07
+        and any other 2-copper-layer PCB must continue to probe at 2L
+        first.
+        """
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "two_layer.kicad_pcb"
+        pcb.write_text(self.PCB_2L)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=6, quiet=True
+        )
+
+        # The full 4-entry ladder must survive a 2L board.
+        assert [n for n, _ in filtered] == [2, 4, 4, 6]
+        # And it still starts at 2L.
+        assert filtered[0][0] == 2
+
+    def test_4l_pcb_drops_2l_entry(self, tmp_path):
+        """A 4-copper-layer PCB must skip the 2L probe entirely.
+
+        Acceptance criterion #1: chorus-test (4-copper stackup) reaches a
+        4L attempt within budget.  This is the unit-level proof of that:
+        the ladder never contains a 2L config when the declared copper
+        count is 4.
+        """
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "four_layer.kicad_pcb"
+        pcb.write_text(self.PCB_4L_NO_ZONES)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=6, quiet=True
+        )
+
+        # 2L must be filtered out -- 4L is the floor.
+        assert all(n >= 4 for n, _ in filtered), (
+            f"Expected ladder to start at 4L on a 4-copper board, got "
+            f"{[n for n, _ in filtered]}"
+        )
+        # First attempt must be a 4L config.
+        assert filtered[0][0] == 4
+
+    def test_4l_plane_zones_promote_plane_aware_first(self, tmp_path):
+        """When inner-layer plane zones exist, plane-aware 4L runs first.
+
+        Acceptance criterion #2: unit test mocks a 4-layer stackup with
+        inner plane zones and asserts auto-layers picks the plane-aware
+        variant on the first 4L attempt (not ``four_layer_all_signal``).
+        """
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "four_layer_planes.kicad_pcb"
+        pcb.write_text(self.PCB_4L_PLANE_ZONES)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=6, quiet=True
+        )
+
+        # No 2L entries.
+        assert all(n >= 4 for n, _ in filtered)
+        # First entry must be 4L plane-aware (SIG-GND-PWR-SIG), NOT all-signal.
+        first_n, first_stack = filtered[0]
+        assert first_n == 4
+        assert "ALL-SIG" not in first_stack.name.upper(), (
+            f"Expected plane-aware 4L first on a board with In1.Cu/In2.Cu "
+            f"zones, got {first_stack.name}"
+        )
+        # And the all-signal variant must still be in the ladder (so it
+        # can serve as a fallback if the plane-aware attempt under-routes).
+        names = [s.name for _, s in filtered]
+        assert any("ALL-SIG" in n.upper() for n in names), (
+            "all-signal 4L variant must remain in the ladder as a fallback"
+        )
+        # Ordering: plane-aware before all-signal.
+        plane_idx = next(i for i, (_, s) in enumerate(filtered) if "ALL-SIG" not in s.name.upper() and _ == 4)
+        all_sig_idx = next(i for i, (_, s) in enumerate(filtered) if "ALL-SIG" in s.name.upper())
+        assert plane_idx < all_sig_idx, (
+            f"plane-aware 4L (index {plane_idx}) must precede all-signal "
+            f"(index {all_sig_idx})"
+        )
+
+    def test_max_layers_below_detected_emits_warning(self, tmp_path, capsys):
+        """``--max-layers 2`` on a 4L board emits a warning and uses the cap.
+
+        Acceptance criterion #4: ``--max-layers`` < detected emits a
+        warning and uses the requested cap (still respects user override).
+        """
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "four_layer.kicad_pcb"
+        pcb.write_text(self.PCB_4L_NO_ZONES)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=2, quiet=False
+        )
+
+        captured = capsys.readouterr()
+        # Warning must be visible.
+        assert "max-layers=2" in captured.out.lower() or "max-layers=2" in captured.out
+        assert "below" in captured.out.lower()
+        assert "4" in captured.out
+        # The ladder must still produce something to try -- the user's
+        # explicit cap wins, so 2L is the only entry that survives.
+        assert filtered, "Filter must not produce an empty ladder"
+        assert all(n <= 2 for n, _ in filtered), (
+            f"With --max-layers=2 the ladder must respect the cap, got "
+            f"{[n for n, _ in filtered]}"
+        )
+
+    def test_max_layers_below_detected_quiet_suppresses_warning(self, tmp_path, capsys):
+        """``quiet=True`` suppresses the warning but still applies the cap."""
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "four_layer.kicad_pcb"
+        pcb.write_text(self.PCB_4L_NO_ZONES)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=2, quiet=True
+        )
+
+        captured = capsys.readouterr()
+        assert captured.out == "", (
+            f"quiet=True should suppress the warning, got: {captured.out!r}"
+        )
+        # Cap still applied.
+        assert all(n <= 2 for n, _ in filtered)
+
+    def test_4l_pcb_capped_to_4_keeps_both_4l_variants(self, tmp_path):
+        """``--max-layers=4`` on a 4L board keeps both 4L variants.
+
+        Confirms the plane-aware promotion does not accidentally drop the
+        all-signal fallback when the cap leaves no room for 6L.
+        """
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "four_layer_planes.kicad_pcb"
+        pcb.write_text(self.PCB_4L_PLANE_ZONES)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=4, quiet=True
+        )
+
+        # Exactly the two 4L variants.
+        assert [n for n, _ in filtered] == [4, 4]
+        # Plane-aware first.
+        assert "ALL-SIG" not in filtered[0][1].name.upper()
+        assert "ALL-SIG" in filtered[1][1].name.upper()
+
+    def test_6l_pcb_drops_2l_and_4l_entries(self, tmp_path):
+        """A 6-copper-layer PCB must skip 2L and 4L probes."""
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        pcb = tmp_path / "six_layer.kicad_pcb"
+        pcb.write_text(self.PCB_6L)
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=6, quiet=True
+        )
+
+        # Only 6L survives the floor.
+        assert [n for n, _ in filtered] == [6]
+
+    def test_parse_failure_falls_back_to_legacy_behaviour(self, tmp_path):
+        """An unreadable / unparseable PCB falls through to the legacy ladder."""
+        from kicad_tools.cli.route_cmd import _filter_layer_configs_for_pcb
+
+        # Empty file: no (layers ...) block -> detector returns 2.
+        pcb = tmp_path / "broken.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+
+        filtered = _filter_layer_configs_for_pcb(
+            self._full_ladder(), pcb, max_layers=6, quiet=True
+        )
+
+        # Legacy behaviour: full ladder starting at 2L.
+        assert [n for n, _ in filtered] == [2, 4, 4, 6]
+
+    def test_detect_pcb_layer_profile_2l(self, tmp_path):
+        """``_detect_pcb_layer_profile`` returns (2, False) for a 2L board."""
+        from kicad_tools.cli.route_cmd import _detect_pcb_layer_profile
+
+        pcb = tmp_path / "p.kicad_pcb"
+        pcb.write_text(self.PCB_2L)
+        assert _detect_pcb_layer_profile(pcb) == (2, False)
+
+    def test_detect_pcb_layer_profile_4l_no_zones(self, tmp_path):
+        """4-copper PCB without inner zones reports (4, False)."""
+        from kicad_tools.cli.route_cmd import _detect_pcb_layer_profile
+
+        pcb = tmp_path / "p.kicad_pcb"
+        pcb.write_text(self.PCB_4L_NO_ZONES)
+        assert _detect_pcb_layer_profile(pcb) == (4, False)
+
+    def test_detect_pcb_layer_profile_4l_plane_zones(self, tmp_path):
+        """4-copper PCB with In1.Cu/In2.Cu zones reports (4, True)."""
+        from kicad_tools.cli.route_cmd import _detect_pcb_layer_profile
+
+        pcb = tmp_path / "p.kicad_pcb"
+        pcb.write_text(self.PCB_4L_PLANE_ZONES)
+        assert _detect_pcb_layer_profile(pcb) == (4, True)
+
+    def test_detect_pcb_layer_profile_6l(self, tmp_path):
+        """6-copper PCB without inner zones reports (6, False)."""
+        from kicad_tools.cli.route_cmd import _detect_pcb_layer_profile
+
+        pcb = tmp_path / "p.kicad_pcb"
+        pcb.write_text(self.PCB_6L)
+        assert _detect_pcb_layer_profile(pcb) == (6, False)
+
+    def test_detect_pcb_layer_profile_outer_zone_does_not_count(self, tmp_path):
+        """A zone on F.Cu / B.Cu is not an *inner* plane zone."""
+        from kicad_tools.cli.route_cmd import _detect_pcb_layer_profile
+
+        pcb_text = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (hatch edge 0.5)
+    (filled_areas_thickness no)
+    (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1) (xy 0 1))))
+)"""
+        pcb = tmp_path / "p.kicad_pcb"
+        pcb.write_text(pcb_text)
+
+        num_copper, has_inner_planes = _detect_pcb_layer_profile(pcb)
+        assert num_copper == 4
+        # Zone is on F.Cu (outer) -- not an inner plane.
+        assert has_inner_planes is False
