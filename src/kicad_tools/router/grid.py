@@ -2976,6 +2976,64 @@ class RoutingGrid:
         owners = self._reserved_for_nets.get((layer_idx, y, x))
         return owners is not None and int(net_id) in owners
 
+    def get_corridor_attractor_bonus(
+        self,
+        layer_idx: int,
+        gx: int,
+        gy: int,
+        net_id: int,
+        bonus: float,
+    ) -> float:
+        """Return the attractor bonus magnitude for a paired-corridor cell.
+
+        Issue #2911: The corridor reservation primitive from #2677 protects
+        cells against partner-net vias but does not tell the main pathfinder
+        to ROUTE through the reserved channel.  Without an attractor the
+        pathfinder treats a reserved corridor as just another empty cell and
+        may complete the pair on a different (more congested) layer or fail
+        outright on dense BGAs like board 06.
+
+        Mechanism: A* is corridor-aware as an "attractor" — every cell on
+        the reserved layer that owns ``net_id`` returns ``bonus`` from this
+        method.  The pathfinder SUBTRACTS this from the cell's step cost
+        (clamping at zero to keep g_scores non-negative), nudging the search
+        toward dropping a via into the corridor and continuing on the
+        reserved layer.  Cells NOT reserved for ``net_id`` (whether
+        unreserved or reserved for a different pair) return 0.0.
+
+        N-member-friendly by construction: the underlying reservation
+        already supports N-net owner sets (#2661), so a match group with
+        three or more members all receive the bonus equally on cells whose
+        owners include their net.
+
+        Fast-path: when ``self._reserved_for_nets`` is empty the function
+        returns 0.0 immediately, preserving byte-identical pre-#2911
+        pathfinder behaviour for boards without any paired corridors.
+
+        Args:
+            layer_idx: Grid layer index.
+            gx, gy: Grid cell coordinates.
+            net_id: Net ID being routed (usually ``start.net`` at the call
+                site).
+            bonus: Attractor magnitude in cost units, normally
+                ``rules.cost_corridor_attractor``.  Returned as-is when
+                the cell qualifies; the caller is responsible for the
+                sign convention (subtract from positive cost).
+
+        Returns:
+            ``bonus`` if the cell is reserved AND ``net_id`` is in the
+            owner set.  ``0.0`` otherwise (including the no-reservation
+            fast path).
+        """
+        if not self._reserved_for_nets or bonus <= 0.0:
+            return 0.0
+        owners = self._reserved_for_nets.get((layer_idx, gy, gx))
+        if owners is None:
+            return 0.0
+        if int(net_id) in owners:
+            return bonus
+        return 0.0
+
     def unmark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Unmark a route's cells (rip-up). Reverses mark_route().
 

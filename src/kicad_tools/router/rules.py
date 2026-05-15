@@ -153,6 +153,52 @@ class DesignRules:
     # to disable corridor guidance.
     cost_corridor_deviation: float = 5.0
 
+    # Diff-pair / match-group corridor attractor (Issue #2911)
+    # Cells reserved by ``EscapeRouter._reserve_pair_continuation_corridor`` for
+    # a paired set of nets receive a NEGATIVE cost bonus when the route's net is
+    # in the reservation's owner set.  This complements the corridor reservation
+    # primitive from #2677 (which protects reserved cells against partner-net
+    # vias but does NOT tell the pathfinder to use the reserved layer).  Without
+    # this attractor the main pathfinder treats the reserved channel as just
+    # another empty layer and may not bother diving into the inner corridor at
+    # all -- the board 06 USB3_TX1+/- pair stayed unrouted on top of an
+    # otherwise-vacant reserved corridor.
+    #
+    # The bonus is applied as ``-cost_corridor_attractor`` per cell, capped at
+    # the cell's positive cost so the total g_score never goes negative
+    # (negative costs would corrupt A* admissibility).
+    #
+    # Default value 3.0 rationale (calibrated empirically against board 06):
+    #
+    #   * Comparable to ``cost_straight`` (1.0): one in-corridor step costs
+    #     ``1.0 - min(1.0, 3.0) = 0.0`` (i.e., a clamp to free), so the
+    #     pathfinder is incentivised to enter the corridor but the clamp
+    #     prevents the cell cost from going negative.  The clamp also caps
+    #     the "tar pit" risk -- once inside the corridor the attractor cannot
+    #     compound across cells to produce a negative-cost cycle.
+    #
+    #   * ~30% of ``cost_via`` (10.0): big enough to outweigh a single
+    #     same-layer detour but NOT a needless via.  The pathfinder will
+    #     drop a via to dive into the reserved layer ONLY when the
+    #     surface-layer alternative is genuinely costlier (blocked,
+    #     congested, or a long detour) -- exactly the board 06 USB3_TX1+/-
+    #     case where the surface lane is congested by the BGA escape fan.
+    #
+    #   * Smaller than ``cost_corridor_deviation`` (5.0): a route that
+    #     ALREADY belongs to the global router's corridor should not be
+    #     pulled out of it by the diff-pair attractor -- the two penalty
+    #     systems compose so the global corridor stays the dominant
+    #     directive and the diff-pair attractor refines the layer choice
+    #     within it.
+    #
+    # If a future board surfaces a "tar pit" failure mode (route gets
+    # trapped inside the corridor when it should exit early to reach a pad
+    # outside), lowering to ~1.5 is the recommended first adjustment --
+    # preserves the layer-preference signal without dominating in-corridor
+    # detour costs.  Set to 0.0 to disable the attractor entirely
+    # (reservations still protect against partner vias).
+    cost_corridor_attractor: float = 3.0
+
     # Corridor penalty decay parameters (Issue #2308)
     # Controls how quickly the corridor penalty relaxes during negotiated
     # rip-up iterations, allowing the detailed router to escape suboptimal

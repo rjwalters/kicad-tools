@@ -2175,9 +2175,18 @@ class Router:
                 # Issue #2288: Corridor deviation penalty from global routing
                 corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, start.net)
 
-                new_g = (
-                    current.g_score
-                    + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
+                # Issue #2911: Diff-pair / match-group corridor attractor.
+                # Subtract a bonus when this cell is reserved for our net so
+                # the pathfinder preferentially uses the reserved channel
+                # established by ``EscapeRouter._reserve_pair_continuation_corridor``.
+                # Clamped at the positive cost components so g_score stays
+                # non-negative (preserves A* admissibility).
+                attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                    nlayer, nx, ny, start.net, self.rules.cost_corridor_attractor,
+                )
+
+                positive_step_cost = (
+                    neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
                     + congestion_cost
                     + negotiated_cost
@@ -2185,7 +2194,11 @@ class Router:
                     + crossing_cost
                     + layer_util_cost
                     + corridor_cost
-                ) * cost_mult
+                )
+                if attractor_bonus > 0.0:
+                    positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
+
+                new_g = (current.g_score + positive_step_cost) * cost_mult
 
                 if new_g < g_scores_arr[nlayer, ny, nx]:
                     g_scores_arr[nlayer, ny, nx] = new_g
@@ -2271,6 +2284,16 @@ class Router:
                     current.x, current.y, new_layer, start.net
                 )
 
+                # Issue #2911: Corridor attractor bonus on the target layer.
+                # A via that lands inside the reserved corridor is the
+                # primary motion this fix is intended to encourage -- without
+                # this bonus the pathfinder has zero reason to drop a via
+                # onto an empty inner layer that "happens" to be reserved.
+                attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                    new_layer, current.x, current.y, start.net,
+                    self.rules.cost_corridor_attractor,
+                )
+
                 # Issue #2325: Cap the total incremental via cost to prevent
                 # accumulated additive penalties from making vias prohibitively
                 # expensive.  Without the cap, dense boards can accumulate
@@ -2289,6 +2312,12 @@ class Router:
                 if self.rules.via_cost_cap_factor > 0.0:
                     via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                     via_incremental = min(via_incremental, via_cap)
+
+                # Issue #2911: Apply the attractor AFTER the cap so the
+                # bonus is felt even when the via cost is at the ceiling.
+                # Clamp at zero so g_scores remain non-negative.
+                if attractor_bonus > 0.0:
+                    via_incremental = max(0.0, via_incremental - attractor_bonus)
 
                 new_g = (current.g_score + via_incremental) * cost_mult
 
@@ -3442,9 +3471,14 @@ class Router:
             # Issue #2288: Corridor deviation penalty from global routing
             corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, source_pad.net)
 
-            new_g = (
-                current.g_score
-                + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
+            # Issue #2911: Diff-pair / match-group corridor attractor (see
+            # forward A* expansion for full rationale).
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                nlayer, nx, ny, source_pad.net, self.rules.cost_corridor_attractor,
+            )
+
+            positive_step_cost = (
+                neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                 + turn_cost
                 + congestion_cost
                 + negotiated_cost
@@ -3452,7 +3486,11 @@ class Router:
                 + crossing_cost
                 + layer_util_cost
                 + corridor_cost
-            ) * cost_mult
+            )
+            if attractor_bonus > 0.0:
+                positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
+
+            new_g = (current.g_score + positive_step_cost) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
                 g_scores[neighbor_key] = new_g
@@ -3512,6 +3550,13 @@ class Router:
                 current.x, current.y, new_layer, source_pad.net
             )
 
+            # Issue #2911: Corridor attractor bonus on the target layer
+            # (see forward A* via transition for full rationale).
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                new_layer, current.x, current.y, source_pad.net,
+                self.rules.cost_corridor_attractor,
+            )
+
             # Issue #2325: Cap via incremental cost (same logic as forward A*)
             via_incremental = (
                 self.rules.cost_via * layer_pref_mult
@@ -3523,6 +3568,11 @@ class Router:
             if self.rules.via_cost_cap_factor > 0.0:
                 via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                 via_incremental = min(via_incremental, via_cap)
+
+            # Issue #2911: Apply the attractor AFTER the cap so the bonus
+            # is felt even when the via cost is at the ceiling.
+            if attractor_bonus > 0.0:
+                via_incremental = max(0.0, via_incremental - attractor_bonus)
 
             new_g = (current.g_score + via_incremental) * cost_mult
 
