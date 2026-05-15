@@ -398,7 +398,19 @@ ValidationResult Grid3D::validate_route(
             // corridor traces (the corridor relaxation in
             // ``_relax_same_component_clearance`` only operates between
             // non-plane pads).
-            if (!pad.is_plane_net && is_excluded_ref(pad.ref_hash)) continue;
+            //
+            // Issue #2933: The same-component signal-pad carve-out is
+            // further narrowed -- it now only suppresses clearance complaints
+            // when the trace stays OUTSIDE the neighbour pad's metal.  On
+            // standard-pitch passives like 0805 resistors (R1 at 2mm pitch
+            // on board 02), the router was emitting traces whose centerline
+            // passed THROUGH the opposite pad's metal because the carve-out
+            // silently exempted them.  This produced 144
+            // ``clearance_pad_segment`` errors on board 02 at jlcpcb tier-1.
+            // The metal-overlap check (clearance < 0) is preserved for all
+            // same-component pads via the deferred-skip pattern below.
+            const bool same_component_signal_carveout =
+                !pad.is_plane_net && is_excluded_ref(pad.ref_hash);
 
             // Skip pads on different layers (unless through-hole: layer_idx == -1)
             if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
@@ -430,6 +442,14 @@ ValidationResult Grid3D::validate_route(
                     pad.x, pad.y, pad.width, pad.height,
                     seg.x1, seg.y1, seg.x2, seg.y2);
                 clearance = center_dist - seg_half_width;
+            }
+
+            // Issue #2933: Apply the same-component carve-out only when the
+            // trace clears the neighbour pad's metal (clearance >= 0).
+            // Negative clearance means the trace overlaps pad copper -- a
+            // true defect that no carve-out should silence.
+            if (same_component_signal_carveout && clearance >= 0.0f) {
+                continue;
             }
 
             if (clearance < result.min_clearance) {
