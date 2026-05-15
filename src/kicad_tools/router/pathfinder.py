@@ -225,6 +225,66 @@ class Router:
         # behavior matches pre-#2559 (single-clearance) routing.
         self._net_name_to_id: dict[str, int] = {}
 
+        # Issue #2929: Per-A*-call wall-clock instrumentation.  When
+        # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
+        # appends a dict to ``_per_call_timings`` recording the elapsed wall
+        # time and the deadline budget used for that call.  Disabled by
+        # default to keep zero overhead on the production hot path; the
+        # autorouter / fleet-status command flips it on for audits.  Drained
+        # via :meth:`get_and_clear_per_call_timings`.
+        #
+        # Schema for each record (see :meth:`route` for population):
+        #   {
+        #     "net": int,                  # source net id
+        #     "net_name": str,
+        #     "elapsed": float,            # wall-clock seconds for THIS call
+        #     "per_net_timeout": float|None,  # deadline supplied by caller
+        #     "deadline_violated": bool,   # True if elapsed > 1.2 * timeout
+        #     "succeeded": bool,           # True iff route() returned non-None
+        #   }
+        #
+        # This is the diagnostic surface for the deadline-enforcement audit
+        # (Issue #2929 acceptance criterion 1).  Cumulative per-net wall
+        # time across rip-up retries is computed by the caller by summing
+        # records grouped by net id; a single record represents ONE A*
+        # invocation and is what ``per_net_timeout`` actually brackets.
+        self._per_call_timing_enabled: bool = False
+        self._per_call_timings: list[dict] = []
+
+    def enable_per_call_timing(self, enabled: bool = True) -> None:
+        """Enable or disable per-A*-call wall-clock instrumentation.
+
+        Issue #2929: When enabled, every ``route()`` call appends a timing
+        record to an internal list that can be drained with
+        :meth:`get_and_clear_per_call_timings`.  Disabled by default so the
+        production routing loop pays zero overhead.
+
+        Args:
+            enabled: True to start recording; False to stop and drop any
+                accumulated records.
+        """
+        self._per_call_timing_enabled = bool(enabled)
+        if not enabled:
+            self._per_call_timings = []
+
+    def get_and_clear_per_call_timings(self) -> list[dict]:
+        """Drain and return the recorded per-A*-call timing records.
+
+        Issue #2929: Each record is a dict with keys
+        ``net``, ``net_name``, ``elapsed``, ``per_net_timeout``,
+        ``deadline_violated``, and ``succeeded`` (see ``__init__`` for the
+        full schema).  After draining, the internal list is cleared so
+        subsequent audit windows only see fresh records.
+
+        Returns:
+            The list of timing records since the last drain (or since
+            instrumentation was enabled).  Empty list if instrumentation
+            is disabled or no calls have been made.
+        """
+        result = self._per_call_timings
+        self._per_call_timings = []
+        return result
+
     # ------------------------------------------------------------------
     # Waypoint helpers (Issue #2330)
     # ------------------------------------------------------------------
@@ -1553,6 +1613,74 @@ class Router:
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route between two pads using congestion-aware A*.
+
+        Issue #2929: When per-A*-call timing instrumentation is enabled via
+        :meth:`enable_per_call_timing`, this wrapper records the elapsed
+        wall-clock time and whether the deadline was respected.  The actual
+        search logic lives in :meth:`_route_impl`.
+        """
+        if not self._per_call_timing_enabled:
+            return self._route_impl(
+                start, end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+
+        t0 = time.monotonic()
+        succeeded = False
+        try:
+            result = self._route_impl(
+                start, end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+            succeeded = result is not None
+            return result
+        finally:
+            elapsed = time.monotonic() - t0
+            # Issue #2929 acceptance criterion 2 specifies a 1.2x slack
+            # bound for "small fudge factor."  We add a 1s absolute floor
+            # to accommodate one final 1024-iteration batch on the Python
+            # path (the deadline is sampled every 1024 iterations; on a
+            # dense grid that batch can take ~hundreds of ms).  For
+            # production budgets (10-30s typical) the multiplicative
+            # bound dominates; for tiny budgets (sub-second) the additive
+            # floor prevents false positives from check granularity.
+            deadline_violated = (
+                per_net_timeout is not None
+                and per_net_timeout > 0
+                and elapsed > per_net_timeout * 1.2 + 1.0
+            )
+            self._per_call_timings.append({
+                "net": start.net,
+                "net_name": start.net_name,
+                "elapsed": elapsed,
+                "per_net_timeout": per_net_timeout,
+                "deadline_violated": deadline_violated,
+                "succeeded": succeeded,
+            })
+
+    def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Inner A* search implementation -- see :meth:`route` for the public
+        wrapper that adds optional per-call wall-clock instrumentation.
 
         Args:
             start: Source pad
