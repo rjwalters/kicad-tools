@@ -803,3 +803,185 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
         "regression to every nudge (legitimate full rollback) OR the "
         "granular path fell back to bulk snapshot restore."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2918: Crystal placement must be on the MCU's XTAL-pin side
+# ---------------------------------------------------------------------------
+#
+# Root cause: ``boards/03-usb-joystick/generate_pcb.py::generate_crystal()``
+# hardcoded ``x = BOARD_ORIGIN_X + 55`` (east of the MCU), but the TQFP-32
+# MCU's XTAL pins (pin 2 = XTAL1, pin 3 = XTAL2) sit on the WEST edge of
+# the package (pad offset = -4.5 mm from U1 centre).  This forced the
+# autorouter to drive 17-22 mm channel-blocked traces across the MCU body,
+# leaving XTAL1 and XTAL2 unrouted.
+#
+# Fix: relocate Y1 to ``BOARD_ORIGIN_X + 22`` (west of U1) with
+# ``y = BOARD_ORIGIN_Y + 30`` aligned to the XTAL pad row; load caps
+# C5/C6 follow via the shared ``xtal_cx`` / ``xtal_cy`` references.
+#
+# This unit test pins the literal so a future hand-edit can't silently
+# re-introduce the east-side placement.  Integration coverage (the route
+# actually completing on XTAL1) is provided by the existing
+# ``test_route_demo_achieves_minimum_completion`` test above -- with the
+# fix in place that test's 9-net floor is reached, whereas with the
+# east-side placement only 7-8 nets route.
+
+
+def test_crystal_placed_west_of_mcu(regenerated_board: Path) -> None:
+    """Issue #2918: Y1 placement literal must be west of U1's XTAL pins.
+
+    ``generate_crystal()`` and ``generate_xtal_load_caps()`` must agree on
+    the crystal centre being on the WEST side of U1 (at
+    ``BOARD_ORIGIN_X + 22``, ``BOARD_ORIGIN_Y + 30``), not the pre-fix
+    east-side hardcode (``BOARD_ORIGIN_X + 55``).
+
+    The check inspects the source of ``generate_pcb.py`` rather than the
+    runtime output so the failure message points directly at the offending
+    literal.  An integration check (XTAL1 actually routing fully) lives
+    in the route-demo completion test above.
+
+    Acceptance criteria from issue #2918:
+
+      1. ``generate_pcb.py`` regenerates a PCB where Y1 sits west of U1
+         (``BOARD_ORIGIN_X + 22``).
+      2. ``kct route ... --manufacturer jlcpcb --auto-layers`` produces
+         ``XTAL1`` fully connected (3/3 pads).
+      3. No regression on any other board.
+
+    Criterion (1) is pinned here; (2) is pinned by the route-demo test
+    above (the 9-net floor is unattainable without XTAL1 routing); (3) is
+    a manual fleet-status check in the PR description.
+    """
+    src = (BOARD_DIR / "generate_pcb.py").read_text()
+
+    # Match ``x = BOARD_ORIGIN_X + 22`` allowing for whitespace variance.
+    crystal_x_pat = re.compile(
+        r"def\s+generate_crystal\b.*?x\s*=\s*BOARD_ORIGIN_X\s*\+\s*22\b",
+        re.DOTALL,
+    )
+    assert crystal_x_pat.search(src), (
+        "generate_crystal() no longer hardcodes x = BOARD_ORIGIN_X + 22.  "
+        "Issue #2918 fix moved Y1 from the east side of U1 "
+        "(BOARD_ORIGIN_X + 55) to the west side (BOARD_ORIGIN_X + 22) so "
+        "the autorouter can reach U1's west-edge XTAL pins (pin 2/3) "
+        "without crossing the MCU body.  If you intentionally moved the "
+        "crystal again, update this regression test to match -- but "
+        "verify XTAL1 still routes 3/3 pads after the move, per the "
+        "issue #2918 acceptance criteria."
+    )
+
+    # Match ``y = BOARD_ORIGIN_Y + 30`` inside ``generate_crystal``.
+    crystal_y_pat = re.compile(
+        r"def\s+generate_crystal\b.*?y\s*=\s*BOARD_ORIGIN_Y\s*\+\s*30\b",
+        re.DOTALL,
+    )
+    assert crystal_y_pat.search(src), (
+        "generate_crystal() no longer pins y = BOARD_ORIGIN_Y + 30.  "
+        "The XTAL pad row on U1 sits at y ~= BOARD_ORIGIN_Y + 30 (mid "
+        "between pin 2 at y_offset -2.0 and pin 3 at y_offset -1.2 "
+        "relative to U1's centre).  Misaligning this row reintroduces "
+        "the channel-blocked routing failure from issue #2918."
+    )
+
+    # And the load-cap helper must reference the SAME centre so C5/C6
+    # follow the crystal.  Without this, the caps would drift back to
+    # the east side and break XTAL1/XTAL2 trace lengths.
+    load_caps_cx_pat = re.compile(
+        r"def\s+generate_xtal_load_caps\b.*?xtal_cx\s*=\s*BOARD_ORIGIN_X\s*\+\s*22\b",
+        re.DOTALL,
+    )
+    assert load_caps_cx_pat.search(src), (
+        "generate_xtal_load_caps() xtal_cx is no longer aligned to "
+        "BOARD_ORIGIN_X + 22 -- the crystal moved but the load caps did "
+        "not follow.  This breaks the XTAL1/XTAL2 trace geometry per "
+        "issue #2918.  Both ``generate_crystal()`` and "
+        "``generate_xtal_load_caps()`` must share the same crystal centre."
+    )
+    load_caps_cy_pat = re.compile(
+        r"def\s+generate_xtal_load_caps\b.*?xtal_cy\s*=\s*BOARD_ORIGIN_Y\s*\+\s*30\b",
+        re.DOTALL,
+    )
+    assert load_caps_cy_pat.search(src), (
+        "generate_xtal_load_caps() xtal_cy is no longer aligned to "
+        "BOARD_ORIGIN_Y + 30 -- see xtal_cx note above."
+    )
+
+    # Negative assertion: the pre-fix east-side literal must NOT reappear
+    # in either helper.  A diff that introduces ``BOARD_ORIGIN_X + 55``
+    # back into the crystal block is exactly the regression we are
+    # guarding against.
+    east_side_pat = re.compile(
+        r"def\s+generate_(crystal|xtal_load_caps)\b.*?BOARD_ORIGIN_X\s*\+\s*55\b",
+        re.DOTALL,
+    )
+    assert not east_side_pat.search(src), (
+        "Pre-issue-#2918 east-side crystal literal (BOARD_ORIGIN_X + 55) "
+        "has reappeared in generate_crystal() or generate_xtal_load_caps().  "
+        "This is the exact regression issue #2918 was opened to prevent; "
+        "the crystal must stay on the MCU's XTAL-pin side."
+    )
+
+
+def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> None:
+    """Issue #2918: regenerated PCB places Y1 to the west of U1.
+
+    Stronger than the source-literal check above: this regenerates the
+    actual PCB and asserts the absolute x coordinate of Y1 is *less*
+    than U1's absolute x.  Catches the case where someone refactors the
+    generator to compute the position differently (e.g. via a placement
+    strategy) but accidentally re-introduces an east-of-U1 result.
+
+    Parses the ``.kicad_pcb`` text directly with regex; no KiCad
+    dependency required for the assertion.
+    """
+    pcb_text = PCB_FILE.read_text()
+
+    # Each ``(footprint ...)`` block contains a ``(reference "REF")`` and
+    # an ``(at X Y [ROT])`` line for the footprint origin.  We use
+    # non-greedy footprint blocks and pull the first ``(at X Y...)`` line
+    # which is the footprint position (subsequent ``(at ...)`` lines
+    # inside the block belong to pads / text and have a different scope).
+    def _find_footprint_x(ref: str) -> float | None:
+        # Iterate over footprint blocks and find the one with the matching
+        # reference.  The footprint ``(at X Y ...)`` is the first ``(at``
+        # token immediately after ``(footprint ...`` and before any
+        # ``(pad`` or ``(fp_text reference``.
+        for m in re.finditer(
+            r'\(footprint\s+"[^"]+"\s*\(layer\s+"[^"]+"\)\s*'
+            r"\(uuid\s+\"[^\"]+\"\)\s*"
+            r"\(at\s+([\-0-9.]+)\s+([\-0-9.]+)",
+            pcb_text,
+        ):
+            # Look forward to the corresponding reference within this
+            # footprint block (bounded by the next ``(footprint`` or end
+            # of string).
+            block_start = m.start()
+            next_fp = pcb_text.find("(footprint", m.end())
+            block_end = next_fp if next_fp != -1 else len(pcb_text)
+            block = pcb_text[block_start:block_end]
+            ref_m = re.search(
+                rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block
+            )
+            if ref_m:
+                return float(m.group(1))
+        return None
+
+    y1_x = _find_footprint_x("Y1")
+    u1_x = _find_footprint_x("U1")
+
+    assert y1_x is not None, (
+        "Y1 (crystal) footprint not found in regenerated board 03 PCB.  "
+        "Did generate_crystal() get removed?"
+    )
+    assert u1_x is not None, (
+        "U1 (MCU) footprint not found in regenerated board 03 PCB.  "
+        "Did the MCU helper get renamed?"
+    )
+
+    assert y1_x < u1_x, (
+        f"Issue #2918 regression: Y1 (crystal) at x={y1_x:.3f} is NOT "
+        f"west of U1 (MCU) at x={u1_x:.3f}.  The MCU's XTAL pins sit on "
+        "U1's west edge; placing Y1 east of U1 forces 17-22 mm "
+        "channel-blocked traces that the autorouter cannot complete."
+    )
