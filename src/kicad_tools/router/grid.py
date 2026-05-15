@@ -2128,10 +2128,11 @@ class RoutingGrid:
             if pad.net == exclude_net:
                 continue
 
-            # Issue #1764 + #2874 + #2908: The same-component-ref exclusion is
-            # intended to permit signal-pin escape routing through the chip's
-            # own perimeter (Issue #1764 reachability fix). It must NOT permit
-            # signal traces to clip plane-net pads on the same chip.
+            # Issue #1764 + #2874 + #2908 + #2933: The same-component-ref
+            # exclusion is intended to permit signal-pin escape routing
+            # through the chip's own perimeter (Issue #1764 reachability fix).
+            # It must NOT permit signal traces to clip plane-net pads on the
+            # same chip, nor to physically overlap pad metal on any pad.
             #
             # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
             # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
@@ -2154,12 +2155,24 @@ class RoutingGrid:
             # ``_relax_same_component_clearance`` only operates between
             # signal pads, so this stricter validation for plane pads is
             # compatible with the existing reachability fix).
-            if (
+            #
+            # Issue #2933: The same-component signal-pad carve-out is further
+            # narrowed -- it now only suppresses clearance complaints when the
+            # trace stays OUTSIDE the neighbour pad's metal.  On standard-pitch
+            # passives like 0805 resistors (R1 at 2mm pitch on board 02), the
+            # router was emitting traces whose centerline passed THROUGH the
+            # opposite pad's metal because the carve-out silently exempted
+            # them.  This produced 144 ``clearance_pad_segment`` errors on
+            # board 02 with negative actual_clearance (overlapping copper).
+            # The metal-overlap check (clearance < 0) is preserved for all
+            # same-component pads, so the trace-through-pad pathology is now
+            # caught at the validator while the fine-pitch escape exemption
+            # (positive clearance < required_clearance) is unchanged.
+            same_component_signal_carveout = (
                 exclude_refs
                 and pad.ref in exclude_refs
                 and not _is_plane_net_pad(pad)
-            ):
-                continue
+            )
 
             # Skip pads on different layers (unless PTH)
             if not pad.through_hole:
@@ -2202,6 +2215,13 @@ class RoutingGrid:
                     seg.x1, seg.y1, seg.x2, seg.y2,
                 )
                 clearance = center_dist - seg_half_width
+
+            # Issue #2933: Apply the same-component carve-out only when the
+            # trace clears the neighbour pad's metal (clearance >= 0).
+            # Negative clearance means the trace overlaps pad copper -- a
+            # true defect that no carve-out should silence.
+            if same_component_signal_carveout and clearance >= 0:
+                continue
 
             if clearance < min_actual_clearance:
                 min_actual_clearance = clearance

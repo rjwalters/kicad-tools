@@ -315,13 +315,25 @@ class TestSameComponentPlaneNetCarveOut:
         ``pad.net != 0 and pad.ref in {'U2', 'Y1'}``; #2908 keeps plane
         pads in the validator and uses rect-aware geometry to compute
         the accurate clearance.
+
+        Issue #2933 update: the original segment in this test clipped
+        BOTH U2.1 (plane pad, exterior) and U2.2 (signal pad, top edge).
+        After #2933 the same-component signal carve-out only suppresses
+        clearance complaints when the trace stays OUTSIDE the pad metal,
+        so U2.2 now reports the deepest violation (segment endpoint
+        (127.5, 119.6) lies exactly on U2.2's top edge).  The test segment
+        is moved to a geometry where the OSC_OUT trace clips ONLY U2.1
+        (the plane-pad regression #2908 was filed for), preserving the
+        original regression coverage.
         """
         grid = _make_grid_with_lqfp48_west_edge()
 
-        # Verified failing segment from the issue.
+        # Adjusted to clip U2.1's top edge only -- segment runs WEST and is
+        # entirely above U2.2's top edge (y > 119.9 keeps clear of U2.2),
+        # while still inside U2.1's clearance envelope.
         seg = Segment(
-            x1=127.7465, y1=119.7903,
-            x2=127.5, y2=119.6,
+            x1=127.5, y1=119.45,
+            x2=126.5, y2=119.45,
             width=0.2,
             layer=Layer.F_CU,
             net=5,
@@ -335,12 +347,11 @@ class TestSameComponentPlaneNetCarveOut:
         )
 
         assert is_valid is False
-        # The accurate rect-aware clearance is 0.100 mm
-        # (0.200 mm centerline distance to top of U2.1 rect, minus 0.100
-        # half-trace).  The required clearance at jlcpcb-tier1 is
-        # 0.127 mm, so the shortfall is 0.027 mm -- this is the verified
-        # DRC actual_value on board 04's committed PCB.
-        assert clearance == pytest.approx(0.1, abs=1e-6)
+        # Centerline y=119.45 is 0.05mm above U2.1 top (y=119.4).
+        # Half-trace = 0.1mm.  Clearance = 0.05 - 0.1 = -0.05mm (overlap).
+        # The plane-pad validator catches this exactly as the post-#2908
+        # rect-aware geometry requires.
+        assert clearance == pytest.approx(-0.05, abs=1e-6)
         assert location is not None
 
     def test_same_net_escape_through_plane_pad_is_passed(self) -> None:
@@ -378,17 +389,30 @@ class TestSameComponentPlaneNetCarveOut:
         chip escape past the chip's own signal pin neighbour) is still
         permitted.  The #2908 narrowing only re-engages the validator
         for PLANE pads -- non-plane same-component pads continue to be
-        skipped.
+        skipped *when the trace stays outside their metal* (#2933).
+
+        The original version of this test put the segment INSIDE U2.2's
+        metal area (y in [119.75, 119.85] inside pad y-range [119.6, 119.9]),
+        which Issue #2933 correctly catches as a trace-through-pad defect.
+        The test now uses a segment that lies in U2.2's clearance envelope
+        but stays OUTSIDE its metal -- the regime the carve-out is
+        actually intended for.
         """
         grid = _make_grid_with_lqfp48_west_edge()
 
         # Foreign-net (NRST = net 12) segment routing past U2.2
         # (USART2_TX, a SIGNAL net on U2).  Pre-#2908 behaviour: skip
         # U2.2 because ``pad.net != 0``.  Post-#2908: still skip
-        # because U2.2 is not a plane net.
+        # because U2.2 is not a plane net.  Post-#2933: still skip
+        # because the segment stays outside U2.2's metal (clearance >= 0).
+        # U2.2 metal y-range is [119.6, 119.9]; segment centerline at
+        # y=120.05 is 0.15mm above the metal edge.  With trace half-width
+        # 0.1, the trace edge is at y=119.95 -- 0.05mm above the pad metal
+        # (positive clearance, but still inside the manufacturer's
+        # 0.127mm clearance envelope where the carve-out is engaged).
         seg = Segment(
-            x1=127.5, y1=119.75,     # tight clearance to U2.2 top edge
-            x2=127.5, y2=119.85,
+            x1=127.5, y1=120.05,     # 0.15mm above U2.2 metal top edge
+            x2=127.0, y2=120.05,
             width=0.2,
             layer=Layer.F_CU,
             net=12,
@@ -401,9 +425,9 @@ class TestSameComponentPlaneNetCarveOut:
             exclude_refs={"U2", "Y1"},
         )
 
-        # U2.2 is signal-net, so the same-component-ref skip still
-        # applies and the segment passes (Issue #1764 reachability
-        # preserved).
+        # U2.2 is signal-net and the trace stays outside its metal,
+        # so the same-component-ref skip still applies and the segment
+        # passes (Issue #1764 reachability preserved).
         assert is_valid is True
 
     def test_far_foreign_net_segment_passes_plane_pad_validator(self) -> None:
@@ -474,6 +498,140 @@ class TestNoRegressionOnCircularPads:
         assert clearance == pytest.approx(0.0, abs=1e-6)
         # 0.0 < 0.127 -- rejected.
         assert is_valid is False
+
+
+class TestIssue2933SameComponentSignalMetalOverlap:
+    """Regression tests for Issue #2933: the same-component signal-pad
+    carve-out (Issue #1764) must NOT silence trace-through-pad-metal
+    violations.
+
+    Scenario (board 02 charlieplex-LED, 0805 resistor R1 at 2mm pitch):
+      * Pad 1 at (107, 138), 1.0 x 1.3mm, net LINE_A (signal)
+      * Pad 2 at (109, 138), 1.0 x 1.3mm, net NODE_A (signal)
+      * When routing LINE_A from elsewhere to R1.1, the pathfinder
+        emitted segments through R1.2's metal because the validator's
+        same-component carve-out silently exempted R1.2 from the
+        pad-vs-segment check.
+      * Result: 144 ``clearance_pad_segment`` errors at jlcpcb-tier1.
+
+    The #2933 fix narrows the carve-out to apply ONLY when the
+    segment stays OUTSIDE the neighbour pad's metal (clearance >= 0).
+    Negative clearance (centerline + half-width inside pad metal)
+    is always rejected, regardless of the same-component carve-out.
+    """
+
+    @staticmethod
+    def _make_0805_resistor_grid() -> RoutingGrid:
+        """Build a routing grid populated with a single 0805 resistor R1
+        at 2mm pitch (the geometry from board 02 charlieplex-LED).
+        """
+        rules = _make_jlcpcb_tier1_rules()
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            origin_x=104.0,
+            origin_y=135.0,
+        )
+        # R1.1 at (107, 138), 1.0 x 1.3mm, LINE_A (signal net 1)
+        grid.add_pad(
+            Pad(
+                x=107.0, y=138.0, width=1.0, height=1.3,
+                net=1, net_name="LINE_A",
+                ref="R1", pin="1", layer=Layer.F_CU,
+            )
+        )
+        # R1.2 at (109, 138), 1.0 x 1.3mm, NODE_A (signal net 5)
+        grid.add_pad(
+            Pad(
+                x=109.0, y=138.0, width=1.0, height=1.3,
+                net=5, net_name="NODE_A",
+                ref="R1", pin="2", layer=Layer.F_CU,
+            )
+        )
+        return grid
+
+    def test_trace_through_opposite_pad_metal_is_rejected(self) -> None:
+        """A LINE_A (net 1) trace runs from outside the resistor west
+        to R1.1, but the pathfinder routed it through R1.2's metal at
+        y=138.5 (inside R1.2 metal y-range 137.35-138.65).  Pre-#2933
+        the validator skipped R1.2 because R1 was in exclude_refs
+        (signal pad, same component); the trace was silently accepted
+        and emerged as a ``clearance_pad_segment`` defect at DRC.
+        Post-#2933 the validator rejects the trace because clearance
+        against R1.2 metal is negative.
+        """
+        grid = self._make_0805_resistor_grid()
+
+        # The exact pathology from board 02: trace at y=138.5 running
+        # west through R1.2's metal area (109, 138.5).  Even a tiny
+        # segment inside the pad copper is a defect.
+        seg = Segment(
+            x1=109.1, y1=138.5,
+            x2=108.9, y2=138.5,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="LINE_A",
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(
+            seg,
+            exclude_net=1,
+            exclude_refs={"R1"},  # both R1.1 and R1.2 are on R1
+        )
+
+        # Centerline at y=138.5 is inside R1.2 metal (y-range
+        # 137.35-138.65).  centerline-to-rect distance = 0 (segment
+        # endpoint inside rect, signed distance <= 0).  After
+        # subtracting half-width 0.1, clearance is at most -0.1.
+        # Pre-#2933 the carve-out skipped R1.2 entirely and the
+        # validator returned is_valid=True.  Post-#2933 the
+        # metal-overlap branch fires and rejects.
+        assert is_valid is False
+        assert clearance < 0
+        assert location is not None
+
+    def test_trace_in_clearance_envelope_outside_pad_metal_is_accepted(self) -> None:
+        """The flip side of the regression: a trace that stays OUTSIDE
+        the same-component pad's metal -- even when below manufacturer
+        clearance -- must still pass under the #1764/#2933 carve-out.
+        This is the regime the carve-out is intended for (escape routing
+        past a neighbour pad with sub-DRC clearance, geometric
+        feasibility guaranteed by the component's designed pitch).
+        """
+        grid = self._make_0805_resistor_grid()
+
+        # Segment runs at y=137.0 -- 0.35mm above R1.2's top edge
+        # (y=138-0.65=137.35 is the metal top; wait, with y increasing
+        # downward in KiCad convention top = y=137.35).  Centerline
+        # distance to R1.2 top is 0.35 - 0 = wait let me redo:
+        # R1.2 metal y-range is [137.35, 138.65].  Segment at y=137.0
+        # is 0.35mm ABOVE the top edge (y=137.35).  Centerline-to-rect
+        # distance = 0.35.  After half-width 0.1, clearance = 0.25.
+        # That's well below required 0.127.  Actually no: 0.25 > 0.127
+        # so this is not in clearance envelope.  Let's use y=137.15.
+        # Centerline-to-rect = 137.35 - 137.15 = 0.2.  After 0.1
+        # half-width, clearance = 0.1.  Below required 0.127 -- the
+        # carve-out should suppress this complaint.
+        seg = Segment(
+            x1=108.0, y1=137.15,
+            x2=110.0, y2=137.15,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="LINE_B",
+        )
+
+        is_valid, _clearance, _location = grid.validate_segment_clearance(
+            seg,
+            exclude_net=2,
+            exclude_refs={"R1"},
+        )
+
+        # Trace stays outside R1.2's metal (clearance >= 0) so the
+        # same-component carve-out applies and the segment passes.
+        assert is_valid is True
 
 
 def test_validator_does_not_over_reject_non_fine_pitch_geometry() -> None:
