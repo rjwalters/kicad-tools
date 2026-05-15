@@ -765,7 +765,15 @@ class NegotiatedRouter:
                     per_net_timeout=edge_timeout,
                     extra_goal_cells=routed_cells if routed_cells else None,
                 )
-                if route:
+                # Issue #2934: ``Route`` is a dataclass and therefore always
+                # truthy regardless of segment count.  Defensive check for
+                # an empty Route here in addition to the upstream rejection
+                # in ``_reconstruct_route``: if either guard slips
+                # (e.g., a future C++ backend path returns an empty Route),
+                # this branch still records the failure and fires
+                # ``failure_callback`` rather than silently dropping a
+                # missing-connectivity sub-route into the result list.
+                if route and (route.segments or route.vias):
                     mark_route_callback(route)
                     routes.append(route)
                     # Collect grid cells from the routed segments so later
@@ -796,7 +804,9 @@ class NegotiatedRouter:
                 present_cost_factor=present_cost_factor,
                 per_net_timeout=per_net_timeout,
             )
-            if route:
+            # Issue #2934: Defensive check for empty Routes; see comment on
+            # the multi-edge RSMT path above for the rationale.
+            if route and (route.segments or route.vias):
                 mark_route_callback(route)
                 routes.append(route)
             else:
