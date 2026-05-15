@@ -954,11 +954,50 @@ class RoutingGrid:
                         # between actual pad copper (which must always block) and clearance
                         # zones (which can be traversed when exiting a pad for sub-grid
                         # connections). Clearance cells remain blocked but pad_blocked=False.
+                        #
+                        # Issue #2915 / #2920: Pad metal cells must ALWAYS be marked
+                        # ``is_obstacle = True`` on first touch, regardless of whether a
+                        # neighbour pad has already painted ``cell.net``. The prior code
+                        # only flipped ``is_obstacle`` on the SECOND pad-touch
+                        # (``elif cell.net != pad.net``), which left isolated pads
+                        # (TO-220, 2.54 mm THT, audio jacks, 0402 caps) with
+                        # ``is_obstacle = False`` because their clearance envelopes
+                        # never overlap a neighbour. In the pathfinder's negotiated
+                        # mode the ``static_blocks`` branch then released the pad
+                        # to foreign-net traces once a single trace touched it
+                        # (``_usage_count > 0``), producing trace-through-pad DRC
+                        # violations on chorus-test (#2915) and board-05's TO-220
+                        # MOSFETs (#2920). BGAs accidentally masked this bug because
+                        # their fine pitch forces neighbour-envelope overlap, which
+                        # took the second-touch branch.
+                        #
+                        # Marking pad metal as ``is_obstacle = True`` does NOT regress
+                        # same-net escape (#2880/#2908): the pathfinder filters with
+                        # ``different_net = cell.net != routing_net``, so own-net pad
+                        # cells (``cell.net == routing_net``) are still passable.
                         if is_metal_area:
                             cell.pad_blocked = True
                             if cell.net == 0:
                                 cell.net = pad.net
-                            elif cell.net != pad.net and pad.net != 0:
+                            # Pad metal is physically copper -- foreign nets must
+                            # NEVER traverse it.  Set ``is_obstacle = True``
+                            # unconditionally (on first touch as well as on
+                            # second-touch overlap) so that the pathfinder's
+                            # negotiated-mode ``static_blocks`` branch
+                            # (which releases blocks once ``usage_count > 0``)
+                            # cannot admit foreign-net traces to pad metal.
+                            # The own-net escape (#2880 / #2908) is unaffected:
+                            # ``different_net = (cell.net != routing_net)`` is
+                            # False for the pad owner, so the cell remains
+                            # passable for its own net.
+                            # ``pad.net != 0`` is required because plane / skipped-
+                            # pour pads need their static block contract
+                            # (``different_net`` from any routing net via
+                            # ``cell.net == 0``) which is enforced by the
+                            # ``static_blocks`` branch with ``usage_count == 0``
+                            # and by the ``pad_blocked`` short-circuit in the
+                            # collision checkers (Issue #2758).
+                            if pad.net != 0:
                                 cell.is_obstacle = True
                         else:
                             if pad.net == 0:
