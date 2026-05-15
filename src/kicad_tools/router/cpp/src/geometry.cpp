@@ -83,6 +83,101 @@ float segment_to_segment_distance(
     return std::min({d1, d2, d3, d4});
 }
 
+float rect_segment_centerline_distance(
+    float cx, float cy, float w, float h,
+    float x1, float y1, float x2, float y2)
+{
+    // Issue #2908: signed centerline-to-rect distance.  Mirrors the
+    // Python helper in router/grid.py and the validator-side helper
+    // from PR #2787 (validate/rules/clearance.py).  Used by
+    // ``Grid3D::validate_route`` to model rectangular SMD pad geometry
+    // accurately for the segment-to-pad clearance check.
+    const float half_w = w / 2.0f;
+    const float half_h = h / 2.0f;
+    const float left = cx - half_w;
+    const float right = cx + half_w;
+    const float bot = cy - half_h;
+    const float top = cy + half_h;
+
+    auto is_inside = [&](float px, float py) -> bool {
+        return left <= px && px <= right && bot <= py && py <= top;
+    };
+
+    const bool p1_in = is_inside(x1, y1);
+    const bool p2_in = is_inside(x2, y2);
+
+    if (p1_in && p2_in) {
+        // Whole centerline inside rect -- return deepest signed-depth.
+        auto signed_depth = [&](float px, float py) -> float {
+            float gap_x = std::max(px - right, left - px);
+            float gap_y = std::max(py - top, bot - py);
+            // Both gap_x and gap_y <= 0 when (px, py) is inside the rect.
+            return std::max(gap_x, gap_y);
+        };
+        float deepest = std::min(signed_depth(x1, y1), signed_depth(x2, y2));
+        constexpr int steps = 32;
+        const float dx = x2 - x1;
+        const float dy = y2 - y1;
+        for (int i = 1; i < steps; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(steps);
+            float d = signed_depth(x1 + t * dx, y1 + t * dy);
+            if (d < deepest) {
+                deepest = d;
+            }
+        }
+        return deepest;
+    }
+
+    if (p1_in != p2_in) {
+        // Endpoint straddles the boundary -- centerline crosses an edge.
+        return 0.0f;
+    }
+
+    // Both endpoints outside.  Check whether the segment crosses any of
+    // the four rectangle edges; if so the centerline touches the
+    // boundary (distance 0).
+    const float ex[4][4] = {
+        {left, bot, right, bot},
+        {right, bot, right, top},
+        {right, top, left, top},
+        {left, top, left, bot},
+    };
+    for (int e = 0; e < 4; ++e) {
+        if (segments_intersect(x1, y1, x2, y2,
+                               ex[e][0], ex[e][1], ex[e][2], ex[e][3])) {
+            return 0.0f;
+        }
+    }
+
+    // No crossing -- closest approach is min over:
+    //   * each segment endpoint to nearest rect point
+    //   * each rect corner to nearest point on segment.
+    auto point_to_rect = [&](float px, float py) -> float {
+        float closest_x = std::clamp(px, left, right);
+        float closest_y = std::clamp(py, bot, top);
+        float ex_ = px - closest_x;
+        float ey_ = py - closest_y;
+        return std::sqrt(ex_ * ex_ + ey_ * ey_);
+    };
+
+    float best = point_to_rect(x1, y1);
+    best = std::min(best, point_to_rect(x2, y2));
+
+    const float corners[4][2] = {
+        {left, bot},
+        {right, bot},
+        {right, top},
+        {left, top},
+    };
+    for (int c = 0; c < 4; ++c) {
+        best = std::min(
+            best,
+            point_to_segment_distance(corners[c][0], corners[c][1], x1, y1, x2, y2)
+        );
+    }
+    return best;
+}
+
 uint32_t fnv1a_hash(const char* str, size_t len) {
     uint32_t hash = 2166136261u;  // FNV offset basis
     for (size_t i = 0; i < len; ++i) {

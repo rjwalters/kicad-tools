@@ -70,10 +70,269 @@ from kicad_tools.exceptions import RoutingError
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
     segment_to_segment_distance as _geom_seg_to_seg_dist,
+    segments_intersect as _geom_segments_intersect,
 )
 from .layers import Layer, LayerStack
 from .primitives import Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
+
+
+# Issue #2908: Plane-net name patterns for same-component validator carve-out.
+#
+# A plane-net pad is one whose net carries copper power/ground topology
+# (a flooded zone or large rail, NOT a single-drop signal trace).
+# These pads must always participate in pad-vs-segment clearance
+# validation even when the pad's component is in the routing context's
+# exclude set (Issue #1764 reachability allowed signal-pin perimeter
+# escapes by skipping same-component pads; this exception preserves
+# that behaviour for signal pads while keeping plane pads in the
+# validator so traces cannot clip their copper).
+#
+# The classification must be NARROW enough not to misclassify a
+# signal net that happens to carry a voltage in its name (board 01's
+# ``VIN``/``VOUT`` are single-drop signal nets, NOT plane pours,
+# and including them in the exact-match set would over-block all
+# 2-pin resistor routes).  The discriminating property is that the
+# net is intended to be a flooded copper plane: that is reliably
+# the case for ``GND``, dedicated numbered power rails (``+3.3V``,
+# ``+5V``, ``+1V2``, ``+12V``), and the canonical IC power-pin
+# names (``VCC``, ``VDD``, ``VSS``, ``VEE``, ``VBAT``, ``VDDA``,
+# ``VDDIO``, ``AVDD``, ``AVSS``, ``DVDD``, ``DVSS``).  ``VIN``,
+# ``VOUT``, ``VBUS`` are intentionally NOT in the set -- they are
+# typically point-to-point signal nets.
+_PLANE_NET_PREFIXES: tuple[str, ...] = (
+    "+",  # +3.3V, +5V, +12V, +1V2, +0V9, etc.
+)
+_PLANE_NET_EXACT: frozenset[str] = frozenset({
+    "GND",
+    "GROUND",
+    "EARTH",
+    "AGND",
+    "DGND",
+    "PGND",
+    "SGND",
+    "VSS",
+    "VSSA",
+    "AVSS",
+    "DVSS",
+    "VCC",
+    "VCCA",
+    "AVCC",
+    "DVCC",
+    "VDD",
+    "VDDA",
+    "VDDIO",
+    "AVDD",
+    "DVDD",
+    "VEE",
+    "VBAT",
+    "VAA",
+})
+
+
+def _sync_pad_to_cpp_grid(
+    py_grid: "RoutingGrid",
+    cpp_grid: Any,
+    pad: "Pad",
+    pin_pitch: float | None,
+) -> None:
+    """Push a single pad's geometry into the paired C++ grid's validator state.
+
+    Issue #2908: ``CppGrid.from_routing_grid`` populates the C++ ``pads_``
+    vector once at ``Autorouter.__init__`` time, but ``Autorouter.add_component``
+    (the actual pad-loading code path used by the router pipeline) adds pads
+    via ``RoutingGrid.add_pad`` LATER -- after the C++ grid is already
+    constructed.  Without an incremental sync, the C++ ``validate_route``
+    iterates an empty pads list and silently accepts segment-vs-pad
+    violations.  This helper mirrors the same per-pad payload that
+    ``from_routing_grid`` computes (layer index, clearance override, ref
+    hash, plane-net flag) so the C++ validator has accurate pad geometry
+    immediately on each ``add_pad`` call.
+    """
+    # Avoid hard dependency on cpp_backend at import time (cpp_backend
+    # imports grid.py).  Defer the router_cpp import to call time.
+    try:
+        from . import router_cpp  # type: ignore[attr-defined]
+    except ImportError:
+        return
+
+    # Compute layer index (-1 for through-hole = all layers).
+    if pad.through_hole:
+        layer_idx = -1
+    else:
+        try:
+            layer_idx = py_grid.layer_to_index(pad.layer.value)
+        except (KeyError, ValueError):
+            layer_idx = 0
+
+    clearance_override = py_grid.rules.get_clearance_for_component(pad.ref, pin_pitch)
+    ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
+    is_plane_net = _is_plane_net_pad(pad)
+
+    try:
+        cpp_grid._impl.add_pad(
+            pad.x,
+            pad.y,
+            pad.width,
+            pad.height,
+            pad.net,
+            layer_idx,
+            ref_hash,
+            clearance_override,
+            is_plane_net,
+        )
+    except (AttributeError, TypeError):
+        # Older C++ binding without is_plane_net argument; ignore -- the
+        # build-version mismatch guard in cpp_backend.py disables the
+        # C++ backend in that case anyway.
+        return
+
+
+def _is_plane_net_pad(pad: "Pad") -> bool:
+    """Return True if ``pad`` belongs to a plane net (power/ground topology).
+
+    Issue #2908: Used by ``validate_segment_clearance`` to decide whether
+    a same-component-ref pad should still participate in pad-vs-segment
+    clearance validation.  The pre-#2908 code only kept plane-net pads
+    when their net id had been rewritten to ``0`` by ``skip_nets`` in
+    ``io.py``; boards routed without ``--skip-nets`` (e.g. board 04 which
+    routes ``+3.3V`` / ``GND`` as real nets to support zone stitching)
+    therefore silently exempted same-component plane pads from the
+    validator, allowing trace clips against U2.1 / U2.8 / U2.23 / U2.24
+    (Issue #2880).
+
+    The plane-net check is keyed on ``pad.net_name`` (exact match
+    against ``_PLANE_NET_EXACT`` or starts with a member of
+    ``_PLANE_NET_PREFIXES``) so the semantics are consistent
+    regardless of whether the schematic uses ``skip_nets``
+    (``pad.net == 0``) or not (``pad.net != 0``).
+
+    Args:
+        pad: The pad to classify.
+
+    Returns:
+        True if the pad's net name matches the plane-net classification.
+    """
+    if pad.net == 0:
+        # The skipped-pour-net convention already marks this as a plane.
+        return True
+    name = pad.net_name.upper() if pad.net_name else ""
+    if not name:
+        return False
+    if name in _PLANE_NET_EXACT:
+        return True
+    for prefix in _PLANE_NET_PREFIXES:
+        if name.startswith(prefix):
+            return True
+    return False
+
+
+def _rect_segment_centerline_distance(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    """Signed centerline distance between an axis-aligned rectangle and a segment.
+
+    Issue #2908: Mirror of the validator-side helper introduced in PR #2787
+    (``src/kicad_tools/validate/rules/clearance.py::
+    _rect_segment_centerline_distance``).  The router-side validator was
+    previously modelling rectangular SMD pads as discs of radius
+    ``max(w, h) / 2``; on rectangular pads where ``w != h`` the disc model
+    over-blocks along the SHORT axis (phantom inflation) AND under-detects
+    at the LONG-axis corners (the disc's rounded corner clips inside
+    the rectangle's sharp corner).  Use true axis-aligned-rectangle
+    geometry to mirror the post-route DRC's geometric semantics.
+
+    Returns the minimum distance from the segment's centerline to the
+    rectangle.  The sign convention matches
+    ``_rect_circle_clearance`` (validate/rules/clearance.py):
+
+    - **Positive** -- segment is entirely outside the rectangle.
+    - **Zero**     -- segment touches/crosses the rectangle boundary.
+    - **Negative** -- segment centerline lies inside the rectangle; the
+      magnitude is the deepest signed-depth along the segment.
+
+    Args:
+        cx, cy: Center of rectangle.
+        w, h: Width and height of rectangle.
+        x1, y1: Segment start.
+        x2, y2: Segment end.
+
+    Returns:
+        Signed centerline-to-rectangle distance in millimetres.
+    """
+    half_w = w / 2
+    half_h = h / 2
+    left = cx - half_w
+    right = cx + half_w
+    bot = cy - half_h
+    top = cy + half_h
+
+    def _inside(px: float, py: float) -> bool:
+        return left <= px <= right and bot <= py <= top
+
+    p1_in = _inside(x1, y1)
+    p2_in = _inside(x2, y2)
+
+    if p1_in and p2_in:
+        # Whole centerline inside rect -- return deepest signed-depth.
+
+        def _signed_depth(px: float, py: float) -> float:
+            gap_x = max(px - right, left - px)
+            gap_y = max(py - top, bot - py)
+            return max(gap_x, gap_y)
+
+        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
+        steps = 32
+        dx = x2 - x1
+        dy = y2 - y1
+        for i in range(1, steps):
+            t = i / steps
+            d = _signed_depth(x1 + t * dx, y1 + t * dy)
+            if d < deepest:
+                deepest = d
+        return deepest
+
+    if p1_in != p2_in:
+        # Endpoint straddles the boundary -- centerline crosses an edge.
+        return 0.0
+
+    # Both endpoints outside.  Check edge crossings.
+    rect_edges = (
+        (left, bot, right, bot),
+        (right, bot, right, top),
+        (right, top, left, top),
+        (left, top, left, bot),
+    )
+    for ex1, ey1, ex2, ey2 in rect_edges:
+        if _geom_segments_intersect(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+            return 0.0
+
+    # No crossing -- min over (segment endpoints to rect, rect corners to seg).
+    def _point_to_rect(px: float, py: float) -> float:
+        closest_x = max(left, min(px, right))
+        closest_y = max(bot, min(py, top))
+        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    candidates = [
+        _point_to_rect(x1, y1),
+        _point_to_rect(x2, y2),
+    ]
+    for corner_x, corner_y in (
+        (left, bot),
+        (right, bot),
+        (right, top),
+        (left, top),
+    ):
+        candidates.append(_geom_point_to_seg_dist(corner_x, corner_y, x1, y1, x2, y2))
+
+    return min(candidates)
 
 logger = logging.getLogger(__name__)
 
@@ -858,6 +1117,21 @@ class RoutingGrid:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
+
+        # Issue #2908: Sync the pad to the paired C++ grid (if present) so the
+        # C++ ``validate_route`` segment-vs-pad clearance check has up-to-date
+        # pad data.  The C++ side's ``pads_`` vector was historically only
+        # populated by ``CppGrid.from_routing_grid``, which runs ONCE at
+        # ``Autorouter.__init__`` -- before ``add_component()`` triggers any
+        # ``grid.add_pad()`` call.  Without this incremental sync, the C++
+        # validator iterated over an empty pads list and silently accepted
+        # routes that violated pad clearance (Issue #2908 root cause -- 44
+        # ``clearance_pad_segment`` errors on board 04 even though the C++
+        # validator had the disc-bound + same-component-ref skip code
+        # branch).
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            _sync_pad_to_cpp_grid(self, cpp_grid, pad, pin_pitch)
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation.
@@ -1854,19 +2128,37 @@ class RoutingGrid:
             if pad.net == exclude_net:
                 continue
 
-            # Issue #1764 + #2874: The same-component-ref exclusion is intended
-            # to permit signal-pin escape routing through the chip's own
-            # perimeter (Issue #1764 reachability fix). It must NOT permit
-            # signal traces to clip plane-net pads on the same chip. Keep
-            # plane-net pads (``pad.net == 0``, the SKIPPED-net convention
-            # threaded through ``cpp_backend.py:596-605``) in the validator
-            # even when their component is in the exclude set. This mirrors
-            # the C++ guard at ``cpp/src/grid.cpp:376`` (PR #2873) and the
-            # canonical ``component_inherent`` filter at
-            # ``io.py:1818-1822``. ``Pad.net: int`` (see
-            # ``primitives.py:245``), so the direct ``!= 0`` comparison is
-            # clean.
-            if exclude_refs and pad.net != 0 and pad.ref in exclude_refs:
+            # Issue #1764 + #2874 + #2908: The same-component-ref exclusion is
+            # intended to permit signal-pin escape routing through the chip's
+            # own perimeter (Issue #1764 reachability fix). It must NOT permit
+            # signal traces to clip plane-net pads on the same chip.
+            #
+            # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
+            # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
+            # (``skip_nets`` rewriting in ``io.py:2819-2820``) kept plane-net
+            # pads in the validator. That convention only covers boards that
+            # pass ``--skip-nets``; board 04 routes ``+3.3V`` / ``GND`` as
+            # real nets (so the GND zone can stitch up after routing), so
+            # ``U2.1 +3.3V`` retains ``net == 2`` and was being silently
+            # exempted -- producing 44 ``clearance_pad_segment`` violations
+            # against same-component plane pads (Issue #2908, successor to
+            # #2902).
+            #
+            # Issue #2908 broadens the carve-out: a same-component pad is
+            # excluded ONLY when it is a signal net (not a plane net).
+            # Plane-net pads -- whether ``net == 0`` (skipped-pour) or
+            # ``net > 0`` with a power/ground name -- are kept in the
+            # validator. The rect-aware geometry below ensures the disc-bound
+            # over-rejection on the SHORT axis does not regress legitimate
+            # signal-vs-signal corridor traces (the corridor relaxation in
+            # ``_relax_same_component_clearance`` only operates between
+            # signal pads, so this stricter validation for plane pads is
+            # compatible with the existing reachability fix).
+            if (
+                exclude_refs
+                and pad.ref in exclude_refs
+                and not _is_plane_net_pad(pad)
+            ):
                 continue
 
             # Skip pads on different layers (unless PTH)
@@ -1883,15 +2175,33 @@ class RoutingGrid:
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
             required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
 
-            # Calculate distance from segment to pad center
-            # Use the pad's larger dimension as radius for conservative check
-            pad_radius = max(pad.width, pad.height) / 2
-
-            # Point-to-segment distance calculation
-            dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
-
-            # Edge-to-edge clearance
-            clearance = dist - seg_half_width - pad_radius
+            # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
+            # previous disc bound (``radius = max(w, h) / 2``) over-rejected
+            # along the pad's SHORT axis (a 1.475 x 0.3 mm LQFP-48 pad became
+            # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
+            # below the pad metal) and under-detected at long-axis corners
+            # (the disc's rounded corner clips inside the rectangle's sharp
+            # corner). Vias and square pads (w == h within 1 micron) keep
+            # the disc model -- it is exact for circular obstacles and
+            # cheaper to evaluate. This mirrors PR #2787's fix at
+            # ``validate/rules/clearance.py::_segment_circle_clearance``.
+            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            if is_circular_pad:
+                pad_radius = max(pad.width, pad.height) / 2
+                dist = self._point_to_segment_distance(
+                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+                clearance = dist - seg_half_width - pad_radius
+            else:
+                # Rect-aware: signed centerline-to-rect distance.  Negative
+                # means the segment centerline lies inside the pad rectangle
+                # (a real DRC defect; the magnitude is the deepest signed
+                # depth).
+                center_dist = _rect_segment_centerline_distance(
+                    pad.x, pad.y, pad.width, pad.height,
+                    seg.x1, seg.y1, seg.x2, seg.y2,
+                )
+                clearance = center_dist - seg_half_width
 
             if clearance < min_actual_clearance:
                 min_actual_clearance = clearance

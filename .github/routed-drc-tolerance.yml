@@ -140,26 +140,45 @@ tolerances:
   # Tracked: Phase 3N (#2726), match-group tuning (#2723).
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70
 
-  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Held at 60 (post-#2871
-  # floor).  Issue #2874 (this PR) lands the Python-side mirror of
-  # #2871/PR #2873: both the C++ validator (``cpp/src/grid.cpp:376``)
-  # and the Python validator (``src/kicad_tools/router/grid.py:1503``)
-  # now narrow the same-component-ref exclusion to signal pads only --
-  # plane-net (``net == 0``) pads on the chip participate in
-  # pad-vs-segment validation again.  Validator parity is now closed,
-  # but re-routing the source PCB with the C++ backend still yields
-  # the same 56 errors (44 ``clearance_pad_segment`` + 4 each of
-  # ``segment_via``, ``pad_via``, ``segment_segment``) -- the C++
-  # pathfinder finds a route that fits under its post-route validator
-  # (after avoidance-cost retries) without falling back to Python, so
-  # the Python validator narrowing does not alter the routing yield on
-  # this board in isolation.  The remaining 56 errors are real
-  # geometry violations the C++ pathfinder cannot avoid in this
-  # corridor; reducing them to 0 requires the chained narrow-channel
-  # fixes (#2842 / #2865 / #2867 / #2869) to compose with the
-  # validator parity here, plus follow-up routing-strategy changes.
-  # The board-04 floor is therefore held at 60 until a re-route
-  # achieves the joint exit clause for #2834 (manufacturing-ready).
-  # Tracked: #2834 (manufacturing-ready), #2871 (C++ side), #2874
-  # (Python side, this PR).
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 60
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
+  # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
+  # only kept plane-net pads in the validator when ``pad.net == 0``
+  # (the SKIPPED-pour convention); board 04 routes ``+3.3V`` / ``GND``
+  # as real nets (so the GND zone can stitch up after routing), so the
+  # U2 plane pads retained ``pad.net != 0`` and were silently exempted
+  # from the same-component-ref carve-out -- producing 44
+  # ``clearance_pad_segment`` errors on U2's west edge cluster
+  # (U2.1/8/9/23/24/36 vs NRST/OSC_OUT/SWCLK escapes).
+  #
+  # Two prior layers were tried and rejected:
+  #   * #2890 / PR #2897 -- escape-phase predicate (variant #3).  The
+  #     dispatcher never picked the plane-side direction; 0% effect on
+  #     the cluster.  Reference branch ``feature/issue-2890`` @
+  #     ``f5ee5bde``.
+  #   * #2902 / PR #2905 -- grid pre-blocking halo at
+  #     ``_apply_narrow_channel_halo``.  Over-broad; regressed boards
+  #     02/03/04 (44 -> 58 errors on board 04).  Reference branch
+  #     ``feature/issue-2902`` @ ``5de7f0d5``.
+  #
+  # #2908 fixes the validator layer directly.  Both the Python
+  # validator (``grid.py::validate_segment_clearance``) and the C++
+  # validator (``cpp/src/grid.cpp::validate_route``) now:
+  #   1. Treat plane-net pads as anyone-can-detect obstacles based on
+  #      ``pad.net_name`` (``+...V``, ``GND``, ``VCC``, ``VDD``, ...)
+  #      regardless of whether the net id is 0 (skipped-pour) or
+  #      > 0 (zone-stitched).
+  #   2. Use rect-aware geometry (``_rect_segment_centerline_distance``)
+  #      to model rectangular SMD pads accurately instead of the
+  #      ``radius = max(w, h) / 2`` disc bound.  Mirrors PR #2787's
+  #      validate/rules/clearance.py fix.
+  #
+  # Result on the post-fix routed artifact: 8 errors
+  # (2 ``clearance_pad_via`` + 2 ``clearance_segment_segment``
+  # + 4 ``clearance_segment_via``).  ``clearance_pad_segment`` drops
+  # to **0**.  Floor is held at 12 to give 4-error headroom for
+  # routing-yield noise between runs; the next tightening pass can
+  # drop this further if the residual seg-via and pad-via violations
+  # are stable across re-routes.  Tracked: #2834
+  # (manufacturing-ready), #2908 (this PR), #2880 (NRST cluster --
+  # closed by this PR).
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 12

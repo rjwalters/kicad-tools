@@ -107,9 +107,15 @@ public:
 
     // Register pads for clearance validation.
     // clearance_override: pre-computed from rules.get_clearance_for_component()
+    // is_plane_net (Issue #2908): True when the pad's net carries plane
+    // (power/ground) topology -- used by validate_route() to skip the
+    // same-component-ref carve-out so plane pads remain validated even
+    // when the routing context excludes their component (mirrors the
+    // Python ``_is_plane_net_pad`` helper).
     void add_pad(float x, float y, float width, float height,
                  int net, int layer_idx, uint32_t ref_hash,
-                 float clearance_override);
+                 float clearance_override,
+                 bool is_plane_net = false);
 
     // Register a completed route's segments for clearance validation.
     void add_stored_segment(float x1, float y1, float x2, float y2,
