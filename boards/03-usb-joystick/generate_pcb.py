@@ -504,16 +504,26 @@ def generate_xtal_load_caps() -> str:
 
     Crystal Y1 sits at ``(BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 30)`` with
     pads at x = +/-2.44 mm relative to its center (XTAL1 on pad 1, XTAL2 on
-    pad 2). Place C5 ~4 mm below the XTAL1 pad and C6 ~4 mm below the XTAL2
-    pad so each load cap is adjacent to its crystal pin with a short trace
-    to GND.
+    pad 2). Place C5/C6 ~4 mm ABOVE (north of) the crystal so each load
+    cap is adjacent to its crystal pin with a short trace to GND.
+
+    Why above (negative dy), not below: the joystick J2 sits at
+    ``(BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 35)`` with through-hole pads
+    spanning x = 11..19, y = 35. A below-Y1 cap at (xtal_cx - 2.44,
+    xtal_cy + 4) = (BOARD_ORIGIN_X + 19.56, BOARD_ORIGIN_Y + 34) places
+    C5-1 pad (0.56 x 0.62 mm at x = -0.48 from center) directly on top of
+    J2-5 (1.6 mm dia pad at (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 35))
+    -- a -0.110 mm pad-to-pad clearance violation that no router can fix.
+    Flipping cap_dy to negative places C5/C6 in the empty area between Y1
+    (y = 30) and U1's north pad row (y = 27.5), with > 0.9 mm clearance
+    on both sides.
     """
     xtal_cx = BOARD_ORIGIN_X + 22
     xtal_cy = BOARD_ORIGIN_Y + 30
-    cap_dy = 4.0  # mm below crystal center
+    cap_dy = -4.0  # mm above crystal center (negative = north of Y1)
 
     parts = [
-        # C5: XTAL1 -> GND, sits under crystal pin 1
+        # C5: XTAL1 -> GND, sits above (north of) crystal pin 1
         generate_capacitor(
             "C5",
             (xtal_cx - 2.44, xtal_cy + cap_dy),
@@ -521,7 +531,7 @@ def generate_xtal_load_caps() -> str:
             "GND",
             value="22pF",
         ),
-        # C6: XTAL2 -> GND, sits under crystal pin 2
+        # C6: XTAL2 -> GND, sits above (north of) crystal pin 2
         generate_capacitor(
             "C6",
             (xtal_cx + 2.44, xtal_cy + cap_dy),
