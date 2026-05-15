@@ -1814,6 +1814,77 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
+def create_zones_for_pcb(pcb_path: Path) -> int:
+    """Create copper-pour zones for power and ground nets on *pcb_path*.
+
+    Issue #2899: board 05's committed routed PCB carried 0 zones because
+    this script's pipeline jumps straight from PCB generation to routing
+    without ever invoking the zone generator.  ``kct build``'s own
+    ``_run_step_zones`` step never fires either, because ``design.py`` is
+    detected as both the schematic and PCB generator -- it runs in the
+    SCHEMATIC step and the build pipeline either short-circuits the
+    later ZONES step (when this script exited 0) or aborts before
+    reaching it (when this script exits 1 on ERC/DRC failures).
+    Either way, zones never land in the on-disk PCB.
+
+    Adding the zones here -- after the unrouted PCB is written and
+    before the router consumes it -- makes the design self-contained:
+    the router preserves zones via its raw-text concatenation (the
+    write path fixed in #2770), so the committed routed PCB now ships
+    with VMOTOR / +5V / +3.3V / GND / PWR_LED zones regardless of
+    whether ``kct build`` runs the ZONES step or not.
+
+    The implementation reuses ``auto_pour_if_missing`` (the same helper
+    that ``kct route`` invokes) so layer assignment, priority handling,
+    edge-clearance inset, and the all-power-board guard all match the
+    rest of the toolchain.  The JLCPCB minimum-edge-clearance is
+    sourced from ``mfr_limits`` so zone copper does not extend to the
+    board edge and trigger ``edge_clearance_zone`` DRC violations.
+
+    Args:
+        pcb_path: Path to the unrouted .kicad_pcb file.  Modified in place.
+
+    Returns:
+        Number of zones created (0 if all power nets already have zones,
+        or if the board classifies as all-power per issue #2740).
+    """
+    from kicad_tools.router.auto_pour import auto_pour_if_missing
+    from kicad_tools.router.mfr_limits import get_mfr_limits
+
+    print("\n" + "=" * 60)
+    print("Creating copper-pour zones...")
+    print("=" * 60)
+
+    # Look up edge clearance from the JLCPCB profile so zone copper does
+    # not bleed to the board edge.  Mirrors the lookup in
+    # build_cmd._run_step_zones so both code paths use identical insets.
+    edge_clearance: float | None = None
+    try:
+        _limits = get_mfr_limits("jlcpcb")
+        if _limits.min_edge_clearance > 0:
+            edge_clearance = _limits.min_edge_clearance
+    except ValueError:
+        pass  # Unknown manufacturer -- proceed without inset
+
+    print(f"\n1. Loading PCB: {pcb_path}")
+    if edge_clearance is not None:
+        print(f"   Edge clearance inset: {edge_clearance}mm (from jlcpcb profile)")
+
+    zones_created, pour_net_names = auto_pour_if_missing(
+        pcb_path,
+        quiet=False,
+        edge_clearance=edge_clearance,
+    )
+
+    print("\n2. Result:")
+    if zones_created > 0:
+        print(f"   Created {zones_created} zone(s) for: {', '.join(pour_net_names)}")
+    else:
+        print("   No new zones created (zones already exist or board is all-power)")
+
+    return zones_created
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """
     Route the PCB using the autorouter.
@@ -1963,6 +2034,66 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
+def fill_zones_in_routed_pcb(routed_path: Path) -> int:
+    """Fill copper zones in the routed PCB via ``kicad-cli``.
+
+    Issue #2899 acceptance criterion 3 requires each zone's filled area
+    to cover >=80% of its plane region.  ``add_zone`` only writes the
+    zone *definition* (polygon outline + net + layer + priority); the
+    actual copper polygon is computed by KiCad's fill engine when the
+    zone is filled.
+
+    ``kct route`` calls :func:`route_cmd._fill_zones_after_route` once
+    routing completes, which invokes ``kicad-cli pcb fill-zones`` (or
+    falls back to ``kicad-cli pcb drc`` on older KiCad versions which
+    fills zones as a side-effect).  This script bypasses ``kct route``
+    and uses :func:`kicad_tools.router.load_pcb_for_routing` directly,
+    so we have to fill the zones ourselves for parity.
+
+    Without this step the routed PCB carries ``(zone ...)`` blocks but
+    no ``(filled_polygon ...)`` entries -- zone_unfilled DRC warnings
+    surface in ``kct check`` and exported Gerbers ship without any
+    plane copper.
+
+    Returns the number of zones present in the routed PCB after fill
+    (informational only; the actual fill polygons are validated by DRC).
+    Returns 0 silently when ``kicad-cli`` is unavailable so the script
+    still runs on developer machines without KiCad installed.
+    """
+    from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+
+    print("\n" + "=" * 60)
+    print("Filling copper zones...")
+    print("=" * 60)
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        print("\n   WARNING: kicad-cli not found - skipping zone fill")
+        print("   Install KiCad 8 from: https://www.kicad.org/download/")
+        return 0
+
+    print(f"\n1. Filling zones in: {routed_path}")
+    result = run_fill_zones(routed_path, kicad_cli=kicad_cli)
+
+    if not result.success:
+        print(f"\n   WARNING: Zone fill failed: {result.stderr or '(no stderr)'}")
+        return 0
+
+    # Re-read and report zone count for visibility.
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(routed_path))
+        print(f"\n2. Result: {len(pcb.zones)} zone(s) filled")
+        for z in pcb.zones:
+            layers = z.layers if hasattr(z, "layers") and z.layers else ["?"]
+            print(f"   - {z.net_name} on {layers[0]} (priority {getattr(z, 'priority', '?')})")
+        return len(pcb.zones)
+    except Exception as e:
+        print(f"\n   WARNING: Could not re-read routed PCB to count zones: {e}")
+        return 0
+
+
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB using kct check for consistent results."""
     print("\n" + "=" * 60)
@@ -2014,11 +2145,26 @@ def main() -> int:
         # Step 4: Create PCB
         pcb_path = create_bldc_pcb(output_dir)
 
-        # Step 5: Route PCB
+        # Step 5: Create copper-pour zones for power/ground nets.
+        # Issue #2899: must happen *before* routing so the router's raw-text
+        # concatenation in route_pcb() preserves the zones (see #2770).
+        zones_created = create_zones_for_pcb(pcb_path)
+
+        # Step 6: Route PCB
         routed_path = output_dir / "bldc_controller_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
-        # Step 6: Run DRC
+        # Step 7: Fill copper zones in the routed PCB.
+        # Issue #2899 AC: filled zones must cover >=80% of the plane region.
+        # ``kct route`` performs this automatically after routing (see
+        # route_cmd._fill_zones_after_route); this script bypasses the CLI
+        # and uses the router API directly, so we fill the zones here for
+        # parity.  Without this step the routed PCB carries (zone ...) blocks
+        # but no (filled_polygon ...) entries -- zone_unfilled DRC warnings
+        # surface and Gerbers ship without plane copper.
+        zones_filled = fill_zones_in_routed_pcb(routed_path)
+
+        # Step 8: Run DRC
         drc_success = run_drc(routed_path)
 
         # Summary
@@ -2033,6 +2179,7 @@ def main() -> int:
         print(f"  4. PCB (routed): {routed_path.name}")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
+        print(f"  Zones: {zones_created} zone(s) created, {zones_filled} filled")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
         print("\nComponent summary:")
