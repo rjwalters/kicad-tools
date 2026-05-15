@@ -58,6 +58,7 @@ class TwoPhaseRouter:
         attempt_blocked_component_ripup: Callable[..., Any] | None = None,
         build_pads_by_net: Callable[..., Any] | None = None,
         get_partially_routed_nets: Callable[..., Any] | None = None,
+        interleave_match_groups: Callable[[list[int]], list[int]] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -73,6 +74,15 @@ class TwoPhaseRouter:
         self._route_net_with_corridor = route_net_with_corridor
         self._mark_route = mark_route
         self._pour_nets_without_zones = pour_nets_without_zones or set()
+        # Issue #2914: Optional fairness pass that front-loads one
+        # representative per match group on the priority-sorted
+        # ``net_order``.  Threaded in from
+        # :meth:`Autorouter._create_two_phase_router` so the two-phase
+        # detailed-routing loop uses the same fairness contract as
+        # :meth:`Autorouter.route_all_negotiated`.  When ``None`` (e.g.
+        # unit tests that construct TwoPhaseRouter directly), the
+        # routing order is identical to the pre-#2914 behaviour.
+        self._interleave_match_groups = interleave_match_groups
         # Issue #2527: Optional hooks that let the detailed-routing stall path
         # invoke ``Autorouter._attempt_blocked_component_ripup_negotiated``.
         # When the initial pass leaves overflow=0 with unrouted/partial nets
@@ -184,6 +194,19 @@ class TwoPhaseRouter:
                 "(trivially connected)"
             )
         net_order = multi_pad_nets
+
+        # Issue #2914: Front-load one representative per match group so
+        # no group can be fully starved by the wall-clock budget.  Without
+        # this, board 07 ADDR_BUS (priority class 2) was fully scheduled
+        # after DDR / MIPI / HDMI (class 1) and the 600 s budget was
+        # exhausted before A0..A7 received any "Routing net..." log line.
+        # The helper is threaded in from
+        # :meth:`Autorouter._create_two_phase_router` so it shares its
+        # implementation (and detection-failure fallback) with the
+        # negotiated-route path.  When unset (direct TwoPhaseRouter
+        # construction in tests) the routing order is unchanged.
+        if self._interleave_match_groups is not None:
+            net_order = self._interleave_match_groups(net_order)
 
         total_nets = len(net_order)
 
