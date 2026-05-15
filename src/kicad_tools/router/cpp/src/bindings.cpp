@@ -172,7 +172,8 @@ NB_MODULE(router_cpp, m) {
         // Geometric validation (Issue #2439)
         .def("add_pad", &Grid3D::add_pad,
              "x"_a, "y"_a, "width"_a, "height"_a,
-             "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a)
+             "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
+             "is_plane_net"_a = false)
         .def("add_stored_segment", &Grid3D::add_stored_segment,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a,
              "width"_a, "layer_idx"_a, "net"_a)

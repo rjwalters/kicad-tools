@@ -303,8 +303,9 @@ float Grid3D::memory_mb() const {
 
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
-                     float clearance_override) {
-    pads_.push_back({x, y, width, height, net, layer_idx, ref_hash, clearance_override});
+                     float clearance_override, bool is_plane_net) {
+    pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
+                     clearance_override, is_plane_net});
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -372,16 +373,32 @@ ValidationResult Grid3D::validate_route(
             // Skip same-net pads
             if (pad.net == exclude_net) continue;
 
-            // Issue #1764 + #2871 follow-up: the same-component-ref exclusion
+            // Issue #1764 + #2871 + #2908: the same-component-ref exclusion
             // is intended to permit signal-pin escape routing through the
             // chip's own perimeter (Issue #1764 reachability fix). It must
             // NOT permit signal traces to clip plane-net pads on the same
-            // chip. Keep plane-net pads (pad.net == 0, the SKIPPED-net
-            // convention threaded through cpp_backend.py:596-605) in the
-            // validator even when their component is in the exclude set
-            // (44 clearance_pad_segment errors on board 04 NRST / OSC_OUT /
-            // SWCLK vs U2 GND / +3.3V pads -- see issue #2871).
-            if (pad.net != 0 && is_excluded_ref(pad.ref_hash)) continue;
+            // chip.
+            //
+            // PR #2873 narrowed the exclusion to ``pad.net != 0`` so the
+            // SKIPPED-net convention (``skip_nets`` rewriting in
+            // ``cpp_backend.py:596-605``) kept plane pads in the validator.
+            // That convention only covers boards that pass ``--skip-nets``;
+            // board 04 routes ``+3.3V`` / ``GND`` as real nets, so the
+            // U2.1 / U2.8 / U2.23 / U2.24 plane pads retained ``net != 0``
+            // and were silently exempted -- 44 ``clearance_pad_segment``
+            // violations on the west edge cluster (Issue #2908).
+            //
+            // Issue #2908 broadens the carve-out: a same-component pad is
+            // excluded ONLY when it is a SIGNAL pad (``!pad.is_plane_net``).
+            // Plane-net pads -- whether ``net == 0`` (skipped-pour) or
+            // ``net > 0`` with a power/ground name (classified in
+            // ``cpp_backend.py``) -- are kept in the validator.  The
+            // rect-aware geometry below ensures the disc-bound short-axis
+            // over-rejection does not regress legitimate signal-vs-signal
+            // corridor traces (the corridor relaxation in
+            // ``_relax_same_component_clearance`` only operates between
+            // non-plane pads).
+            if (!pad.is_plane_net && is_excluded_ref(pad.ref_hash)) continue;
 
             // Skip pads on different layers (unless through-hole: layer_idx == -1)
             if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
@@ -389,15 +406,31 @@ ValidationResult Grid3D::validate_route(
             // Per-component clearance (Issue #1016)
             float required_clearance = pad.clearance_override;
 
-            // Pad radius: conservative, use larger dimension
-            float pad_radius = std::max(pad.width, pad.height) / 2.0f;
-
-            // Point-to-segment distance
-            float dist = point_to_segment_distance(
-                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
-
-            // Edge-to-edge clearance
-            float clearance = dist - seg_half_width - pad_radius;
+            // Issue #2908: Rect-aware geometry for rectangular SMD pads.
+            // The previous disc bound (``pad_radius = max(w, h) / 2``)
+            // over-rejected along the pad's SHORT axis -- a 1.475 x 0.3 mm
+            // LQFP-48 pad became a 0.7375 mm-radius disc, 0.587 mm of
+            // phantom inflation above / below the pad metal.  Vias and
+            // square pads (w == h within 1 micron) keep the disc model;
+            // it is exact for circular obstacles and cheaper to evaluate.
+            // Mirrors PR #2787 (validate/rules/clearance.py) and the
+            // Python validator at ``router/grid.py``.
+            float clearance;
+            const bool is_circular_pad = std::abs(pad.width - pad.height) < 0.001f;
+            if (is_circular_pad) {
+                const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+                const float dist = point_to_segment_distance(
+                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                clearance = dist - seg_half_width - pad_radius;
+            } else {
+                // Rect-aware: signed centerline-to-rect distance.  Negative
+                // means the segment centerline lies inside the pad rectangle
+                // (a real DRC defect).
+                const float center_dist = rect_segment_centerline_distance(
+                    pad.x, pad.y, pad.width, pad.height,
+                    seg.x1, seg.y1, seg.x2, seg.y2);
+                clearance = center_dist - seg_half_width;
+            }
 
             if (clearance < result.min_clearance) {
                 result.min_clearance = clearance;

@@ -21,7 +21,7 @@ namespace router {
 // ``cpp_backend.py``; on import the two are compared and a mismatch
 // disables the C++ backend with a clear "kct build-native" error,
 // preventing silent ``AttributeError`` failures from a stale .so.
-constexpr int ROUTER_CPP_BUILD_VERSION = 4;
+constexpr int ROUTER_CPP_BUILD_VERSION = 5;
 
 // Grid cell state
 struct GridCell {
@@ -161,6 +161,14 @@ struct PadInfo {
     int layer_idx = -1;         // -1 means through-hole (all layers)
     uint32_t ref_hash = 0;      // FNV-1a hash of component reference
     float clearance_override = 0.0f;  // Pre-computed clearance for this pad's component
+    // Issue #2908: True when the pad's net carries plane (power/ground)
+    // topology, regardless of whether the net id is 0 (skipped-pour
+    // convention) or a real net number (e.g. board 04 routes ``+3.3V``
+    // and ``GND`` as real nets so the GND zone can stitch up after
+    // routing).  Set from ``cpp_backend.py::CppGrid.from_routing_grid``
+    // by classifying ``pad.net_name`` (the C++ side has no string
+    // table, so the boolean is computed in Python and passed in).
+    bool is_plane_net = false;
 };
 
 // Stored segment for validation (Issue #2439)

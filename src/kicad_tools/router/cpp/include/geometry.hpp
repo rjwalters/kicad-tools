@@ -35,6 +35,23 @@ float segment_to_segment_distance(
     float x1, float y1, float x2, float y2,
     float x3, float y3, float x4, float y4);
 
+// Issue #2908: Signed centerline distance between an axis-aligned
+// rectangle (cx, cy, w, h) and a line segment (x1,y1)-(x2,y2).
+//
+// Sign convention:
+//   * Positive -- segment is entirely outside the rectangle.
+//   * Zero     -- segment touches/crosses the rectangle boundary.
+//   * Negative -- segment centerline lies inside the rectangle; the
+//                 magnitude is the deepest signed-depth along the
+//                 centerline (a real DRC defect indicator).
+//
+// Mirrors ``_rect_segment_centerline_distance`` in
+// ``src/kicad_tools/router/grid.py`` and the validator-side helper
+// from PR #2787 (validate/rules/clearance.py).
+float rect_segment_centerline_distance(
+    float cx, float cy, float w, float h,
+    float x1, float y1, float x2, float y2);
+
 // Compute FNV-1a hash of a string.
 // Deterministic across runs (unlike Python's hash() which is randomized).
 uint32_t fnv1a_hash(const char* str, size_t len);

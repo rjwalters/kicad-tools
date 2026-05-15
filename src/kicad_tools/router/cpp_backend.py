@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 4
+_REQUIRED_CPP_BUILD_VERSION = 5
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -575,6 +575,11 @@ class CppGrid:
         # Issue #2439: Populate pad data for C++ geometric validation.
         # Pre-compute per-component clearance overrides and FNV-1a ref hashes
         # so the C++ side never calls back into Python during validation.
+        # Issue #2908: Pre-compute plane-net classification on Python side
+        # (C++ has no net-name string table) so the C++ validator can use
+        # the same carve-out as the Python ``_is_plane_net_pad`` helper.
+        from .grid import _is_plane_net_pad
+
         component_pitches = grid.compute_component_pitches()
         for pad in grid._pads:
             # Compute layer index (-1 for through-hole pads = all layers)
@@ -593,6 +598,14 @@ class CppGrid:
             # Deterministic FNV-1a hash of component reference
             ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
 
+            # Issue #2908: Pre-compute plane-net classification on the Python
+            # side (the C++ Pad struct has no net-name string table).  Used
+            # by ``Grid3D::validate_route`` to keep plane pads in the
+            # validator even when their component is in the exclude set --
+            # the same fix as the Python-side ``_is_plane_net_pad`` carve-out
+            # at ``grid.py::validate_segment_clearance``.
+            is_plane_net = _is_plane_net_pad(pad)
+
             cpp_grid._impl.add_pad(
                 pad.x,
                 pad.y,
@@ -602,6 +615,7 @@ class CppGrid:
                 layer_idx,
                 ref_hash,
                 clearance_override,
+                is_plane_net,
             )
 
         return cpp_grid
