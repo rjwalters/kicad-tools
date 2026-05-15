@@ -282,6 +282,55 @@ class ZonePolygon:
     points: list[tuple[float, float]]
 
 
+@dataclass
+class ThermalPadCandidate:
+    """A pad identified as a heat-sink / thermal pad candidate for thermal stitching.
+
+    Augments :class:`PadInfo` with the footprint library name so that the
+    thermal-pad heuristic can also key off footprint families
+    (e.g. ``TO-220``, ``DPAK``, ``QFN-EP``).
+    """
+
+    pad: PadInfo
+    footprint_name: str  # Full footprint library:name string
+    # True when the heuristic flagged this pad via footprint-name match
+    matched_by_footprint: bool = False
+    # True when the heuristic flagged this pad via large pad area
+    matched_by_size: bool = False
+    # True when the heuristic flagged this pad via reference prefix
+    matched_by_reference: bool = False
+
+
+# Default footprint-name patterns that indicate a thermal / heat-sink pad
+# context. The patterns are matched case-insensitively as substrings of the
+# footprint library:name (e.g. ``Package_TO_SOT_THT:TO-220-3_Vertical``).
+DEFAULT_THERMAL_FOOTPRINT_PATTERNS: tuple[str, ...] = (
+    "TO-220",
+    "TO220",
+    "TO-252",
+    "TO252",
+    "TO-263",
+    "TO263",
+    "DPAK",
+    "D2PAK",
+    "D-PAK",
+    "SO-8-EP",
+    "SOIC-8-EP",
+    "POWERPAD",
+    "QFN-EP",
+    "QFN_EP",
+    "DFN-EP",
+    "DFN_EP",
+    "-EP_",  # Generic "exposed pad" suffix
+    "1EP",   # Generic "1 exposed pad" suffix (e.g. QFN-32-1EP_5x5mm)
+    "_EP_",  # Underscore-bracketed EP marker
+)
+
+# Default reference-prefix list for component classes that typically have
+# heat-sink pads on power nets (Q = transistors/MOSFETs, U = power ICs).
+DEFAULT_THERMAL_REFERENCE_PREFIXES: tuple[str, ...] = ("Q",)
+
+
 def get_net_map(sexp: SExp) -> dict[int, str]:
     """Build a mapping of net number to net name."""
     net_map = {}
@@ -2493,6 +2542,575 @@ def check_via_clearance(
     return True
 
 
+def _matches_footprint_pattern(footprint_name: str, patterns: tuple[str, ...]) -> bool:
+    """Return True if any of the patterns appears (case-insensitively) in the
+    footprint name string.
+
+    The match is a substring check on the upper-cased footprint name so
+    library prefixes like ``Package_TO_SOT_THT:`` and suffixes like
+    ``_Vertical`` don't break the match.
+    """
+    if not footprint_name:
+        return False
+    up = footprint_name.upper()
+    return any(p.upper() in up for p in patterns)
+
+
+def _matches_reference_prefix(reference: str, prefixes: tuple[str, ...]) -> bool:
+    """Return True if the reference starts with any of the given prefixes.
+
+    Match is case-sensitive on the prefix so that ``Q1`` matches ``Q`` but
+    ``R10`` does not match ``Q``. References like ``Q1A`` and ``Q12`` are
+    matched by prefix ``Q`` after stripping the digit suffix is unnecessary
+    -- a simple ``startswith`` plus digit check suffices.
+    """
+    if not reference or not prefixes:
+        return False
+    for prefix in prefixes:
+        if reference.startswith(prefix):
+            # Require that the next char (if any) is a digit, so prefix "Q"
+            # matches "Q1" / "Q12" but not "QFN1" (a footprint-like name as
+            # reference).
+            rest = reference[len(prefix):]
+            if not rest or rest[0].isdigit():
+                return True
+    return False
+
+
+def find_thermal_pad_candidates(
+    sexp: SExp,
+    net_names: set[str],
+    footprint_patterns: tuple[str, ...] = DEFAULT_THERMAL_FOOTPRINT_PATTERNS,
+    reference_prefixes: tuple[str, ...] = DEFAULT_THERMAL_REFERENCE_PREFIXES,
+    min_pad_size: float = 2.0,
+) -> list[ThermalPadCandidate]:
+    """Find pads that look like MOSFET / heat-sink thermal pads.
+
+    A pad qualifies as a thermal-pad candidate when ALL of these hold:
+
+    1. The pad is on one of the target ``net_names`` (a power-plane net).
+    2. At least ONE of these signals is true:
+       a. The footprint library:name matches a known thermal-pad family
+          (``footprint_patterns``, e.g. ``TO-220``, ``DPAK``, ``QFN-EP``).
+       b. The footprint reference starts with a thermal-component prefix
+          (``reference_prefixes``, e.g. ``Q`` for MOSFETs/transistors).
+       c. The pad's bounding box meets ``min_pad_size`` mm on BOTH axes
+          (large exposed-pad style heat-sink pad).
+
+    The conjunction of (1) AND (2) ensures we don't false-positive on,
+    say, a regular SMD bypass cap on GND (passes 1 but fails 2) and we
+    don't false-positive on a MOSFET's gate signal pin (fails 1).
+
+    Args:
+        sexp: PCB S-expression
+        net_names: Target plane nets (case-sensitive)
+        footprint_patterns: Substrings (case-insensitive) of footprint
+            library:name that mark thermal-pad packages.
+        reference_prefixes: Reference prefixes (case-sensitive) for
+            component classes that typically have heat-sink pads.
+        min_pad_size: Minimum pad width AND height in mm for the
+            "large pad" signal.
+
+    Returns:
+        List of :class:`ThermalPadCandidate` describing each qualifying
+        pad (one entry per pad, not per footprint).
+    """
+    net_map = get_net_map(sexp)
+    target_net_nums = {num for num, name in net_map.items() if name in net_names}
+
+    candidates: list[ThermalPadCandidate] = []
+
+    for fp in sexp.iter_children():
+        if fp.tag != "footprint":
+            continue
+
+        # Footprint library:name string (first positional arg).
+        footprint_name = fp.get_string(0) or ""
+
+        # Footprint placement
+        at_node = fp.find_child("at")
+        if not at_node:
+            continue
+        fp_x = at_node.get_float(0) or 0.0
+        fp_y = at_node.get_float(1) or 0.0
+        fp_rotation = at_node.get_float(2) or 0.0
+
+        layer_node = fp.find_child("layer")
+        fp_layer = layer_node.get_string(0) if layer_node else "F.Cu"
+
+        # Reference
+        reference = None
+        for prop in fp.find_children("property"):
+            if prop.get_string(0) == "Reference":
+                reference = prop.get_string(1)
+                break
+        if reference is None:
+            for fp_text in fp.find_children("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    reference = fp_text.get_string(1)
+                    break
+        if reference is None:
+            reference = "??"
+
+        # Pre-compute the footprint and reference signals (constant per fp).
+        fp_match = _matches_footprint_pattern(footprint_name, footprint_patterns)
+        ref_match = _matches_reference_prefix(reference, reference_prefixes)
+
+        rad = math.radians(fp_rotation)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+
+        for pad in fp.find_children("pad"):
+            pad_number = pad.get_string(0)
+            pad_type = pad.get_string(1)
+
+            if pad_type not in ("smd", "thru_hole"):
+                continue
+
+            # Pad must be on a target plane net.
+            net_node = pad.find_child("net")
+            if not net_node:
+                continue
+            net_num = net_node.get_int(0)
+            if net_num not in target_net_nums:
+                continue
+
+            net_name = net_map.get(net_num, "")
+
+            # Pad position
+            pad_at = pad.find_child("at")
+            if not pad_at:
+                continue
+            pad_rel_x = pad_at.get_float(0) or 0.0
+            pad_rel_y = pad_at.get_float(1) or 0.0
+            pad_x = fp_x + pad_rel_x * cos_r - pad_rel_y * sin_r
+            pad_y = fp_y + pad_rel_x * sin_r + pad_rel_y * cos_r
+
+            # Pad size
+            size_node = pad.find_child("size")
+            pad_width = size_node.get_float(0) or 0.5 if size_node else 0.5
+            pad_height = size_node.get_float(1) or 0.5 if size_node else 0.5
+
+            size_match = pad_width >= min_pad_size and pad_height >= min_pad_size
+
+            # Disjunction of signals (any one is enough; net-membership is
+            # already required by the early continue above).
+            if not (fp_match or ref_match or size_match):
+                continue
+
+            pad_info = PadInfo(
+                reference=reference,
+                pad_number=pad_number or "?",
+                net_number=net_num,
+                net_name=net_name,
+                x=pad_x,
+                y=pad_y,
+                layer=fp_layer,
+                width=pad_width,
+                height=pad_height,
+                pad_type=pad_type or "smd",
+            )
+
+            candidates.append(
+                ThermalPadCandidate(
+                    pad=pad_info,
+                    footprint_name=footprint_name,
+                    matched_by_footprint=fp_match,
+                    matched_by_size=size_match,
+                    matched_by_reference=ref_match,
+                )
+            )
+
+    return candidates
+
+
+def generate_thermal_via_positions(
+    pad: PadInfo,
+    vias_per_pad: int,
+    thermal_radius: float,
+    via_size: float,
+    clearance: float,
+) -> list[tuple[float, float]]:
+    """Generate candidate positions for thermal vias around / under a pad.
+
+    Two placement strategies, selected by pad size:
+
+    * "Under-pad" mode (pad ≥ ``via_size * 2`` on both axes): place vias on
+      a uniform grid inside the pad bounding box. Suitable for large
+      exposed-pad packages (QFN-EP, D2PAK, SO8-EP) where the pad copper is
+      big enough to fit multiple vias and still satisfy via-to-pad-edge
+      clearance.
+
+    * "Halo" mode (smaller pads, e.g. TO-220 pin pads at 1.8×1.8 mm):
+      place vias on a circle centered on the pad, with radius
+      ``thermal_radius``. The ring radius is far enough that the vias do
+      not collide with the pad's own copper but close enough to share the
+      pad's local thermal field via the surrounding zone fill.
+
+    The returned positions are *candidates only* — the caller must still
+    run :func:`check_via_clearance` against the rest of the board copper.
+
+    Args:
+        pad: Source pad whose center seeds the via array.
+        vias_per_pad: Number of thermal vias to attempt to place per pad.
+        thermal_radius: Halo-mode ring radius in mm (distance from pad
+            center to via center).
+        via_size: Via pad diameter in mm (used only for under-pad spacing).
+        clearance: Edge / pad clearance in mm.
+
+    Returns:
+        List of (x, y) candidate positions, ordered such that the most
+        thermally-effective positions come first (centroid first, then
+        ring/spiral outward).
+    """
+    if vias_per_pad <= 0:
+        return []
+
+    # Decide mode based on whether a 2×2 grid of vias fits comfortably
+    # inside the pad with the requested clearance.  Each via needs
+    # (via_size + clearance) clearance on every side from the pad edge,
+    # plus we want the vias separated from each other by at least one
+    # via_size for thermal effectiveness.  Require pad ≥ 3*(via_size +
+    # clearance) on both axes so the under-pad mode is meaningfully
+    # better than a halo (a TO-220 thru-hole pad at 1.8 mm misses this
+    # threshold and falls back to halo).
+    min_under_pad = 3.0 * (via_size + clearance)
+    use_under_pad = pad.width >= min_under_pad and pad.height >= min_under_pad
+
+    positions: list[tuple[float, float]] = []
+
+    if use_under_pad:
+        # Under-pad grid.  Choose grid dimensions so that we produce at
+        # least ``vias_per_pad`` candidates (caller filters by clearance).
+        # Start with the smallest square grid that meets the target.
+        side = max(2, math.ceil(math.sqrt(vias_per_pad)))
+
+        # Compute step so the outermost grid points sit ``edge_margin`` in
+        # from the pad edge.
+        edge_margin = via_size / 2 + clearance
+        usable_w = max(0.0, pad.width - 2 * edge_margin)
+        usable_h = max(0.0, pad.height - 2 * edge_margin)
+
+        if side > 1:
+            step_x = usable_w / (side - 1)
+            step_y = usable_h / (side - 1)
+        else:
+            step_x = 0.0
+            step_y = 0.0
+
+        for i in range(side):
+            for j in range(side):
+                x = pad.x - usable_w / 2 + i * step_x
+                y = pad.y - usable_h / 2 + j * step_y
+                positions.append((x, y))
+    else:
+        # Halo ring around the pad.  Place vias on a circle of radius
+        # ``thermal_radius`` so they are close enough to the pad to
+        # participate in the thermal pour but do not collide with the pad
+        # copper.  Drop into a wider radius if the requested radius is
+        # smaller than the minimum safe distance.
+        pad_half = max(pad.width, pad.height) / 2
+        min_safe_r = pad_half + via_size / 2 + clearance
+        r_base = max(thermal_radius, min_safe_r)
+
+        # Distribute ``vias_per_pad`` points evenly on the base ring,
+        # starting at 45° so the first via sits at NE (avoids collisions
+        # with straight-line trace escapes that exit pads horizontally).
+        # Then add extra fallback candidates: (a) intermediate angles on
+        # the same ring, (b) the same angles on a wider ring.  This lets
+        # the caller's clearance filter skip blocked positions while
+        # still hitting the target via count when at least some halo
+        # slots are free.
+        n = max(vias_per_pad, 4)
+
+        # Pass 1: base ring at primary angles (NE/NW/SW/SE for n=4).
+        for k in range(n):
+            theta = (2 * math.pi * k / n) + math.pi / 4
+            x = pad.x + r_base * math.cos(theta)
+            y = pad.y + r_base * math.sin(theta)
+            positions.append((x, y))
+
+        # Pass 2: same ring at intermediate angles (N/E/S/W for n=4).
+        for k in range(n):
+            theta = (2 * math.pi * k / n)
+            x = pad.x + r_base * math.cos(theta)
+            y = pad.y + r_base * math.sin(theta)
+            positions.append((x, y))
+
+        # Pass 3: wider ring (50% larger radius) at primary angles —
+        # useful when the base ring is blocked by adjacent traces.
+        r_wide = r_base * 1.5
+        for k in range(n):
+            theta = (2 * math.pi * k / n) + math.pi / 4
+            x = pad.x + r_wide * math.cos(theta)
+            y = pad.y + r_wide * math.sin(theta)
+            positions.append((x, y))
+
+    return positions
+
+
+def run_thermal_stitch(
+    pcb_path: Path,
+    net_names: list[str],
+    via_size: float = 0.45,
+    drill: float = 0.2,
+    clearance: float = 0.2,
+    vias_per_pad: int = 4,
+    thermal_radius: float = 2.5,
+    min_pad_size: float = 2.0,
+    footprint_patterns: tuple[str, ...] | None = None,
+    reference_prefixes: tuple[str, ...] | None = None,
+    target_layer: str | None = None,
+    dry_run: bool = False,
+) -> StitchResult:
+    """Place thermal vias under / around MOSFET heat-sink pads.
+
+    Selects pads using :func:`find_thermal_pad_candidates` (footprint-name
+    family / reference-prefix / pad-size heuristic, ANDed with target-net
+    membership) and places ``vias_per_pad`` thermal vias per candidate pad
+    via :func:`generate_thermal_via_positions`.
+
+    Each candidate position is gated by:
+
+    * Standard :func:`check_via_clearance` against other-net copper.
+    * Same-net via stacking prevention (existing vias treated as
+      obstacles).
+    * Inside-zone check: the via must fall inside a same-net zone polygon
+      with at least ``via_size/2 + clearance`` margin from the zone edge
+      so the via lands on actual copper after zone fill.
+
+    Idempotent: existing same-net vias inside a candidate position's
+    exclusion radius cause the position to be skipped, so re-running the
+    stitcher does not double-stitch.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        net_names: List of target plane-net names (typically GND or the
+            user's power-plane nets).
+        via_size: Via pad diameter in mm.
+        drill: Via drill diameter in mm.
+        clearance: Minimum clearance from existing copper in mm.
+        vias_per_pad: Target number of thermal vias per qualifying pad.
+        thermal_radius: Halo-mode ring radius in mm (for smaller pads).
+        min_pad_size: Minimum pad width/height (mm) to count as a
+            "large pad" for the pad-size signal.
+        footprint_patterns: Override the default thermal-footprint
+            substring list.
+        reference_prefixes: Override the default thermal-reference
+            prefix list.
+        target_layer: Force a specific target layer for the via's deep
+            terminus (auto-detected from zones if None).
+        dry_run: If True, do not write the PCB to disk.
+
+    Returns:
+        :class:`StitchResult` describing the vias placed.
+    """
+    if footprint_patterns is None:
+        footprint_patterns = DEFAULT_THERMAL_FOOTPRINT_PATTERNS
+    if reference_prefixes is None:
+        reference_prefixes = DEFAULT_THERMAL_REFERENCE_PREFIXES
+
+    sexp = load_pcb(pcb_path)
+    copper_layers = get_copper_layers(sexp)
+
+    result = StitchResult(
+        pcb_name=pcb_path.name,
+        target_nets=net_names,
+    )
+
+    net_set = set(net_names)
+    net_map = get_net_map(sexp)
+    target_net_nums = {num for num, name in net_map.items() if name in net_set}
+
+    # Find candidate thermal pads.
+    candidates = find_thermal_pad_candidates(
+        sexp,
+        net_names=net_set,
+        footprint_patterns=footprint_patterns,
+        reference_prefixes=reference_prefixes,
+        min_pad_size=min_pad_size,
+    )
+
+    if not candidates:
+        return result
+
+    # Pre-collect obstacle copper for clearance checks.
+    other_net_tracks = find_all_track_segments(sexp, exclude_nets=target_net_nums)
+    other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
+    other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
+    other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
+
+    # Per-net same-net via positions (existing + newly placed).  Treated
+    # as obstacles to prevent stacking on the same net.  A via placed for
+    # one target net (e.g. VMOTOR) appears as a different-net obstacle
+    # for another target net's processing (e.g. PHASE_A), so we also
+    # track a running list of cross-net placed vias to add to the
+    # clearance-check inputs.
+    existing_same_net_vias = find_existing_vias(sexp, target_net_nums)
+    same_net_via_positions_by_net: dict[int, list[tuple[float, float]]] = {}
+    for vx, vy, vn in existing_same_net_vias:
+        same_net_via_positions_by_net.setdefault(vn, []).append((vx, vy))
+
+    # Mutable copy of other_net_vias we can append to as we place new
+    # vias on neighbouring target nets.
+    # find_all_board_vias returns BoardVia objects with (x, y, net, ...);
+    # we mirror that shape via list mutation.
+    cross_net_placed_vias: list[tuple[float, float, int]] = []
+
+    # Build a per-net zone-polygon index for inside-zone checks and
+    # auto-target-layer detection.
+    zone_polys_by_net: dict[str, list[ZonePolygon]] = {}
+    for net_name in net_names:
+        zone_polys_by_net[net_name] = extract_zone_polygons(sexp, net_name)
+
+    # Resolve target layer per net (used to size the via stack).
+    target_layer_by_net: dict[str, str | None] = {}
+    for net_name in net_names:
+        if target_layer:
+            target_layer_by_net[net_name] = target_layer
+            continue
+        polys = zone_polys_by_net.get(net_name, [])
+        zone_layers = [zp.layer for zp in polys]
+        if zone_layers and not _should_use_stackup_fallback(zone_layers, copper_layers):
+            target_layer_by_net[net_name] = zone_layers[0]
+            result.detected_layers[net_name] = zone_layers[0]
+        else:
+            inferred = infer_target_layer_from_stackup(copper_layers, net_name)
+            if inferred:
+                target_layer_by_net[net_name] = inferred
+                result.detected_layers[net_name] = inferred
+                result.stackup_inferred_nets.append(net_name)
+            else:
+                target_layer_by_net[net_name] = None
+                result.fallback_nets.append(net_name)
+
+    # Group pads by (reference, footprint) so we can pick the "best" pad
+    # per component when multiple of its pads are on target plane nets.
+    # For TO-220-3, both pad 1 (gate) and pad 2 (drain on VMOTOR) could
+    # match -- but only the drain (the power-net pad) does in practice,
+    # since the gate net (e.g. GATE_AH) is not a plane net.
+    # The heuristic above already filters by net so this grouping just
+    # serves the diagnostic count.
+
+    for cand in candidates:
+        pad = cand.pad
+        net_name = pad.net_name
+        pad_net = pad.net_number
+
+        # Compute the via stack layers.
+        surface_layer = pad.layer if pad.layer in ("F.Cu", "B.Cu") else "F.Cu"
+        layers = get_via_layers(surface_layer, target_layer_by_net.get(net_name))
+
+        # Idempotency guard: if the pad already has at least vias_per_pad
+        # same-net vias within ``thermal_radius * 2`` (i.e. inside the
+        # wider-ring fallback area), skip placement entirely.  This
+        # prevents the second invocation of `kct stitch --thermal` from
+        # adding extra vias on the wider fallback ring after the primary
+        # ring is already saturated.
+        existing_pad_vias = same_net_via_positions_by_net.get(pad_net, [])
+        proximity_threshold = thermal_radius * 2.0
+        already_near = sum(
+            1
+            for (vx, vy) in existing_pad_vias
+            if abs(vx - pad.x) <= proximity_threshold
+            and abs(vy - pad.y) <= proximity_threshold
+        )
+        if already_near >= vias_per_pad:
+            result.already_connected += 1
+            continue
+
+        # Generate candidate positions.
+        positions = generate_thermal_via_positions(
+            pad,
+            vias_per_pad=vias_per_pad,
+            thermal_radius=thermal_radius,
+            via_size=via_size,
+            clearance=clearance,
+        )
+
+        # Required edge margin from zone boundary so the via lands on
+        # copper after fill.
+        zone_margin = via_size / 2 + clearance
+        same_net_zones = zone_polys_by_net.get(net_name, [])
+
+        # Per-net same-net via list (existing + newly placed on this net).
+        same_net_vias_for_pad = same_net_via_positions_by_net.setdefault(
+            pad_net, []
+        )
+
+        # Cross-net obstacles: starting set + any vias we've placed on
+        # other target nets during this run.
+        other_net_vias_with_placed = list(other_net_vias)
+        for cx, cy, cn in cross_net_placed_vias:
+            if cn != pad_net:
+                other_net_vias_with_placed.append((cx, cy, via_size, cn))
+
+        placed_for_pad = 0
+        for vx, vy in positions:
+            # Clearance against other-net copper and same-net stacking.
+            if not check_via_clearance(
+                vx,
+                vy,
+                via_size,
+                clearance,
+                other_net_tracks,
+                other_net_vias_with_placed,
+                other_net_pads,
+                same_net_vias_for_pad,
+                other_net_filled_polys,
+            ):
+                continue
+
+            # Must fall inside a same-net zone polygon with proper margin.
+            # (When no zones are defined for the net, fall back to placing
+            # the via anyway -- this lets the stitcher be useful on boards
+            # whose zone step has not yet run, at the cost of a possible
+            # DRC warning until zones are added.)
+            if same_net_zones:
+                in_zone = False
+                for zp in same_net_zones:
+                    if point_in_polygon(vx, vy, zp.points) and _point_has_edge_margin(
+                        vx, vy, zp.points, zone_margin
+                    ):
+                        in_zone = True
+                        break
+                if not in_zone:
+                    continue
+
+            placement = ViaPlacement(
+                pad=pad,
+                via_x=vx,
+                via_y=vy,
+                size=via_size,
+                drill=drill,
+                layers=layers,
+            )
+            result.vias_added.append(placement)
+            same_net_vias_for_pad.append((vx, vy))
+            cross_net_placed_vias.append((vx, vy, pad_net))
+            placed_for_pad += 1
+
+            if placed_for_pad >= vias_per_pad:
+                break
+
+        if placed_for_pad == 0:
+            # Diagnostic: no via could be placed for this thermal pad
+            # candidate (likely all positions failed clearance or
+            # fell outside the zone).
+            result.pads_skipped.append(
+                (pad, "thermal: no clear via position found")
+            )
+
+    # Apply changes if not dry run.
+    if not dry_run and result.vias_added:
+        for placement in result.vias_added:
+            add_via_to_pcb(sexp, placement)
+        save_pcb(sexp, pcb_path)
+        verify_pcb_write(pcb_path, expected_vias=len(result.vias_added))
+
+    return result
+
+
 def run_blanket_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -3372,6 +3990,51 @@ def main(argv: list[str] | None = None) -> int:
         help="Grid spacing for blanket stitching in mm (default: 3.0)",
     )
     parser.add_argument(
+        "--thermal",
+        action="store_true",
+        help=(
+            "Place thermal vias under / around MOSFET heat-sink pads. "
+            "Selects pads using footprint-name (TO-220, DPAK, QFN-EP, ...), "
+            "reference-prefix (Q*), and pad-size heuristics, AND-ed with "
+            "target-net membership."
+        ),
+    )
+    parser.add_argument(
+        "--vias-per-pad",
+        type=int,
+        default=4,
+        help="Number of thermal vias to place per qualifying pad (default: 4)",
+    )
+    parser.add_argument(
+        "--thermal-radius",
+        type=float,
+        default=2.5,
+        help=(
+            "Halo-mode ring radius in mm for thermal vias placed AROUND "
+            "(not under) smaller pads (default: 2.5)"
+        ),
+    )
+    parser.add_argument(
+        "--thermal-min-pad-size",
+        type=float,
+        default=2.0,
+        help=(
+            "Minimum pad width AND height (mm) for the 'large pad' thermal "
+            "signal (default: 2.0). Pads bigger than this on both axes are "
+            "flagged as heat-sink pads even without a footprint-name match."
+        ),
+    )
+    parser.add_argument(
+        "--thermal-component-prefix",
+        action="append",
+        dest="thermal_component_prefixes",
+        help=(
+            "Reference prefix (case-sensitive) for components that should "
+            "be considered thermal-pad candidates. Can be repeated. "
+            "Defaults to 'Q' (transistors / MOSFETs)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         "-d",
         action="store_true",
@@ -3481,7 +4144,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Auto-detected {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
     try:
-        if args.blanket:
+        if args.thermal:
+            ref_prefixes: tuple[str, ...] = (
+                tuple(args.thermal_component_prefixes)
+                if args.thermal_component_prefixes
+                else DEFAULT_THERMAL_REFERENCE_PREFIXES
+            )
+            result = run_thermal_stitch(
+                pcb_path=pcb_path,
+                net_names=net_names,
+                via_size=via_size,
+                drill=drill,
+                clearance=args.clearance,
+                vias_per_pad=args.vias_per_pad,
+                thermal_radius=args.thermal_radius,
+                min_pad_size=args.thermal_min_pad_size,
+                reference_prefixes=ref_prefixes,
+                target_layer=args.target_layer,
+                dry_run=args.dry_run,
+            )
+        elif args.blanket:
             result = run_blanket_stitch(
                 pcb_path=pcb_path,
                 net_names=net_names,

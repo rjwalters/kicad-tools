@@ -2084,6 +2084,55 @@ def _add_stitch_parser(subparsers) -> None:
         help="Grid spacing for blanket stitching in mm (default: 3.0)",
     )
     stitch_parser.add_argument(
+        "--thermal",
+        action="store_true",
+        dest="stitch_thermal",
+        help=(
+            "Place thermal vias under / around MOSFET heat-sink pads. "
+            "Selects pads using footprint-name (TO-220, DPAK, QFN-EP, ...), "
+            "reference-prefix (Q*), and pad-size heuristics, AND-ed with "
+            "target-net membership."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--vias-per-pad",
+        type=int,
+        default=4,
+        dest="stitch_vias_per_pad",
+        help="Number of thermal vias to place per qualifying pad (default: 4)",
+    )
+    stitch_parser.add_argument(
+        "--thermal-radius",
+        type=float,
+        default=2.5,
+        dest="stitch_thermal_radius",
+        help=(
+            "Halo-mode ring radius in mm for thermal vias placed AROUND "
+            "(not under) smaller pads (default: 2.5)"
+        ),
+    )
+    stitch_parser.add_argument(
+        "--thermal-min-pad-size",
+        type=float,
+        default=2.0,
+        dest="stitch_thermal_min_pad_size",
+        help=(
+            "Minimum pad width AND height (mm) for the 'large pad' thermal "
+            "signal (default: 2.0). Pads bigger than this on both axes are "
+            "flagged as heat-sink pads even without a footprint-name match."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--thermal-component-prefix",
+        action="append",
+        dest="stitch_thermal_component_prefixes",
+        help=(
+            "Reference prefix (case-sensitive) for components that should "
+            "be considered thermal-pad candidates. Can be repeated. "
+            "Defaults to 'Q' (transistors / MOSFETs)."
+        ),
+    )
+    stitch_parser.add_argument(
         "--dry-run",
         "-d",
         action="store_true",
