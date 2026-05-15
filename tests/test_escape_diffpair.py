@@ -1137,15 +1137,21 @@ class TestCorridorAttractor:
             f"got {via_count} vias"
         )
 
-        # And at least one segment should be on the inner layer (the
-        # via-down/via-up topology implies SOMETHING is on a non-F.Cu
-        # layer between the vias).
-        non_surface_segments = [
+        # And at least one segment must live on the RESERVED inner
+        # layer (In1.Cu) -- not merely on any non-surface layer.
+        # The attractor's contract is that the route prefers the
+        # reserved corridor; checking only "non-F.Cu" would still pass
+        # if the attractor produced 0.0 bonus and the route dived
+        # randomly into In2.Cu, which is exactly the regression class
+        # this gate is meant to catch (Judge soft finding on PR #2938).
+        reserved_layer_segments = [
             s for s in route.segments
-            if s.layer not in (Layer.F_CU,)
+            if s.layer == Layer.IN1_CU
         ]
-        assert len(non_surface_segments) >= 1, (
-            "Expected route to traverse a non-F.Cu layer"
+        assert len(reserved_layer_segments) >= 1, (
+            f"Expected route to traverse the RESERVED inner layer "
+            f"(In1.Cu); got segments on layers "
+            f"{sorted({s.layer.value for s in route.segments})}"
         )
 
     # ------------------------------------------------------------------
