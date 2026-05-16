@@ -565,21 +565,31 @@ class TestSymbolInstance:
         assert abs(pos[1] - 100.0) < 0.01
 
     def test_symbol_instance_pin_position_rotated(self, mock_symbol_def):
-        """Get pin position on rotated symbol."""
+        """Get pin position on rotated symbol.
+
+        Library Y-up vs schematic Y-down: rotation happens in library coords,
+        then Y is negated to convert to screen coords.  See issue #2959.
+        """
         inst = SymbolInstance(
             symbol_def=mock_symbol_def,
             x=100.0,
             y=100.0,
-            rotation=90,  # 90 degrees rotation
+            rotation=90,  # 90 degrees rotation (CCW in library coords)
             reference="R1",
             value="10k",
         )
 
         pos = inst.pin_position("1")
-        # At 90 degrees, (-2.54, 0) rotates to (0, -2.54)
-        # Both schematic and symbol use Y-down: (100+0, 100+(-2.54)) = (100, 97.46)
+        # Pin 1 library coords (Y-up): (-2.54, 0)
+        # Rotate 90 CCW in Y-up: (0, -2.54)
+        # Negate Y for schematic Y-down: (0, 2.54)
+        # Translated to (100, 100): (100, 102.54)
+        # (Because pin 1 has y=0 in library, the result is the same whether
+        # or not Y is negated -- this test passes on the buggy code too.
+        # The non-zero-Y rotation behaviour is exercised in
+        # ``test_pin_position_y_up_convention_at_four_rotations`` below.)
         assert abs(pos[0] - 100.0) < 0.01
-        assert abs(pos[1] - 97.46) < 0.01
+        assert abs(pos[1] - 102.54) < 0.01
 
     def test_symbol_instance_pin_position_by_number(self, mock_symbol_def):
         """Get pin position by pin number."""
@@ -629,10 +639,20 @@ class TestSymbolInstance:
         assert "2" in positions
 
     def test_pin_position_vertical_ordering(self):
-        """Verify pins maintain correct vertical ordering (issue #889).
+        """Verify pins maintain correct vertical ordering (issues #889 / #2959).
 
-        Pins with positive Y in symbol-local coords should have higher screen Y
-        than pins with negative Y, since both symbol defs and schematics use Y-down.
+        KiCad library symbols store pin positions in Y-UP coordinates: a pin
+        with positive library Y sits ABOVE the symbol origin in the library
+        drawing.  KiCad schematics use Y-DOWN screen coordinates (origin
+        top-left, +Y is below), so a library Y-up pin with positive Y must
+        map to a SMALLER schematic Y (higher on screen).
+
+        Issue #889 incorrectly concluded both spaces were Y-down and removed
+        the Y-flip.  Issue #2959 restored the Y-flip after observing that
+        connector pin 2 (library Y=-2.54) was rendered by KiCad below the
+        symbol origin (schematic Y = symbol Y + 2.54) while ``pin_position()``
+        was returning a coordinate above it (symbol Y - 2.54), causing wires
+        to terminate in empty space and ERC ``pin_not_connected`` errors.
         """
         # Create a symbol with pins at different Y positions
         pins = [
@@ -651,17 +671,154 @@ class TestSymbolInstance:
             value="Test",
         )
 
-        top_pos = inst.pin_position("TOP")  # Pin at symbol-local y=+2.54
-        bottom_pos = inst.pin_position("BOTTOM")  # Pin at symbol-local y=-2.54
+        top_pos = inst.pin_position("TOP")  # Pin at library-local y=+2.54 (above)
+        bottom_pos = inst.pin_position("BOTTOM")  # Pin at library-local y=-2.54 (below)
 
-        # In Y-down coords, higher Y value = lower on screen
-        # TOP pin (+2.54 in symbol) should have HIGHER screen Y than BOTTOM (-2.54)
-        assert top_pos[1] > bottom_pos[1], (
-            f"TOP y={top_pos[1]} should be > BOTTOM y={bottom_pos[1]}"
+        # In Y-down screen coords, smaller Y value = higher on screen.
+        # TOP pin (library +2.54 = above) should have SMALLER screen Y than
+        # BOTTOM (library -2.54 = below).
+        assert top_pos[1] < bottom_pos[1], (
+            f"TOP y={top_pos[1]} should be < BOTTOM y={bottom_pos[1]}"
         )
-        # Verify exact positions: symbol_pos + pin_pos
-        assert top_pos == (105.08, 102.54)  # 100 + 5.08, 100 + 2.54
-        assert bottom_pos == (105.08, 97.46)  # 100 + 5.08, 100 + (-2.54)
+        # Verify exact positions: symbol_pos + (pin_x, -pin_y)
+        assert top_pos == (105.08, 97.46)  # 100 + 5.08, 100 + (-(+2.54))
+        assert bottom_pos == (105.08, 102.54)  # 100 + 5.08, 100 + (-(-2.54))
+
+    def test_pin_position_y_up_convention_at_four_rotations(self):
+        """``pin_position()`` correctly handles library Y-up at 0/90/180/270 (#2959).
+
+        Uses a Connector_Generic-style ``Conn_01x02`` Pin 2 at library
+        ``(-5.08, -2.54)``.  Rotation is applied in library (Y-up) coordinates
+        using the standard CCW rotation matrix, then Y is negated to obtain
+        schematic (Y-down) coordinates.  This matches the convention used by
+        ``kicad_tools.schema.library.get_pin_position`` and is what KiCad
+        itself renders.
+        """
+        # Conn_01x02 Pin 2 -- library Y-up
+        pin = Pin(name="Pin_2", number="2", x=-5.08, y=-2.54, angle=0, length=2.54)
+        sym_def = SymbolDef(
+            lib_id="Connector_Generic:Conn_01x02",
+            name="Conn_01x02",
+            raw_sexp="",
+            pins=[pin],
+        )
+
+        def place(rot: float) -> tuple[float, float]:
+            inst = SymbolInstance(
+                symbol_def=sym_def,
+                x=100.0,
+                y=100.0,
+                rotation=rot,
+                reference="J1",
+                value="Conn_01x02",
+            )
+            return inst.pin_position("2")
+
+        # rotation=0:
+        #   rotate (-5.08, -2.54) -> (-5.08, -2.54)
+        #   negate Y -> (-5.08, 2.54)
+        #   translate -> (94.92, 102.54)
+        assert place(0) == pytest.approx((94.92, 102.54), abs=0.01)
+
+        # rotation=90 (CCW in library Y-up):
+        #   rotate (-5.08, -2.54) -> (2.54, -5.08)
+        #   negate Y -> (2.54, 5.08)
+        #   translate -> (102.54, 105.08)
+        assert place(90) == pytest.approx((102.54, 105.08), abs=0.01)
+
+        # rotation=180:
+        #   rotate (-5.08, -2.54) -> (5.08, 2.54)
+        #   negate Y -> (5.08, -2.54)
+        #   translate -> (105.08, 97.46)
+        assert place(180) == pytest.approx((105.08, 97.46), abs=0.01)
+
+        # rotation=270:
+        #   rotate (-5.08, -2.54) -> (-2.54, 5.08)
+        #   negate Y -> (-2.54, -5.08)
+        #   translate -> (97.46, 94.92)
+        assert place(270) == pytest.approx((97.46, 94.92), abs=0.01)
+
+    def test_pin_position_round_trip_with_real_library(self, tmp_path):
+        """Wire endpoints computed by ``pin_position()`` survive a write/parse
+        round-trip and land exactly on the pin positions reported by the
+        independent ``LibrarySymbol.get_pin_position`` implementation.
+
+        This is the strongest single check that ``pin_position()`` uses the
+        same convention as the rest of the toolchain.  It exercises the real
+        ``Connector_Generic:Conn_01x02`` symbol (Pin 2 at library Y=-2.54).
+        Regression for #2959.
+        """
+        from kicad_tools.schema.library import LibraryPin, LibrarySymbol
+        from kicad_tools.schematic.models.schematic import Schematic
+
+        # Build a tiny schematic with a connector and a wire that attaches to
+        # pin 2 according to ``pin_position()``.  Use ``SnapMode.OFF`` so the
+        # wire endpoint isn't independently snapped to the grid, which would
+        # mask any small discrepancy between the two implementations.
+        sch = Schematic(title="round-trip-2959", snap_mode=SnapMode.OFF)
+        try:
+            j1 = sch.add_symbol(
+                "Connector_Generic:Conn_01x02",
+                x=50.0,
+                y=80.0,
+                ref="J1",
+                value="PWR",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+            )
+        except Exception as exc:  # pragma: no cover -- env without KiCad libs
+            pytest.skip(f"KiCad symbol library not available: {exc}")
+
+        j1_pin2 = j1.pin_position("2")
+
+        # Cross-check against the independent ``LibrarySymbol`` impl.
+        # The connector pin 2 is at library (-5.08, -2.54); when placed at
+        # (50.0, 80.0) the library-Y-up to schematic-Y-down conversion gives
+        # (50.0 - 5.08, 80.0 + 2.54) = (44.92, 82.54).
+        ref_sym = LibrarySymbol(
+            name="Conn_01x02",
+            pins=[
+                LibraryPin(
+                    number="2",
+                    name="Pin_2",
+                    type="passive",
+                    position=(-5.08, -2.54),
+                    rotation=0,
+                    length=2.54,
+                ),
+            ],
+        )
+        ref_pos = ref_sym.get_pin_position(
+            "2", instance_pos=(50.0, 80.0), instance_rot=0
+        )
+        assert ref_pos is not None
+        assert j1_pin2 == pytest.approx(ref_pos, abs=0.01), (
+            f"pin_position() {j1_pin2} disagrees with LibrarySymbol.get_pin_position "
+            f"{ref_pos} -- the two implementations must share a single Y convention."
+        )
+
+        # Add a horizontal wire ending at the predicted pin 2 location.
+        wire_start = (j1_pin2[0] - 5.0, j1_pin2[1])
+        sch.add_wire(wire_start, j1_pin2)
+
+        sch_path = tmp_path / "round_trip.kicad_sch"
+        sch.write(sch_path)
+
+        # Re-parse and confirm the wire endpoint still matches the predicted
+        # pin 2 location after a write/parse cycle.
+        parsed = Schematic.load(sch_path)
+        # The wire we added should be present with the same endpoint.
+        matching = [
+            w
+            for w in parsed.wires
+            if (
+                (w.x1, w.y1) == pytest.approx(j1_pin2, abs=0.01)
+                or (w.x2, w.y2) == pytest.approx(j1_pin2, abs=0.01)
+            )
+        ]
+        assert matching, (
+            f"No wire endpoint matched predicted pin 2 position {j1_pin2}. "
+            f"Wires: {[((w.x1, w.y1), (w.x2, w.y2)) for w in parsed.wires]}"
+        )
 
     def test_symbol_instance_to_sexp_node(self, mock_symbol_def):
         """SymbolInstance generates valid S-expression node."""
@@ -1759,11 +1916,18 @@ class TestSymbolInstanceAdvanced:
         assert pos is not None
 
     def test_pin_position_vertical_ordering(self):
-        """Verify pins maintain correct vertical ordering (issue #889).
+        """Verify pins maintain correct vertical ordering (issues #889 / #2959).
 
-        This test ensures that pins with positive Y in symbol-local coordinates
-        result in higher Y in schematic coordinates, and vice versa. The bug was
-        that Y coordinates were incorrectly negated, swapping vertical positions.
+        KiCad library symbols use Y-UP coordinates while schematics use Y-DOWN
+        screen coordinates.  Pin OUTH at library (10.16, +2.54) sits ABOVE the
+        symbol origin in the library drawing, so on a Y-down schematic screen
+        it should render at a SMALLER Y than the symbol origin -- i.e. higher
+        on screen.
+
+        Issue #889 originally (and incorrectly) flipped this convention; issue
+        #2959 restored the library-Y-up to schematic-Y-down negation after
+        observing that connector pins with non-zero library Y were rendered
+        on the wrong side of the symbol, breaking ERC.
         """
         # Create a symbol with pins at different Y positions (like a gate driver)
         pins = [
@@ -1771,7 +1935,7 @@ class TestSymbolInstanceAdvanced:
                 name="OUTH",
                 number="1",
                 x=10.16,
-                y=2.54,  # Positive Y in symbol
+                y=2.54,  # Positive library Y = above symbol origin (library Y-up)
                 angle=0,
                 length=2.54,
                 pin_type="output",
@@ -1780,7 +1944,7 @@ class TestSymbolInstanceAdvanced:
                 name="OUTL",
                 number="2",
                 x=10.16,
-                y=-2.54,  # Negative Y in symbol
+                y=-2.54,  # Negative library Y = below symbol origin (library Y-up)
                 angle=0,
                 length=2.54,
                 pin_type="output",
@@ -1806,18 +1970,19 @@ class TestSymbolInstanceAdvanced:
         outh_pos = inst.pin_position("OUTH")
         outl_pos = inst.pin_position("OUTL")
 
-        # In Y-down screen coords, positive symbol Y should result in higher screen Y
-        # OUTH (symbol y=+2.54) should have HIGHER screen Y than OUTL (symbol y=-2.54)
-        assert outh_pos[1] > outl_pos[1], (
-            f"OUTH y={outh_pos[1]} should be > OUTL y={outl_pos[1]}. "
-            "Pins appear to be vertically swapped due to incorrect Y negation."
+        # In Y-down screen coords, smaller Y value = higher on screen.
+        # OUTH (library +2.54 = above origin) maps to a SMALLER screen Y than
+        # OUTL (library -2.54 = below origin).
+        assert outh_pos[1] < outl_pos[1], (
+            f"OUTH y={outh_pos[1]} should be < OUTL y={outl_pos[1]}. "
+            "Library Y-up convention must be flipped to schematic Y-down."
         )
 
         # Verify exact positions
-        # OUTH: x = 320.04 + 10.16 = 330.2, y = 35.56 + 2.54 = 38.1
-        # OUTL: x = 320.04 + 10.16 = 330.2, y = 35.56 + (-2.54) = 33.02
-        assert outh_pos == (330.2, 38.1), f"OUTH position incorrect: {outh_pos}"
-        assert outl_pos == (330.2, 33.02), f"OUTL position incorrect: {outl_pos}"
+        # OUTH: x = 320.04 + 10.16 = 330.2, y = 35.56 + (-(+2.54)) = 33.02
+        # OUTL: x = 320.04 + 10.16 = 330.2, y = 35.56 + (-(-2.54)) = 38.1
+        assert outh_pos == (330.2, 33.02), f"OUTH position incorrect: {outh_pos}"
+        assert outl_pos == (330.2, 38.1), f"OUTL position incorrect: {outl_pos}"
 
 
 class TestSchematicAutoLayout:
