@@ -85,7 +85,12 @@ public:
     // Negotiated routing support
     void reset_usage();
     void increment_usage(int x, int y, int layer);
-    float get_negotiated_cost(int x, int y, int layer, float present_factor) const;
+    // Issue #2963: optional ``net`` parameter — when nonzero AND the
+    // cell's net matches, the ``is_obstacle`` hard-reject is skipped
+    // (the destination pad's own metal stays reachable for its own
+    // routing net post-PR #2928's first-touch obstacle marking).
+    float get_negotiated_cost(int x, int y, int layer, float present_factor,
+                              int net = 0) const;
     void update_history_costs(float increment);
     int get_total_overflow() const;
 

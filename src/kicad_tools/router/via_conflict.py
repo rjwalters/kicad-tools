@@ -996,7 +996,14 @@ class ViaConflictManager:
                     cell = self.grid.grid[layer_idx][ny][nx]
                     if cell.blocked and cell.net != exclude_net and cell.net != 0:
                         return True
-                    if cell.is_obstacle:
+                    # Issue #2963: Post-PR #2928, pad-metal cells are
+                    # marked ``is_obstacle=True`` on first touch.  Without
+                    # an own-net filter, this rejects via-repair candidates
+                    # that sit inside the via's own destination pad
+                    # (e.g. NRST/BOOT0 endpoints on board 04).  Only treat
+                    # an obstacle cell as blocking when it belongs to a
+                    # different net.
+                    if cell.is_obstacle and cell.net != exclude_net:
                         return True
 
         return False

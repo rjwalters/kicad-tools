@@ -1288,8 +1288,12 @@ class Router:
                 is_obstacle = is_obstacle_arr[i]
                 usage = usage_arr[i]
 
-                if is_obstacle:
-                    return True  # Obstacles always block
+                # Issue #2963: own-net obstacle cells (destination pad
+                # metal post-PR #2928 first-touch marking) must remain
+                # passable for the routing net's own via.  Foreign-net
+                # obstacles still hard-reject.
+                if is_obstacle and cell_net != net:
+                    return True  # Obstacles always block (foreign net)
 
                 # No-net pads must always block
                 if cell_net == 0:
@@ -1310,10 +1314,20 @@ class Router:
         return False
 
     def _get_negotiated_cell_cost(
-        self, gx: int, gy: int, layer: int, present_factor: float = 1.0
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        present_factor: float = 1.0,
+        net: int | None = None,
     ) -> float:
-        """Get negotiated congestion cost for a cell."""
-        return self.grid.get_negotiated_cost(gx, gy, layer, present_factor)
+        """Get negotiated congestion cost for a cell.
+
+        Issue #2963: ``net`` plumbs the routing-net context to the
+        cost function so own-net ``is_obstacle`` cells (destination
+        pad metal marked by PR #2928's first-touch) are reachable.
+        """
+        return self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
 
     def _get_layer_priority(self) -> list[int]:
         """Get layer indices sorted by congestion (most congested first).
@@ -2284,7 +2298,7 @@ class Router:
                 negotiated_cost = 0.0
                 if negotiated_mode and not (is_start_adjacent or is_end_adjacent):
                     negotiated_cost = self._get_negotiated_cell_cost(
-                        nx, ny, nlayer, present_cost_factor
+                        nx, ny, nlayer, present_cost_factor, net=start.net
                     )
 
                 # Issue #2430: Use pre-computed zone cost array
@@ -2388,7 +2402,7 @@ class Router:
                 negotiated_cost = 0.0
                 if negotiated_mode:
                     negotiated_cost = self._get_negotiated_cell_cost(
-                        current.x, current.y, new_layer, present_cost_factor
+                        current.x, current.y, new_layer, present_cost_factor, net=start.net
                     )
 
                 # Add layer preference cost for new layer (Issue #625)
@@ -3583,7 +3597,9 @@ class Router:
             congestion_cost = self._get_congestion_cost(nx, ny, nlayer)
             negotiated_cost = 0.0
             if allow_sharing and not (is_source_adjacent or is_target_adjacent):
-                negotiated_cost = self._get_negotiated_cell_cost(nx, ny, nlayer, 1.0)
+                negotiated_cost = self._get_negotiated_cell_cost(
+                    nx, ny, nlayer, 1.0, net=source_pad.net
+                )
 
             zone_cost = self._get_zone_cost(nx, ny, nlayer, source_pad.net)
             net_class = self._get_net_class(source_pad.net_name)
@@ -3668,7 +3684,7 @@ class Router:
             negotiated_cost = 0.0
             if allow_sharing:
                 negotiated_cost = self._get_negotiated_cell_cost(
-                    current.x, current.y, new_layer, 1.0
+                    current.x, current.y, new_layer, 1.0, net=source_pad.net
                 )
 
             net_class = self._get_net_class(source_pad.net_name)

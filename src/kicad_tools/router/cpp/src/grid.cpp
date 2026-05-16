@@ -251,13 +251,20 @@ void Grid3D::increment_usage(int x, int y, int layer) {
     }
 }
 
-float Grid3D::get_negotiated_cost(int x, int y, int layer, float present_factor) const {
+float Grid3D::get_negotiated_cost(int x, int y, int layer, float present_factor,
+                                  int net) const {
     if (!is_valid(x, y, layer)) {
         return std::numeric_limits<float>::infinity();
     }
 
     const auto& cell = at(x, y, layer);
-    if (cell.is_obstacle) {
+    // Issue #2963: own-net obstacle cells (e.g. destination pad metal
+    // marked is_obstacle=True on first touch by PR #2928) must remain
+    // reachable for the routing net.  When ``net`` is 0 the caller
+    // has no net context, so the legacy conservative reject stands;
+    // when ``net`` is nonzero AND matches the cell's net the obstacle
+    // gate is bypassed (foreign-net obstacles still hard-reject).
+    if (cell.is_obstacle && (net == 0 || cell.net != net)) {
         return std::numeric_limits<float>::infinity();
     }
 

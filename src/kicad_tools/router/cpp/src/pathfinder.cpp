@@ -533,7 +533,11 @@ RouteResult Pathfinder::route(
             float congestion_cost = get_congestion_cost(nx, ny, nlayer);
             float negotiated_cost = 0.0f;
             if (negotiated_mode) {
-                negotiated_cost = grid_.get_negotiated_cost(nx, ny, nlayer, present_cost_factor);
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells (destination pad metal post-PR #2928) stay
+                // reachable with finite cost.
+                negotiated_cost = grid_.get_negotiated_cost(
+                    nx, ny, nlayer, present_cost_factor, net);
             }
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
@@ -581,8 +585,11 @@ RouteResult Pathfinder::route(
             float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
             float negotiated_cost = 0.0f;
             if (negotiated_mode) {
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells stay reachable with finite cost (via-drop into
+                // destination pad).
                 negotiated_cost = grid_.get_negotiated_cost(
-                    current.x, current.y, new_layer, present_cost_factor);
+                    current.x, current.y, new_layer, present_cost_factor, net);
             }
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
@@ -922,8 +929,10 @@ RouteResult Pathfinder::run_astar_loop() {
             float congestion_cost = get_congestion_cost(nx, ny, nlayer);
             float negotiated_cost = 0.0f;
             if (search_negotiated_mode_) {
-                negotiated_cost = grid_.get_negotiated_cost(nx, ny, nlayer,
-                                                           search_present_cost_factor_);
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells (destination pad metal) stay reachable.
+                negotiated_cost = grid_.get_negotiated_cost(
+                    nx, ny, nlayer, search_present_cost_factor_, search_net_);
             }
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
@@ -972,8 +981,12 @@ RouteResult Pathfinder::run_astar_loop() {
             float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
             float negotiated_cost = 0.0f;
             if (search_negotiated_mode_) {
+                // Issue #2963: pass routing net (search_net_) so own-net
+                // obstacle cells stay reachable for via drop into the
+                // destination pad metal.
                 negotiated_cost = grid_.get_negotiated_cost(
-                    current.x, current.y, new_layer, search_present_cost_factor_);
+                    current.x, current.y, new_layer, search_present_cost_factor_,
+                    search_net_);
             }
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;

@@ -3795,12 +3795,23 @@ class EscapeRouter:
             return False
 
         # Check for obstacles in grid
+        #
+        # Issue #2963: Post-PR #2928, isolated pad-metal cells are
+        # marked ``is_obstacle=True`` on first touch.  Without an
+        # own-net filter here, every via candidate that lands inside
+        # the destination pad's footprint is rejected -- including
+        # when ``net`` is the pad's own net (e.g. NRST/BOOT0 endpoint
+        # pads on board 04).  Mirror PR #2965's pattern: only reject
+        # when the cell's net is a *different* net from the via's.
+        # When ``net`` is ``None`` the caller has no net context, so
+        # preserve the original (conservative) hard reject.
         gx, gy = self.grid.world_to_grid(x, y)
         if 0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows:
             for layer_idx in range(self.grid.num_layers):
                 cell = self.grid.grid[layer_idx][gy][gx]
                 if cell.blocked and cell.is_obstacle:
-                    return False
+                    if net is None or cell.net != net:
+                        return False
 
         # Issue #2944: World-coordinate clearance check against foreign
         # copper.  Only runs when the caller supplies pad / track
