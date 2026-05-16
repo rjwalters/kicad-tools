@@ -60,6 +60,15 @@ def _make_mock_grid(
     # tests that exercise only segment / pad logic are unaffected.
     grid.routes = routes if routes is not None else []
 
+    # Issue #2960: Default the via R-tree to disabled so the collision
+    # checker falls back to the linear scan over ``grid.routes`` (the
+    # pre-#2960 contract) for tests that haven't built one explicitly.
+    # MagicMock auto-creates truthy attribute proxies, which would
+    # otherwise trick the collision checker into querying a fake R-tree.
+    grid._via_rtree = None
+    grid._via_rtree_items = {}
+    grid._via_rtree_count = 0
+
     if segments:
         # Build mock R-tree data
         items: dict[int, Segment] = {}
@@ -233,6 +242,11 @@ def _make_mock_grid_with_pad_cell(
     grid._seg_rtree_items = {}
     # Issue #2955: VectorCollisionChecker iterates grid.routes for foreign vias.
     grid.routes = []
+    # Issue #2960: disable the via R-tree by default so the fallback
+    # linear scan path is exercised (see ``_make_mock_grid``).
+    grid._via_rtree = None
+    grid._via_rtree_items = {}
+    grid._via_rtree_count = 0
 
     pad_cell = MagicMock()
     pad_cell.blocked = blocked

@@ -8270,6 +8270,23 @@ class Autorouter:
                     f"net(s) to preserve connectivity"
                 )
 
+        # Issue #2960: ``cleanup_artifacts`` may remove entire routes
+        # (Step 1) or strip vias from surviving routes (Steps 2/3), and
+        # may also restore vias (Step 4 connectivity preservation).  The
+        # via R-tree is keyed by ``id(via)`` and was populated by
+        # ``mark_route`` -- after these mutations the index may contain
+        # entries for vias no longer on any route, or be missing newly
+        # restored vias.  Rebuild from the post-cleanup ``self.routes``
+        # so the optimizer's ``VectorCollisionChecker.path_is_clear``
+        # queries see the same set of vias the validator does.
+        try:
+            self.grid.rebuild_via_index()
+        except AttributeError:
+            # Grids constructed by older test fixtures may not provide
+            # ``rebuild_via_index``; treat as a no-op so cleanup remains
+            # backwards compatible.
+            pass
+
         # Store stats for retrieval by output module
         self._cleanup_stats = stats
         return stats
