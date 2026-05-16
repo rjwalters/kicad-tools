@@ -2829,6 +2829,222 @@ class Autorouter:
     # (Issue #2672 / Epic #2556 Phase 3K-cont)
     # ------------------------------------------------------------------
 
+    def _ensure_stackup_for_impedance(self) -> None:
+        """Lazily auto-derive a stackup for impedance-driven sizing.
+
+        Issue #2964: ``load_pcb_for_routing`` (the CLI's primary
+        Autorouter constructor) does not pass a ``stackup=`` argument,
+        so ``self._stackup`` is ``None`` in every CLI invocation.  This
+        causes both :meth:`_synthesize_impedance_targets_from_validator_defaults`
+        and :meth:`_resolve_impedance_for_net_classes` to short-circuit,
+        leaving impedance-driven sizing dormant on production routing
+        paths -- regardless of whether a board declares explicit
+        impedance targets (board 06's MIPI/USB diff pairs) or relies on
+        the validator's regex defaults (board 04's SWCLK).
+
+        This helper bridges the gap: when no stackup is available but
+        the router's layer stack signals a 4+ layer board, it auto-
+        derives a generic 4L/6L stackup so the resolver can compute a
+        physics-driven width.  The derived stackup is stored on
+        ``self._stackup`` so subsequent calls (in the same router
+        instance) reuse it.
+
+        Mirrors :meth:`ImpedanceRule._board_has_controlled_impedance`
+        gating: 2L boards opt out so the resolver does not produce
+        unsolvable ~2.8mm-wide 50Ω widths on hobbyist FR4 1.6mm cores.
+
+        Idempotent: calling on a router that already has a stackup is
+        a no-op.  Safe to call on every routing invocation.
+        """
+        if self._stackup is not None:
+            return
+
+        try:
+            num_layers = (
+                len(self.layer_stack.layers) if self.layer_stack is not None else None
+            )
+        except AttributeError:
+            num_layers = None
+
+        if num_layers is None or num_layers < 4:
+            return
+
+        try:
+            from kicad_tools.physics import Stackup
+
+            self._stackup = Stackup._create_generic_stackup(num_layers)
+            logger.info(
+                "Auto-derived generic %d-layer stackup for impedance-driven sizing "
+                "(no explicit stackup provided to Autorouter; Issue #2964)",
+                num_layers,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return
+
+    def _synthesize_impedance_targets_from_validator_defaults(self) -> None:
+        """Bridge validator regex defaults into router NetClass targets.
+
+        Issue #2964: ``ImpedanceRule._get_default_specs()`` auto-applies
+        impedance targets (e.g. ``.*CLK.*`` -> 50Ω single-ended,
+        ``USB.*D[PM]?`` -> 90Ω diff) to any net matching the regex at
+        DRC time.  The router's :func:`_resolve_impedance_for_net_classes`
+        only engages when a :class:`NetClassRouting` already has an explicit
+        ``target_diff_impedance`` / ``target_single_impedance`` set.  These
+        two subsystems were not connected: validator defaults stayed
+        invisible to the router, so the router used its 0.2 mm literal width
+        on nets the validator would later flag as impedance-mismatched
+        (e.g. SWCLK on board 04, surfacing as 6 ImpedanceRule errors).
+
+        This helper closes the bridge.  For each net in ``self.net_names``
+        whose existing :class:`NetClassRouting` does **not** declare a
+        ``target_*_impedance``, it consults the validator's regex defaults
+        (via :meth:`ImpedanceRule._get_default_specs`) and -- if the regex
+        matches -- synthesizes a NetClass clone carrying the matched
+        target.  The clone is then handed to
+        :func:`resolve_impedance_for_net_classes` like any explicitly
+        declared target, so downstream routing components automatically
+        consume the impedance-driven width.
+
+        Gating: this helper mirrors :meth:`ImpedanceRule._board_has_controlled_impedance`
+        -- it activates only when the stackup signals controlled-impedance
+        intent (explicit stackup data, or 4+ copper layers).  Generic 2L
+        hobbyist boards opt out, matching the validator's suppression
+        behavior (Issue #2696) so 2L users do not get unsolvable
+        ~2.8 mm-wide SWCLK widths.
+
+        INFO-level logging surfaces each synthesis so users can see the
+        bridge firing.
+
+        Idempotent: re-running the helper on an already-synthesized map
+        produces the same result (regex defaults are deterministic and
+        the helper skips nets that already carry a target).
+
+        Must run **before** :meth:`_resolve_impedance_for_net_classes`
+        so the resolver sees the synthesized targets.
+
+        Calls :meth:`_ensure_stackup_for_impedance` first so the bridge
+        can fire on production routing paths where ``load_pcb_for_routing``
+        does not pass a stackup to the Autorouter (Issue #2964).
+        """
+        # Lazily auto-derive a stackup for 4+ layer boards when the caller
+        # did not provide one.  This is the production-path enabler --
+        # the CLI's ``load_pcb_for_routing`` does not pass a stackup, and
+        # without auto-derivation the bridge would silently never fire.
+        self._ensure_stackup_for_impedance()
+
+        if self._stackup is None:
+            return
+
+        # Gate on controlled-impedance opt-in.  Mirror the validator's
+        # _board_has_controlled_impedance() so the router and validator
+        # apply defaults in lockstep.
+        has_explicit = getattr(self._stackup, "has_explicit_data", False)
+        if not has_explicit:
+            try:
+                stk_layers = self._stackup.num_copper_layers
+            except AttributeError:
+                stk_layers = 2
+            if stk_layers < 4:
+                return
+
+        # Pull the validator's regex defaults.  Source of truth lives in
+        # the validator; we are read-only consumers here.
+        try:
+            from kicad_tools.validate.rules.impedance import ImpedanceRule
+        except ImportError:
+            return
+
+        specs = ImpedanceRule._get_default_specs()
+        if not specs:
+            return
+
+        import dataclasses
+        import re
+
+        synthesized_count = 0
+        for nid, net_name in self.net_names.items():
+            if not net_name:
+                continue
+
+            existing = self.net_class_map.get(net_name)
+
+            # If the existing class already declares an impedance target,
+            # the explicit declaration wins -- skip to avoid clobbering.
+            if existing is not None and (
+                existing.target_single_impedance is not None
+                or existing.target_diff_impedance is not None
+            ):
+                continue
+
+            # Find the first regex default that matches this net name.
+            matched_spec = None
+            for spec in specs:
+                if re.match(spec.net_pattern, net_name, re.IGNORECASE):
+                    matched_spec = spec
+                    break
+
+            if matched_spec is None:
+                continue
+
+            target_z0 = matched_spec.target_z0
+            target_zdiff = matched_spec.target_zdiff
+
+            # If both are None somehow, skip.
+            if target_z0 is None and target_zdiff is None:
+                continue
+
+            # Build the synthesized NetClassRouting.  When an existing
+            # class is in place (e.g. NET_CLASS_DEBUG for SWCLK via
+            # DEFAULT_NET_CLASS_MAP), clone it so other fields (clearance,
+            # priority, length_critical, etc.) are preserved.  Otherwise
+            # synthesize a fresh class with sensible defaults from the
+            # router's per-class trace_width / clearance literals.
+            if existing is not None:
+                new_nc = dataclasses.replace(
+                    existing,
+                    target_single_impedance=target_z0,
+                    target_diff_impedance=target_zdiff,
+                )
+            else:
+                new_nc = NetClassRouting(
+                    name=f"SynthesizedImpedance_{net_name}",
+                    priority=2,
+                    trace_width=self.rules.trace_width,
+                    clearance=self.rules.trace_clearance,
+                    target_single_impedance=target_z0,
+                    target_diff_impedance=target_zdiff,
+                    length_critical=True,
+                )
+
+            self.net_class_map[net_name] = new_nc
+            synthesized_count += 1
+
+            # INFO-level log: surface the bridge firing so users see the
+            # synthesized target (AC3 of Issue #2964).
+            if target_z0 is not None:
+                logger.info(
+                    "Synthesized NetClass for %s from validator regex default %r: "
+                    "%.1fΩ single-ended",
+                    net_name,
+                    matched_spec.net_pattern,
+                    target_z0,
+                )
+            if target_zdiff is not None:
+                logger.info(
+                    "Synthesized NetClass for %s from validator regex default %r: "
+                    "%.1fΩ differential",
+                    net_name,
+                    matched_spec.net_pattern,
+                    target_zdiff,
+                )
+
+        if synthesized_count > 0:
+            logger.info(
+                "Impedance-target synthesis: bridged %d net(s) from validator "
+                "regex defaults to router NetClass targets",
+                synthesized_count,
+            )
+
     def _resolve_impedance_for_net_classes(self) -> None:
         """Apply impedance-driven sizing to ``self.net_class_map`` in place.
 
@@ -2876,6 +3092,20 @@ class Autorouter:
         See ``_prepare_routing`` for the integration point (step 0,
         before the partner-name ``dataclasses.replace`` loop).
         """
+        # Issue #2964: Lazily auto-derive a stackup on the production
+        # path.  ``load_pcb_for_routing`` does not pass a stackup, so
+        # without this the resolver short-circuits on every CLI route
+        # call -- even for boards with explicit impedance targets.
+        self._ensure_stackup_for_impedance()
+
+        # Issue #2964: Bridge validator regex defaults into router NetClass
+        # targets BEFORE the resolver runs.  Without this, nets like SWCLK
+        # that match the validator's ``.*CLK.*`` -> 50Ω default but have
+        # no explicit ``target_single_impedance`` on their NetClass would
+        # route at the literal 0.2 mm width and later fail ImpedanceRule
+        # at DRC time.
+        self._synthesize_impedance_targets_from_validator_defaults()
+
         if self._stackup is None:
             # No stackup -> resolver would short-circuit anyway.  Skip
             # entirely to avoid the import cost on the hot routing path
