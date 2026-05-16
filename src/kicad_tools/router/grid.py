@@ -2041,6 +2041,22 @@ class RoutingGrid:
                         if cell_net != pad.net and cell_net != other_pad.net:
                             continue
 
+                        # Issue #2961: never clear _blocked on cells already
+                        # marked is_obstacle. Pad-metal first-touch (#2915) and
+                        # rect-aware halo first-touch (#2940) set is_obstacle =
+                        # True specifically to keep foreign-net traces out; the
+                        # C++ pathfinder gates the is_obstacle check inside
+                        # ``if (cell.blocked)``, so clearing ``blocked`` would
+                        # silently disable the obstacle test and let foreign
+                        # traces clip neighbor pads (e.g. chorus-test J2 GPIO
+                        # header at 2.54mm pitch, above the narrow-channel
+                        # halo threshold). Own-net traces are unaffected:
+                        # ``cell.net == routing_net`` already makes
+                        # ``is_obstacle`` cells passable for their own net via
+                        # pathfinder.cpp line 104 short-circuit.
+                        if self._is_obstacle[layer_idx, gy, gx]:
+                            continue
+
                         # Keep the cell blocked if it falls within the reduced
                         # clearance zone of either pad's metal
                         wx, wy = self.grid_to_world(gx, gy)
