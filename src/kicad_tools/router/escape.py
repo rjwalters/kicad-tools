@@ -3926,6 +3926,186 @@ class EscapeRouter:
             else:
                 return EscapeDirection.SOUTH
 
+    def _select_in_pad_via_position(
+        self,
+        pad: Pad,
+        via_diameter: float,
+        min_annular: float,
+        effective_clearance: float,
+        package: PackageInfo | None,
+    ) -> tuple[float, float, bool]:
+        """Select an in-pad via position with a long-axis clearance nudge.
+
+        Issue #2946: When dead-centre placement on a fine-pitch QFP pad
+        produces clearance violations to adjacent foreign-net pads
+        (board-04 OSC_OUT at 0.5mm-pitch LQFP-48), iterate offsets along
+        the pad's **long axis** seeking the smallest-magnitude offset
+        whose candidate via passes both the world-coordinate clearance
+        predicate (:meth:`_can_place_via`) and the pad-copper
+        containment check.
+
+        Stencil safety: solder-paste stencil apertures key off the pad's
+        geometry, not the via's position, so an offset via inside the
+        pad does NOT corrupt the stencil aperture as long as the via
+        barrel + annular ring stay entirely inside the pad copper
+        rectangle.  The containment check enforces this constraint --
+        the via center must lie within the pad's interior such that::
+
+            |offset| + via_radius + min_annular <= long_dim / 2
+
+        i.e. the maximum nudge is
+        ``(long_dim - via_diameter) / 2 - min_annular``.
+
+        Search strategy:
+        1. Dead-centre ``(pad.x, pad.y)`` is the FIRST candidate -- if
+           it passes the clearance predicate, no nudge is attempted.
+           This preserves the existing behavior on the common case
+           where no neighboring pad is close enough to violate.
+        2. Otherwise iterate offsets ``[+s, -s, +2s, -2s, ...]`` with
+           ``s = 0.05 mm`` along the pad's long axis (X axis when
+           ``pad.width > pad.height``, Y axis otherwise).  The first
+           offset whose candidate via passes BOTH checks is returned.
+        3. If no candidate passes, fall back to dead-centre.  The
+           caller (``_try_in_pad_escape``) emits the structured warning
+           in that case, preserving the PR #2945 "place anyway, defer
+           DRC to the user" semantics for the unfixable cases.
+
+        Args:
+            pad: The pad whose surface escape was just rejected.
+            via_diameter: Effective via diameter for in-pad placement
+                (manufacturer min_via_diameter or design rules fallback).
+            min_annular: Minimum annular ring (pad copper around the via
+                barrel) that must remain after placement.  Used as the
+                pad-copper containment safety margin.
+            effective_clearance: Clearance value passed through to
+                :meth:`_can_place_via`.
+            package: Optional package context.  When ``None`` the nudge
+                rescue is disabled and dead-centre is returned (no
+                neighbor pad / track context available to validate
+                offsets against).
+
+        Returns:
+            A tuple ``(via_x, via_y, nudged)`` where ``via_x``/``via_y``
+            are the chosen via center coordinates in world space and
+            ``nudged`` is ``True`` iff the position differs from
+            dead-centre AND the candidate passes the clearance
+            predicate (i.e. the nudge rescue succeeded).
+        """
+        via_x = pad.x
+        via_y = pad.y
+
+        # Without package context we have no foreign-net pads to
+        # validate against; preserve legacy dead-centre behavior.
+        if package is None:
+            return via_x, via_y, False
+
+        # Foreign-net pads on the same footprint (the pads the in-pad
+        # rescue is most likely to clip on a fine-pitch QFP).
+        foreign_pads = [
+            p for p in package.pads
+            if p is not pad and p.net != pad.net
+        ]
+
+        # Quick path: dead-centre.  If the existing clearance predicate
+        # accepts it, no nudge is needed.  This is the common case for
+        # the majority of in-pad rescues and keeps behavior identical
+        # to PR #2944 / #2945 when neighbor clearance is fine.
+        if self._can_place_via(
+            x=via_x,
+            y=via_y,
+            net=pad.net,
+            foreign_pads=foreign_pads,
+            clearance=effective_clearance,
+            via_diameter=via_diameter,
+        ):
+            return via_x, via_y, False
+
+        # Determine pad long-axis direction.  The Pad primitive does not
+        # carry rotation; ``width``/``height`` already encode the post-
+        # rotation footprint (KiCad emits oriented bounding-box extents
+        # when the loader projects pad geometry to world coordinates).
+        # The longer extent is the long axis.
+        if pad.width >= pad.height:
+            long_dim = pad.width
+            axis_x, axis_y = 1.0, 0.0
+        else:
+            long_dim = pad.height
+            axis_x, axis_y = 0.0, 1.0
+
+        # Stencil-safety budget: the via center may travel along the
+        # long axis until the via's barrel + annular ring is about to
+        # exit the pad's long-edge copper.  We require strict interior
+        # containment so the SMT stencil aperture remains valid.
+        via_radius = via_diameter / 2
+        max_offset = (long_dim - via_diameter) / 2 - min_annular
+        if max_offset <= 0.0:
+            # No room to nudge -- fall back to dead-centre (caller will
+            # emit the diagnostic warning).
+            return via_x, via_y, False
+
+        # NOTE: we deliberately do NOT check short-axis containment.
+        # The parent ``_try_in_pad_escape`` already validates the LARGER
+        # dimension covers ``drill + 2 * annular`` and documents the
+        # short axis as exempt: a via-in-pad's *pad landing* (diameter)
+        # may extend off the SMT pad's short edges because the via is
+        # filled and plated, but the drill must remain inside pad
+        # copper.  The nudge here only translates along the long axis,
+        # so short-axis containment is invariant -- whatever was true
+        # at dead-centre remains true after the offset.
+
+        # Iterate offsets [+s, -s, +2s, -2s, ...] until either an
+        # offset passes the clearance predicate or we exceed the
+        # stencil-safety budget.  The step size is 0.05 mm to match
+        # the grid resolution used elsewhere in the router.
+        step = 0.05
+        n_steps = int(max_offset / step) + 1
+
+        for i in range(1, n_steps + 1):
+            for sign in (+1.0, -1.0):
+                offset = sign * i * step
+                if abs(offset) > max_offset + 1e-9:
+                    continue
+
+                cand_x = pad.x + axis_x * offset
+                cand_y = pad.y + axis_y * offset
+
+                # Pad-copper containment: the via center plus radius
+                # plus annular ring must remain inside the pad
+                # rectangle along the long axis.  (Short-axis
+                # containment is independent of the offset and was
+                # validated above.)
+                if abs(offset) + via_radius + min_annular > long_dim / 2 + 1e-9:
+                    continue
+
+                # Clearance predicate against foreign-net pads on the
+                # same footprint.  We pass through the manufacturer-
+                # effective via diameter and clearance so the check
+                # mirrors the geometry that will land on the PCB.
+                if self._can_place_via(
+                    x=cand_x,
+                    y=cand_y,
+                    net=pad.net,
+                    foreign_pads=foreign_pads,
+                    clearance=effective_clearance,
+                    via_diameter=via_diameter,
+                ):
+                    logger.info(
+                        "In-pad rescue NUDGED for pad %s (ref=%s pin=%s): "
+                        "dead-centre (%.3f, %.3f) violated clearance; "
+                        "long-axis offset=%+.3fmm accepted "
+                        "(via at (%.3f, %.3f); budget=%.3fmm).  "
+                        "Stencil aperture unaffected -- via barrel + "
+                        "annular ring remain inside pad copper.",
+                        pad.net_name, pad.ref, pad.pin,
+                        pad.x, pad.y, offset, cand_x, cand_y, max_offset,
+                    )
+                    return cand_x, cand_y, True
+
+        # No offset succeeded.  Return dead-centre; the caller emits
+        # the diagnostic warning and proceeds (preserves PR #2945
+        # last-resort behavior).
+        return via_x, via_y, False
+
     def _try_in_pad_escape(
         self,
         pad: Pad,
@@ -3952,6 +4132,25 @@ class EscapeRouter:
         OSC_OUT (0.5mm pitch, 0.6mm vias) where the in-pad rescue
         violated clearance to OSC_IN and NRST by 0.05mm.
 
+        Issue #2946: When dead-centre placement violates clearance to a
+        neighboring foreign-net pad, the in-pad via is nudged along the
+        pad's **long axis** by increments of 0.05 mm before falling back
+        to the dead-centre placement.  The nudge is intentionally
+        constrained to the long axis (and to remain entirely within the
+        pad's copper rectangle) because solder-paste stencil apertures
+        key off the pad's geometry, not the via's position -- so an
+        offset via inside the pad does NOT corrupt the stencil aperture
+        as long as the via barrel + annular ring stay inside the pad
+        copper (a precondition of the existing
+        ``via_in_pad_supported`` capability gate, which itself implies
+        the via is filled and plated).  The stencil-safety budget is::
+
+            max_offset = (long_dim - via_diameter) / 2 - min_annular
+
+        A 0.3 x 1.4 mm LQFP-48 pad with a 0.45 mm via and 0.05 mm
+        annular ring yields ~0.42 mm of safe in-pad travel -- vastly
+        more than the 0.05 mm clearance gap board 04 OSC_OUT fails by.
+
         Pre-conditions (return ``None`` when violated):
         - ``self.via_in_pad_supported`` must be ``True`` (set from manufacturer
           capability flags during ``__init__``).
@@ -3963,7 +4162,9 @@ class EscapeRouter:
           foreign-net pads on the same footprint.
 
         On success the returned ``EscapeRoute`` contains:
-        - A ``Via`` placed exactly at ``(pad.x, pad.y)`` with ``in_pad=True``.
+        - A ``Via`` placed at ``(via_x, via_y)`` with ``in_pad=True``,
+          which is normally dead-centre on the pad but may be offset
+          along the long axis when a clearance-rescue nudge succeeds.
         - A single inner-layer segment from the via to a normal escape point
           chosen in the same direction the deferred surface escape would
           have used.
@@ -3978,9 +4179,11 @@ class EscapeRouter:
             escape_width: Trace width to use for the inner-layer segment.
             package: Optional package context.  When supplied, the
                 proposed in-pad via is validated against neighboring
-                foreign-net pads (Issue #2944).  When ``None`` (legacy
-                call sites), only the original geometry preconditions
-                run and the via is placed without the neighbor check.
+                foreign-net pads (Issue #2944) and the long-axis nudge
+                rescue (Issue #2946) is attempted before the
+                dead-centre fallback.  When ``None`` (legacy call sites),
+                only the original geometry preconditions run and the
+                via is placed dead-centre without the neighbor check.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
@@ -4027,29 +4230,34 @@ class EscapeRouter:
             )
             return None
 
-        # Place via dead-centre on the pad.  Off-centre vias inside a pad
-        # break solder paste stencil generation downstream, so we do not
-        # nudge -- if dead-centre doesn't fit, defer instead.
-        via_x = pad.x
-        via_y = pad.y
+        # Issue #2946: select the in-pad via position.  Default to
+        # dead-centre on the pad; if that violates clearance to a
+        # neighboring foreign-net pad, iterate offsets along the pad's
+        # long axis seeking the smallest-magnitude offset whose
+        # candidate via passes BOTH the clearance predicate
+        # (``_can_place_via``) AND the pad-copper containment check
+        # (the via barrel + annular ring must stay inside the pad
+        # rectangle so the solder-paste stencil aperture remains valid).
+        via_x, via_y, nudged = self._select_in_pad_via_position(
+            pad=pad,
+            via_diameter=via_diameter,
+            min_annular=min_annular,
+            effective_clearance=effective_clearance,
+            package=package,
+        )
 
-        # Issue #2944: Diagnostic-only clearance check against neighboring
-        # foreign-net pads on the same footprint.  On 0.5mm-pitch QFPs
-        # with 0.6mm vias the via's clearance envelope spills off the
-        # parent pad and onto the adjacent pin pads, producing DRC
-        # errors of ~0.05mm overlap (board-04 OSC_OUT cluster).
-        #
-        # We do NOT reject the candidate here -- the in-pad rescue is
-        # the LAST RESORT for fine-pitch QFP escape; no alternate path
-        # exists if surface escape already failed, and the BGA-style
-        # ring fallback referenced in the curator's #2944 analysis is
-        # not available for QFP/LQFP.  Rejecting would leave the pin
-        # unrouted and the whole board's completion floor would drop
-        # below the escalation gate.  Instead we emit a structured
-        # warning so users (and tier-escalation logic) can decide
-        # whether to accept the local DRC violation or escalate to a
-        # smaller-via tier / wider-pitch footprint.
-        if package is not None:
+        # Issue #2944 / #2946: Diagnostic clearance check against the
+        # neighboring foreign-net pads on the same footprint.  When the
+        # nudge rescue succeeded the dead-centre would have failed but
+        # the offset position passes -- no warning is emitted in that
+        # case (the via is DRC-clean).  When the nudge rescue could not
+        # find any passing offset (e.g. dense plane-sandwich, all
+        # offsets blocked), ``_select_in_pad_via_position`` falls back
+        # to dead-centre and we emit the structured warning so users
+        # (and tier-escalation logic) can decide whether to accept the
+        # local DRC violation or escalate to a smaller-via tier / wider-
+        # pitch footprint.
+        if package is not None and not nudged:
             other_pads = [p for p in package.pads if p is not pad]
             if not self._via_clears_other_pads(
                 x=via_x,
