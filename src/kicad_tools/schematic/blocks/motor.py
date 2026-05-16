@@ -1243,18 +1243,33 @@ class GateDriveResistorArray(CircuitBlock):
             self.ports[in_port_name] = in_pos
             self.ports[out_port_name] = out_pos
 
-            # Optional net labels — emit a label at each pin and add an
-            # alias port keyed by the net suffix (the trailing token after
-            # the last '_').
+            # Optional net labels — emit short horizontal stub wires from
+            # each pin so the label has a wire to anchor to. KiCad's
+            # label-only connectivity requires the label coordinate to lie
+            # on a wire endpoint or segment; without these stubs, labels
+            # in columns beyond the first one float (see issue #2968).
+            # The stub length matches one schematic grid (2.54 mm).
+            #
+            # Pattern mirrors ``create_3phase_inverter`` (~line 350):
+            #     sch.add_wire(pos, (label_x, pos[1]))
+            #     sch.add_label(name, label_x, pos[1], rotation=0)
+            #
+            # Alias ports are keyed by the net suffix (the trailing token
+            # after the last ``_``).
+            STUB = 2.54
             if input_nets is not None:
                 in_net = input_nets[i]
-                sch.add_label(in_net, in_pos[0], in_pos[1], rotation=0)
+                in_label_x = in_pos[0] - STUB
+                sch.add_wire(in_pos, (in_label_x, in_pos[1]))
+                sch.add_label(in_net, in_label_x, in_pos[1], rotation=0)
                 alias = f"IN_{_net_suffix(in_net)}"
                 self.ports[alias] = in_pos
 
             if output_nets is not None:
                 out_net = output_nets[i]
-                sch.add_label(out_net, out_pos[0], out_pos[1], rotation=0)
+                out_label_x = out_pos[0] + STUB
+                sch.add_wire(out_pos, (out_label_x, out_pos[1]))
+                sch.add_label(out_net, out_label_x, out_pos[1], rotation=0)
                 alias = f"OUT_{_net_suffix(out_net)}"
                 self.ports[alias] = out_pos
 
