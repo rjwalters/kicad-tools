@@ -33,13 +33,25 @@ class Pin:
     pin_type: str = "passive"
 
     def connection_point(self) -> tuple[float, float]:
-        """Get the wire connection point.
+        """Get the wire connection point in symbol-local (library Y-up) coords.
 
-        The connection point is where wires attach to the pin.
-        In KiCad symbol definitions, this is the (x, y) position.
+        The connection point is where wires attach to the pin.  In KiCad
+        symbol definitions (``.kicad_sym``) this is the ``(x, y)`` position
+        stored in library Y-UP coordinates -- positive Y is above the symbol
+        origin in the library drawing.
+
+        IMPORTANT: KiCad schematics use Y-DOWN screen coordinates.  Callers
+        that need an absolute schematic position must negate Y after applying
+        any rotation/mirror; see
+        :meth:`kicad_tools.schematic.models.symbol.SymbolInstance.pin_position`
+        and :meth:`kicad_tools.schema.library.LibrarySymbol.get_pin_position`
+        for the correct conversion.  Using ``connection_point()`` directly in
+        schematic space produces vertically-flipped pin positions for any
+        pin with non-zero library Y (issue #2959).
 
         Returns:
-            (x, y) tuple of the wire connection point in symbol-local coordinates
+            (x, y) tuple of the wire connection point in library-local
+            (Y-up) coordinates.
         """
         return (self.x, self.y)
 
