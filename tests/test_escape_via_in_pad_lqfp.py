@@ -208,7 +208,14 @@ class TestLqfp48InPadEscape:
 
     def test_in_pad_escape_generated_when_supported(self):
         """With manufacturer=jlcpcb-tier1, inner LQFP-48 pins that fail
-        surface escape should fall through to in-pad via escape."""
+        surface escape should fall through to in-pad via escape.
+
+        Issue #2944: The clearance predicate added to
+        ``_try_in_pad_escape`` is DIAGNOSTIC ONLY for QFP/LQFP -- no
+        fallback path exists (the curator's BGA ring-fallback argument
+        does not apply to QFP), so we emit a warning and proceed
+        rather than rejecting and leaving the pin unrouted.
+        """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
         escape_router = EscapeRouter(grid, rules)
@@ -280,7 +287,8 @@ class TestLqfp48InPadEscape:
 
     def test_in_pad_escape_uses_pcbway_when_supported(self):
         """PCBWay is the other tier with ``via_in_pad_supported=True``;
-        verify the rescue fires for it too."""
+        verify the rescue fires for it too.
+        """
         rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules)
         escape_router = EscapeRouter(grid, rules)

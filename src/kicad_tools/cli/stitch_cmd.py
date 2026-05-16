@@ -2595,6 +2595,13 @@ def check_via_clearance(
 ) -> bool:
     """Check if a via at (x, y) passes all clearance checks.
 
+    Issue #2944: The body of this function has been factored into
+    :func:`kicad_tools.router.via_clearance.point_clear_of_copper` so the
+    router escape pipeline can share the same precise world-coordinate
+    predicate.  This wrapper is kept for backward compatibility with
+    existing stitch-cmd call sites and tests; new code should import the
+    shared helper directly.
+
     Args:
         x, y: Proposed via position
         via_size: Via pad diameter in mm
@@ -2608,43 +2615,19 @@ def check_via_clearance(
     Returns:
         True if the position is clear for via placement
     """
-    via_radius = via_size / 2
+    from kicad_tools.router.via_clearance import point_clear_of_copper
 
-    # Check against same-net vias (prevent stacking)
-    for vx, vy in same_net_vias:
-        dist = math.sqrt((vx - x) ** 2 + (vy - y) ** 2)
-        if dist < via_size + clearance:
-            return False
-
-    # Check against other-net track segments
-    for seg in other_net_tracks:
-        dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
-        min_dist = via_radius + seg.width / 2 + clearance
-        if dist < min_dist:
-            return False
-
-    # Check against other-net vias
-    for ovx, ovy, ov_size, _onet in other_net_vias:
-        dist = math.sqrt((ovx - x) ** 2 + (ovy - y) ** 2)
-        min_dist = via_radius + ov_size / 2 + clearance
-        if dist < min_dist:
-            return False
-
-    # Check against other-net pads
-    for px, py, p_radius, _pnet in other_net_pads:
-        dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
-        min_dist = via_radius + p_radius + clearance
-        if dist < min_dist:
-            return False
-
-    # Check against other-net filled polygons (zone fill copper)
-    if other_net_filled_polygons:
-        if not _check_point_filled_polygon_clearance(
-            x, y, via_radius, other_net_filled_polygons, clearance
-        ):
-            return False
-
-    return True
+    return point_clear_of_copper(
+        x=x,
+        y=y,
+        via_size=via_size,
+        clearance=clearance,
+        other_net_tracks=other_net_tracks,
+        other_net_vias=other_net_vias,
+        other_net_pads=other_net_pads,
+        same_net_vias=same_net_vias,
+        other_net_filled_polygons=other_net_filled_polygons,
+    )
 
 
 def _matches_footprint_pattern(footprint_name: str, patterns: tuple[str, ...]) -> bool:
