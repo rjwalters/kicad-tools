@@ -277,3 +277,172 @@ class TestValidatorRegexBridgeIdempotent:
 
         assert width_after_first == width_after_second
         assert target_after_first == target_after_second == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #2967 -- board 06 regression: respect implicit "don't apply
+# impedance sizing" when the board script declares explicit
+# ``target_*_impedance`` but does NOT pass a stackup to ``Autorouter``.
+# Mirrors board 06's ``APPLY_IMPEDANCE_DRIVEN_SIZING = False`` opt-out:
+# the resolver must stay dormant on the production CLI path so the
+# ``intra_pair_clearance`` literals are not overwritten with physically
+# unrouteable ~8 mm gaps.
+# ---------------------------------------------------------------------------
+
+
+class TestBoard06DormancyOptOut:
+    """Issue #2967: when a board declares explicit ``target_*_impedance``
+    on its net classes but does NOT pass a stackup to ``Autorouter``,
+    the resolver must stay dormant -- matching pre-#2964 production CLI
+    behavior.  This is how board 06 opts out of impedance-driven sizing
+    on its dense diff-pair fabric (its ``intra_pair_clearance`` literals
+    of 0.075-0.10 mm would otherwise be overwritten with ~8 mm values
+    that block the entire BGA/QFN/FFC pad-pitch corridors)."""
+
+    def test_explicit_diff_targets_without_stackup_leaves_resolver_dormant(self):
+        """Board 06's scenario: MIPI/USB/PCIE classes carry
+        ``target_diff_impedance`` but the production CLI route passes
+        no stackup to ``Autorouter`` -- the resolver must stay dormant
+        and ``intra_pair_clearance`` literals must survive untouched."""
+        rules = DesignRules(manufacturer="jlcpcb")
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
+        # Mirror board 06's MIPI net class (target_diff_impedance=100,
+        # intra_pair_clearance=0.10 mm).  No stackup is supplied --
+        # this matches ``load_pcb_for_routing`` (Issue #2966 root cause
+        # was that this path silently woke the resolver on this exact
+        # net-class shape, producing ~8 mm gaps on MIPI/USB/PCIE).
+        mipi_class = NetClassRouting(
+            name="MIPI",
+            trace_width=0.15,
+            clearance=0.15,
+            intra_pair_clearance=0.10,
+            target_diff_impedance=100.0,
+        )
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            stackup=None,  # explicit: no stackup, just like load_pcb_for_routing
+            layer_stack=layer_stack,
+            net_class_map={"MIPI_CLK+": mipi_class, "MIPI_CLK-": mipi_class},
+        )
+        # No CLK-matching net WITHOUT a target -- both already have
+        # target_diff_impedance set, so synthesis must not fire.
+        ar.nets[1] = [("U1", "1")]
+        ar.net_names[1] = "MIPI_CLK+"
+        ar.nets[2] = [("U1", "2")]
+        ar.net_names[2] = "MIPI_CLK-"
+
+        # Pre-gate: ``_has_synthesis_candidates`` must return False
+        # because every CLK net already has an explicit target.
+        assert ar._has_synthesis_candidates() is False, (
+            "Issue #2967 regression: _has_synthesis_candidates() must "
+            "return False when every matching net already carries an "
+            "explicit target_*_impedance.  Returning True would wake "
+            "the auto-derive path and overwrite intra_pair_clearance "
+            "with ~8 mm gaps, blocking board 06's diff-pair fabric."
+        )
+
+        ar._prepare_routing()
+
+        # Resolver must have stayed dormant: stackup is still None,
+        # intra_pair_clearance literal survives, target_diff_impedance
+        # survives (board 06 still declares it for AC#6 assertions).
+        assert ar._stackup is None, (
+            "Issue #2967 regression: auto-stackup fired on a board "
+            "that has explicit targets but no synthesis candidates.  "
+            "Board 06 routes 0/21 nets when this happens."
+        )
+        resolved = ar.net_class_map["MIPI_CLK+"]
+        assert resolved.intra_pair_clearance == 0.10, (
+            f"Issue #2967 regression: MIPI intra_pair_clearance was "
+            f"overwritten to {resolved.intra_pair_clearance}mm (board "
+            f"06's literal is 0.10mm).  The resolver fired on an "
+            f"explicit target despite the board author's implicit "
+            f"opt-out (no stackup passed)."
+        )
+        assert resolved.target_diff_impedance == 100.0
+
+    def test_swclk_synthesis_candidate_still_wakes_auto_derive(self):
+        """The opt-out must NOT regress the #2964 SWCLK fix: when a
+        regex-matching net (e.g. SWCLK) has no explicit target,
+        ``_has_synthesis_candidates`` returns True and the auto-derive
+        fires -- preserving board 04's impedance-driven SWCLK width."""
+        rules = DesignRules(manufacturer="jlcpcb")
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            stackup=None,
+            layer_stack=layer_stack,
+            net_class_map={"SWCLK": NET_CLASS_DEBUG},
+        )
+        ar.nets[1] = [("U1", "37")]
+        ar.net_names[1] = "SWCLK"
+
+        # SWCLK has no target on NET_CLASS_DEBUG, and matches
+        # ``.*CLK.*`` -- synthesis should fire.
+        assert ar._has_synthesis_candidates() is True
+
+        ar._prepare_routing()
+
+        # The auto-derive fired (stackup now set), synthesis ran,
+        # and the resolver produced a 50Ω-driven width.
+        assert ar._stackup is not None
+        assert ar.net_class_map["SWCLK"].target_single_impedance == 50.0
+        assert ar.net_class_map["SWCLK"].trace_width > 0.25
+
+    def test_auto_derive_uses_jlcpcb_4l_not_generic_4l(self):
+        """PR #2966 Judge Q2: the router's auto-derived 4L stackup must
+        match what the validator uses by default (JLCPCB 4L, er=4.05,
+        0.2104 mm prepreg) so router and validator agree on impedance
+        widths.  Before the fix the router used
+        ``_create_generic_stackup`` (er=4.5, 0.20 mm prepreg) which
+        produced a different SWCLK width (0.325 mm vs the JLCPCB 0.375
+        mm) and put router/validator out of lockstep."""
+        rules = DesignRules(manufacturer="jlcpcb")
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            stackup=None,
+            layer_stack=layer_stack,
+            net_class_map={"SWCLK": NET_CLASS_DEBUG},
+        )
+        ar.nets[1] = [("U1", "37")]
+        ar.net_names[1] = "SWCLK"
+
+        ar._prepare_routing()
+
+        # Verify the resolver produced the JLCPCB 4L width (0.375 mm)
+        # rather than the generic 4L width (0.325 mm).  Both are within
+        # the 10% DRC tolerance for 50Ω SWCLK on JLCPCB, but only the
+        # JLCPCB value keeps router and validator in lockstep.
+        resolved_width = ar.net_class_map["SWCLK"].trace_width
+        assert resolved_width == pytest.approx(0.375, abs=0.02), (
+            f"PR #2966 Judge Q2 regression: SWCLK width={resolved_width:.3f}mm "
+            f"-- expected ~0.375mm (JLCPCB 4L er=4.05).  The router's "
+            f"auto-derived stackup must match Stackup._create_default_stackup "
+            f"so the router and validator compute the same impedance widths."
+        )
+
+        # Verify the auto-derived stackup carries the JLCPCB epsilon_r
+        # for the F.Cu reference dielectric (the first prepreg).
+        # JLCPCB 4L has prepreg er=4.05.  Generic 4L has er=4.5.
+        from kicad_tools.physics.stackup import LayerType
+
+        first_dielectric = next(
+            layer
+            for layer in ar._stackup.layers
+            if layer.layer_type == LayerType.DIELECTRIC and layer.epsilon_r
+        )
+        assert first_dielectric.epsilon_r == pytest.approx(4.05, abs=0.01), (
+            f"Auto-derived stackup's first dielectric has er="
+            f"{first_dielectric.epsilon_r:.2f}; expected 4.05 (JLCPCB).  "
+            f"Validator/router lockstep drift will resurface."
+        )
