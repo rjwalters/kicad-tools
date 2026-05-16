@@ -580,21 +580,31 @@ class SymbolInstance:
                 suggestions=suggestions,
             )
 
-        # Get the wire connection point (end of pin) in symbol-local coordinates
+        # Get the wire connection point (end of pin) in symbol-local coordinates.
+        # KiCad library symbols store pin positions in Y-UP coordinates (math
+        # convention: +Y is above origin in the library's drawing).  KiCad
+        # schematics use Y-DOWN screen coordinates (origin top-left, +Y is below).
+        # We rotate in library Y-up coords, then negate Y to convert to schematic
+        # Y-down before translating to the placed symbol position.  This matches
+        # the proven implementation in ``kicad_tools.schema.library.get_pin_position``.
         conn_x, conn_y = pin.connection_point()
 
-        # Apply rotation transformation
-        # Note: Both KiCad schematics and symbol definitions use Y-down coordinates
+        # Apply rotation in library Y-up coordinates (standard CCW rotation matrix).
         rad = math.radians(self.rotation)
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 
-        # Rotate connection point around origin
         rx = conn_x * cos_r - conn_y * sin_r
         ry = conn_x * sin_r + conn_y * cos_r
 
-        # Translate to symbol position
-        # Round to 2 decimal places for consistent wire matching
+        # Convert from library Y-up to schematic Y-down by negating the Y offset.
+        # Without this flip, pins with non-zero library Y end up on the wrong
+        # side of the symbol (issue #2959), causing wires to terminate in empty
+        # space and ERC to report pin_not_connected.
+        ry = -ry
+
+        # Translate to symbol position.  Round to 2 decimal places for
+        # consistent wire matching.
         return (round(self.x + rx, 2), round(self.y + ry, 2))
 
     def all_pin_positions(self) -> dict[str, tuple[float, float]]:
