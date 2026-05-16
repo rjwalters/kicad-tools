@@ -270,7 +270,17 @@ class TestSameComponentClearanceRelaxation:
         )
 
     def test_through_hole_pads_relaxation(self):
-        """Through-hole pads on the same component should also be relaxed."""
+        """Through-hole pads on the same component should also be relaxed.
+
+        Post-#2915/#2940: cells in the same-component carve-out overlap can
+        carry ``is_obstacle = True`` from the rect-aware first-touch fix.
+        Issue #2961's fix keeps those cells ``_blocked = True`` so foreign
+        nets cannot clip them, but the pathfinder's ``different_net = (cell.net
+        != routing_net)`` mask still admits own-net traces.  Therefore we
+        assert the post-fix invariant: cells in the carve-out are passable
+        for an own-net trace via the pathfinder, not that ``_blocked == False``
+        (which was a pre-#2915 implementation detail).
+        """
         rules = DesignRules(
             grid_resolution=0.05,
             trace_width=0.2,
@@ -293,16 +303,26 @@ class TestSameComponentClearanceRelaxation:
         grid.add_pad(pad1)
         grid.add_pad(pad2)
 
-        # Check all layers have passable cells in the corridor
+        # Check that pad1's own net can reach corridor cells on every layer.
+        # We use ``compute_expanded_blocked`` (the Python pathfinder mirror)
+        # with radius=0 to isolate the per-cell decision.  For an own-net
+        # trace (``cell.net == routing_net``), the pathfinder treats the
+        # cell as passable regardless of ``is_obstacle`` -- this is the
+        # same-net escape semantics preserved by Issues #2915/#2940/#2961.
         mid_gx, mid_gy = grid.world_to_grid(5.0, 5.0)
         for layer_idx in range(grid.num_layers):
+            blocked_for_net1 = grid.compute_expanded_blocked(
+                radius=0, net=1, allow_sharing=False
+            )
             passable = 0
             for gy in range(max(0, mid_gy - 20), min(grid.rows, mid_gy + 21)):
-                if not grid._blocked[layer_idx, gy, mid_gx]:
+                if not blocked_for_net1[layer_idx, gy, mid_gx]:
                     passable += 1
             assert passable > 0, (
                 f"Through-hole corridor on layer {layer_idx} should have "
-                f"passable cells after relaxation"
+                f"passable cells for pad1's own net (net=1) after relaxation. "
+                f"Same-net escape (#2452/#2880/#2908) must survive the "
+                f"#2961 carve-out tightening."
             )
 
     def test_widely_spaced_pads_no_overlap(self):
