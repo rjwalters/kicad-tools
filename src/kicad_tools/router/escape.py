@@ -40,8 +40,28 @@ if TYPE_CHECKING:
 
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
+from .via_clearance import point_clear_of_copper
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SegmentAdapter:
+    """Adapter that exposes a :class:`Segment` with the ``start_x/start_y/end_x/end_y``
+    attribute names expected by :func:`point_clear_of_copper`.
+
+    Issue #2944: The shared clearance helper consumes duck-typed track
+    segments via the ``TrackSegmentLike`` protocol (start_x, start_y, end_x,
+    end_y, width).  The router's :class:`Segment` uses ``x1, y1, x2, y2``.
+    Rather than rename the latter (which is a wide-blast-radius change),
+    we adapt at the boundary.
+    """
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    width: float
 
 
 class PackageType(Enum):
@@ -1997,6 +2017,7 @@ class EscapeRouter:
                             direction=direction,
                             effective_clearance=effective_clearance,
                             escape_width=escape_width,
+                            package=package,
                         )
                         if in_pad_route is not None:
                             if pin_boxed and not violation:
@@ -2657,6 +2678,7 @@ class EscapeRouter:
                         direction=direction,
                         effective_clearance=effective_clearance,
                         escape_width=escape_width,
+                        package=package,
                     )
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
@@ -2740,6 +2762,7 @@ class EscapeRouter:
                         direction=direction,
                         effective_clearance=effective_clearance,
                         escape_width=escape_width,
+                        package=package,
                     )
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
@@ -3697,8 +3720,48 @@ class EscapeRouter:
 
         return rows
 
-    def _can_place_via(self, x: float, y: float) -> bool:
-        """Check if a via can be placed at the given position."""
+    def _can_place_via(
+        self,
+        x: float,
+        y: float,
+        net: int | None = None,
+        foreign_pads: list[Pad] | None = None,
+        foreign_tracks: list[Segment] | None = None,
+        clearance: float | None = None,
+        via_diameter: float | None = None,
+    ) -> bool:
+        """Check if a via can be placed at the given position.
+
+        Issue #2944: The grid-cell check that historically lived here was
+        too coarse for fine-pitch QFP/SSOP escape routing -- a via that
+        lands on a "free" grid cell can still sit within trace/pad
+        clearance of an adjacent foreign-net pad or segment in world
+        coordinates.  When ``foreign_pads`` / ``foreign_tracks`` are
+        supplied, the shared world-coordinate predicate from
+        :mod:`kicad_tools.router.via_clearance` is consulted as well.
+
+        Args:
+            x: Proposed via X in mm (world coordinates).
+            y: Proposed via Y in mm (world coordinates).
+            net: Net number of the via being placed (used to filter
+                ``foreign_pads`` / ``foreign_tracks`` to the truly
+                foreign-net subset).  When ``None`` the pad / segment
+                lists are treated as already pre-filtered to foreign
+                nets.
+            foreign_pads: Optional list of nearby pads to validate the
+                via against.  Pads whose ``net`` equals ``net`` are
+                skipped automatically when ``net`` is provided.
+            foreign_tracks: Optional list of nearby segments to validate
+                against.  Segments whose ``net`` equals ``net`` are
+                skipped automatically.
+            clearance: Required minimum clearance from foreign copper
+                (mm).  Defaults to the design rules' via clearance.
+            via_diameter: Via pad diameter (mm).  Defaults to the design
+                rules' via diameter.
+
+        Returns:
+            True if the position is clear; False if blocked.
+        """
         # Check grid bounds
         if not (0 <= x <= self.grid.width and 0 <= y <= self.grid.height):
             return False
@@ -3710,6 +3773,133 @@ class EscapeRouter:
                 cell = self.grid.grid[layer_idx][gy][gx]
                 if cell.blocked and cell.is_obstacle:
                     return False
+
+        # Issue #2944: World-coordinate clearance check against foreign
+        # copper.  Only runs when the caller supplies pad / track
+        # context -- preserves existing behavior for call sites that
+        # only have grid-cell information.
+        if foreign_pads or foreign_tracks:
+            eff_clearance = (
+                clearance if clearance is not None else self.rules.via_clearance
+            )
+            eff_diameter = (
+                via_diameter if via_diameter is not None else self.rules.via_diameter
+            )
+
+            # Pre-filter to foreign-net pads/tracks when the caller
+            # supplied the via's own net.  This keeps the predicate
+            # focused on truly-foreign copper and avoids spurious
+            # rejections on same-net targets.
+            pad_tuples: list[tuple[float, float, float, int]] = []
+            if foreign_pads:
+                for p in foreign_pads:
+                    if net is not None and p.net == net:
+                        continue
+                    # Effective pad radius: use the larger of width/height
+                    # so the predicate is conservative for oblong fine-pitch
+                    # pads (the inscribed-circle radius would under-estimate
+                    # clearance along the long axis).
+                    eff_radius = max(p.width, p.height) / 2
+                    pad_tuples.append((p.x, p.y, eff_radius, p.net))
+
+            seg_list: list[Segment] = []
+            if foreign_tracks:
+                for s in foreign_tracks:
+                    if net is not None and s.net == net:
+                        continue
+                    seg_list.append(s)
+
+            # Adapt Segment (x1/y1/x2/y2) to the predicate's expected
+            # start_x/start_y/end_x/end_y interface.
+            adapted_segs = [
+                _SegmentAdapter(
+                    start_x=s.x1, start_y=s.y1,
+                    end_x=s.x2, end_y=s.y2,
+                    width=s.width,
+                )
+                for s in seg_list
+            ]
+
+            if not point_clear_of_copper(
+                x=x,
+                y=y,
+                via_size=eff_diameter,
+                clearance=eff_clearance,
+                other_net_tracks=adapted_segs,
+                other_net_pads=pad_tuples,
+            ):
+                return False
+
+        return True
+
+    def _via_clears_other_pads(
+        self,
+        x: float,
+        y: float,
+        via_diameter: float,
+        clearance: float,
+        other_pads: list[Pad],
+        same_net: int,
+    ) -> bool:
+        """Return True iff a via at (x, y) clears every foreign-net pad.
+
+        Issue #2944: helper for the in-pad escape rescue path.  The
+        ``_try_in_pad_escape`` method places a via dead-centre on a
+        fine-pitch SMD pad; on packages where the pin pitch is below
+        ``via_diameter + 2 * clearance`` this puts the via inside the
+        neighboring foreign-net pads' clearance envelope.  Calling this
+        helper before committing the in-pad via lets us reject the
+        rescue and let the main router try a different approach
+        (typically the next-ring escape).
+
+        Geometry: SMD pads are axis-aligned rectangles, so a
+        worst-case-circle ``max(w,h)/2`` approximation is too pessimistic
+        for oblong fine-pitch pads.  We compute the distance from the
+        via center to the actual pad rectangle (closest point on the
+        rectangle to the via center) and require::
+
+            rect_dist >= via_radius + clearance
+
+        Args:
+            x: Proposed via X (mm).
+            y: Proposed via Y (mm).
+            via_diameter: Via pad diameter (mm).
+            clearance: Required minimum clearance (mm).
+            other_pads: Pads on the same footprint (or any other context)
+                to validate against.  Same-net pads are skipped via
+                ``same_net``.
+            same_net: Net of the via being placed; pads with this net are
+                treated as same-net and skipped.
+
+        Returns:
+            True when every foreign-net pad clears the proposed via.
+        """
+        via_radius = via_diameter / 2
+        required = via_radius + clearance
+
+        for p in other_pads:
+            if p.net == same_net:
+                continue
+
+            # Distance from via center to the pad rectangle (axis-aligned).
+            half_w = p.width / 2
+            half_h = p.height / 2
+            dx_abs = abs(x - p.x)
+            dy_abs = abs(y - p.y)
+            outside_x = max(0.0, dx_abs - half_w)
+            outside_y = max(0.0, dy_abs - half_h)
+
+            if outside_x == 0.0 and outside_y == 0.0:
+                # Via center is inside the pad rectangle.  This is the
+                # legitimate "via in pad" case ONLY when the pad's net
+                # matches the via's net -- which we've already filtered
+                # out above.  Foreign-net interior means an immediate
+                # violation.
+                return False
+
+            rect_dist = math.sqrt(outside_x * outside_x + outside_y * outside_y)
+            if rect_dist < required - 1e-9:
+                return False
 
         return True
 
@@ -3742,6 +3932,7 @@ class EscapeRouter:
         direction: EscapeDirection,
         effective_clearance: float,
         escape_width: float,
+        package: PackageInfo | None = None,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -3751,6 +3942,16 @@ class EscapeRouter:
         boards), bypassing the surface-real-estate constraint that forced
         deferral with the alternating-layer strategy.
 
+        Issue #2944: When ``package`` is supplied, the candidate in-pad
+        via is validated against every other pad on the same footprint
+        using the shared world-coordinate predicate from
+        :mod:`kicad_tools.router.via_clearance`.  This rejects in-pad
+        rescues that would land within
+        ``via_radius + neighbor_radius + clearance`` of an adjacent
+        foreign-net pad -- the exact failure mode seen on board 04 LQFP
+        OSC_OUT (0.5mm pitch, 0.6mm vias) where the in-pad rescue
+        violated clearance to OSC_IN and NRST by 0.05mm.
+
         Pre-conditions (return ``None`` when violated):
         - ``self.via_in_pad_supported`` must be ``True`` (set from manufacturer
           capability flags during ``__init__``).
@@ -3758,6 +3959,8 @@ class EscapeRouter:
           ring: ``min(pad.width, pad.height) >= via_diameter`` (we require
           the pad copper to fully cover the via diameter; the pad's own
           copper provides the annular ring).
+        - When ``package`` is supplied, the candidate via must clear all
+          foreign-net pads on the same footprint.
 
         On success the returned ``EscapeRoute`` contains:
         - A ``Via`` placed exactly at ``(pad.x, pad.y)`` with ``in_pad=True``.
@@ -3773,6 +3976,11 @@ class EscapeRouter:
             effective_clearance: Clearance value to use for the inner-layer
                 escape point offset.
             escape_width: Trace width to use for the inner-layer segment.
+            package: Optional package context.  When supplied, the
+                proposed in-pad via is validated against neighboring
+                foreign-net pads (Issue #2944).  When ``None`` (legacy
+                call sites), only the original geometry preconditions
+                run and the via is placed without the neighbor check.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
@@ -3824,6 +4032,33 @@ class EscapeRouter:
         # nudge -- if dead-centre doesn't fit, defer instead.
         via_x = pad.x
         via_y = pad.y
+
+        # Issue #2944: Validate the candidate in-pad via against
+        # neighboring foreign-net pads on the same footprint.  On
+        # 0.5mm-pitch QFPs with 0.6mm vias, the via's clearance envelope
+        # spills off the parent pad and onto the adjacent pin pads --
+        # producing DRC errors of ~0.05mm overlap (board 04 OSC_OUT /
+        # OSC_IN / NRST cluster).  Reject the rescue here and let the
+        # caller fall back to either the next surface escape ring or
+        # deferral to the main router.
+        if package is not None:
+            other_pads = [p for p in package.pads if p is not pad]
+            if not self._via_clears_other_pads(
+                x=via_x,
+                y=via_y,
+                via_diameter=via_diameter,
+                clearance=effective_clearance,
+                other_pads=other_pads,
+                same_net=pad.net,
+            ):
+                logger.debug(
+                    "In-pad escape for pad %s (ref=%s pin=%s) rejected: "
+                    "candidate via at (%.3f, %.3f) violates clearance to a "
+                    "neighboring foreign-net pad on %s (Issue #2944).",
+                    pad.net_name, pad.ref, pad.pin,
+                    via_x, via_y, pad.ref,
+                )
+                return None
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
