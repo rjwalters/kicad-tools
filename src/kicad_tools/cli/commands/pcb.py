@@ -11,7 +11,7 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses")
+        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses")
         return 1
 
     pcb_path = Path(args.pcb)
@@ -42,6 +42,10 @@ def run_pcb_command(args) -> int:
     # Handle move-footprint command
     if args.pcb_command == "move-footprint":
         return _run_move_footprint_command(args, pcb_path)
+
+    # Handle lock-footprints / unlock-footprints commands
+    if args.pcb_command in ("lock-footprints", "unlock-footprints"):
+        return _run_lock_footprints_command(args, pcb_path)
 
     # Handle add-zone command
     if args.pcb_command == "add-zone":
@@ -709,6 +713,38 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
         to=to_tuple,
         rotation=rotation,
         batch_map=batch_map,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+    )
+
+
+def _run_lock_footprints_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb lock-footprints' / 'pcb unlock-footprints' commands."""
+    from kicad_tools.cli.pcb_lock_footprints import run_lock_footprints
+
+    refs_str = getattr(args, "refs", None)
+    all_perimeter = getattr(args, "all_perimeter", False)
+    perimeter_margin = getattr(args, "perimeter_margin", None)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    unlock = args.pcb_command == "unlock-footprints"
+
+    refs: list[str] | None = None
+    if refs_str:
+        refs = [r.strip() for r in refs_str.split(",") if r.strip()]
+        if not refs:
+            print("Error: --refs must contain at least one reference", file=sys.stderr)
+            return 1
+
+    return run_lock_footprints(
+        pcb_path=pcb_path,
+        refs=refs,
+        all_perimeter=all_perimeter,
+        perimeter_margin=perimeter_margin,
+        unlock=unlock,
         dry_run=dry_run,
         output_path=output_path,
         output_format=output_format,

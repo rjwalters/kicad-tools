@@ -1506,6 +1506,61 @@ def _add_pcb_parser(subparsers) -> None:
         help="Preview moves without modifying the PCB file",
     )
 
+    # pcb lock-footprints / unlock-footprints
+    for _cmd_name, _help_verb in (
+        ("lock-footprints", "Lock"),
+        ("unlock-footprints", "Unlock"),
+    ):
+        _lock_fp = pcb_subparsers.add_parser(
+            _cmd_name,
+            help=f"{_help_verb} footprints by reference (for anchor-weight recipe)",
+            description=(
+                f"{_help_verb} footprints in a PCB so the anchor-weight "
+                "recipe (kct optimize-placement --anchor-weight 1.0 "
+                "--allow-infeasible) can identify perimeter anchors. "
+                "Use --refs for explicit selection or --all-perimeter to "
+                "target every footprint whose bounding box touches the "
+                "Edge.Cuts outline.  Idempotent."
+            ),
+        )
+        _lock_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+        _lock_fp.add_argument(
+            "--refs",
+            help="Comma-separated reference designators (e.g. J1,J2,MH1)",
+        )
+        _lock_fp.add_argument(
+            "--all-perimeter",
+            action="store_true",
+            help="Target all footprints whose bbox touches the board edge",
+        )
+        _lock_fp.add_argument(
+            "--perimeter-margin",
+            type=float,
+            default=None,
+            help=(
+                "Tolerance in mm for the --all-perimeter test "
+                "(default: 2.0). Set higher to include footprints "
+                "set further inboard."
+            ),
+        )
+        _lock_fp.add_argument(
+            "-o",
+            "--output",
+            dest="output",
+            help="Output file path (default: overwrite input PCB)",
+        )
+        _lock_fp.add_argument(
+            "--format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format for results",
+        )
+        _lock_fp.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview changes without modifying the PCB file",
+        )
+
     # pcb add-zone
     pcb_add_zone = pcb_subparsers.add_parser(
         "add-zone",
