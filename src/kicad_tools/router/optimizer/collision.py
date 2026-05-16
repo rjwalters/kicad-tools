@@ -332,40 +332,68 @@ class VectorCollisionChecker:
             if clearance < min_clearance:
                 return False
 
-        # Issue #2955: Check against foreign-net vias.
+        # Issue #2955 / #2960: Check against foreign-net vias.
         #
-        # The R-tree only indexes segments, so the broad/narrow-phase loop
-        # above never sees vias.  Without this check the optimizer's
-        # ``compress_staircase`` / ``convert_45_corners`` passes happily
-        # replace a clearance-respecting zigzag with a diagonal that grazes
-        # or punches a foreign-net through-hole via -- the canonical board-03
-        # failure mode where XTAL1's B.Cu trace was rewritten to a single
-        # off-grid segment that ran 0.14 mm from XTAL2's via at (125.6, 128.3),
-        # producing the ``clearance_segment_segment`` / ``clearance_segment_via``
-        # pair the post-route DRC then surfaces.
+        # The segment R-tree above does not index vias, so without an
+        # explicit via check the optimizer's ``compress_staircase`` /
+        # ``convert_45_corners`` passes happily replace a
+        # clearance-respecting zigzag with a diagonal that grazes or
+        # punches a foreign-net through-hole via.  The canonical
+        # board-03 failure was XTAL1's B.Cu trace rewritten to a single
+        # off-grid segment running 0.14 mm from XTAL2's via at
+        # (125.6, 128.3), producing ``clearance_segment_segment`` /
+        # ``clearance_segment_via`` post-route DRC pairs.
         #
-        # ``GridCollisionChecker`` is implicitly safe against this because
-        # ``_mark_via`` paints ``cell.net = via.net`` on every blocked cell
-        # within the via's clearance envelope, so the Bresenham walk hits
-        # the via at the soft-block branch (``cell.net != exclude_net``).
-        # The R-tree path skipped that check entirely.
+        # ``GridCollisionChecker`` is implicitly safe against this
+        # because ``_mark_via`` paints ``cell.net = via.net`` on every
+        # blocked cell in the via's clearance envelope, so the
+        # Bresenham walk hits the via at the soft-block branch
+        # (``cell.net != exclude_net``).  The vector path needs an
+        # explicit check.
         #
-        # Through-hole vias span ``layers[0]`` -> ``layers[1]`` inclusive of
-        # everything in between (KiCad does not enumerate inner layers in the
-        # S-expression).  ``validate_segment_clearance`` (grid.py:2390+) uses
-        # the same "check every via on every layer" simplification -- it's
-        # conservative-safe (at most a handful of false-positive rejections
-        # on multi-layer boards with blind/buried vias, which kicad-tools
-        # does not currently emit).
-        for route in self.grid.routes:
-            if route.net == exclude_net:
-                continue
-            for via in route.vias:
-                # Layer filter: through-hole vias span [layers[0], layers[1]]
-                # inclusive.  Skip the check if the via does not touch this
-                # layer.  ``_via_on_layer`` falls back to "yes" when the
-                # layer order is ambiguous, preserving the conservative
-                # behaviour of ``validate_segment_clearance``.
+        # PR #2958 (issue #2955) added a double-nested linear scan over
+        # ``grid.routes × route.vias`` here, which the optimizer
+        # invokes thousands of times per net.  On boards 06/07 this
+        # produced a fleet-wide ~3x slowdown (issue #2960).
+        #
+        # Issue #2960 replaces that scan with an R-tree query against
+        # the via index maintained by ``RoutingGrid`` (mirrored to
+        # ``self.routes`` mutations in ``mark_route`` / ``unmark_route``).
+        # The broad phase returns only vias whose AABB overlaps the
+        # path's query envelope; the narrow phase keeps the existing
+        # ``_via_on_layer`` + point-to-segment distance contract.
+        #
+        # Through-hole vias span ``layers[0]`` -> ``layers[1]`` inclusive
+        # of everything in between (KiCad does not enumerate inner
+        # layers in the S-expression).  ``validate_segment_clearance``
+        # (grid.py) uses the same "check every via on every layer"
+        # simplification -- it's conservative-safe (at most a handful
+        # of false-positive rejections on multi-layer boards with
+        # blind/buried vias, which kicad-tools does not currently
+        # emit).
+        via_rtree = getattr(self.grid, "_via_rtree", None)
+        via_items: dict[int, Any] = getattr(self.grid, "_via_rtree_items", {})
+        if via_rtree is not None and via_items:
+            # Broad-phase query envelope: path AABB inflated by
+            # half_width + min_clearance.  Each indexed via envelope is
+            # already inflated by ``via_radius + max_clearance + max_trace_half_width``
+            # (see ``RoutingGrid._compute_via_rtree_inflation``), so the
+            # union of the two envelopes is a conservative superset of
+            # the actual clearance check region for any via.
+            query_envelope = (
+                min(x1, x2) - search_radius,
+                min(y1, y2) - search_radius,
+                max(x1, x2) + search_radius,
+                max(y1, y2) + search_radius,
+            )
+            for via_id in via_rtree.intersection(query_envelope):
+                via = via_items.get(via_id)
+                if via is None:
+                    continue
+                # Skip own-net vias (matches the pre-fix per-route filter).
+                if via.net == exclude_net:
+                    continue
+                # Layer filter mirrors the linear-scan version.
                 if not self._via_on_layer(via, layer_idx):
                     continue
                 via_radius = via.diameter / 2
@@ -375,6 +403,23 @@ class VectorCollisionChecker:
                 clearance = dist - half_width - via_radius
                 if clearance < min_clearance:
                     return False
+        else:
+            # Fallback: index not built (e.g. mock grids in unit tests,
+            # or rtree unavailable).  Use the original linear scan so
+            # correctness from PR #2958 is preserved unconditionally.
+            for route in self.grid.routes:
+                if route.net == exclude_net:
+                    continue
+                for via in route.vias:
+                    if not self._via_on_layer(via, layer_idx):
+                        continue
+                    via_radius = via.diameter / 2
+                    dist = point_to_segment_distance(
+                        via.x, via.y, x1, y1, x2, y2
+                    )
+                    clearance = dist - half_width - via_radius
+                    if clearance < min_clearance:
+                        return False
 
         # Also check hard obstacles (pads, keepouts) via the grid
         # The R-tree only indexes routed segments, not static obstacles,

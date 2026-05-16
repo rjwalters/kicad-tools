@@ -697,6 +697,40 @@ class RoutingGrid:
         self._seg_rtree_count: int = 0  # total indexed segments across all layers
         self._rtree_available = RTREE_AVAILABLE
 
+        # Issue #2960: Via R-tree spatial index.
+        #
+        # PR #2958 (issue #2955) added a correctness fix to
+        # ``VectorCollisionChecker.path_is_clear`` that iterates
+        # ``grid.routes × route.vias`` on every call to detect foreign-net
+        # via grazing.  The optimizer pipeline (``optimizer/algorithms.py``)
+        # invokes ``path_is_clear`` thousands of times per net, so the
+        # unindexed double loop produced a fleet-wide ~3x slowdown on the
+        # C++ router (13s -> 40s per net on boards 06 / 07).
+        #
+        # This R-tree indexes all vias in ``self.routes`` by their AABB
+        # envelope (inflated by ``via_radius + max_clearance + max_trace_width/2``
+        # so that a bbox intersection against the query path's envelope
+        # returns all candidate vias that could violate clearance).  The
+        # ``VectorCollisionChecker`` queries this index instead of the
+        # double loop, dropping per-call cost from O(V) to O(log V).
+        #
+        # The index is maintained in lock-step with ``self.routes`` by
+        # ``mark_route`` / ``unmark_route``.  ``invalidate_spatial_index``
+        # rebuilds it when design rules change.  Out-of-band mutations
+        # (e.g. ``drc_nudge`` merging duplicate vias post-routing) happen
+        # AFTER the optimizer has run, so the index is correct during the
+        # only performance-critical phase.
+        self._via_rtree: Any = None  # single rtree.Index (vias indexed by 2D bbox)
+        self._via_rtree_items: dict[int, Via] = {}  # rtree id -> Via
+        self._via_rtree_count: int = 0
+        # Inflation: via_radius + max trace half-width + max clearance.
+        # ``max_clearance`` already covers the worst-case via clearance,
+        # and adding the largest plausible trace half-width keeps the
+        # envelope conservative for narrow-phase point-to-segment checks.
+        # Computed lazily on first insert so changes to design rules
+        # before any insertion are picked up by ``invalidate_spatial_index``.
+        self._via_rtree_inflation: float = 0.0
+
         # Issue #2335: Clearance-compensated spatial indexing.
         # R-tree envelopes are inflated by max_clearance so that intersection
         # queries return all segments that *could* violate clearance, without
@@ -2780,6 +2814,138 @@ class RoutingGrid:
             layer_idx = self.layer_to_index(seg.layer.value)
             self._rtree_remove_segment(seg, layer_idx)
 
+    # ------------------------------------------------------------------
+    # Issue #2960: Via R-tree spatial index
+    # ------------------------------------------------------------------
+    #
+    # The via index is a single 2D rtree (one shared index, not per-layer)
+    # because vias are points and through-hole vias span every copper
+    # layer.  The narrow-phase query in ``VectorCollisionChecker`` then
+    # filters candidates by layer via ``_via_on_layer``.  Indexing in 2D
+    # (instead of 3D x/y/layer) keeps the R-tree simple and matches the
+    # data shape: through-hole vias would each appear on every layer in
+    # a per-layer index, costing the same memory as a single 2D index
+    # without any query-cost win.
+
+    def _compute_via_rtree_inflation(self) -> float:
+        """Inflation amount for via envelopes (mm).
+
+        The bbox query in ``VectorCollisionChecker.path_is_clear`` is
+        constructed from the path's AABB expanded by
+        ``half_width + min_clearance``.  To guarantee the broad phase
+        returns every via whose narrow-phase distance check could fire,
+        each indexed via envelope must be expanded by
+        ``via_radius + max_clearance + max_trace_half_width`` so that the
+        union of the two envelopes is at least as large as the actual
+        clearance envelope.
+
+        We use ``rules.max_clearance`` for clearance (the widest possible
+        clearance across net classes, mirroring ``_rtree_clearance_inflation``)
+        and ``rules.max_trace_width / 2`` for the trace half-width.
+        ``via_radius`` is added per-via at insertion time.
+        """
+        max_trace = getattr(self.rules, "max_trace_width", self.rules.trace_width)
+        return self.rules.max_clearance + max_trace / 2
+
+    @staticmethod
+    def _via_envelope(
+        via: Via, extra_inflation: float
+    ) -> tuple[float, float, float, float]:
+        """Compute the inflated AABB for a via.
+
+        Args:
+            via: The via whose envelope to compute.
+            extra_inflation: Additional expansion beyond the via radius
+                (typically clearance + max trace half-width).
+
+        Returns:
+            (min_x, min_y, max_x, max_y) tuple suitable for R-tree insertion.
+        """
+        margin = via.diameter / 2 + extra_inflation
+        return (via.x - margin, via.y - margin, via.x + margin, via.y + margin)
+
+    def _get_or_create_via_rtree(self) -> Any:
+        """Lazily create the via R-tree.  Returns None if rtree unavailable."""
+        if not self._rtree_available:
+            return None
+        if self._via_rtree is None:
+            p = rtree_index.Property()
+            p.dimension = 2
+            self._via_rtree = rtree_index.Index(properties=p)
+            # Initialize inflation on first use so it reflects current rules.
+            self._via_rtree_inflation = self._compute_via_rtree_inflation()
+        return self._via_rtree
+
+    def _rtree_insert_via(self, via: Via) -> None:
+        """Insert a via into the via R-tree.
+
+        Skipped silently when rtree is unavailable.  Each via is keyed by
+        ``id(via)`` (consistent with the segment R-tree convention).
+        """
+        idx = self._get_or_create_via_rtree()
+        if idx is None:
+            return
+        via_id = id(via)
+        if via_id in self._via_rtree_items:
+            # Defensive: avoid double-insert (would leak an entry).
+            return
+        envelope = self._via_envelope(via, self._via_rtree_inflation)
+        idx.insert(via_id, envelope)
+        self._via_rtree_items[via_id] = via
+        self._via_rtree_count += 1
+
+    def _rtree_remove_via(self, via: Via) -> None:
+        """Remove a via from the via R-tree.
+
+        No-op when the via is not currently indexed or rtree is unavailable.
+        """
+        if not self._rtree_available or self._via_rtree is None:
+            return
+        via_id = id(via)
+        if via_id not in self._via_rtree_items:
+            return
+        envelope = self._via_envelope(via, self._via_rtree_inflation)
+        self._via_rtree.delete(via_id, envelope)
+        del self._via_rtree_items[via_id]
+        self._via_rtree_count = max(0, self._via_rtree_count - 1)
+
+    def _rtree_insert_route_vias(self, route: Route) -> None:
+        """Insert every via of a route into the via R-tree."""
+        if not self._rtree_available:
+            return
+        for via in route.vias:
+            self._rtree_insert_via(via)
+
+    def _rtree_remove_route_vias(self, route: Route) -> None:
+        """Remove every via of a route from the via R-tree."""
+        if not self._rtree_available or self._via_rtree is None:
+            return
+        for via in route.vias:
+            self._rtree_remove_via(via)
+
+    def rebuild_via_index(self) -> None:
+        """Rebuild the via R-tree from scratch from ``self.routes``.
+
+        Used by ``invalidate_spatial_index`` and as a recovery path when
+        out-of-band mutations (e.g. ``drc_nudge`` merging vias) leave
+        the index stale.  Idempotent.
+        """
+        if not self._rtree_available:
+            return
+
+        # Drop any existing index state.
+        self._via_rtree = None
+        self._via_rtree_items.clear()
+        self._via_rtree_count = 0
+
+        # Re-read inflation from (possibly changed) design rules.
+        self._via_rtree_inflation = self._compute_via_rtree_inflation()
+
+        # Re-populate from current routes.
+        for route in self.routes:
+            for via in route.vias:
+                self._rtree_insert_via(via)
+
     def invalidate_spatial_index(self) -> None:
         """Rebuild the R-tree spatial index with current clearance values.
 
@@ -2788,6 +2954,9 @@ class RoutingGrid:
         two-phase routing rule adjustments).  The method re-reads
         ``rules.max_clearance``, clears the existing R-tree structures, and
         re-inserts every indexed segment with the updated inflation.
+
+        Issue #2960: Also rebuilds the via R-tree so its envelopes use the
+        new clearance / max-trace-width values.
         """
         if not self._rtree_available:
             return
@@ -2809,6 +2978,9 @@ class RoutingGrid:
         for layer_idx, segments in segments_by_layer.items():
             for seg in segments:
                 self._rtree_insert_segment(seg, layer_idx)
+
+        # Rebuild the via index using the current rules.
+        self.rebuild_via_index()
 
     def mark_route(self, route: Route, max_trace_width: float | None = None) -> None:
         """Mark a route's cells as used.
@@ -2845,6 +3017,10 @@ class RoutingGrid:
             self.routes.append(route)
             # Maintain R-tree index for fast clearance queries (Issue #1249)
             self._rtree_insert_route(route)
+            # Issue #2960: Mirror via insertions into the via R-tree so
+            # ``VectorCollisionChecker.path_is_clear`` can query them in
+            # O(log V) instead of walking ``self.routes`` linearly.
+            self._rtree_insert_route_vias(route)
 
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Mark cells along a segment as blocked (with clearance buffer)."""
@@ -3145,6 +3321,10 @@ class RoutingGrid:
             if route in self.routes:
                 # Remove from R-tree index before removing from list (Issue #1249)
                 self._rtree_remove_route(route)
+                # Issue #2960: Remove vias from the via R-tree in lock-step
+                # with the route list to keep the index consistent for
+                # subsequent ``VectorCollisionChecker.path_is_clear`` calls.
+                self._rtree_remove_route_vias(route)
                 self.routes.remove(route)
                 removed = True
 
