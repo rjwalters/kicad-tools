@@ -398,9 +398,24 @@ def generate_button(ref: str, pos: tuple, net_name: str) -> str:
 
 
 def generate_crystal() -> str:
-    """Generate crystal oscillator footprint."""
-    x = BOARD_ORIGIN_X + 55  # Right of MCU
-    y = BOARD_ORIGIN_Y + 28
+    """Generate crystal oscillator footprint.
+
+    The MCU (U1) sits at (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 32).  Its
+    XTAL pins (2 = XTAL1, 3 = XTAL2) are on the LEFT/west side of the QFP
+    package (pad_offset = -4.5 mm from U1 center, so absolute x ≈ centre-4.5).
+    Placing the crystal to the RIGHT of U1 forces the router to run 17–22 mm
+    traces from those west-edge pads around or through the MCU body — a
+    channel-blocked failure confirmed in board-03 routing audit (2026-05-15).
+
+    Fix: place Y1 to the LEFT of U1 (BOARD_ORIGIN_X + 22), with its centre
+    vertically aligned with the XTAL pad row (BOARD_ORIGIN_Y + 30, midway
+    between pins 2 and 3 at y offsets -2.0 and -1.2 mm from U1 centre).
+    The gap between Y1 pin 2 (x ≈ BOARD_ORIGIN_X + 24.4) and U1 pin 2
+    (x ≈ BOARD_ORIGIN_X + 35.5) is ≈11 mm — plenty of room for a short
+    direct trace on F.Cu without crossing any other signal.
+    """
+    x = BOARD_ORIGIN_X + 22  # Left of MCU (XTAL pins 2/3 are on U1's west edge)
+    y = BOARD_ORIGIN_Y + 30  # Aligned with U1 XTAL pad row
 
     # HC49 crystal, 2 pins
     return f"""  (footprint "Crystal:Crystal_HC49-U_Vertical"
@@ -487,18 +502,28 @@ def generate_xtal_load_caps() -> str:
     C6 (XTAL2 -> GND). Without them on the PCB, ``kct validate --sync``
     flags schematic-only refs and the BOM<->PCB preflight blocks export.
 
-    Crystal Y1 sits at ``(BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 28)`` with
+    Crystal Y1 sits at ``(BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 30)`` with
     pads at x = +/-2.44 mm relative to its center (XTAL1 on pad 1, XTAL2 on
-    pad 2). Place C5 ~4 mm below the XTAL1 pad and C6 ~4 mm below the XTAL2
-    pad so each load cap is adjacent to its crystal pin with a short trace
-    to GND.
+    pad 2). Place C5/C6 ~4 mm ABOVE (north of) the crystal so each load
+    cap is adjacent to its crystal pin with a short trace to GND.
+
+    Why above (negative dy), not below: the joystick J2 sits at
+    ``(BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 35)`` with through-hole pads
+    spanning x = 11..19, y = 35. A below-Y1 cap at (xtal_cx - 2.44,
+    xtal_cy + 4) = (BOARD_ORIGIN_X + 19.56, BOARD_ORIGIN_Y + 34) places
+    C5-1 pad (0.56 x 0.62 mm at x = -0.48 from center) directly on top of
+    J2-5 (1.6 mm dia pad at (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 35))
+    -- a -0.110 mm pad-to-pad clearance violation that no router can fix.
+    Flipping cap_dy to negative places C5/C6 in the empty area between Y1
+    (y = 30) and U1's north pad row (y = 27.5), with > 0.9 mm clearance
+    on both sides.
     """
-    xtal_cx = BOARD_ORIGIN_X + 55
-    xtal_cy = BOARD_ORIGIN_Y + 28
-    cap_dy = 4.0  # mm below crystal center
+    xtal_cx = BOARD_ORIGIN_X + 22
+    xtal_cy = BOARD_ORIGIN_Y + 30
+    cap_dy = -4.0  # mm above crystal center (negative = north of Y1)
 
     parts = [
-        # C5: XTAL1 -> GND, sits under crystal pin 1
+        # C5: XTAL1 -> GND, sits above (north of) crystal pin 1
         generate_capacitor(
             "C5",
             (xtal_cx - 2.44, xtal_cy + cap_dy),
@@ -506,7 +531,7 @@ def generate_xtal_load_caps() -> str:
             "GND",
             value="22pF",
         ),
-        # C6: XTAL2 -> GND, sits under crystal pin 2
+        # C6: XTAL2 -> GND, sits above (north of) crystal pin 2
         generate_capacitor(
             "C6",
             (xtal_cx + 2.44, xtal_cy + cap_dy),
