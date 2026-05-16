@@ -233,10 +233,31 @@ tolerances:
   # Result on the post-fix routed artifact: 8 errors
   # (2 ``clearance_pad_via`` + 2 ``clearance_segment_segment``
   # + 4 ``clearance_segment_via``).  ``clearance_pad_segment`` drops
-  # to **0**.  Floor is held at 12 to give 4-error headroom for
+  # to **0**.  Floor was held at 12 to give 4-error headroom for
   # routing-yield noise between runs; the next tightening pass can
   # drop this further if the residual seg-via and pad-via violations
   # are stable across re-routes.  Tracked: #2834
   # (manufacturing-ready), #2908 (this PR), #2880 (NRST cluster --
   # closed by this PR).
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 12
+  #
+  # Tightened 12 -> 4 by issue #2951 / this PR.  The routed artifact
+  # was regenerated on top of the rect-aware ``_can_place_via``
+  # (Issue #2951) and ``set_via_foreign_context`` (Issue #2947)
+  # changes; the re-route lands at 4 errors:
+  #   * 2 ``clearance_segment_via`` at (26.838, 21.75) -- OSC_IN/NRST
+  #     traces touching the OSC_OUT via.
+  #   * 2 ``clearance_pad_via`` at (26.838, 21.5)/(26.838, 22.0) --
+  #     OSC_OUT in-pad via vs U2.5 (OSC_IN) and U2.7 (NRST).
+  # The OSC_OUT cluster is intrinsic to the LQFP-48 0.5mm-pitch
+  # geometry: the in-pad nudge searches along the pad's long axis
+  # (X for west-edge pads), but the U2.5/U2.7 neighbors share the
+  # OSC_OUT pad's X extent (all pads at x=126.8375, fingers extend
+  # along X into the chip body), so no long-axis offset can clear
+  # them.  The nudge correctly detects this and emits the structured
+  # ``In-pad rescue ... violates clearance`` warning before placing
+  # at dead-centre as a last resort (PR #2945 "place anyway, defer
+  # DRC to the user" semantics).  Exit clause: drop to 0 once the
+  # LQFP OSC_OUT escape uses pin-edge fanout (skip the in-pad
+  # rescue entirely on neighbor-overlapping pads) or a smaller via
+  # tier sized for the 0.5mm pitch.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 4

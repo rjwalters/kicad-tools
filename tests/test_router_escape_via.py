@@ -309,5 +309,136 @@ class TestInPadEscapeClearance:
         )
 
 
+class TestRectAwareForeignPadClearance:
+    """Issue #2951: ``point_clear_of_copper`` and
+    ``EscapeRouter._can_place_via`` must use rect-distance for oblong
+    fine-pitch foreign pads (not the disc-bound ``max(w,h)/2``).
+
+    Modelled on the board-04 LQFP-48 OSC_OUT cluster: 0.3 x 1.4mm pads
+    at 0.5mm pitch.  The disc-bound treats a neighbor as a 1.4mm disc,
+    making the required centre-to-centre distance
+    ``0.3 (via_r) + 0.7 (pad_r) + 0.15 (clear) = 1.15mm`` -- but the
+    pitch is only 0.5mm so every nudged via candidate is rejected.
+    With rect-distance the same geometry only requires
+    ``0.3 (via_r) + 0.15 (clear) = 0.45mm`` clearance to the pad EDGE,
+    which the long-axis nudge can satisfy.
+    """
+
+    def test_disc_rejects_dead_centre_via(self):
+        """Sanity: dead-centre via on the parent pad with the disc-bound
+        4-tuple is rejected (this is the production state pre-#2951).
+        """
+        # Neighbor: 0.3 x 1.4mm pad at (0.0, 0.5), pitch 0.5mm along Y.
+        # Disc bound: radius = 0.7mm.
+        # Via at (0, 0), diameter 0.6.
+        # Required = 0.3 + 0.7 + 0.15 = 1.15mm; actual = 0.5 -> reject.
+        assert not point_clear_of_copper(
+            x=0.0,
+            y=0.0,
+            via_size=0.6,
+            clearance=0.15,
+            other_net_pads=[(0.0, 0.5, 0.7, 99)],
+        )
+
+    def test_rect_admits_via_disc_would_reject(self):
+        """Core Issue #2951 diagnostic: a via positioned off the SHORT
+        axis of an oblong foreign pad clears rect-distance but the
+        disc-bound rejects.
+
+        Geometry:
+        * Foreign pad 0.3 (X) x 1.4 (Y) centered at (0, 0) -- long axis
+          is Y, short axis is X.  Pad extends x in [-0.15, +0.15],
+          y in [-0.7, +0.7].
+        * Via diameter 0.6, clearance 0.15.
+        * Via center at (0.6, 0.5).
+
+        Rect-distance: outside_x = 0.6 - 0.15 = 0.45; outside_y = 0.5 -
+        0.7 = -0.2 -> 0.  rect_dist = 0.45.  Required = via_radius +
+        clearance = 0.45.  Admits at the boundary.
+
+        Disc bound (radius = max(0.3, 1.4)/2 = 0.7): centre-to-centre =
+        sqrt(0.36 + 0.25) = 0.781.  Required = 0.3 + 0.7 + 0.15 = 1.15.
+        Rejects.
+
+        This is the LQFP fine-pitch escape pattern: PR #2950's in-pad
+        nudge produces candidate via offsets adjacent to the parent pad
+        (off the short axis) -- the disc-bound rejects every such
+        candidate, but rect-distance correctly admits clearly-clear
+        positions.
+        """
+        # Rect-aware 5-tuple: passes.
+        assert point_clear_of_copper(
+            x=0.6,
+            y=0.5,
+            via_size=0.6,
+            clearance=0.15,
+            other_net_pads=[(0.0, 0.0, 0.3, 1.4, 99)],
+        )
+
+        # Same geometry with the legacy disc-bound 4-tuple: rejects.
+        # max(0.3, 1.4)/2 = 0.7
+        assert not point_clear_of_copper(
+            x=0.6,
+            y=0.5,
+            via_size=0.6,
+            clearance=0.15,
+            other_net_pads=[(0.0, 0.0, 0.7, 99)],
+        )
+
+    def test_can_place_via_uses_rect_aware_for_foreign_pads(self):
+        """``EscapeRouter._can_place_via`` end-to-end with a 0.3 x 1.4mm
+        oblong foreign pad: the via center off the short axis must be
+        admitted (rect-aware) where the legacy disc-bound rejected it.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules)
+
+        # Same dichotomy geometry as above, but driven through the
+        # ``_can_place_via`` entry point so the Pad -> 5-tuple
+        # conversion in escape.py is exercised.
+        foreign = Pad(
+            x=10.0, y=10.0, width=0.3, height=1.4,
+            net=99, net_name="FOREIGN", layer=Layer.F_CU,
+        )
+        # Via at (10.6, 10.5) -- 0.45mm rect-distance to pad short edge,
+        # exactly at threshold (0.3 + 0.15 = 0.45).  Rect admits.  Disc
+        # would have rejected (cent-to-cent 0.78 < 1.15 threshold).
+        assert router._can_place_via(
+            x=10.6,
+            y=10.5,
+            net=5,
+            foreign_pads=[foreign],
+            clearance=0.15,
+            via_diameter=0.6,
+        )
+
+    def test_can_place_via_still_rejects_close_foreign_pad(self):
+        """Rect-aware does NOT make the predicate over-permissive: a
+        via clearly inside a foreign pad's clearance envelope is still
+        rejected.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules)
+
+        # Same 0.3 x 1.4mm foreign pad; via this time at (10.0, 10.5)
+        # i.e. centred on the pad short axis, 0.5mm from pad short
+        # edge along Y.  Rect: outside_x=0, outside_y=-0.2 (inside).
+        # Via center is inside the pad rectangle -> immediate rejection.
+        foreign = Pad(
+            x=10.0, y=10.0, width=0.3, height=1.4,
+            net=99, net_name="FOREIGN", layer=Layer.F_CU,
+        )
+        assert not router._can_place_via(
+            x=10.0,
+            y=10.5,
+            net=5,
+            foreign_pads=[foreign],
+            clearance=0.15,
+            via_diameter=0.6,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

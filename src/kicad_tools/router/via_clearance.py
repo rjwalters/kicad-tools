@@ -36,7 +36,6 @@ from typing import Protocol
 
 from kicad_tools.core.geometry import point_to_segment_distance
 
-
 # ---------------------------------------------------------------------------
 # Duck-typed protocols so the helper works with both stitcher and router
 # data classes without importing either module's concrete dataclass.
@@ -147,6 +146,24 @@ def _point_clear_of_filled_polygons(
 # ---------------------------------------------------------------------------
 
 
+#: Foreign-net pad tuple type.  Either:
+#:
+#: * 4-tuple ``(x, y, effective_radius, net_num)`` -- legacy "disc-bound"
+#:   shape used by the stitcher's pre-#2944 callers.  The effective radius
+#:   conservatively encodes pad geometry as ``max(width, height) / 2``.
+#: * 5-tuple ``(x, y, width, height, net_num)`` -- rect-aware shape
+#:   introduced in Issue #2951.  The helper computes axis-separated
+#:   distance to the pad rectangle (closest-point distance), avoiding the
+#:   disc-bound over-conservatism for oblong fine-pitch pads (e.g. 0.3 x
+#:   1.4mm LQFP fingers at 0.5mm pitch where the disc bound of 0.7mm
+#:   produces a 1.05mm minimum centre-to-centre vs the actual 0.35mm
+#:   rect-distance requirement).
+ForeignPadTuple = (
+    tuple[float, float, float, int]  # (x, y, radius, net)
+    | tuple[float, float, float, float, int]  # (x, y, width, height, net)
+)
+
+
 def point_clear_of_copper(
     x: float,
     y: float,
@@ -154,7 +171,7 @@ def point_clear_of_copper(
     clearance: float,
     other_net_tracks: list[TrackSegmentLike] | None = None,
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
-    other_net_pads: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[ForeignPadTuple] | None = None,
     same_net_vias: list[tuple[float, float]] | None = None,
     other_net_filled_polygons: list[FilledPolygonLike] | None = None,
 ) -> bool:
@@ -166,7 +183,9 @@ def point_clear_of_copper(
     * Same-net vias (prevents stacking; threshold = ``via_size + clearance``).
     * Other-net track segments (threshold = ``via_radius + seg.width/2 + clearance``).
     * Other-net vias (threshold = ``via_radius + other_radius + clearance``).
-    * Other-net pads (threshold = ``via_radius + pad_radius + clearance``).
+    * Other-net pads (threshold = ``via_radius + pad_radius + clearance`` for
+      4-tuple discs, or rect-distance >= ``via_radius + clearance`` for
+      5-tuple width/height pads -- see :data:`ForeignPadTuple`).
     * Other-net filled polygons (zone fills).
 
     Returns True only if every check passes.  Any single violation
@@ -193,10 +212,12 @@ def point_clear_of_copper(
             type with ``start_x/start_y/end_x/end_y/width``).
         other_net_vias: Foreign-net vias as
             ``(x, y, size_mm, net_num)`` tuples.
-        other_net_pads: Foreign-net pads as
-            ``(x, y, effective_radius_mm, net_num)`` tuples.  The
-            "effective radius" should already encode pad geometry
-            (e.g. ``max(width, height) / 2`` for roundrect pads).
+        other_net_pads: Foreign-net pads.  Each element may be either a
+            4-tuple ``(x, y, effective_radius_mm, net_num)`` (legacy
+            disc-bound) or a 5-tuple
+            ``(x, y, width_mm, height_mm, net_num)`` (rect-aware --
+            preferred for oblong fine-pitch pads; see Issue #2951).
+            Mixing tuple shapes within the same list is supported.
         same_net_vias: Existing same-net via centers as ``(x, y)``
             tuples used to reject via stacking.
         other_net_filled_polygons: Foreign-net filled polygons from
@@ -232,11 +253,39 @@ def point_clear_of_copper(
                 return False
 
     if other_net_pads:
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
-            min_dist = via_radius + p_radius + clearance
-            if dist < min_dist:
-                return False
+        # Required clearance from any pad edge -- same for disc and rect
+        # forms below (the disc form folds the pad's effective radius
+        # into the threshold, while the rect form measures distance to
+        # the pad's edge directly).
+        required_from_edge = via_radius + clearance
+        for pad in other_net_pads:
+            if len(pad) == 5:
+                # Rect-aware: (x, y, width, height, net).
+                # Compute axis-separated distance from via center to the
+                # axis-aligned pad rectangle -- mirrors
+                # ``EscapeRouter._via_clears_other_pads`` (Issue #2946).
+                px, py, p_w, p_h, _pnet = pad
+                half_w = p_w / 2
+                half_h = p_h / 2
+                dx_abs = abs(x - px)
+                dy_abs = abs(y - py)
+                outside_x = max(0.0, dx_abs - half_w)
+                outside_y = max(0.0, dy_abs - half_h)
+                if outside_x == 0.0 and outside_y == 0.0:
+                    # Via center inside the foreign pad rectangle -- an
+                    # immediate violation.  (Same-net "via in pad" is
+                    # legitimate but must be filtered by the caller; the
+                    # helper does not consult the via's own net.)
+                    return False
+                rect_dist = math.sqrt(outside_x * outside_x + outside_y * outside_y)
+                if rect_dist < required_from_edge - 1e-9:
+                    return False
+            else:
+                # Disc-bound legacy: (x, y, radius, net).
+                px, py, p_radius, _pnet = pad
+                dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+                if dist < via_radius + p_radius + clearance:
+                    return False
 
     if other_net_filled_polygons:
         if not _point_clear_of_filled_polygons(
@@ -249,6 +298,7 @@ def point_clear_of_copper(
 
 __all__ = [
     "FilledPolygonLike",
+    "ForeignPadTuple",
     "TrackSegmentLike",
     "point_clear_of_copper",
 ]
