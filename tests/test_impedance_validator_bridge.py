@@ -25,11 +25,9 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import (
     NET_CLASS_DEBUG,
-    DEFAULT_NET_CLASS_MAP,
     DesignRules,
     NetClassRouting,
 )
-
 
 # ---------------------------------------------------------------------------
 # Primary bridge gate (must fail on main, pass on PR)
@@ -131,9 +129,7 @@ class TestValidatorRegexBridge:
         assert "SWCLK" in log_text, (
             f"Expected INFO log mentioning SWCLK after synthesis, got:\n{log_text}"
         )
-        assert "50" in log_text, (
-            f"Expected INFO log mentioning 50Ω target, got:\n{log_text}"
-        )
+        assert "50" in log_text, f"Expected INFO log mentioning 50Ω target, got:\n{log_text}"
 
 
 # ---------------------------------------------------------------------------
