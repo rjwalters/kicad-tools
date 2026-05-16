@@ -332,6 +332,50 @@ class VectorCollisionChecker:
             if clearance < min_clearance:
                 return False
 
+        # Issue #2955: Check against foreign-net vias.
+        #
+        # The R-tree only indexes segments, so the broad/narrow-phase loop
+        # above never sees vias.  Without this check the optimizer's
+        # ``compress_staircase`` / ``convert_45_corners`` passes happily
+        # replace a clearance-respecting zigzag with a diagonal that grazes
+        # or punches a foreign-net through-hole via -- the canonical board-03
+        # failure mode where XTAL1's B.Cu trace was rewritten to a single
+        # off-grid segment that ran 0.14 mm from XTAL2's via at (125.6, 128.3),
+        # producing the ``clearance_segment_segment`` / ``clearance_segment_via``
+        # pair the post-route DRC then surfaces.
+        #
+        # ``GridCollisionChecker`` is implicitly safe against this because
+        # ``_mark_via`` paints ``cell.net = via.net`` on every blocked cell
+        # within the via's clearance envelope, so the Bresenham walk hits
+        # the via at the soft-block branch (``cell.net != exclude_net``).
+        # The R-tree path skipped that check entirely.
+        #
+        # Through-hole vias span ``layers[0]`` -> ``layers[1]`` inclusive of
+        # everything in between (KiCad does not enumerate inner layers in the
+        # S-expression).  ``validate_segment_clearance`` (grid.py:2390+) uses
+        # the same "check every via on every layer" simplification -- it's
+        # conservative-safe (at most a handful of false-positive rejections
+        # on multi-layer boards with blind/buried vias, which kicad-tools
+        # does not currently emit).
+        for route in self.grid.routes:
+            if route.net == exclude_net:
+                continue
+            for via in route.vias:
+                # Layer filter: through-hole vias span [layers[0], layers[1]]
+                # inclusive.  Skip the check if the via does not touch this
+                # layer.  ``_via_on_layer`` falls back to "yes" when the
+                # layer order is ambiguous, preserving the conservative
+                # behaviour of ``validate_segment_clearance``.
+                if not self._via_on_layer(via, layer_idx):
+                    continue
+                via_radius = via.diameter / 2
+                dist = point_to_segment_distance(
+                    via.x, via.y, x1, y1, x2, y2
+                )
+                clearance = dist - half_width - via_radius
+                if clearance < min_clearance:
+                    return False
+
         # Also check hard obstacles (pads, keepouts) via the grid
         # The R-tree only indexes routed segments, not static obstacles,
         # so we use the grid's obstacle layer for pad/keepout checks.
@@ -341,6 +385,28 @@ class VectorCollisionChecker:
             return False
 
         return True
+
+    def _via_on_layer(self, via: Any, layer_idx: int) -> bool:
+        """Return True if ``via`` blocks copper on ``layer_idx``.
+
+        Through-hole vias (the common case in kicad-tools today) declare
+        ``layers=(F.Cu, B.Cu)`` and physically block every layer in between
+        as well.  Blind / buried vias declare a sub-range.  This helper maps
+        the start / end layer enum values to grid layer indices and returns
+        ``True`` iff ``layer_idx`` falls in the inclusive range.
+
+        When the layer mapping cannot be resolved (unexpected Layer enum
+        value, etc.) the helper returns ``True`` to preserve the conservative
+        "assume blocking" behaviour of ``grid.validate_segment_clearance``
+        which iterates every via without layer filtering.
+        """
+        try:
+            start_idx = self.grid.layer_to_index(via.layers[0].value)
+            end_idx = self.grid.layer_to_index(via.layers[1].value)
+        except Exception:
+            return True
+        lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)
+        return lo <= layer_idx <= hi
 
     def _check_obstacles_clear(
         self,
