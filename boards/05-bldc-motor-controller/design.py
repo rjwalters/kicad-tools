@@ -1887,149 +1887,96 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """
-    Route the PCB using the autorouter.
+    Route the PCB by invoking the ``kct route`` CLI with the proven flag recipe.
 
-    Returns True if all nets were routed successfully.
+    Returns True if the routed file was produced (even partially).
+
+    Issue #2975: Previously this function called
+    ``router.route_all_negotiated()`` directly through the in-process API,
+    which bypassed the CLI's flag stack and gave the default routing
+    profile.  Empirically (measured on 2026-05-15 in #2906) that path
+    completes only ~5/40 signal nets on this board, while the CLI's
+    ``--no-auto-layers --layers 2 --manufacturer jlcpcb
+    --differential-pairs --backend python --seed 42 --timeout 240``
+    recipe completes ~15/40 on the same unrouted PCB.
+
+    What each flag does:
+
+    - ``--no-auto-layers --layers 2``: pin a 2-layer stackup so the
+      negotiator gets the full 240 s budget on the right stack.  The
+      default auto-layers loop escalates to 4L/6L before settling and
+      throws away the partial 2L result.
+    - ``--manufacturer jlcpcb``: triggers the jlcpcb design-rule profile
+      (different defaults from the bare ``DesignRules(...)`` the script
+      previously constructed).
+    - ``--differential-pairs``: enables the ISENSE_* matched-impedance
+      pair handling.
+    - ``--backend python``: the Python backend produces a meaningfully
+      higher completion than the C++ backend on this specific PCB's
+      manufacturer-tier feasibility profile (#2906 measurement).
+    - ``--seed 42``: deterministic output for byte-identical re-routes
+      in CI.
+
+    Skip nets remain the high-current power/phase nets that are carried
+    by copper pours instead of routed traces.
     """
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
-    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
-
     print("\n" + "=" * 60)
-    print("Routing PCB...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issue #2975)...")
     print("=" * 60)
-
-    # Configure design rules (from project.kct spec)
-    # min_trace: 0.2mm signal, min_space: 0.15mm, min_drill: 0.3mm
-    # Grid resolution must be <= clearance/2 for reliable DRC compliance.
-    # Issue #1543: Increased trace_width from 0.15mm to 0.2mm for reliable
-    # signal routing on a motor controller board.  Power nets get wider
-    # traces (0.5mm+) via the net-class system automatically.
-    # Issue #2532: Reduced trace_clearance to 0.15mm to allow fanout from
-    # the DRV8301 HTSSOP-56 (0.5mm-pitch) and STM32G431 LQFP-32
-    # (0.8mm-pitch) packages.  These match the JLCPCB 1-2 layer minimums.
-    rules = DesignRules(
-        grid_resolution=0.05,
-        trace_width=0.2,
-        trace_clearance=0.15,
-        via_drill=0.3,
-        via_diameter=0.6,
-    )
-
-    print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Grid resolution: {rules.grid_resolution}mm")
-    print(f"   Trace width: {rules.trace_width}mm")
-    print(f"   Clearance: {rules.trace_clearance}mm")
 
     # Skip power and high-current nets (route manually or use copper pour zones)
     # Phase nets carry motor current (10A+) and need wide traces (2mm+)
     skip_nets = ["VMOTOR", "+5V", "+3.3V", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
 
-    # Load the PCB
-    router, net_map = load_pcb_for_routing(
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
+        "--output",
+        str(output_path),
+        "--no-auto-layers",
+        "--layers",
+        "2",
+        "--manufacturer",
+        "jlcpcb",
+        "--differential-pairs",
+        "--backend",
+        "python",
+        "--seed",
+        "42",
+        "--timeout",
+        "240",
+        "--skip-nets",
+        ",".join(skip_nets),
+    ]
 
-    print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
+    print(f"\n1. Input: {input_path}")
+    print(f"   Output: {output_path}")
     print(f"   Skipping power nets: {skip_nets}")
+    print(f"   Command: {' '.join(cmd)}")
+    print("\n2. Routing...")
 
-    # Route all nets
-    #
-    # Issue #2794: Use ``route_all_negotiated`` with explicit per-net and
-    # outer timeouts so a single pathological net cannot stall the build
-    # indefinitely.  The bare ``router.route_all()`` call (no timeouts,
-    # no progress callback) previously hung this board's ``kct build``
-    # for 22+ minutes inside A* heap-key churn -- with one net emitted
-    # and zero feedback after that point.
-    #
-    # The values below mirror the ``kct route`` CLI's defaults
-    # (``src/kicad_tools/cli/route_cmd.py:1702-1710``):
-    #
-    #   - ``per_net_timeout=30.0``  -- per-net A* deadline (#2775/#2779
-    #     bracketed this across the whole net rather than per RSMT edge,
-    #     so 30 s is now a reliable cap)
-    #   - ``timeout=240.0``         -- outer wall-clock budget for the
-    #     entire negotiated loop; on the off-chance every net hits its
-    #     timeout, total stays bounded
-    #   - ``progress_callback``     -- one-line per-net status so
-    #     ``kct build`` (and humans) see progress without ``--verbose``
-    print("\n2. Routing nets...")
+    result = subprocess.run(cmd, capture_output=False, text=True)
 
-    def _route_progress(progress: float, message: str, _ok: bool) -> bool:
-        # Negotiated callback fires once per net plus a final summary;
-        # echo to stdout so build_cmd's streaming stdout (Issue #2794
-        # fix) surfaces it to the parent process.
-        print(f"   [{progress * 100:5.1f}%] {message}", flush=True)
-        return True
+    # ``kct route`` returns 0 on full success and a non-zero code on
+    # partial / failed routing.  Either way it writes a routed PCB to
+    # ``output_path`` (the partial-results file is at
+    # ``<stem>_partial.kicad_pcb``).  As long as the output file exists,
+    # downstream steps (zone fill + DRC) can run; report success/partial
+    # purely informationally.
+    success = result.returncode == 0
 
-    router.route_all_negotiated(
-        per_net_timeout=30.0,
-        timeout=240.0,
-        progress_callback=_route_progress,
-    )
-
-    # Get statistics before optimization
-    stats_before = router.get_statistics()
-
-    print("\n3. Raw routing results:")
-    print(f"   Routes: {stats_before['routes']}")
-    print(f"   Segments: {stats_before['segments']}")
-    print(f"   Vias: {stats_before['vias']}")
-
-    # Optimize traces
-    print("\n4. Optimizing traces...")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    optimizer = TraceOptimizer(config=opt_config)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    # Get final statistics
-    stats = router.get_statistics()
-
-    print("\n5. Final routing results:")
-    print(f"   Routes: {stats['routes']}")
-    print(f"   Segments: {stats['segments']}")
-    print(f"   Vias: {stats['vias']}")
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    # Save routed PCB
-    print(f"\n6. Saving routed PCB: {output_path}")
-
-    original_content = input_path.read_text()
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-
-    # Calculate success - we skipped power nets, so only count signal nets
-    total_signal_nets = len([n for n in router.nets if n > 0])
-    success = stats["nets_routed"] == total_signal_nets
+    if not output_path.exists():
+        print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
+        return False
 
     if success:
-        print("\n   SUCCESS: All signal nets routed!")
+        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_signal_nets} signal nets")
+        print(f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
+              "(partial routing; downstream zone fill + DRC will continue)")
 
     return success
 
