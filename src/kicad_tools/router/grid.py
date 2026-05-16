@@ -3517,15 +3517,42 @@ class RoutingGrid:
             self._present_cost_ema = alpha * new_present + (1.0 - alpha) * self._present_cost_ema
 
     def get_negotiated_cost(
-        self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        present_cost_factor: float = 1.0,
+        net: int | None = None,
     ) -> float:
-        """Get the negotiated congestion cost for a cell."""
+        """Get the negotiated congestion cost for a cell.
+
+        Args:
+            gx, gy, layer: Grid coordinates / layer index of the cell.
+            present_cost_factor: Adaptive present-cost weight.
+            net: Optional routing-net context.  When provided AND the
+                cell's net matches, an ``is_obstacle`` cell is treated
+                as reachable (returns a finite cost) rather than hard
+                ``inf``.  This is the cost-side mirror of the
+                ``cell.net != net`` filter applied in the pathfinder's
+                ``_is_trace_blocked`` / ``_is_via_blocked`` predicates
+                (PR #2965 pattern).  Without this, post-PR #2928 the
+                destination pad's own metal -- which is now marked
+                ``is_obstacle=True`` on first touch -- yields ``inf``
+                cost and A* cannot expand into it, leaving endpoint
+                pads (e.g. NRST/BOOT0 on board 04) unreachable.
+                Defaults to ``None`` (legacy behavior: any obstacle
+                cell is ``inf``).
+        """
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return float("inf")
 
         cell = self.grid[layer][gy][gx]
 
-        if cell.is_obstacle:
+        # Issue #2963: own-net obstacle cells (e.g. the destination
+        # pad's own metal after PR #2928's first-touch marking) must
+        # remain reachable for the routing net.  Foreign-net obstacles
+        # still hard-reject.
+        if cell.is_obstacle and (net is None or cell.net != net):
             return float("inf")
 
         # Issue #2333: Use EMA-smoothed present cost when available

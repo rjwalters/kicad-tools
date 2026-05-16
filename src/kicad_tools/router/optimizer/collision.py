@@ -128,7 +128,11 @@ class GridCollisionChecker:
 
             # Check if blocked by another net
             if cell.blocked:
-                if cell.is_obstacle:
+                # Issue #2963: own-net obstacle cells (destination pad
+                # metal marked by PR #2928's first-touch) must remain
+                # passable for the route's own net.  Foreign-net
+                # obstacles still hard-reject.
+                if cell.is_obstacle and cell.net != exclude_net:
                     return False  # Hard obstacle (pad, keepout) -- always block
 
                 # Issue #2757: A pad on a skipped pour net (e.g. GND, +3V3)

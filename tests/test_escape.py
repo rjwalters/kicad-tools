@@ -905,6 +905,99 @@ class TestStaggeredViaFanout:
         )
 
 
+class TestCanPlaceViaOwnNetObstacle:
+    """Issue #2963 regression: `_can_place_via` must admit a candidate
+    that lands on an own-net `is_obstacle=True` cell.
+
+    Post-PR #2928, isolated pad-metal cells are marked
+    ``is_obstacle=True`` on first touch.  Before this fix, the grid-cell
+    check inside ``_can_place_via`` rejected EVERY candidate that landed
+    inside the destination pad's footprint -- even when ``net`` matched
+    the pad's own net.  On board 04 this manifested as NRST/BOOT0 (and
+    similar endpoint pads) being unreachable, dropping the route from
+    9/9 to 7/9.
+    """
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create grid and rules for testing."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def _paint_obstacle_cell(self, grid, x, y, net):
+        """Mark the cell at world (x, y) as a same-net obstacle on every
+        layer, mirroring the post-PR #2928 isolated-pad first-touch
+        bookkeeping.
+        """
+        gx, gy = grid.world_to_grid(x, y)
+        for layer_idx in range(grid.num_layers):
+            cell = grid.grid[layer_idx][gy][gx]
+            cell.blocked = True
+            cell.is_obstacle = True
+            cell.net = net
+
+    def test_own_net_obstacle_admits_via(self, grid_and_rules):
+        """Issue #2963 primary regression:
+        ``_can_place_via(x, y, net=pad.net)`` must return True at a cell
+        whose ``is_obstacle=True`` belongs to ``pad.net`` (own net).
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pad_net = 7
+        pad_x, pad_y = 10.0, 10.0
+        self._paint_obstacle_cell(grid, pad_x, pad_y, pad_net)
+
+        # Same-net via: must be admitted even though the cell is an
+        # obstacle.  Without the fix this returns False -- the bug that
+        # blocked board 04 NRST/BOOT0.
+        assert router._can_place_via(pad_x, pad_y, net=pad_net) is True, (
+            "Issue #2963: same-net via must be admitted on an own-net "
+            "is_obstacle cell (NRST/BOOT0 endpoint reachability)."
+        )
+
+    def test_foreign_net_obstacle_rejects_via(self, grid_and_rules):
+        """Issue #2963 corollary: foreign-net obstacle cells must still
+        reject the candidate via.  The fix must not loosen the original
+        PR #2928 invariant.
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        obstacle_net = 7
+        probe_net = 99
+        x, y = 10.0, 10.0
+        self._paint_obstacle_cell(grid, x, y, obstacle_net)
+
+        assert router._can_place_via(x, y, net=probe_net) is False, (
+            "Issue #2963: foreign-net obstacle cells must still reject "
+            "the via (preserves PR #2928's invariant)."
+        )
+
+    def test_none_net_obstacle_rejects_via(self, grid_and_rules):
+        """When the caller supplies ``net=None`` (no net context), the
+        predicate must remain conservative and reject obstacle cells --
+        callers who lack net context cannot prove the cell is own-net.
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        self._paint_obstacle_cell(grid, 10.0, 10.0, net=7)
+
+        assert router._can_place_via(10.0, 10.0, net=None) is False, (
+            "Issue #2963: with no net context, conservative reject must "
+            "be preserved (no spurious allowance)."
+        )
+
+
 class TestApplyEscapeRoutes:
     """Tests for applying escape routes to grid."""
 

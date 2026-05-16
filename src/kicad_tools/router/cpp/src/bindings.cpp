@@ -157,7 +157,7 @@ NB_MODULE(router_cpp, m) {
         .def("reset_usage", &Grid3D::reset_usage)
         .def("increment_usage", &Grid3D::increment_usage, "x"_a, "y"_a, "layer"_a)
         .def("get_negotiated_cost", &Grid3D::get_negotiated_cost,
-             "x"_a, "y"_a, "layer"_a, "present_factor"_a)
+             "x"_a, "y"_a, "layer"_a, "present_factor"_a, "net"_a = 0)
         .def("update_history_costs", &Grid3D::update_history_costs, "increment"_a)
         .def("get_total_overflow", &Grid3D::get_total_overflow)
         // Properties
