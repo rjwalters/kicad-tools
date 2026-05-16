@@ -16,7 +16,7 @@ from kicad_tools.router.escape import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Pad
+from kicad_tools.router.primitives import Pad, Segment
 from kicad_tools.router.rules import DesignRules
 
 # ==============================================================================
@@ -759,7 +759,11 @@ class TestStaggeredViaFanout:
 
         # Create a simple 2x2 grid of pads
         pads = create_bga_pads(2, 2, pitch=0.8)
-        vias = router.staggered_via_fanout(pads)
+        # Issue #2948: pass empty foreign-copper lists explicitly to
+        # preserve the legacy grid-cell-only behavior under test.
+        vias = router.staggered_via_fanout(
+            pads, foreign_pads=[], foreign_tracks=[]
+        )
 
         # Should have up to 4 vias
         assert len(vias) <= 4
@@ -770,7 +774,11 @@ class TestStaggeredViaFanout:
         router = EscapeRouter(grid, rules)
 
         pads = create_bga_pads(3, 3, pitch=1.0)  # Larger pitch for clarity
-        vias = router.staggered_via_fanout(pads, stagger_distance=0.3)
+        # Issue #2948: pass empty foreign-copper lists explicitly so the
+        # legacy fast path (grid-cell-only) is exercised here.
+        vias = router.staggered_via_fanout(
+            pads, stagger_distance=0.3, foreign_pads=[], foreign_tracks=[]
+        )
 
         # Check that vias are near but not exactly on pad positions
         for via in vias:
@@ -781,6 +789,120 @@ class TestStaggeredViaFanout:
             # Via should be offset from pad (not exactly on it)
             # but close enough to connect
             assert min_dist < 1.0  # Within 1mm
+
+    def test_foreign_pad_in_envelope_rejects_via(self, grid_and_rules):
+        """Issue #2948: when a foreign-net pad sits inside the via's
+        clearance envelope, ``staggered_via_fanout`` must drop the
+        offending candidate via ``_can_place_via``.
+
+        This pins the wire from caller -> predicate.  Without the wiring
+        (the pre-#2948 state) the same call would have emitted the via.
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Single same-net pad; with stagger_distance=0 the candidate via
+        # lands exactly on the pad.  Place a foreign-net pad at a
+        # distance that violates the clearance envelope:
+        #
+        #   via_diameter = 0.7  -> via_radius = 0.35
+        #   foreign pad effective radius = max(0.4, 0.4) / 2 = 0.2
+        #   via_clearance = 0.2
+        #   required separation = 0.35 + 0.2 + 0.2 = 0.75 mm
+        #
+        # Place the foreign pad 0.5 mm away -> below the threshold ->
+        # rejection expected.
+        own_pad = Pad(
+            x=10.0, y=10.0, width=0.4, height=0.4,
+            net=5, net_name="OWN", layer=Layer.F_CU,
+        )
+        foreign = Pad(
+            x=10.5, y=10.0, width=0.4, height=0.4,
+            net=99, net_name="OTHER", layer=Layer.F_CU,
+        )
+
+        # Baseline: with no foreign context the legacy path emits the via.
+        baseline_vias = router.staggered_via_fanout(
+            [own_pad], stagger_distance=0.0
+        )
+        assert len(baseline_vias) == 1, (
+            "Sanity check: legacy path (no foreign context) should emit "
+            "the candidate via."
+        )
+
+        # Wired path: foreign pad inside the envelope rejects the via.
+        wired_vias = router.staggered_via_fanout(
+            [own_pad],
+            stagger_distance=0.0,
+            foreign_pads=[foreign],
+            foreign_tracks=[],
+        )
+        assert wired_vias == [], (
+            "Issue #2948: foreign-net pad inside clearance envelope must "
+            "cause _can_place_via to reject the candidate via."
+        )
+
+    def test_foreign_track_in_envelope_rejects_via(self, grid_and_rules):
+        """Issue #2948: foreign-net track segments must also be honored
+        when supplied via ``foreign_tracks``.
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        own_pad = Pad(
+            x=10.0, y=10.0, width=0.4, height=0.4,
+            net=5, net_name="OWN", layer=Layer.F_CU,
+        )
+        # Horizontal foreign-net trace passing 0.4 mm above the via center.
+        # Required clearance:
+        #   via_radius (0.35) + trace_half_width (0.1) + via_clearance (0.2)
+        #   = 0.65 mm; actual 0.4 mm -> reject.
+        foreign_seg = Segment(
+            x1=9.0, y1=10.4, x2=11.0, y2=10.4,
+            width=0.2, layer=Layer.F_CU, net=99, net_name="OTHER",
+        )
+
+        wired_vias = router.staggered_via_fanout(
+            [own_pad],
+            stagger_distance=0.0,
+            foreign_pads=[],
+            foreign_tracks=[foreign_seg],
+        )
+        assert wired_vias == [], (
+            "Issue #2948: foreign-net track inside clearance envelope "
+            "must cause _can_place_via to reject the candidate via."
+        )
+
+    def test_same_net_pad_does_not_reject_via(self, grid_and_rules):
+        """Issue #2948: same-net pads in ``foreign_pads`` must NOT cause
+        rejection.  The predicate must filter by net before evaluating
+        clearance — otherwise the parent pad would always reject its own
+        in-pad via.
+        """
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        own_pad = Pad(
+            x=10.0, y=10.0, width=0.4, height=0.4,
+            net=5, net_name="OWN", layer=Layer.F_CU,
+        )
+        # Same-net "foreign" pad close enough to violate clearance if
+        # treated as foreign.  Must be filtered out by net=5.
+        same_net = Pad(
+            x=10.3, y=10.0, width=0.4, height=0.4,
+            net=5, net_name="OWN", layer=Layer.F_CU,
+        )
+
+        vias = router.staggered_via_fanout(
+            [own_pad],
+            stagger_distance=0.0,
+            foreign_pads=[same_net],
+            foreign_tracks=[],
+        )
+        assert len(vias) == 1, (
+            "Issue #2948: same-net pads must be filtered out before the "
+            "world-coord clearance check."
+        )
 
 
 class TestApplyEscapeRoutes:
