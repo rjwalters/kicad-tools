@@ -33,6 +33,7 @@ def _make_mock_grid(
     rtree_available: bool = True,
     seg_rtree_count: int = 10,
     segments: list[Segment] | None = None,
+    routes: list | None = None,
     trace_clearance: float = 0.15,
     resolution: float = 0.1,
     cols: int = 100,
@@ -53,6 +54,11 @@ def _make_mock_grid(
     grid.world_to_grid = MagicMock(
         side_effect=lambda x, y: (int(x / resolution), int(y / resolution))
     )
+
+    # Issue #2955: VectorCollisionChecker now consults ``grid.routes`` for
+    # foreign-net via checks.  Default to an empty list so pre-existing
+    # tests that exercise only segment / pad logic are unaffected.
+    grid.routes = routes if routes is not None else []
 
     if segments:
         # Build mock R-tree data
@@ -225,6 +231,8 @@ def _make_mock_grid_with_pad_cell(
     grid.world_to_grid = MagicMock(side_effect=lambda x, y: (int(x / 0.1), int(y / 0.1)))
     grid._seg_rtree = {}
     grid._seg_rtree_items = {}
+    # Issue #2955: VectorCollisionChecker iterates grid.routes for foreign vias.
+    grid.routes = []
 
     pad_cell = MagicMock()
     pad_cell.blocked = blocked
@@ -336,3 +344,207 @@ class TestVectorCollisionCheckerPadBlocked:
         checker2 = make_collision_checker(grid2, ignore_overflow=True)
         assert isinstance(checker2, GridCollisionChecker)
         assert checker2.ignore_overflow is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #2955: VectorCollisionChecker must reject paths that graze or punch
+# foreign-net through-hole vias.  The pre-fix VectorCollisionChecker only
+# consulted the R-tree (segments only) and ``_check_obstacles_clear``
+# (pads/keepouts only), so the trace optimizer's ``compress_staircase`` /
+# ``convert_45_corners`` passes could rewrite a clearance-respecting zigzag
+# into a diagonal that crossed a foreign via.  Board-03 canonical:
+# XTAL1's B.Cu trace was compressed into a single off-grid segment passing
+# 0.14 mm from XTAL2's via at world (125.6, 128.3), producing the
+# ``clearance_segment_segment`` / ``clearance_segment_via`` DRC pair.
+#
+# ``GridCollisionChecker`` was implicitly safe because ``_mark_via`` paints
+# ``cell.net = via.net`` on every blocked cell within the via's clearance
+# envelope, so the Bresenham walk's ``cell.net != exclude_net`` soft-block
+# branch rejects the path.  This test suite pins the corresponding behaviour
+# into the R-tree path.
+# ---------------------------------------------------------------------------
+
+
+def _make_via(x: float, y: float, net: int, *, diameter: float = 0.6, drill: float = 0.3):
+    """Build a through-hole Via primitive for VectorCollisionChecker tests."""
+    from kicad_tools.router.primitives import Via
+
+    return Via(
+        x=x,
+        y=y,
+        drill=drill,
+        diameter=diameter,
+        layers=(Layer.F_CU, Layer.B_CU),
+        net=net,
+    )
+
+
+def _make_route_with_via(net: int, via):
+    """Build a Route containing a single via and no segments."""
+    from kicad_tools.router.primitives import Route
+
+    route = Route(net=net, net_name=f"net_{net}")
+    route.vias.append(via)
+    return route
+
+
+class TestVectorCollisionCheckerForeignVia:
+    """Issue #2955: VectorCollisionChecker rejects paths punching foreign vias."""
+
+    def test_path_through_foreign_via_blocked(self):
+        """Path whose center passes through a foreign-net via must be rejected.
+
+        Canonical board-03 XTAL geometry: XTAL1 B.Cu trace from
+        (128.68, 128.01) -> (122.71, 128.31) parametrically passes through
+        x = 125.6 at y ~= 128.16, only 0.14 mm from XTAL2's via centre at
+        (125.6, 128.3).  Edge-to-edge clearance with via_radius=0.3 and
+        trace_half_width=0.1: 0.14 - 0.3 - 0.1 = -0.26 mm -- well below
+        the 0.15 mm minimum clearance.
+        """
+        via = _make_via(125.6, 128.3, net=16)  # XTAL2 via
+        route = _make_route_with_via(net=16, via=via)
+        # No foreign segments in the R-tree -- isolate the via path.
+        grid = _make_mock_grid(routes=[route])
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {0: mock_rtree}
+        grid._seg_rtree_items = {0: {}}
+
+        checker = VectorCollisionChecker(grid)
+        # XTAL1 (net 15) compressed B.Cu segment -- the path the optimizer
+        # produced pre-fix.  Must be rejected.
+        result = checker.path_is_clear(
+            128.68, 128.01, 122.71, 128.31,
+            Layer.B_CU, 0.2, exclude_net=15,
+        )
+        assert result is False, (
+            "Optimizer path through XTAL2 via must be rejected by "
+            "VectorCollisionChecker (issue #2955)."
+        )
+
+    def test_own_net_via_does_not_block_path(self):
+        """A via on the trace's own net must NOT block the trace.
+
+        A trace must be allowed to terminate at / extend from its own via.
+        """
+        via = _make_via(2.5, 0.0, net=1)
+        route = _make_route_with_via(net=1, via=via)
+        grid = _make_mock_grid(routes=[route])
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {0: mock_rtree}
+        grid._seg_rtree_items = {0: {}}
+
+        checker = VectorCollisionChecker(grid)
+        result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.F_CU, 0.2, exclude_net=1,
+        )
+        assert result is True
+
+    def test_via_well_outside_clearance_does_not_block(self):
+        """A foreign via outside the clearance envelope must NOT block."""
+        # Via 5 mm above the trace -- nowhere near clearance.
+        via = _make_via(2.5, 5.0, net=2)
+        route = _make_route_with_via(net=2, via=via)
+        grid = _make_mock_grid(routes=[route])
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {0: mock_rtree}
+        grid._seg_rtree_items = {0: {}}
+
+        checker = VectorCollisionChecker(grid)
+        result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.F_CU, 0.2, exclude_net=1,
+        )
+        assert result is True
+
+    def test_via_within_clearance_blocks_path(self):
+        """A foreign via whose envelope grazes the trace must block.
+
+        Geometry: via at (2.5, 0.5) with diameter 0.6 (radius 0.3).
+        Trace half-width 0.1.  Required clearance 0.15.
+        Distance from via centre to trace line = 0.5 mm.
+        Edge-to-edge clearance = 0.5 - 0.3 - 0.1 = 0.1 mm < 0.15 mm.
+        """
+        via = _make_via(2.5, 0.5, net=2)
+        route = _make_route_with_via(net=2, via=via)
+        grid = _make_mock_grid(routes=[route])
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {0: mock_rtree}
+        grid._seg_rtree_items = {0: {}}
+
+        checker = VectorCollisionChecker(grid)
+        result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.F_CU, 0.2, exclude_net=1,
+        )
+        assert result is False
+
+    def test_via_on_different_layer_does_not_block_blind_via(self):
+        """A blind via that does not touch the trace's layer must NOT block.
+
+        Synthetic blind via case: via spans (F.Cu, F.Cu) -- only F.Cu.
+        Trace on B.Cu (layer index 1) must not be rejected.  This guards
+        the layer-aware ``_via_on_layer`` helper.
+        """
+        from kicad_tools.router.primitives import Via
+
+        via = Via(
+            x=2.5,
+            y=0.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.F_CU),  # F.Cu-only "blind" via
+            net=2,
+        )
+        route = _make_route_with_via(net=2, via=via)
+        grid = _make_mock_grid(routes=[route])
+        # Override layer_to_index so F.Cu=0, B.Cu=1
+        def _layer_to_index(name: str) -> int:
+            return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+        grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {1: mock_rtree}  # B.Cu R-tree
+        grid._seg_rtree_items = {1: {}}
+
+        checker = VectorCollisionChecker(grid)
+        # Trace on B.Cu, the F.Cu-only via should be ignored on B.Cu.
+        result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.B_CU, 0.2, exclude_net=1,
+        )
+        assert result is True, (
+            "Blind via that does not touch the trace's layer must not "
+            "block the path."
+        )
+
+    def test_through_hole_via_blocks_on_both_layers(self):
+        """A TH via (F.Cu <-> B.Cu) must block on F.Cu AND B.Cu."""
+        via = _make_via(2.5, 0.0, net=2)
+        route = _make_route_with_via(net=2, via=via)
+        grid = _make_mock_grid(routes=[route])
+        def _layer_to_index(name: str) -> int:
+            return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+        grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
+        mock_rtree = MagicMock()
+        mock_rtree.intersection = MagicMock(return_value=[])
+        grid._seg_rtree = {0: mock_rtree, 1: mock_rtree}
+        grid._seg_rtree_items = {0: {}, 1: {}}
+
+        checker = VectorCollisionChecker(grid)
+        # F.Cu trace through the via -- must reject.
+        f_result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.F_CU, 0.2, exclude_net=1,
+        )
+        assert f_result is False
+        # B.Cu trace through the via -- must also reject.
+        b_result = checker.path_is_clear(
+            0.0, 0.0, 5.0, 0.0,
+            Layer.B_CU, 0.2, exclude_net=1,
+        )
+        assert b_result is False
