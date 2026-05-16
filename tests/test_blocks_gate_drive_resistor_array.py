@@ -114,7 +114,11 @@ class TestGateDriveResistorArray:
             assert in_pos[0] < out_pos[0]
 
     def test_input_output_net_aliases(self, mock_schematic):
-        """When ``input_nets``/``output_nets`` provided, aliases and labels appear."""
+        """When ``input_nets``/``output_nets`` provided, aliases and labels appear.
+
+        Labels are offset by one schematic grid (2.54 mm) from the pin so
+        a stub wire can anchor them — see #2968.
+        """
         block = create_gate_drive_resistor_array(
             mock_schematic,
             x=100,
@@ -136,16 +140,55 @@ class TestGateDriveResistorArray:
         assert "GATE_DRV_AH" in labels_called
         assert "GATE_AH" in labels_called
 
-        # And each label sits at the corresponding pin position.
+        # Labels sit on the stub-wire endpoint, offset 2.54mm from the pin
+        # (left of pin 1, right of pin 2). The ports themselves remain at
+        # the pin positions so external blocks connect to the pin, not the
+        # label stub.
+        STUB = 2.54
         in_pos = block.ports["IN_1"]
         out_pos = block.ports["OUT_1"]
         for call in mock_schematic.add_label.call_args_list:
             args, _kw = call
             net_name, lx, ly = args[0], args[1], args[2]
             if net_name == "GATE_DRV_AH":
-                assert (lx, ly) == in_pos
+                assert (lx, ly) == (in_pos[0] - STUB, in_pos[1])
             elif net_name == "GATE_AH":
-                assert (lx, ly) == out_pos
+                assert (lx, ly) == (out_pos[0] + STUB, out_pos[1])
+
+    def test_labels_anchored_to_wire_endpoints(self, mock_schematic):
+        """Regression test for #2968.
+
+        Every ``add_label(text, x, y)`` call must have at least one matching
+        ``add_wire(a, b)`` call whose endpoints include ``(x, y)`` — otherwise
+        KiCad's label-only connectivity treats the label as floating.
+        """
+        create_gate_drive_resistor_array(
+            mock_schematic,
+            x=100,
+            y=100,
+            channels=3,
+            input_nets=["GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH"],
+            output_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+        )
+
+        # Collect every wire endpoint (both ends of every add_wire call).
+        wire_endpoints: set[tuple[float, float]] = set()
+        for call in mock_schematic.add_wire.call_args_list:
+            args, _kw = call
+            a, b = args[0], args[1]
+            wire_endpoints.add((a[0], a[1]))
+            wire_endpoints.add((b[0], b[1]))
+
+        # Every label coordinate must be a wire endpoint.
+        label_calls = mock_schematic.add_label.call_args_list
+        assert len(label_calls) == 6, "expected 3 input + 3 output labels"
+        for call in label_calls:
+            args, _kw = call
+            net_name, lx, ly = args[0], args[1], args[2]
+            assert (lx, ly) in wire_endpoints, (
+                f"label {net_name!r} at ({lx}, {ly}) has no matching wire endpoint; "
+                f"KiCad will treat it as floating (regression of #2968)"
+            )
 
     def test_net_list_length_validation(self, mock_schematic):
         """Mismatched ``input_nets``/``output_nets`` length raises ValueError."""
