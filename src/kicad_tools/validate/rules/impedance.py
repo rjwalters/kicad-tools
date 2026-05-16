@@ -104,17 +104,32 @@ class ImpedanceRule(DRCRule):
 
     @staticmethod
     def _get_default_specs() -> list[NetImpedanceSpec]:
-        """Return default impedance specifications for common signal types."""
+        """Return default impedance specifications for common signal types.
+
+        Ordering note (Issue #2970): the ``+/-`` and ``_P/_N`` diff-pair
+        suffix patterns are placed BEFORE the single-ended ``.*CLK$``
+        catch-all so that nets like ``MIPI_CLK+`` resolve to 100Ω
+        differential (their actual electrical role) rather than 50Ω
+        single-ended. The ``.*CLK$`` anchor (vs. the prior ``.*CLK.*``)
+        further ensures ``MIPI_CLK+`` does not match the single-ended
+        pattern at all -- the trailing ``+`` is required to live in
+        ``.*[+\\-]$``'s diff-pair pattern.
+        """
         return [
-            # USB differential pairs - 90Ω differential
+            # USB differential pairs - 90Ω differential (covers + / - / P / M / D+/D-)
             NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0),
-            # High-speed single-ended - 50Ω
-            NetImpedanceSpec(r".*CLK.*", target_z0=50.0),
-            NetImpedanceSpec(r".*MCLK.*", target_z0=50.0),
-            NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
-            # LVDS/high-speed diff pairs - 100Ω differential
+            # LVDS/high-speed diff pairs - 100Ω differential.
             NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0),
+            # Generic diff-pair suffix conventions - 100Ω differential.
+            # NOTE: these must come BEFORE the single-ended ``.*CLK$``
+            # spec so e.g. ``MIPI_CLK+`` resolves to diff, not 50Ω SE.
             NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0),
+            NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0),
+            # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
+            # ``MIPI_CLK+`` does NOT mis-match as single-ended.
+            NetImpedanceSpec(r".*CLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*MCLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
         ]
 
     def __init__(
@@ -280,6 +295,35 @@ class ImpedanceRule(DRCRule):
         for net_name, traces in trace_data.items():
             spec = self._find_matching_spec(net_name)
             if spec is None:
+                continue
+
+            # Issue #2973 follow-up: skip differential-only specs (those
+            # carrying only ``target_zdiff``) when the rule has no
+            # diff-pair detection context (``self._detected_pairs`` is
+            # empty / ``self._partner_map`` does not contain this net).
+            # Without coupling information, the single-ended fallback in
+            # ``_check_trace_impedance`` evaluates the trace against a
+            # bogus ``target_z = spec.target_z0 or 50.0`` (i.e. 50Ω),
+            # which produces spurious "target is 50.0Ω" errors on routed
+            # diff-pair signals like ``PCIE_TX+``.  This is the standalone
+            # ``kct check`` code path (``DRCChecker.check_impedance``
+            # constructs ``ImpedanceRule()`` with no ``detected_pairs``)
+            # which board 06's CI gate exercises.  Skipping diff-only
+            # specs in this context mirrors the Phase 3K docstring's
+            # contract: "when ``None`` (the default), the rule falls
+            # back to its pre-Phase 3K single-ended-only behavior",
+            # which should NOT mean "evaluate a diff target against a
+            # single-ended fallback".  Diff-pair impedance is still
+            # validated when the router supplies ``detected_pairs``
+            # (the autorouter integration path), and single-ended
+            # specs (``target_z0`` set) continue to fire unconditionally
+            # -- this preserves the #2964 SWCLK use case and the
+            # impedance-driven sizing bridge in PR #2966.
+            if (
+                spec.target_z0 is None
+                and spec.target_zdiff is not None
+                and net_name not in self._partner_map
+            ):
                 continue
 
             for trace in traces:
