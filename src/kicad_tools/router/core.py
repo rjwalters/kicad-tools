@@ -1530,6 +1530,56 @@ class Autorouter:
         if hasattr(self.router, "set_unrouted_pads"):
             self.router.set_unrouted_pads(unrouted_pads)
 
+    def _update_router_via_foreign_context(self, current_net: int) -> None:
+        """Update router foreign-net context for world-coord via clearance.
+
+        Issue #2947: ``pathfinder.Router._check_via_placement_cached``
+        consults a coarse-grid obstacle map that can admit vias which
+        violate world-coordinate clearance against foreign-net pads /
+        committed tracks (most visibly: board-04 BOOT0 vias overlapping
+        SWDIO/SWCLK by 0.1-0.2 mm).  We push the foreign-net pads and
+        already-committed track segments to the router so it can run
+        the same ``point_clear_of_copper`` predicate the escape phase
+        already uses (PR #2945 / Issue #2944).
+
+        Same-net obstacles are filtered here (matches the escape-router
+        boundary convention).  A* has a fallback at both call sites
+        (`pathfinder.py:2227` / `:3516` use ``continue`` on rejection)
+        so a hard reject is safe -- the search will try alternate via
+        positions or alternate 2D paths.
+
+        Args:
+            current_net: The net ID being routed (foreign = pads/segments
+                whose net != current_net).
+        """
+        if not hasattr(self.router, "set_via_foreign_context"):
+            return  # C++ backend or test stub without the hook -- no-op.
+
+        # Foreign pads: every pad whose net differs from ``current_net``.
+        # ``set_via_foreign_context`` filters same-net per-call too, but
+        # filtering here keeps the list bounded for boards with large
+        # pad counts.
+        foreign_pads = [
+            p for p in self.pads.values() if p.net != current_net
+        ]
+
+        # Foreign tracks: all committed Segment objects from ``self.routes``
+        # whose net differs from ``current_net``.  Routes for the current
+        # net are still in flight so they're naturally absent; we
+        # additionally guard with the same-net filter for robustness
+        # against the rip-up / retry path that may leave partial
+        # ``current_net`` routes in ``self.routes``.
+        foreign_tracks = []
+        for route in self.routes:
+            if route.net == current_net:
+                continue
+            foreign_tracks.extend(route.segments)
+
+        self.router.set_via_foreign_context(
+            foreign_pads=foreign_pads,
+            foreign_tracks=foreign_tracks,
+        )
+
     def route_net(
         self,
         net: int,
@@ -1560,6 +1610,11 @@ class Autorouter:
 
         # Issue #1019: Update router with unrouted pad info for via impact scoring
         self._update_router_unrouted_pads(net)
+
+        # Issue #2947: Push foreign-net pad / track context so
+        # ``_check_via_placement_cached`` can apply the same world-coord
+        # clearance predicate the escape phase uses (PR #2945).
+        self._update_router_via_foreign_context(net)
 
         routes: list[Route] = []
 

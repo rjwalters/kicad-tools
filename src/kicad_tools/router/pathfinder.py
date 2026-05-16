@@ -31,6 +31,25 @@ from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
+from .via_clearance import point_clear_of_copper
+
+
+@dataclass(frozen=True)
+class _SegmentAdapter:
+    """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
+    attribute names expected by :func:`point_clear_of_copper`.
+
+    Issue #2947: The shared clearance helper consumes duck-typed track
+    segments via the ``TrackSegmentLike`` protocol; :class:`Segment` uses
+    ``x1, y1, x2, y2``.  Mirrors the identical adapter in
+    :mod:`kicad_tools.router.escape` (PR #2945 for Issue #2944).
+    """
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    width: float
 
 
 @dataclass(order=True)
@@ -164,6 +183,22 @@ class Router:
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
+
+        # Issue #2947: World-coord foreign-net clearance context for via
+        # placement.  The coarse-grid obstacle map consulted by
+        # ``_is_via_blocked`` can admit a via that sits within
+        # ``via_radius + obstacle_radius + clearance`` of a foreign-net pad
+        # or trace in world coordinates -- the same bug class PR #2945
+        # patched in ``EscapeRouter._can_place_via``.  When this context is
+        # populated via :meth:`set_via_foreign_context`,
+        # ``_check_via_placement_cached`` consults
+        # :func:`point_clear_of_copper` after the per-layer grid check
+        # passes.  Empty by default so behavior matches pre-#2947 when no
+        # caller wires the context up.  Cache invariant: the setter
+        # CLEARS ``_via_cache`` so subsequent checks re-evaluate against
+        # the new context (same pattern as ``add_routed_segments``).
+        self._foreign_pad_tuples: list[tuple[float, float, float, int]] = []
+        self._foreign_track_adapters: list[_SegmentAdapter] = []
 
         # Issue #1016: Component pitch cache for per-component clearance
         # Computed lazily on first use
@@ -652,6 +687,64 @@ class Router:
                 pitch = component_pitches[ref]
                 if pitch < self.rules.fine_pitch_threshold:
                     self._fine_pitch_pad_positions.append((pad.x, pad.y, ref))
+
+    def set_via_foreign_context(
+        self,
+        foreign_pads: list[Pad] | None = None,
+        foreign_tracks: list[Segment] | None = None,
+    ) -> None:
+        """Set foreign-net pad / track context for world-coord via clearance.
+
+        Issue #2947: ``_check_via_placement_cached`` historically only
+        consulted the coarse-grid obstacle map via ``_is_via_blocked``.
+        A via that lands on a "free" grid cell can still sit within
+        ``via_radius + foreign_obstacle_radius + clearance`` of an
+        adjacent foreign-net pad / trace in world coordinates -- the
+        coarse grid's resolution loses this distinction.  When this
+        context is populated, the via predicate consults
+        :func:`point_clear_of_copper` after the grid check passes.
+
+        Cache-key safety: the via cache key is
+        ``(gx, gy, net, effective_radius)`` -- already net-keyed, so
+        cross-net stale positives are impossible.  Within a single
+        net, however, a positive cache entry from a stale foreign
+        context could now be wrong (a foreign track may have committed
+        since).  This setter therefore CLEARS the via cache so subsequent
+        checks re-evaluate against the new context.  Same invariant
+        ``add_routed_segments`` / ``clear_via_cache`` already maintain.
+
+        Args:
+            foreign_pads: Board pads (any net) the via must clear.
+                Same-net pads are filtered per-call so a superset is
+                fine.
+            foreign_tracks: Committed track segments (any net) the via
+                must clear.  Same-net segments are filtered per-call.
+        """
+        pad_tuples: list[tuple[float, float, float, int]] = []
+        if foreign_pads:
+            for p in foreign_pads:
+                # Effective pad radius: max(width, height) / 2 so the
+                # predicate is conservative for oblong fine-pitch pads
+                # (mirrors EscapeRouter._can_place_via, Issue #2944).
+                eff_radius = max(p.width, p.height) / 2
+                pad_tuples.append((p.x, p.y, eff_radius, p.net))
+
+        track_adapters: list[_SegmentAdapter] = []
+        if foreign_tracks:
+            for s in foreign_tracks:
+                track_adapters.append(
+                    _SegmentAdapter(
+                        start_x=s.x1, start_y=s.y1,
+                        end_x=s.x2, end_y=s.y2,
+                        width=s.width,
+                    )
+                )
+
+        self._foreign_pad_tuples = pad_tuples
+        self._foreign_track_adapters = track_adapters
+
+        # Foreign context affects via blocking results -- invalidate cache.
+        self.clear_via_cache()
 
     def _get_via_impact_cost(self, wx: float, wy: float, current_net: int) -> float:
         """Calculate the impact cost of placing a via at the given position.
@@ -1288,6 +1381,41 @@ class Router:
             if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing,
                                      radius=radius):
                 # Cache the negative result
+                if self._via_cache_enabled and not allow_sharing:
+                    self._via_cache[(gx, gy, net, effective_radius)] = False
+                return False
+
+        # Issue #2947: World-coord foreign-net clearance check.  The
+        # per-layer coarse-grid check above can admit a via that sits
+        # within ``via_radius + foreign_obstacle_radius + clearance`` of
+        # an adjacent foreign-net pad / trace in world coordinates -- the
+        # grid resolution loses the sub-cell distinction.  Same bug
+        # class PR #2945 patched in ``EscapeRouter._can_place_via``.
+        # Only runs when ``set_via_foreign_context`` has populated the
+        # context lists (otherwise behavior matches pre-#2947).  A* has
+        # a fallback at both call sites (``continue`` on rejection ->
+        # next neighbor / next via position), so a hard reject here is
+        # safe -- unlike the QFP in-pad rescue path.
+        if self._foreign_pad_tuples or self._foreign_track_adapters:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            # Effective via diameter from grid radius (cells -> mm).
+            eff_diameter = 2 * effective_radius * self.grid.resolution
+            # Filter same-net obstacles (passing a superset is allowed
+            # by ``point_clear_of_copper``'s contract but the same-net
+            # filter avoids spurious rejections on the routing net).
+            other_pads = [p for p in self._foreign_pad_tuples if p[3] != net]
+            # Track adapter does not carry net id; the caller
+            # (``Autorouter``) is responsible for excluding same-net
+            # segments before populating the context.  This matches
+            # ``EscapeRouter``'s pattern at the boundary.
+            if not point_clear_of_copper(
+                x=wx,
+                y=wy,
+                via_size=eff_diameter,
+                clearance=self.rules.via_clearance,
+                other_net_tracks=self._foreign_track_adapters,
+                other_net_pads=other_pads,
+            ):
                 if self._via_cache_enabled and not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
