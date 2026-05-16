@@ -391,6 +391,100 @@ class TestBoard06DormancyOptOut:
         assert ar.net_class_map["SWCLK"].target_single_impedance == 50.0
         assert ar.net_class_map["SWCLK"].trace_width > 0.25
 
+    def test_diffpair_plus_suffix_net_synthesizes_100ohm_target(self):
+        """Issue #2970: when a board declares ``+/-`` diff-pair nets
+        (e.g. ``PCIE_TX+``) on a NetClass with NO explicit
+        ``target_diff_impedance``, the bridge must synthesize 100Ω diff
+        via the new ``.*[+\\-]$`` regex default.
+
+        Before #2970 the regex defaults only covered ``_P/_N`` suffix
+        nets, so ``PCIE_TX+`` fell through unmatched and the router
+        kept the literal trace width."""
+        rules = DesignRules(manufacturer="jlcpcb")
+        stackup = Stackup.jlcpcb_4layer()
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
+        # Synthetic NetClass with NO target_diff_impedance.  PCIE_TX+
+        # should pick up 100Ω diff from the new validator default.
+        plain_class = NetClassRouting(
+            name="PlainHighSpeed",
+            trace_width=0.2,
+            clearance=0.15,
+            intra_pair_clearance=0.15,
+        )
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            stackup=stackup,
+            layer_stack=layer_stack,
+            net_class_map={"PCIE_TX+": plain_class, "PCIE_TX-": plain_class},
+        )
+        ar.nets[1] = [("U1", "1")]
+        ar.net_names[1] = "PCIE_TX+"
+        ar.nets[2] = [("U1", "2")]
+        ar.net_names[2] = "PCIE_TX-"
+
+        # Before the bridge runs, no targets are set.
+        assert ar.net_class_map["PCIE_TX+"].target_diff_impedance is None
+        assert ar.net_class_map["PCIE_TX-"].target_diff_impedance is None
+
+        ar._prepare_routing()
+
+        # After the bridge: 100Ω differential synthesized on BOTH halves.
+        resolved_plus = ar.net_class_map["PCIE_TX+"]
+        resolved_minus = ar.net_class_map["PCIE_TX-"]
+        assert resolved_plus.target_diff_impedance == 100.0, (
+            f"Bridge FAILED on +/- diff-pair suffix: PCIE_TX+ got "
+            f"target_diff_impedance={resolved_plus.target_diff_impedance}, "
+            f"expected 100.0.  Issue #2970 fix regressed."
+        )
+        assert resolved_minus.target_diff_impedance == 100.0
+        # Single-ended must remain None -- this is a diff pair.
+        assert resolved_plus.target_single_impedance is None
+        assert resolved_minus.target_single_impedance is None
+
+    def test_mipi_clk_plus_synthesizes_diff_not_single_ended(self):
+        """Issue #2970 core fix: ``MIPI_CLK+`` must NOT be classified
+        as single-ended 50Ω (the old ``.*CLK.*`` would have caught it).
+        The trailing ``+`` routes it to ``.*[+\\-]$`` -> 100Ω diff."""
+        rules = DesignRules(manufacturer="jlcpcb")
+        stackup = Stackup.jlcpcb_4layer()
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
+        plain_class = NetClassRouting(
+            name="PlainHighSpeed",
+            trace_width=0.2,
+            clearance=0.15,
+            intra_pair_clearance=0.15,
+        )
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            stackup=stackup,
+            layer_stack=layer_stack,
+            net_class_map={"MIPI_CLK+": plain_class},
+        )
+        ar.nets[1] = [("U1", "1")]
+        ar.net_names[1] = "MIPI_CLK+"
+
+        ar._prepare_routing()
+
+        resolved = ar.net_class_map["MIPI_CLK+"]
+        # MUST be diff, NOT single-ended.
+        assert resolved.target_diff_impedance == 100.0, (
+            f"MIPI_CLK+ got target_diff_impedance="
+            f"{resolved.target_diff_impedance}, expected 100.0. "
+            f"Issue #2970: trailing '+' must route to diff-pair spec."
+        )
+        assert resolved.target_single_impedance is None, (
+            f"MIPI_CLK+ got target_single_impedance="
+            f"{resolved.target_single_impedance} -- the old "
+            f".*CLK.* pattern is still bleeding through. "
+            f"Issue #2970 fix regressed."
+        )
+
     def test_auto_derive_uses_jlcpcb_4l_not_generic_4l(self):
         """PR #2966 Judge Q2: the router's auto-derived 4L stackup must
         match what the validator uses by default (JLCPCB 4L, er=4.05,

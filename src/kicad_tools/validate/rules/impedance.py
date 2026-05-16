@@ -104,17 +104,32 @@ class ImpedanceRule(DRCRule):
 
     @staticmethod
     def _get_default_specs() -> list[NetImpedanceSpec]:
-        """Return default impedance specifications for common signal types."""
+        """Return default impedance specifications for common signal types.
+
+        Ordering note (Issue #2970): the ``+/-`` and ``_P/_N`` diff-pair
+        suffix patterns are placed BEFORE the single-ended ``.*CLK$``
+        catch-all so that nets like ``MIPI_CLK+`` resolve to 100Ω
+        differential (their actual electrical role) rather than 50Ω
+        single-ended. The ``.*CLK$`` anchor (vs. the prior ``.*CLK.*``)
+        further ensures ``MIPI_CLK+`` does not match the single-ended
+        pattern at all -- the trailing ``+`` is required to live in
+        ``.*[+\\-]$``'s diff-pair pattern.
+        """
         return [
-            # USB differential pairs - 90Ω differential
+            # USB differential pairs - 90Ω differential (covers + / - / P / M / D+/D-)
             NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0),
-            # High-speed single-ended - 50Ω
-            NetImpedanceSpec(r".*CLK.*", target_z0=50.0),
-            NetImpedanceSpec(r".*MCLK.*", target_z0=50.0),
-            NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
-            # LVDS/high-speed diff pairs - 100Ω differential
+            # LVDS/high-speed diff pairs - 100Ω differential.
             NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0),
+            # Generic diff-pair suffix conventions - 100Ω differential.
+            # NOTE: these must come BEFORE the single-ended ``.*CLK$``
+            # spec so e.g. ``MIPI_CLK+`` resolves to diff, not 50Ω SE.
             NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0),
+            NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0),
+            # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
+            # ``MIPI_CLK+`` does NOT mis-match as single-ended.
+            NetImpedanceSpec(r".*CLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*MCLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
         ]
 
     def __init__(

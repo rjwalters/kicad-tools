@@ -177,6 +177,130 @@ class TestImpedanceDefaultGating:
         assert rule_empty._using_default_specs is False
 
 
+class TestDiffPairSuffixPatterns:
+    """Issue #2970: default regex specs must cover the ``+/-`` diff-pair
+    suffix convention (board 06's PCIE/MIPI nets), not just ``_P/_N``.
+
+    Acceptance criteria:
+
+    - Each board-06 ``+/-`` net resolves to ``target_zdiff=100.0`` via
+      the new ``.*[+\\-]$`` spec.
+    - ``MIPI_CLK+`` is NOT mis-classified by the single-ended ``.*CLK``
+      pattern — the trailing ``+`` must route to the diff-pair spec.
+    - The single-ended ``.*CLK`` pattern is anchored (``$``) so it does
+      not eat ``MIPI_CLK+`` even before list-order tie-breaking.
+    """
+
+    def test_pcie_diff_pair_nets_resolve_to_100ohm_diff(self):
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("PCIE_TX+", "PCIE_TX-", "PCIE_RX+", "PCIE_RX-"):
+            spec = rule._find_matching_spec(net)
+            assert spec is not None, f"No spec matched {net} (regression: pre-#2970 gap)"
+            assert spec.target_zdiff == 100.0, (
+                f"{net} matched {spec.net_pattern!r} but target_zdiff="
+                f"{spec.target_zdiff}, expected 100.0"
+            )
+            assert spec.target_z0 is None, (
+                f"{net} unexpectedly carries target_z0={spec.target_z0} "
+                f"(should be diff-pair only)"
+            )
+
+    def test_mipi_diff_pair_nets_resolve_to_100ohm_diff(self):
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("MIPI_CLK+", "MIPI_CLK-", "MIPI_D0+", "MIPI_D0-"):
+            spec = rule._find_matching_spec(net)
+            assert spec is not None, f"No spec matched {net} (regression: pre-#2970 gap)"
+            assert spec.target_zdiff == 100.0, (
+                f"{net} matched {spec.net_pattern!r} but target_zdiff="
+                f"{spec.target_zdiff}, expected 100.0 (NOT 50Ω single-ended)"
+            )
+            assert spec.target_z0 is None, (
+                f"{net} got single-ended target_z0={spec.target_z0} -- the "
+                f".*CLK pattern leaked. Issue #2970 fix regressed."
+            )
+
+    def test_mipi_clk_plus_does_not_match_clk_single_ended(self):
+        """The single-ended ``.*CLK$`` anchor must not eat ``MIPI_CLK+``.
+
+        Even if list order changed, the anchor itself guarantees correct
+        classification — this is the belt to the suspenders of ordering.
+        """
+        import re
+
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        clk_specs = [
+            s for s in ImpedanceRule._get_default_specs() if "CLK" in s.net_pattern
+        ]
+        assert clk_specs, "Expected at least one CLK-targeted default spec"
+        for spec in clk_specs:
+            if spec.target_z0 is None:
+                # Skip diff-pair specs that happen to match CLK by accident
+                continue
+            assert not re.match(spec.net_pattern, "MIPI_CLK+", re.IGNORECASE), (
+                f"Single-ended spec {spec.net_pattern!r} unexpectedly "
+                f"matches 'MIPI_CLK+' -- this re-introduces Issue #2970."
+            )
+
+    def test_pn_suffix_pattern_still_works(self):
+        """Regression guard: the pre-existing ``.*_[PN]$`` pattern must
+        keep matching ``CLK_OUT_P`` / ``LVDS_TX_N`` etc."""
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("FOO_P", "BAR_N", "DATA_BUS_P"):
+            spec = rule._find_matching_spec(net)
+            assert spec is not None
+            assert spec.target_zdiff == 100.0
+
+    def test_swclk_still_resolves_to_50ohm_single_ended(self):
+        """Regression guard for PR #2966: bare ``SWCLK`` (no suffix)
+        must still resolve to the 50Ω single-ended default."""
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        spec = rule._find_matching_spec("SWCLK")
+        assert spec is not None
+        assert spec.target_z0 == 50.0
+        assert spec.target_zdiff is None
+
+    def test_plain_nets_still_unmatched(self):
+        """Negative gate: nets without recognized prefixes / suffixes
+        must NOT match any default spec.  Specifically, generic power /
+        ground / data line names must stay unmatched so the validator
+        does not impose impedance targets on signals that have none."""
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("VCC", "GND", "DATA_LINE_5V", "PLAIN_NET"):
+            spec = rule._find_matching_spec(net)
+            assert spec is None, (
+                f"Net {net!r} unexpectedly matched spec "
+                f"{spec.net_pattern!r} -- the new diff-pair patterns "
+                f"are too greedy."
+            )
+
+    def test_usb_diff_pair_still_resolves_via_usb_pattern(self):
+        """``USB2_D+`` / ``USB2_D-`` must keep matching the dedicated
+        ``USB.*D[PM\\+\\-]?`` 90Ω spec (which lives BEFORE the generic
+        ``.*[+\\-]$`` 100Ω spec in list order)."""
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("USB2_D+", "USB2_D-", "USB_DP", "USB_DM"):
+            spec = rule._find_matching_spec(net)
+            assert spec is not None
+            assert spec.target_zdiff == 90.0, (
+                f"{net} matched {spec.net_pattern!r} -> "
+                f"target_zdiff={spec.target_zdiff}, expected 90.0 "
+                f"(USB-specific pattern must precede generic +/- pattern)"
+            )
+
+
 class TestStackupExplicitDataFlag:
     """Tests for ``Stackup.has_explicit_data`` round-tripping."""
 
