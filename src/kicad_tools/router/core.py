@@ -3872,11 +3872,21 @@ class Autorouter:
            are squeezed out.
 
         The fix: detect inner-corner positions of a *mirrored byte-lane*
-        match group and bump those members' priority above their
-        immediate row neighbors.  Inner-corner pads still have the
-        corner gap available as an escape, but they need to claim
-        their lateral lane *before* the corner pad uses it -- corner
-        pads can fall back to the corner gap, inner-corner pads cannot.
+        match group and demote the second-inward neighbours of the
+        inner-corner so the inner-corner claims its lateral lane
+        BEFORE the second-inward net consumes it.  Corner pads keep
+        their default rank -- they can fall back to the corner gap
+        as an escape and detour-pressuring them tends to spill DRC
+        violations across the row (see Judge feedback below).
+
+        Judge feedback (PR #2969 review): the original implementation
+        demoted BOTH the corner (0/n-1) and second-inward (2/n-3)
+        neighbours of inner-corner.  That bumped board-07's
+        match-group regression DRC count from 9-69 (baseline) to 86
+        (over the 70 allowlist), because demoting the corner forced
+        it to detour through tight-clearance geometry on its own row.
+        Constraining demotion to second-inward only is the minimal
+        intervention that still solves the inner-corner squeeze.
 
         Detection (geometry-only, no hardcoded net names):
 
@@ -3891,9 +3901,10 @@ class Autorouter:
         4. Project pads onto the axis with greater spatial variance
            (the row's long axis).  Sort by that projection.
         5. The pads at sorted index 1 and N-2 are "inner-corner".
-           The pads at sorted index 0 and N-1 are "corner".
-        6. Promote the inner-corner nets above the corner nets and
-           one slot inward (the second-from-edge nets).
+           The pads at sorted indices 2 and N-3 are "second-inward".
+        6. Demote ONLY the second-inward nets so they route AFTER
+           the inner-corner.  Corner nets (0 and N-1) keep their
+           default rank.
 
         We do NOT change the priority class -- the bump is applied as
         a within-class reordering after ``_interleave_match_groups``
@@ -3969,9 +3980,12 @@ class Autorouter:
             if nid in net_order_set:
                 groups.setdefault(grp, []).append(nid)
 
-        # Build promotion priority overrides: net_id -> rank (lower = earlier).
-        # ``None`` means use the existing position.
-        promote_ranks: dict[int, int] = {}
+        # Build demotion priority overrides: net_id -> rank (higher = later).
+        # The default rank is 1; demoted neighbours are pushed to rank 2.
+        # (Renamed from ``promote_ranks`` per Judge feedback: the dict
+        # stores DEMOTE ranks, not promote ranks -- demoted entries are
+        # the ones that get pushed BACK in the order.)
+        demote_ranks: dict[int, int] = {}
 
         for grp_name, grp_net_ids in groups.items():
             if len(grp_net_ids) < MIN_BYTE_LANE_SIZE:
@@ -4043,40 +4057,52 @@ class Autorouter:
             inner_corner_indices = (1, n - 2)
             inner_corner_nets = {sorted_nets[i] for i in inner_corner_indices}
 
-            # Build the promotion plan for this group with minimal
-            # blast radius.  We DEMOTE the inner-corner's immediate row
-            # neighbours (corner at index 0/n-1, and second-inward at
-            # index 2/n-3) so the inner-corner net (at index 1 / n-2)
-            # routes BEFORE its neighbours.  We deliberately do NOT
-            # promote the inner-corner net itself: that would also lift
-            # it above non-neighbour group members (e.g. DM0 on board
-            # 07, which has the shortest bbox-diagonal and must route
-            # first to claim the center channel before DQS-bounded
-            # neighbours block it).  Demoting only the two specific
-            # neighbours keeps the rest of the priority-sorted order
-            # intact while still letting the inner-corner net claim
-            # its lateral lane before the corner net.
+            # Build the demotion plan for this group with the smallest
+            # possible blast radius.  We DEMOTE only the second-inward
+            # neighbours (positions 2 and n-3), so the inner-corner net
+            # (positions 1 / n-2) routes BEFORE the second-inward net.
+            # The corner net (positions 0 / n-1) keeps its default rank
+            # -- it's typically the shortest path and can still escape
+            # through the corner gap regardless of when it routes.
+            #
+            # Judge feedback (PR #2969 review): the prior broader plan
+            # (demote both corner AND second-inward) bumped the board-07
+            # match-group regression DRC count from 9-69 (baseline) to
+            # 86 (over the 70 allowlist), because demoting the corner
+            # forced it to detour through tight-clearance geometry on
+            # its own row (DQ5 saw U1.33 blocked by DQ4 at 0.44 mm and
+            # by DQS_N at 0.74 mm).  Constraining to second-inward only
+            # leaves the corner free to claim its natural escape and
+            # eliminates that pressure while still letting the inner-
+            # corner claim its lateral lane before the second-inward
+            # net.
+            #
+            # We deliberately do NOT promote the inner-corner net
+            # itself: that would also lift it above non-neighbour group
+            # members (e.g. DM0 on board 07, which has the shortest
+            # bbox-diagonal and must route first to claim the centre
+            # channel before DQS-bounded neighbours block it).
             for i, nid in enumerate(sorted_nets):
-                if i in (0, n - 1, 2, n - 3):
-                    # Corner and second-inward neighbours.  ``max()``
+                if i in (2, n - 3):
+                    # Second-inward neighbours of inner-corner.  ``max()``
                     # so multi-group boards (a net that's a neighbour
                     # of inner-corner in more than one group) don't
-                    # downgrade an already-promoted rank.
-                    promote_ranks[nid] = max(promote_ranks.get(nid, 0), 2)
+                    # downgrade an already-demoted rank.
+                    demote_ranks[nid] = max(demote_ranks.get(nid, 0), 2)
 
-        if not promote_ranks:
+        if not demote_ranks:
             return net_order
 
-        # Apply the promotion plan via stable sort: rank-1 nets keep
-        # their priority-sort positions, rank-2 nets (the corner +
-        # second-inward neighbours of an inner-corner) get pushed
-        # behind their rank-1 sibling group members.  Original order
-        # within each rank is preserved by the secondary key.
+        # Apply the demotion plan via stable sort: rank-1 nets keep
+        # their priority-sort positions, rank-2 nets (the second-inward
+        # neighbours of an inner-corner) get pushed behind their rank-1
+        # sibling group members.  Original order within each rank is
+        # preserved by the secondary key.
         original_index = {nid: i for i, nid in enumerate(net_order)}
         default_rank = 1
 
         def _byte_lane_sort_key(net_id: int) -> tuple[int, int]:
-            return (promote_ranks.get(net_id, default_rank), original_index[net_id])
+            return (demote_ranks.get(net_id, default_rank), original_index[net_id])
 
         out = sorted(net_order, key=_byte_lane_sort_key)
 
