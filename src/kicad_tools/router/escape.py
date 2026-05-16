@@ -3818,17 +3818,22 @@ class EscapeRouter:
             # supplied the via's own net.  This keeps the predicate
             # focused on truly-foreign copper and avoids spurious
             # rejections on same-net targets.
-            pad_tuples: list[tuple[float, float, float, int]] = []
+            #
+            # Issue #2951: pass (x, y, width, height, net) 5-tuples so
+            # ``point_clear_of_copper`` uses rect-distance for oblong
+            # fine-pitch pads.  The old ``max(width, height) / 2``
+            # disc-bound made 0.3 x 1.4mm LQFP fingers look like 1.4mm
+            # discs and rejected every nudged via candidate on 0.5mm
+            # pitch -- in production this kept PR #2950's in-pad nudge
+            # from ever finding a valid offset (see
+            # ``EscapeRouter._via_clears_other_pads`` for the matching
+            # rect template).
+            pad_tuples: list[tuple[float, float, float, float, int]] = []
             if foreign_pads:
                 for p in foreign_pads:
                     if net is not None and p.net == net:
                         continue
-                    # Effective pad radius: use the larger of width/height
-                    # so the predicate is conservative for oblong fine-pitch
-                    # pads (the inscribed-circle radius would under-estimate
-                    # clearance along the long axis).
-                    eff_radius = max(p.width, p.height) / 2
-                    pad_tuples.append((p.x, p.y, eff_radius, p.net))
+                    pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
 
             seg_list: list[Segment] = []
             if foreign_tracks:

@@ -197,7 +197,11 @@ class Router:
         # caller wires the context up.  Cache invariant: the setter
         # CLEARS ``_via_cache`` so subsequent checks re-evaluate against
         # the new context (same pattern as ``add_routed_segments``).
-        self._foreign_pad_tuples: list[tuple[float, float, float, int]] = []
+        # Issue #2951: stored as 5-tuples ``(x, y, width, height, net)`` so
+        # ``point_clear_of_copper`` uses rect-distance for oblong fine-pitch
+        # pads (the previous ``(x, y, max(w,h)/2, net)`` disc-bound was the
+        # last remaining via-clearance bug pattern for non-square pads).
+        self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
 
         # Issue #1016: Component pitch cache for per-component clearance
@@ -720,14 +724,14 @@ class Router:
             foreign_tracks: Committed track segments (any net) the via
                 must clear.  Same-net segments are filtered per-call.
         """
-        pad_tuples: list[tuple[float, float, float, int]] = []
+        # Issue #2951: pass (x, y, width, height, net) 5-tuples so
+        # ``point_clear_of_copper`` uses rect-distance for oblong
+        # fine-pitch pads (mirrors the same change in
+        # ``EscapeRouter._can_place_via``).
+        pad_tuples: list[tuple[float, float, float, float, int]] = []
         if foreign_pads:
             for p in foreign_pads:
-                # Effective pad radius: max(width, height) / 2 so the
-                # predicate is conservative for oblong fine-pitch pads
-                # (mirrors EscapeRouter._can_place_via, Issue #2944).
-                eff_radius = max(p.width, p.height) / 2
-                pad_tuples.append((p.x, p.y, eff_radius, p.net))
+                pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
 
         track_adapters: list[_SegmentAdapter] = []
         if foreign_tracks:
@@ -1403,7 +1407,9 @@ class Router:
             # Filter same-net obstacles (passing a superset is allowed
             # by ``point_clear_of_copper``'s contract but the same-net
             # filter avoids spurious rejections on the routing net).
-            other_pads = [p for p in self._foreign_pad_tuples if p[3] != net]
+            # Net is at index 4 for the 5-tuple (x, y, w, h, net) shape
+            # populated by ``set_via_foreign_context`` (Issue #2951).
+            other_pads = [p for p in self._foreign_pad_tuples if p[4] != net]
             # Track adapter does not carry net id; the caller
             # (``Autorouter``) is responsible for excluding same-net
             # segments before populating the context.  This matches
