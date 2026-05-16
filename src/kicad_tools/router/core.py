@@ -3851,6 +3851,246 @@ class Autorouter:
             return net_order
         return out
 
+    def _apply_byte_lane_inner_priority(self, net_order: list[int]) -> list[int]:
+        """Promote inner-corner byte-lane members above their immediate neighbors.
+
+        Issue #2962: On board 07 a DDR data byte (10 nets routed between
+        mirrored QFN-48 packages U1 and U2) repeatedly leaves DQ1 and DQ6
+        unrouted.  Pin row order on U1.25-35 is
+        ``DQ0, DQ1, DQ2, DQ3, DM0, DQS_P, DQS_N, DQ4, DQ5, DQ6, DQ7``
+        (mirrored on U2.1-11).  DQ1 and DQ6 sit at *inner-corner*
+        positions -- one step in from the corner pad.  Root cause:
+
+        1. The DQS differential pair routes first (diff-pair pre-pass),
+           consuming the center channel.
+        2. Remaining DQ nets fill by ``_get_net_priority`` ordering
+           (essentially bbox-diagonal for same-class nets).
+        3. By the time DQ1 (id 5) and DQ6 (id 10) attempt, their
+           corner neighbor (DQ0/DQ7) has escaped through the corner
+           gap and the next-inward neighbor (DQ2/DQ5) has consumed
+           the only remaining lateral lane.  Both inner-corner nets
+           are squeezed out.
+
+        The fix: detect inner-corner positions of a *mirrored byte-lane*
+        match group and bump those members' priority above their
+        immediate row neighbors.  Inner-corner pads still have the
+        corner gap available as an escape, but they need to claim
+        their lateral lane *before* the corner pad uses it -- corner
+        pads can fall back to the corner gap, inner-corner pads cannot.
+
+        Detection (geometry-only, no hardcoded net names):
+
+        1. Identify match groups with at least ``MIN_BYTE_LANE_SIZE``
+           members.  Smaller groups don't exhibit the mirrored byte-lane
+           topology and the heuristic is unsafe to apply.
+        2. For each candidate group, find the component that hosts the
+           most group-member pads ("primary component").  This is the
+           QFN/QFP package whose row dictates inner-corner geometry.
+        3. Collect the group's pads on that component.  Require at
+           least ``MIN_BYTE_LANE_SIZE`` to confirm a co-located row.
+        4. Project pads onto the axis with greater spatial variance
+           (the row's long axis).  Sort by that projection.
+        5. The pads at sorted index 1 and N-2 are "inner-corner".
+           The pads at sorted index 0 and N-1 are "corner".
+        6. Promote the inner-corner nets above the corner nets and
+           one slot inward (the second-from-edge nets).
+
+        We do NOT change the priority class -- the bump is applied as
+        a within-class reordering after ``_interleave_match_groups``
+        has already run.  This means:
+
+        - Diff-pair coupling (DQS pair) is unaffected: it's already
+          routed by the pre-pass before this function sees the order.
+        - Connector-sibling promotion (#2482) is preserved: that
+          adjustment runs on the *unsorted* class-priority key,
+          while we operate on the post-interleave list.
+        - The ``_interleave_match_groups`` starvation guarantee
+          (#2914) is preserved: this function reorders within the
+          head-class run; starvable-group promoted leaders remain in
+          their post-interleave positions.
+
+        Args:
+            net_order: Routing order after ``_interleave_match_groups``.
+
+        Returns:
+            Reordered list (same length and membership).  On any
+            internal failure (missing match-group detector, single
+            net per component, etc.) the input is returned unchanged.
+        """
+        # Minimum group size to qualify as a mirrored byte-lane.  A
+        # 4-net group can't be congested enough at its row middle to
+        # exhibit the inner-corner squeeze pattern; 5 is the smallest
+        # where the heuristic is provably useful (corner + inner-corner
+        # + middle + mirror).  The DDR byte on board 07 has 10 row
+        # members, so 5 is a comfortable lower bound.
+        MIN_BYTE_LANE_SIZE = 5
+
+        if len(net_order) < 4:
+            return net_order
+
+        # Best-effort match-group detection (mirrors _interleave_match_groups).
+        net_to_group: dict[int, str] = {}
+        try:
+            from .match_group_detection import detect_match_groups
+
+            net_to_class: dict[str, str] = {}
+            synth_routing: dict = dict(self.net_class_map)
+            for net_name, net_class in self.net_class_map.items():
+                cls_name = getattr(net_class, "name", None)
+                if cls_name is None:
+                    continue
+                net_to_class[net_name] = cls_name
+                synth_routing.setdefault(cls_name, net_class)
+
+            detected_groups = detect_match_groups(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                length_tracker=self._length_tracker,
+                enable_suffix_inference=True,
+            )
+            for grp in detected_groups:
+                for nid in grp.net_ids:
+                    net_to_group[nid] = grp.name
+                for p_nid, n_nid in getattr(grp, "pair_ids", []):
+                    net_to_group[p_nid] = grp.name
+                    net_to_group[n_nid] = grp.name
+        except Exception:
+            return net_order
+
+        if not net_to_group:
+            return net_order
+
+        # Group the net_order members by their match group, restricted
+        # to nets actually present in this routing pass.
+        net_order_set = set(net_order)
+        groups: dict[str, list[int]] = {}
+        for nid, grp in net_to_group.items():
+            if nid in net_order_set:
+                groups.setdefault(grp, []).append(nid)
+
+        # Build promotion priority overrides: net_id -> rank (lower = earlier).
+        # ``None`` means use the existing position.
+        promote_ranks: dict[int, int] = {}
+
+        for grp_name, grp_net_ids in groups.items():
+            if len(grp_net_ids) < MIN_BYTE_LANE_SIZE:
+                continue
+
+            # Find the primary component: the component reference that
+            # hosts the most pads belonging to this group.  In a mirrored
+            # byte-lane topology this resolves to either U1 or U2 (both
+            # host all N members, so the first encountered wins
+            # deterministically by sorted ref).
+            comp_pad_count: dict[str, list[tuple[int, float, float]]] = {}
+            for nid in grp_net_ids:
+                pad_keys = self.nets.get(nid, [])
+                for key in pad_keys:
+                    pad = self.pads.get(key)
+                    if pad is None or not pad.ref:
+                        continue
+                    comp_pad_count.setdefault(pad.ref, []).append((nid, pad.x, pad.y))
+
+            if not comp_pad_count:
+                continue
+
+            # Pick the component with the most group-member pads.  Tie
+            # breaks alphabetically for determinism.
+            primary_ref = max(
+                comp_pad_count.keys(),
+                key=lambda r: (len(comp_pad_count[r]), -ord(r[0]) if r else 0),
+            )
+            primary_pads = comp_pad_count[primary_ref]
+
+            # Need a distinct pad per net on the primary component -- if
+            # multiple pads of the same net are on the same component
+            # (multi-pad nets) we collapse to the first one.  This is
+            # sufficient because the row position is what matters.
+            net_to_pad: dict[int, tuple[float, float]] = {}
+            for nid, px, py in primary_pads:
+                if nid not in net_to_pad:
+                    net_to_pad[nid] = (px, py)
+
+            if len(net_to_pad) < MIN_BYTE_LANE_SIZE:
+                continue
+
+            # Determine the row's primary axis: pick the axis with greater
+            # variance across the pads.  For a vertical row (pads share x)
+            # the y axis has higher variance; for a horizontal row, x does.
+            xs = [p[0] for p in net_to_pad.values()]
+            ys = [p[1] for p in net_to_pad.values()]
+            x_span = max(xs) - min(xs)
+            y_span = max(ys) - min(ys)
+
+            if max(x_span, y_span) < 1e-6:
+                continue  # Degenerate: all pads at the same point
+
+            # Sort group members along the row axis.
+            if y_span >= x_span:
+                # Vertical row -- sort by y
+                sorted_nets = sorted(net_to_pad.keys(), key=lambda n: net_to_pad[n][1])
+            else:
+                # Horizontal row -- sort by x
+                sorted_nets = sorted(net_to_pad.keys(), key=lambda n: net_to_pad[n][0])
+
+            n = len(sorted_nets)
+            if n < MIN_BYTE_LANE_SIZE:
+                continue
+
+            # Inner-corner indices in the sorted row.  Position 1 (one in
+            # from the top corner) and position n-2 (one in from the
+            # bottom corner) are the inner-corner members.
+            inner_corner_indices = (1, n - 2)
+            inner_corner_nets = {sorted_nets[i] for i in inner_corner_indices}
+
+            # Build the promotion plan for this group with minimal
+            # blast radius.  We DEMOTE the inner-corner's immediate row
+            # neighbours (corner at index 0/n-1, and second-inward at
+            # index 2/n-3) so the inner-corner net (at index 1 / n-2)
+            # routes BEFORE its neighbours.  We deliberately do NOT
+            # promote the inner-corner net itself: that would also lift
+            # it above non-neighbour group members (e.g. DM0 on board
+            # 07, which has the shortest bbox-diagonal and must route
+            # first to claim the center channel before DQS-bounded
+            # neighbours block it).  Demoting only the two specific
+            # neighbours keeps the rest of the priority-sorted order
+            # intact while still letting the inner-corner net claim
+            # its lateral lane before the corner net.
+            for i, nid in enumerate(sorted_nets):
+                if i in (0, n - 1, 2, n - 3):
+                    # Corner and second-inward neighbours.  ``max()``
+                    # so multi-group boards (a net that's a neighbour
+                    # of inner-corner in more than one group) don't
+                    # downgrade an already-promoted rank.
+                    promote_ranks[nid] = max(promote_ranks.get(nid, 0), 2)
+
+        if not promote_ranks:
+            return net_order
+
+        # Apply the promotion plan via stable sort: rank-1 nets keep
+        # their priority-sort positions, rank-2 nets (the corner +
+        # second-inward neighbours of an inner-corner) get pushed
+        # behind their rank-1 sibling group members.  Original order
+        # within each rank is preserved by the secondary key.
+        original_index = {nid: i for i, nid in enumerate(net_order)}
+        default_rank = 1
+
+        def _byte_lane_sort_key(net_id: int) -> tuple[int, int]:
+            return (promote_ranks.get(net_id, default_rank), original_index[net_id])
+
+        out = sorted(net_order, key=_byte_lane_sort_key)
+
+        # Length-preservation safety net (mirrors _interleave_match_groups).
+        if len(out) != len(net_order) or set(out) != set(net_order):
+            logger.error(
+                "_apply_byte_lane_inner_priority produced inconsistent output "
+                "(in=%d, out=%d); falling back to identity ordering",
+                len(net_order),
+                len(out),
+            )
+            return net_order
+        return out
+
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
 
@@ -4123,6 +4363,16 @@ class Autorouter:
         # Boards without match-group declarations (and without nets that
         # match suffix-inference patterns) receive an identity ordering.
         net_order = self._interleave_match_groups(net_order)
+
+        # Issue #2962: Inner-corner byte-lane priority bump.  In mirrored
+        # byte-lane topologies (board 07 DDR data byte on QFN-48 pair),
+        # the pads one in from each row corner ("inner-corner" pins)
+        # have neither the corner gap nor a free lateral lane available
+        # once their neighbors route first.  Promote those nets above
+        # their immediate row neighbors so they claim a lateral lane
+        # before corner nets escape via the corner gap.  Boards without
+        # a mirrored byte-lane match group degenerate to identity.
+        net_order = self._apply_byte_lane_inner_priority(net_order)
 
         if parallel:
             return self.route_all_parallel(
@@ -5310,6 +5560,13 @@ class Autorouter:
         # net..." log line.  See ``_interleave_match_groups`` docstring
         # for the fairness-vs-priority trade-off rationale.
         net_order = self._interleave_match_groups(net_order)
+
+        # Issue #2962: Inner-corner byte-lane priority bump (see
+        # ``_apply_byte_lane_inner_priority`` docstring).  Identical hook
+        # to ``route_all``: applied AFTER ``_interleave_match_groups``
+        # so the head-class run keeps the starvation-fairness ordering
+        # and we adjust only within-class neighbor priorities.
+        net_order = self._apply_byte_lane_inner_priority(net_order)
 
         total_nets = len(net_order)
 
@@ -7273,6 +7530,11 @@ class Autorouter:
             # ``route_all_two_phase`` (the default ``kct route`` entry point
             # via :meth:`route_with_escape`).
             interleave_match_groups=self._interleave_match_groups,
+            # Issue #2962: Share the inner-corner byte-lane priority bump
+            # with the two-phase path so board 07's DDR data byte gets
+            # the DQ1/DQ6 inner-position bump in `kct route` (which goes
+            # through ``route_with_escape``).
+            apply_byte_lane_inner_priority=self._apply_byte_lane_inner_priority,
         )
 
     def route_all_two_phase(
