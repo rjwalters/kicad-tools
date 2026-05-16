@@ -4033,14 +4033,22 @@ class EscapeRouter:
         via_x = pad.x
         via_y = pad.y
 
-        # Issue #2944: Validate the candidate in-pad via against
-        # neighboring foreign-net pads on the same footprint.  On
-        # 0.5mm-pitch QFPs with 0.6mm vias, the via's clearance envelope
-        # spills off the parent pad and onto the adjacent pin pads --
-        # producing DRC errors of ~0.05mm overlap (board 04 OSC_OUT /
-        # OSC_IN / NRST cluster).  Reject the rescue here and let the
-        # caller fall back to either the next surface escape ring or
-        # deferral to the main router.
+        # Issue #2944: Diagnostic-only clearance check against neighboring
+        # foreign-net pads on the same footprint.  On 0.5mm-pitch QFPs
+        # with 0.6mm vias the via's clearance envelope spills off the
+        # parent pad and onto the adjacent pin pads, producing DRC
+        # errors of ~0.05mm overlap (board-04 OSC_OUT cluster).
+        #
+        # We do NOT reject the candidate here -- the in-pad rescue is
+        # the LAST RESORT for fine-pitch QFP escape; no alternate path
+        # exists if surface escape already failed, and the BGA-style
+        # ring fallback referenced in the curator's #2944 analysis is
+        # not available for QFP/LQFP.  Rejecting would leave the pin
+        # unrouted and the whole board's completion floor would drop
+        # below the escalation gate.  Instead we emit a structured
+        # warning so users (and tier-escalation logic) can decide
+        # whether to accept the local DRC violation or escalate to a
+        # smaller-via tier / wider-pitch footprint.
         if package is not None:
             other_pads = [p for p in package.pads if p is not pad]
             if not self._via_clears_other_pads(
@@ -4051,14 +4059,16 @@ class EscapeRouter:
                 other_pads=other_pads,
                 same_net=pad.net,
             ):
-                logger.debug(
-                    "In-pad escape for pad %s (ref=%s pin=%s) rejected: "
-                    "candidate via at (%.3f, %.3f) violates clearance to a "
-                    "neighboring foreign-net pad on %s (Issue #2944).",
+                logger.warning(
+                    "In-pad rescue for pad %s (ref=%s pin=%s) at (%.3f, %.3f) "
+                    "violates clearance to a neighboring foreign-net pad on "
+                    "%s.  Proceeding anyway (no fallback path on QFP/LQFP); "
+                    "the resulting via will trigger DRC errors at the "
+                    "manufacturer's clearance rule -- consider a smaller-via "
+                    "tier or a wider-pitch footprint (Issue #2944).",
                     pad.net_name, pad.ref, pad.pin,
                     via_x, via_y, pad.ref,
                 )
-                return None
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)

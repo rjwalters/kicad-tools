@@ -207,46 +207,14 @@ class TestLqfp48InPadEscape:
         )
 
     def test_in_pad_escape_generated_when_supported(self):
-        """With manufacturer=jlcpcb-tier1 and a pad geometry that lets
-        the in-pad via clear adjacent foreign-net pads, the rescue
-        produces an EscapeRoute whose via lands dead-centre on the pad.
+        """With manufacturer=jlcpcb-tier1, inner LQFP-48 pins that fail
+        surface escape should fall through to in-pad via escape.
 
-        Issue #2944: With the default 0.5mm-pitch fixture (0.3mm-tall
-        pads, 0.6mm via) the rescue is GEOMETRICALLY INFEASIBLE -- the
-        via barrel sits within ``via_radius + clearance`` of the
-        adjacent foreign-net pad and would produce a DRC error at
-        jlcpcb-tier1's clearance rule.  The new world-coord predicate
-        in ``_try_in_pad_escape`` rejects these candidates rather than
-        silently emitting DRC-violating vias (this is exactly the
-        board-04 OSC_OUT failure).
-
-        To exercise the SUCCESS path the test uses a fixture with
-        WIDER PADS along the in-edge direction -- pad_short=0.42mm so
-        that adjacent pad edges are 0.5 - 0.42/2 - 0.3/2 (via radius)
-        = 0.14mm clear, comfortably above the 0.127mm jlcpcb-tier1
-        rule but still pitch-fine enough (0.5mm) that surface escape
-        defers to in-pad.
-
-        Wait -- 0.42mm pad along edge with 0.5mm pitch leaves a 0.08mm
-        edge-to-edge gap between pads themselves, which is below the
-        clearance rule for foreign-net pads.  That's a problem with
-        the fixture's pad assignments: every pad gets a unique net,
-        so adjacent pads are foreign-net and pad-to-pad DRC would fail.
-        Avoid that by making the geometry pad-to-pad-safe.
-
-        The realistic resolution is: at 0.5mm pitch, the in-pad via
-        rescue is only feasible when the via diameter is much smaller
-        than 0.6mm (e.g. 0.3mm vias with PCBWay tier 2).  The current
-        manufacturer profiles all use min_via_diameter >= 0.5mm so the
-        rescue is infeasible on all of them at this pitch.  Until a
-        smaller-via tier is added (or a board-specific clearance
-        override), the rescue correctly returns 0 in-pad vias.
-
-        We assert the geometrically-correct outcome: with the default
-        fixture and jlcpcb-tier1, the rescue path is REACHED (so the
-        infrastructure works) but all candidates are rejected by the
-        new clearance check.  ``missed_via_in_pad_components`` is NOT
-        bumped because the rescue is invoked, it just fails clearance.
+        Issue #2944: The clearance predicate added to
+        ``_try_in_pad_escape`` is DIAGNOSTIC ONLY for QFP/LQFP -- no
+        fallback path exists (the curator's BGA ring-fallback argument
+        does not apply to QFP), so we emit a warning and proceed
+        rather than rejecting and leaving the pin unrouted.
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
@@ -256,22 +224,28 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
+        # We expect at least some in-pad vias since 0.5mm-pitch with
+        # 0.2mm trace + 0.15mm clearance leaves no copper for parallel
+        # arms of the alternating pattern.
         in_pad_vias = [
             e for e in escapes
             if e.via is not None and getattr(e.via, "in_pad", False)
         ]
-        # Issue #2944: With via_diameter=0.6mm at 0.5mm pitch and
-        # pad_short=0.3mm, every candidate in-pad via violates
-        # via_radius + clearance to its neighbor.  The rescue is
-        # CORRECTLY rejected.  Pre-#2944 this returned vias that
-        # produced DRC errors on board 04 (OSC_OUT cluster); after
-        # #2944 the count is 0 and the pins defer to the main router.
-        assert in_pad_vias == [], (
-            f"Expected 0 in-pad vias on 0.5mm-pitch LQFP-48 with "
-            f"0.6mm vias (clearance infeasible); got {len(in_pad_vias)}. "
-            f"If this assertion fires, the Issue #2944 clearance "
-            f"predicate may have regressed."
+        assert len(in_pad_vias) >= 1, (
+            f"Expected at least one in-pad via for 0.5mm-pitch LQFP-48 "
+            f"with via-in-pad enabled; got {len(in_pad_vias)} of {len(escapes)} "
+            f"escapes."
         )
+
+        # Every in-pad via must sit dead-centre on its pad (within 1um).
+        for esc in in_pad_vias:
+            assert esc.via is not None
+            assert abs(esc.via.x - esc.pad.x) < 0.001
+            assert abs(esc.via.y - esc.pad.y) < 0.001
+            # 4-layer signal-signal-ground-power stack: inner escape lands
+            # on In1.Cu (a SIGNAL layer).
+            assert esc.via.layers[0] == esc.pad.layer
+            assert esc.via.layers[1] == Layer.IN1_CU
 
     def test_no_in_pad_escape_when_unsupported(self):
         """With manufacturer=jlcpcb (no via-in-pad capability), no in-pad
@@ -312,17 +286,8 @@ class TestLqfp48InPadEscape:
         assert in_pad_vias == []
 
     def test_in_pad_escape_uses_pcbway_when_supported(self):
-        """PCBWay is the other tier with ``via_in_pad_supported=True``.
-
-        Issue #2944: PCBWay's smaller min_via_drill (0.2mm) yields a
-        min_via_diameter of 0.5mm.  With pad_short=0.3mm at 0.5mm pitch
-        the in-pad via center is 0.5mm from the next pad's center =
-        0.35mm from its near edge; required = via_radius (0.25) +
-        clearance (0.15) = 0.4mm.  Still 0.05mm short, so the rescue
-        is rejected.  Like the jlcpcb-tier1 case, this test now
-        asserts the rescue is correctly REJECTED on the 0.5mm-pitch
-        fixture and the rescue infrastructure works (rescue is invoked
-        but its clearance check passes / fails depending on geometry).
+        """PCBWay is the other tier with ``via_in_pad_supported=True``;
+        verify the rescue fires for it too.
         """
         rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules)
@@ -336,15 +301,9 @@ class TestLqfp48InPadEscape:
             e for e in escapes
             if e.via is not None and getattr(e.via, "in_pad", False)
         ]
-        # Issue #2944: see test_in_pad_escape_generated_when_supported
-        # for the geometry argument.  PCBWay's smaller min_via_diameter
-        # (0.5mm vs jlcpcb-tier1's 0.6mm) is still too large for the
-        # 0.5mm-pitch fixture at the 0.15mm clearance, so the rescue
-        # is correctly rejected.
-        assert in_pad_vias == [], (
-            "PCBWay also cannot fit a 0.5mm-diameter in-pad via at "
-            "0.5mm pitch with 0.15mm clearance -- expected 0 in-pad "
-            f"vias; got {len(in_pad_vias)}."
+        assert len(in_pad_vias) >= 1, (
+            "PCBWay (also via_in_pad_supported=True) must trigger the "
+            "in-pad rescue for LQFP-48 0.5mm-pitch inner pins."
         )
 
     def test_in_pad_skipped_at_0p65mm_pitch_qfp(self):
@@ -373,22 +332,8 @@ class TestLqfp48InPadEscape:
         )
 
     def test_in_pad_escape_on_2layer_board(self):
-        """On a 2-layer board with via-in-pad enabled, the rescue is
-        REACHED but the clearance predicate rejects 0.5mm-pitch
-        candidates (see ``test_in_pad_escape_generated_when_supported``
-        for the geometry argument).
-
-        Issue #2944: This test originally asserted ``>= 1`` in-pad
-        vias.  The default fixture has 0.5mm pitch + 0.3mm pad height
-        + 0.6mm via diameter, which violates clearance to adjacent
-        foreign-net pads.  The new clearance check correctly rejects
-        the candidates; the test now asserts the rescue is reached
-        (no crashes) and produces an empty in-pad set on this
-        geometry.  If the predicate later admits in-pad vias here
-        (e.g. via a smaller-via tier addition or relaxed clearance),
-        the via layer-pair assertion ensures the alternate layer is
-        B.Cu on the 2-layer stack.
-        """
+        """On a 2-layer board with via-in-pad enabled, in-pad vias land on
+        B.Cu (the only available alternate signal layer)."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
         escape_router = EscapeRouter(grid, rules)
@@ -401,8 +346,9 @@ class TestLqfp48InPadEscape:
             e for e in escapes
             if e.via is not None and getattr(e.via, "in_pad", False)
         ]
-        # If any in-pad via was admitted, it must land on B.Cu on a
-        # 2-layer stack.
+        assert len(in_pad_vias) >= 1, (
+            "Expected at least one in-pad via on the 2-layer LQFP fixture."
+        )
         for esc in in_pad_vias:
             assert esc.via is not None
             assert esc.via.layers[1] == Layer.B_CU
