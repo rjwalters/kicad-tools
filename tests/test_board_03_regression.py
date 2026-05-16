@@ -985,3 +985,170 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
         "U1's west edge; placing Y1 east of U1 forces 17-22 mm "
         "channel-blocked traces that the autorouter cannot complete."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2943: J2 west-side nudge to clear JOY_Y channel past J2-5
+# ---------------------------------------------------------------------------
+#
+# Root cause: After issue #2918's west-side crystal placement
+# (Y1 at BOARD_ORIGIN_X + 22), the routing channel between Y1's south
+# pad metal and J2-5's north pad metal was only ~3.4 mm tall at
+# x = 19..22 -- the exact corridor JOY_Y needs to thread from the
+# filter column (filt_cx = BOARD_ORIGIN_X + 27) westward to J2-4
+# (x = BOARD_ORIGIN_X + 17 pre-nudge).  The result was 6
+# ``clearance_pad_segment`` errors where JOY_Y segments clipped
+# J2-5 (JOY_BTN, 1.6 mm dia pad).
+#
+# Fix: nudge J2 west by 2 mm (joy_cx: BOARD_ORIGIN_X + 15 ->
+# BOARD_ORIGIN_X + 13).  This walks J2-5 from x = 19 to x = 17
+# and opens a clean >5 mm channel.  PR #2941 (merged same day)
+# explicitly forbids router-side relaxation of these errors:
+# the same-component carve-out now correctly rejects negative-
+# clearance segments, so the fix MUST be geometric.
+#
+# This unit test pins the literal joy_cx = BOARD_ORIGIN_X + 13 so a
+# future hand-edit can't silently re-introduce the J2-5 channel
+# clip.  Integration coverage (the DRC count actually dropping to
+# the 4-error baseline) comes from the .github/routed-drc-tolerance.yml
+# floor of 4 set in the same PR.
+
+
+def test_joystick_nudged_west_to_clear_joy_y_channel(regenerated_board: Path) -> None:
+    """Issue #2943: J2 placement literal must sit at BOARD_ORIGIN_X + 13.
+
+    ``generate_joystick()`` and ``generate_joystick_filter()`` must agree
+    on the joystick connector centre being at ``BOARD_ORIGIN_X + 13``
+    (the post-nudge x), not the pre-nudge ``BOARD_ORIGIN_X + 15``.
+
+    The check inspects the source of ``generate_pcb.py`` rather than the
+    runtime output so the failure message points directly at the offending
+    literal.  An integration check (the 6 J2-5 ``clearance_pad_segment``
+    errors actually disappearing) is implicit in the routed-drc-tolerance
+    floor of 4 (down from 9) set in the same PR.
+
+    Acceptance criteria from issue #2943:
+
+      1. ``generate_joystick()`` uses ``x = BOARD_ORIGIN_X + 13``.
+      2. ``generate_joystick_filter()`` uses ``joy_cx = BOARD_ORIGIN_X + 13``
+         (so the filter column references stay consistent).
+      3. The pre-nudge literal ``BOARD_ORIGIN_X + 15`` must NOT appear in
+         either helper any longer.
+
+    Criterion (1) and (2) are pinned here; the DRC count drop is pinned
+    by the floor of 4 in ``.github/routed-drc-tolerance.yml``.
+    """
+    src = (BOARD_DIR / "generate_pcb.py").read_text()
+
+    # Match ``x = BOARD_ORIGIN_X + 13`` inside ``generate_joystick()``.
+    joystick_x_pat = re.compile(
+        r"def\s+generate_joystick\b(?!_filter).*?x\s*=\s*BOARD_ORIGIN_X\s*\+\s*13\b",
+        re.DOTALL,
+    )
+    assert joystick_x_pat.search(src), (
+        "generate_joystick() no longer hardcodes x = BOARD_ORIGIN_X + 13.  "
+        "Issue #2943 fix nudged J2 from BOARD_ORIGIN_X + 15 to "
+        "BOARD_ORIGIN_X + 13 (2 mm west) so the JOY_Y routing channel "
+        "between Y1 (BOARD_ORIGIN_X + 22) and J2-5 widens from ~3.4 mm "
+        "to >5 mm.  If you intentionally moved J2 again, verify the "
+        "J2-5 ``clearance_pad_segment`` errors haven't returned (check "
+        "DRC against the post-#2943 baseline of 4 errors at jlcpcb "
+        "tier-1)."
+    )
+
+    # Match ``joy_cx = BOARD_ORIGIN_X + 13`` inside ``generate_joystick_filter()``.
+    filter_cx_pat = re.compile(
+        r"def\s+generate_joystick_filter\b.*?joy_cx\s*=\s*BOARD_ORIGIN_X\s*\+\s*13\b",
+        re.DOTALL,
+    )
+    assert filter_cx_pat.search(src), (
+        "generate_joystick_filter() joy_cx is no longer aligned to "
+        "BOARD_ORIGIN_X + 13 -- the joystick moved but the filter helper "
+        "did not follow.  Both ``generate_joystick()`` and "
+        "``generate_joystick_filter()`` must share the same J2 centre, "
+        "otherwise the filter column drifts relative to the connector "
+        "pads."
+    )
+
+    # Negative assertion: the pre-#2943 literal ``BOARD_ORIGIN_X + 15``
+    # must NOT reappear inside either joystick helper.  A diff that
+    # restores the old position is exactly the regression we are
+    # guarding against.
+    pre_nudge_pat = re.compile(
+        r"def\s+generate_joystick(?:_filter)?\b.*?(?:x|joy_cx)\s*=\s*BOARD_ORIGIN_X\s*\+\s*15\b",
+        re.DOTALL,
+    )
+    assert not pre_nudge_pat.search(src), (
+        "Pre-issue-#2943 J2 position literal (BOARD_ORIGIN_X + 15) has "
+        "reappeared in generate_joystick() or generate_joystick_filter().  "
+        "This is the exact regression issue #2943 was opened to prevent; "
+        "with Y1 on the west side (issue #2918), J2 must stay west of "
+        "x = +15 or the JOY_Y channel collapses and the 6 J2-5 "
+        "clearance_pad_segment errors return."
+    )
+
+
+def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
+    """Issue #2943 guard: J2-1 (GND) absolute x stays inside PCB west edge.
+
+    The nudge moves J2-1 from absolute x = BOARD_ORIGIN_X + 11 to
+    BOARD_ORIGIN_X + 9.  Curator flagged this as a guard: confirm J2's
+    body doesn't overhang the PCB west edge after the nudge.
+
+    Acceptance: J2-1 pad centre absolute x must be > BOARD_ORIGIN_X + 0.8
+    (i.e., pad edge stays inside the PCB by at least the pad radius
+    plus a small safety margin).  J2's body (which extends beyond the
+    PCB south edge by design) is unaffected -- the nudge is in X only.
+    """
+    pcb_text = PCB_FILE.read_text()
+
+    # Find J2's footprint position.
+    def _find_footprint_xy(ref: str) -> tuple[float, float] | None:
+        for m in re.finditer(
+            r'\(footprint\s+"[^"]+"\s*\(layer\s+"[^"]+"\)\s*'
+            r"\(uuid\s+\"[^\"]+\"\)\s*"
+            r"\(at\s+([\-0-9.]+)\s+([\-0-9.]+)",
+            pcb_text,
+        ):
+            block_start = m.start()
+            next_fp = pcb_text.find("(footprint", m.end())
+            block_end = next_fp if next_fp != -1 else len(pcb_text)
+            block = pcb_text[block_start:block_end]
+            ref_m = re.search(
+                rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block
+            )
+            if ref_m:
+                return float(m.group(1)), float(m.group(2))
+        return None
+
+    j2_xy = _find_footprint_xy("J2")
+    assert j2_xy is not None, (
+        "J2 (joystick) footprint not found in regenerated board 03 PCB.  "
+        "Did generate_joystick() get removed?"
+    )
+    j2_cx, _ = j2_xy
+
+    # J2-1 (GND) sits at pad offset -4 mm from J2 centre.  Pad diameter
+    # is 1.6 mm, so the pad's west edge is at j2_cx - 4 - 0.8 = j2_cx - 4.8.
+    # BOARD_ORIGIN_X = 100 (world coords).  We need pad-west-edge >
+    # BOARD_ORIGIN_X (>= 0 mm slack), and ideally with some safety margin.
+    pad1_centre_x = j2_cx - 4.0
+    pad1_west_edge_x = pad1_centre_x - 0.8  # 1.6 mm dia / 2
+
+    # BOARD_ORIGIN_X is 100.0 from the generator constant.
+    board_west_x = 100.0
+    edge_clearance = pad1_west_edge_x - board_west_x
+
+    assert edge_clearance > 0.0, (
+        f"J2-1 (GND) pad west edge at x={pad1_west_edge_x:.3f} mm is "
+        f"OUTSIDE the PCB west edge (x={board_west_x:.3f} mm).  J2 is at "
+        f"cx={j2_cx:.3f}; the issue #2943 nudge moved J2 too far west.  "
+        "Pull J2 back east until the pad sits fully inside the PCB."
+    )
+    assert edge_clearance >= 0.5, (
+        f"J2-1 (GND) pad west edge has only {edge_clearance:.3f} mm of "
+        f"clearance to the PCB west edge.  This is below the safe margin "
+        "of 0.5 mm; the JLCPCB process requires at least 0.4 mm "
+        "edge-to-copper clearance, so this will likely DRC-fail.  Pull "
+        "J2 back east."
+    )

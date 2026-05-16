@@ -333,8 +333,22 @@ def generate_usb_connector() -> str:
 
 
 def generate_joystick() -> str:
-    """Generate analog joystick footprint (2-axis + button)."""
-    x = BOARD_ORIGIN_X + 15  # Left side of board
+    """Generate analog joystick footprint (2-axis + button).
+
+    J2 was nudged west from ``BOARD_ORIGIN_X + 15`` to
+    ``BOARD_ORIGIN_X + 13`` by issue #2943.  Pre-nudge, J2-5 (JOY_BTN)
+    sat at absolute x = ``BOARD_ORIGIN_X + 19`` and the routing channel
+    between J2-5 and the west-side crystal Y1 (at
+    ``BOARD_ORIGIN_X + 22``) was only ~3 mm tall, forcing JOY_Y
+    segments from the filter column (``filt_cx = BOARD_ORIGIN_X + 27``)
+    westward to J2-4 to clip J2-5's pad copper (6
+    ``clearance_pad_segment`` errors).  Walking J2 west by 2 mm moves
+    J2-5 to x = ``BOARD_ORIGIN_X + 17`` and opens a clean >5 mm
+    channel; J2-1 (GND) at absolute x = ``BOARD_ORIGIN_X + 9`` still
+    sits 9 mm inside the PCB west edge (``BOARD_ORIGIN_X``), so the
+    joystick body's south-edge overhang for user grip is preserved.
+    """
+    x = BOARD_ORIGIN_X + 13  # Left side of board (nudged west by 2mm per #2943)
     y = BOARD_ORIGIN_Y + 35
 
     # Typical analog joystick module pinout
@@ -508,15 +522,18 @@ def generate_xtal_load_caps() -> str:
     cap is adjacent to its crystal pin with a short trace to GND.
 
     Why above (negative dy), not below: the joystick J2 sits at
-    ``(BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 35)`` with through-hole pads
-    spanning x = 11..19, y = 35. A below-Y1 cap at (xtal_cx - 2.44,
-    xtal_cy + 4) = (BOARD_ORIGIN_X + 19.56, BOARD_ORIGIN_Y + 34) places
-    C5-1 pad (0.56 x 0.62 mm at x = -0.48 from center) directly on top of
-    J2-5 (1.6 mm dia pad at (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 35))
-    -- a -0.110 mm pad-to-pad clearance violation that no router can fix.
-    Flipping cap_dy to negative places C5/C6 in the empty area between Y1
-    (y = 30) and U1's north pad row (y = 27.5), with > 0.9 mm clearance
-    on both sides.
+    ``(BOARD_ORIGIN_X + 13, BOARD_ORIGIN_Y + 35)`` (nudged west by
+    issue #2943; pre-nudge it sat at ``BOARD_ORIGIN_X + 15``) with
+    through-hole pads spanning x = 9..17, y = 35.  Even with the
+    nudge, a below-Y1 cap at (xtal_cx - 2.44, xtal_cy + 4) =
+    (BOARD_ORIGIN_X + 19.56, BOARD_ORIGIN_Y + 34) sits very close to
+    J2-5's new position (1.6 mm dia pad at
+    (BOARD_ORIGIN_X + 17, BOARD_ORIGIN_Y + 35)) -- the
+    centre-to-centre distance is ~2.78 mm, which is right at the
+    clearance edge for a 1.6 mm dia pad next to a 0.56 mm rectangular
+    cap pad (only ~0.07 mm slack).  Flipping cap_dy to negative
+    places C5/C6 in the empty area between Y1 (y = 30) and U1's
+    north pad row (y = 27.5), with > 0.9 mm clearance on both sides.
     """
     xtal_cx = BOARD_ORIGIN_X + 22
     xtal_cy = BOARD_ORIGIN_Y + 30
@@ -562,8 +579,10 @@ def generate_joystick_filter() -> str:
                                          |
                                         GND
 
-    Joystick connector J2 sits at ``(BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 35)``
-    with through-hole pads on row y=0 at x = -4 (GND), -2 (VCC), 0 (JOY_X),
+    Joystick connector J2 sits at ``(BOARD_ORIGIN_X + 13, BOARD_ORIGIN_Y + 35)``
+    (nudged west by 2 mm per issue #2943; pre-nudge it sat at
+    ``BOARD_ORIGIN_X + 15`` and the JOY_Y channel clipped J2-5).
+    Through-hole pads are on row y=0 at x = -4 (GND), -2 (VCC), 0 (JOY_X),
     +2 (JOY_Y), +4 (JOY_BTN) relative to its center. Place the filter to
     the right of the connector so the wiper traces stay short and there's
     clearance from the QFP MCU (which sits at BOARD_ORIGIN_X + 40, well to
@@ -579,15 +598,22 @@ def generate_joystick_filter() -> str:
     cares about ref/value/footprint match, not net topology, so this is
     acceptable for the demo board).
     """
-    # Joystick connector center (matches generate_joystick())
-    joy_cx = BOARD_ORIGIN_X + 15
+    # Joystick connector center (matches generate_joystick()).  J2 was
+    # nudged west by 2 mm in issue #2943 (was BOARD_ORIGIN_X + 15) to
+    # open the JOY_Y routing channel past J2-5 / Y1.  Keep this literal
+    # in sync with ``generate_joystick()``'s ``x`` literal above.
+    joy_cx = BOARD_ORIGIN_X + 13
     joy_cy = BOARD_ORIGIN_Y + 35
 
     # Filter column sits to the right of the connector, between J2 and U1.
     # U1 (MCU) starts at BOARD_ORIGIN_X + 40 with its courtyard extending
-    # a few mm left, so place the filter column at +12 from J2 center
-    # (BOARD_ORIGIN_X + 27, midway between J2 and U1).
-    filt_cx = joy_cx + 12
+    # a few mm left, so place the filter column at +14 from J2 center
+    # (BOARD_ORIGIN_X + 27 absolute; pre-#2943 this was joy_cx + 12 with
+    # joy_cx = +15, also yielding +27).  Holding the filter at +27
+    # absolute keeps the joystick-to-U1 routing topology unchanged when
+    # J2 moves; experimentation (#2943) confirmed shifting the filter
+    # column with J2 (e.g. joy_cx + 12 -> absolute +25) regresses DRC.
+    filt_cx = joy_cx + 14
 
     # Three rows aligned vertically: JOY_X filter above, JOY_Y filter below,
     # BTN pull-up further below. 2.5 mm row pitch is generous for 0402 parts.

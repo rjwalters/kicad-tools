@@ -103,9 +103,37 @@ tolerances:
   # errors at J2-5 (PCB-local (19, 35)).  Plus the existing 2
   # ``diffpair_clearance_intra`` (#2919) and 1
   # ``clearance_segment_via`` JOY_Y/BTN3 minor crosstalk = 9 total.
-  # Tracked in #2943 (J2-5 channel) with exit clause: drop back to
-  # 4 once #2943's placement nudge or router fix lands; then to 0
-  # once #2919 lands.
+  #
+  # Issue #2943 nudged J2 west 2 mm
+  # (``joy_cx``: ``BOARD_ORIGIN_X + 15`` -> ``BOARD_ORIGIN_X + 13``).
+  # J2-5 (JOY_BTN) moves from x = 19 to x = 17, opening a clean
+  # >5 mm-wide channel between J2-5 and Y1 (at x = 22) for JOY_Y
+  # to thread westward from the filter column to J2-4.  The 6
+  # ``clearance_pad_segment`` errors at the J2-5 location are
+  # eliminated (no errors at PCB-local (19, 35) post-fix).  J2-1
+  # (GND) at x = 9 still sits 9 mm inside the PCB west edge.
+  # Curator (#2943) explicitly rejected the router-side alternative
+  # because PR #2941 tightened the same-component carve-out to
+  # reject negative-clearance segments -- those errors are exactly
+  # that case, and loosening the router would regress #2941.
+  #
+  # However, the router (kct route --auto-layers --seed 13)
+  # converges on 2-layer routing with 9 different errors after the
+  # nudge: 3 ``clearance_pad_segment`` at U1.9 (JOY_X/JOY_Y clipping
+  # MCU pads from a new escape path), 1 ``clearance_pad_via`` at
+  # J1.A6 (#2919 USB family), 1 ``clearance_pad_via`` at U1.14
+  # (BTN3/BTN4), 2 ``diffpair_clearance_intra`` (#2919 USB family),
+  # 1 ``clearance_segment_segment`` + 1 ``clearance_segment_via``
+  # XTAL crosstalk.  The geometric fix is sound (J2-5 cluster gone)
+  # but the router redistributed its conflicts; the net DRC count
+  # is unchanged.  This is honest signaling per #2924's exit clause
+  # framing: floor stays at 9 because the actual count is 9, even
+  # though the underlying defect class shifted.
+  #
+  # Exit clause for further tightening: a routing improvement (or
+  # additional placement nudge to other components like Y1's
+  # cap_dy or U1's pin-side filter routing) that drops the
+  # post-#2943 count below 9.  Tracked under future follow-up.
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 9
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
