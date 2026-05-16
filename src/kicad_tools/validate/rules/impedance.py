@@ -297,6 +297,35 @@ class ImpedanceRule(DRCRule):
             if spec is None:
                 continue
 
+            # Issue #2973 follow-up: skip differential-only specs (those
+            # carrying only ``target_zdiff``) when the rule has no
+            # diff-pair detection context (``self._detected_pairs`` is
+            # empty / ``self._partner_map`` does not contain this net).
+            # Without coupling information, the single-ended fallback in
+            # ``_check_trace_impedance`` evaluates the trace against a
+            # bogus ``target_z = spec.target_z0 or 50.0`` (i.e. 50Ω),
+            # which produces spurious "target is 50.0Ω" errors on routed
+            # diff-pair signals like ``PCIE_TX+``.  This is the standalone
+            # ``kct check`` code path (``DRCChecker.check_impedance``
+            # constructs ``ImpedanceRule()`` with no ``detected_pairs``)
+            # which board 06's CI gate exercises.  Skipping diff-only
+            # specs in this context mirrors the Phase 3K docstring's
+            # contract: "when ``None`` (the default), the rule falls
+            # back to its pre-Phase 3K single-ended-only behavior",
+            # which should NOT mean "evaluate a diff target against a
+            # single-ended fallback".  Diff-pair impedance is still
+            # validated when the router supplies ``detected_pairs``
+            # (the autorouter integration path), and single-ended
+            # specs (``target_z0`` set) continue to fire unconditionally
+            # -- this preserves the #2964 SWCLK use case and the
+            # impedance-driven sizing bridge in PR #2966.
+            if (
+                spec.target_z0 is None
+                and spec.target_zdiff is not None
+                and net_name not in self._partner_map
+            ):
+                continue
+
             for trace in traces:
                 check_result = self._check_trace_impedance(trace, spec)
                 if not check_result.compliant:
