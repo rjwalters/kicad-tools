@@ -4715,6 +4715,11 @@ class Autorouter:
         if len(pads) < 2:
             return []
 
+        # Issue #2953: push foreign-net pad / track context so the N-port
+        # interleaved path's ``self.router.route()`` calls honor the same
+        # world-coord via clearance predicate route_net() does (PR #2952).
+        self._update_router_via_foreign_context(net)
+
         routes: list[Route] = []
 
         # Handle intra-IC connections first
@@ -7015,6 +7020,13 @@ class Autorouter:
         if len(pads) < 2:
             return []
 
+        # Issue #2953: push foreign-net pad / track context so
+        # ``_check_via_placement_cached`` can apply the same world-coord
+        # clearance predicate the escape phase uses (PR #2945/#2952).
+        # ``route_net()`` calls this on its own path; the negotiated
+        # strategy bypasses ``route_net()`` so we wire it here.
+        self._update_router_via_foreign_context(net)
+
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
         for route in intra_routes:
@@ -7338,6 +7350,11 @@ class Autorouter:
         pads = self.nets[net]
         if len(pads) < 2:
             return []
+
+        # Issue #2953: push foreign-net pad / track context so corridor-
+        # aware A* honors the world-coord via clearance predicate the
+        # negotiated / route_net paths already invoke (PR #2952).
+        self._update_router_via_foreign_context(net)
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
