@@ -3658,18 +3658,37 @@ class EscapeRouter:
         self,
         pads: list[Pad],
         stagger_distance: float | None = None,
+        foreign_pads: list[Pad] | None = None,
+        foreign_tracks: list[Segment] | None = None,
     ) -> list[Via]:
         """Generate staggered via pattern under dense package.
 
         Places vias in a dog-bone pattern, offsetting via positions
         based on row/column to prevent via-to-via DRC violations.
 
+        Issue #2948: Forwards optional foreign-net pad / track context to
+        :meth:`_can_place_via` so the world-coordinate clearance check
+        from Issue #2944 can reject candidates whose envelope overlaps
+        adjacent foreign copper.  When omitted (the existing legacy
+        behavior), only the grid-cell bounds / obstacle check is run.
+
         Args:
-            pads: Pads to create fanout vias for
-            stagger_distance: Offset distance for stagger (defaults to via_spacing/2)
+            pads: Pads to create fanout vias for.  Each via inherits the
+                parent pad's ``net`` so the predicate can filter
+                ``foreign_pads`` / ``foreign_tracks`` down to the truly
+                foreign-net subset.
+            stagger_distance: Offset distance for stagger (defaults to
+                ``via_spacing / 2``).
+            foreign_pads: Optional list of nearby pads (board-wide pad
+                registry minus the package being fanned out, ideally) to
+                validate each candidate via against.  Pads whose ``net``
+                matches the parent pad are skipped automatically.
+            foreign_tracks: Optional list of pre-existing track segments
+                to validate against.  Segments whose ``net`` matches the
+                parent pad's net are skipped automatically.
 
         Returns:
-            List of Via objects in staggered pattern
+            List of Via objects in staggered pattern.
         """
         if not pads:
             return []
@@ -3689,8 +3708,17 @@ class EscapeRouter:
                 via_x = pad.x + offset_x
                 via_y = pad.y + offset_y
 
-                # Check if position is valid in grid
-                if self._can_place_via(via_x, via_y):
+                # Issue #2948: forward foreign-copper context (own net
+                # filtering happens inside ``_can_place_via``).  When
+                # ``foreign_pads`` / ``foreign_tracks`` are omitted the
+                # call collapses to the legacy grid-cell-only check.
+                if self._can_place_via(
+                    via_x,
+                    via_y,
+                    net=pad.net,
+                    foreign_pads=foreign_pads,
+                    foreign_tracks=foreign_tracks,
+                ):
                     via = Via(
                         x=via_x,
                         y=via_y,
