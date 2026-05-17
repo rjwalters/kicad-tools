@@ -447,6 +447,33 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # check is satisfied (see #2980).  HS outputs feed the slew-rate
     # resistor array (``GATE_DRV_*``); LS outputs are direct-driven to the
     # MOSFET gates (``GATE_*L``).
+    # The ``Driver_Motor:DRV8308`` symbol exposes 39 pins.  PR #2985 wired
+    # only the six HS/LS gate outputs (``UHSG``/``ULSG``/...).  The remaining
+    # 33 pins fall into three residual categories (see #2986):
+    #
+    #   1. SPI + discrete control inputs (left edge of symbol).  No spare
+    #      MCU pins on the STM32G431K8 are allocated for these on this
+    #      demo board, so each input is tied to a static rail -- ``+3.3V``
+    #      for "idle high" / "always-on" pins, ``GND`` for "normal-mode"
+    #      strapping.  Output-type pins (``SDATAO``, ``FGFB``, ``FGOUT``,
+    #      ``~FAULTn``, ``~LOCKn``) each get a *unique* local net to avoid
+    #      ERC's ``pin_to_pin`` "Output-Output" error.
+    #
+    #   2. Phase bootstrap pins (right edge: ``UHP``/``UHN``/``VHP``/...)
+    #      connect via label-name continuity to the ``BST_*``/``PHASE_*``
+    #      nets driven by the bootstrap capacitor array and the inverter
+    #      below.  The current-sense phase-voltage inputs (``U``/``V``/
+    #      ``W``) also tie to ``PHASE_A``/``B``/``C``.
+    #
+    #   3. Power pins.  GND, charge-pump caps (CP1/CP2), and the current-
+    #      sense input (ISEN) all use the block's horizontal pin_nets
+    #      stubs.  The top-edge regulator pins (VM, VINT, VCP, VSW, VREG)
+    #      sit on a single y-row 2.54 mm apart in x, which collides with
+    #      the block's horizontal-stub direction; those are wired *outside*
+    #      the block via vertical stubs (see ``_U3_TOP_EDGE_NETS`` below).
+    #      Each top-edge regulator output gets a unique local net to avoid
+    #      ``pin_to_pin`` ERC conflicts; ``VM`` ties to the global
+    #      ``VMOTOR`` net (driven by the power-input section).
     gate_driver = GateDriverBlock(
         sch,
         x=X_GATE_DRV,
@@ -458,6 +485,35 @@ def create_bldc_controller(output_dir: Path) -> Path:
         bypass_caps=["100nF", "10uF"],
         cap_ref_start=15,  # C15-C16 for bypass (C12-C14 reserved for bootstrap)
         pin_nets={
+            # --- Category 1: SPI + discrete control (left edge) ---
+            # SPI inputs: tied to +3.3V (idle high) since no MCU pin is
+            # allocated on this demo board.  These are Input-type pins, so
+            # tying multiple of them to the same +3.3V rail is fine.
+            "SCS": "+3.3V",           # SPI chip-select (idle high)
+            "SCLK": "+3.3V",          # SPI clock
+            "SDATAI": "+3.3V",        # SPI MOSI (idle high)
+            "SMODE": "+3.3V",         # SPI mode strap (3-wire vs 4-wire)
+            # Discrete control inputs: tied to static rails.
+            "ENABLE": "+3.3V",        # enable (always-on for demo)
+            "RESET": "+3.3V",         # active-low reset, idle high
+            "BRAKE": "+3.3V",         # active-low brake, idle high
+            "DIR": "+3.3V",           # direction strap
+            "CLKIN": "GND",           # external clock-in (unused, tied low)
+            # Feedback/tachometer inputs: tied low when unused.
+            "FGINP": "GND",           # tach +ve input (unused)
+            "FGINN_TACH": "GND",      # tach -ve / hall feedback (unused)
+            # Output pins MUST each have a unique net.  KiCad ERC reports
+            # ``pin_to_pin`` when two Output-type pins share a wire (e.g.
+            # tying ``FGOUT`` and ``~FAULTn`` both to ``+3.3V`` would
+            # produce an Output-Output conflict).  On a real board these
+            # would have external pull-ups to +3.3V and route to the MCU;
+            # for this demo we give each its own local label.
+            "SDATAO": "SPI_MISO",     # SPI MISO (Output)
+            "FGFB": "FGFB",           # speed-loop feedback (Output)
+            "FGOUT": "FGOUT",         # tach output (Output)
+            "~{FAULTn}": "DRV_FAULTn",  # fault status (Output, open-drain)
+            "~{LOCKn}": "DRV_LOCKn",  # PLL-lock status (Output, open-drain)
+            # --- Category 2: HS/LS gate outputs (right edge) ---
             # High-side gate outputs (route through R20-R22 -> MOSFET gates).
             "UHSG": "GATE_DRV_AH",
             "VHSG": "GATE_DRV_BH",
@@ -466,8 +522,57 @@ def create_bldc_controller(output_dir: Path) -> Path:
             "ULSG": "GATE_AL",
             "VLSG": "GATE_BL",
             "WLSG": "GATE_CL",
+            # Phase bootstrap pins -- match BST_*/PHASE_* nets from the
+            # external bootstrap capacitor array below.
+            "UHP": "BST_A",
+            "UHN": "PHASE_A",
+            "VHP": "BST_B",
+            "VHN": "PHASE_B",
+            "WHP": "BST_C",
+            "WHN": "PHASE_C",
+            # Phase-voltage sense inputs (sinusoidal commutation feedback).
+            "U": "PHASE_A",
+            "V": "PHASE_B",
+            "W": "PHASE_C",
+            # Current-sense input: tied low (no shunt amp on this demo).
+            "ISEN": "GND",
+            # --- Category 3: Power pins (left/bottom-edge pins only) ---
+            # GND has two pins on the symbol (26 and 41).  pin_position
+            # resolves the name "GND" to pin 26; the second pin (41) is
+            # keyed by its number.
+            "GND": "GND",              # logic GND (pin 26)
+            "41": "GND",               # second GND pin (pin 41, same net)
+            # CP1/CP2 sit on the left edge of the symbol (despite the
+            # naming suggesting otherwise), so they fit the block's
+            # horizontal-stub pin_nets pattern.
+            "CP1": "DRV_CP1",          # charge-pump capacitor pin 1
+            "CP2": "DRV_CP2",          # charge-pump capacitor pin 2
+            # Top-edge pins (VINT, VCP, VM, VSW, VREG) cannot use the
+            # block's horizontal ``pin_nets`` stubs without colliding (the
+            # pins are spaced 2.54 mm in x and the stub is also 2.54 mm).
+            # They are wired below via vertical stubs outside the block.
         },
     )
+
+    # Top-edge pins of the DRV8308 symbol (VINT, VCP, VM, VSW, VREG) cannot
+    # use the block's horizontal ``pin_nets`` stubs without colliding (the
+    # pins are spaced 2.54 mm in x and the stub is also 2.54 mm).  Emit
+    # vertical stubs and labels manually so each pin gets a clean wire
+    # endpoint at a distinct label coordinate.
+    _U3_TOP_EDGE_NETS = (
+        ("VINT", "DRV_VINT"),
+        ("VCP", "DRV_VCP"),
+        ("VM", "VMOTOR"),
+        ("VSW", "DRV_VSW"),
+        ("VREG", "DRV_VREG"),
+    )
+    for _pin_name, _net_name in _U3_TOP_EDGE_NETS:
+        _pin_pos = gate_driver.driver.pin_position(_pin_name)
+        # Stub upward (away from symbol body which is below the pin row).
+        _stub_end = (_pin_pos[0], _pin_pos[1] - 2.54)
+        sch.add_wire(_pin_pos, _stub_end, warn_on_collision=False)
+        sch.add_label(_net_name, _stub_end[0], _stub_end[1], rotation=90,
+                      validate_connection=False)
     gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
 
     # External 3-phase bootstrap cap network (BST_x to PHASE_x).
