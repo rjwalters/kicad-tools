@@ -444,8 +444,30 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"\n1. Net classes assembled: {len(net_class_map)} entries")
     print(f"   Diff pairs declared: {len(generate_pcb.DIFFPAIRS)}")
     print("   Match groups (length_match_group): 4")
-    write_sidecar(net_class_map, output_path.parent)
+    sidecar_path = write_sidecar(net_class_map, output_path.parent)
 
+    # Issue #2996: ``kct route`` now accepts ``--net-class-map`` (this PR)
+    # which merges the rich NetClassRouting declarations
+    # (intra_pair_clearance, coupled_routing, length_match_group, ...)
+    # into the autorouter's net_class_map at routing time.  This closes
+    # the *projection gap*: pre-#2996, ``--differential-pairs`` had no
+    # way to consume the sidecar's per-pair ``intra_pair_clearance``
+    # overrides and fell back to defaults that resolved to -0.150 mm
+    # (overlapping sibling traces, ~20K ``diffpair_clearance_intra``
+    # violations -- the bug this issue documents).
+    #
+    # Pass the sidecar through unconditionally so that future recipes
+    # that re-enable ``--differential-pairs`` automatically get the
+    # rich per-pair declarations.  For now the recipe keeps
+    # ``--differential-pairs`` OFF because the projection fix alone is
+    # not sufficient to stay under the 70-error DRC allowlist:
+    # empirically the routed PCB still ends up with ~459 residual
+    # ``diffpair_clearance_intra`` violations (down from ~20K, a 97%
+    # reduction) due to a SEPARATE post-pathfinder serpentine /
+    # length-tune geometry issue.  That issue is filed as a follow-up
+    # (router-side, out of scope per the curator brief's "DO NOT widen
+    # DRC tolerances" hard limit).  Re-enabling ``--differential-pairs``
+    # in this recipe is gated on that follow-up landing.
     cmd = [
         sys.executable,
         "-m",
@@ -467,6 +489,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "600",
         "--skip-nets",
         ",".join(skip_nets),
+        "--net-class-map",
+        str(sidecar_path),
     ]
 
     print(f"\n2. Input: {input_path}")

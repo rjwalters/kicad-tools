@@ -315,6 +315,11 @@ def run_route_command(args) -> int:
     # Issue #2723 (Epic #2661 Phase 3H): forward the length-match-groups flag
     if getattr(args, "length_match_groups", False):
         sub_argv.append("--length-match-groups")
+    # Issue #2996: forward --net-class-map sidecar path so rich
+    # NetClassRouting fields (intra_pair_clearance, etc.) merge into the
+    # autorouter's net_class_map at routing time.
+    if getattr(args, "net_class_map", None) is not None:
+        sub_argv.extend(["--net-class-map", args.net_class_map])
     return route_main(sub_argv)
 
 

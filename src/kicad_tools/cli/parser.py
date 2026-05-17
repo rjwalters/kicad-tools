@@ -2660,6 +2660,22 @@ def _add_route_parser(subparsers) -> None:
             "engage the Phase 2F symmetric-serpentine path."
         ),
     )
+    route_parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (Issue #2996).  Merged into the autorouter's "
+            "name-pattern-classified net_class_map so per-pair / per-group "
+            "fields (intra_pair_clearance, coupled_routing, "
+            "coupled_continuity_threshold, target_diff_impedance, "
+            "length_match_group) project through to the routing-time "
+            "pathfinder.  Without this flag, --differential-pairs falls "
+            "back to NetClassRouting defaults and can produce overlapping "
+            "diff-pair sibling traces under tight mfr profiles."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
@@ -4358,9 +4374,7 @@ def _add_fleet_parser(subparsers) -> None:
             "readiness (gerbers, BOM, CPL, manifest) with staleness detection."
         ),
     )
-    fleet_subparsers = fleet_parser.add_subparsers(
-        dest="fleet_command", help="Fleet commands"
-    )
+    fleet_subparsers = fleet_parser.add_subparsers(dest="fleet_command", help="Fleet commands")
 
     # fleet status
     fleet_status = fleet_subparsers.add_parser(
