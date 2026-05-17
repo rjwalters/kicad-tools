@@ -77,6 +77,7 @@ class LDOBlock(CircuitBlock):
         domain: str = "",
         output_voltage: str = "3V3",
         auto_footprint: bool = False,
+        pin_nets: dict[str, str] | None = None,
     ):
         """
         Create an LDO power supply block.
@@ -95,6 +96,19 @@ class LDOBlock(CircuitBlock):
             domain: Power domain identifier ("" for generic, "A" for analog, "D" for digital)
             output_voltage: Output voltage string (e.g., "3V3", "5V") for net naming
             auto_footprint: If True, automatically select footprint for caps based on value
+            pin_nets: Optional mapping of LDO-IC pin name or number to net
+                label.  For each entry, a one-grid (2.54 mm) stub wire
+                is drawn from the pin away from the symbol center and the
+                net label is placed on the stub endpoint so KiCad's
+                label-on-wire ERC check is satisfied (see issue #2980,
+                mirrors the ``GateDriverBlock`` pattern introduced in
+                PR #2985).  When ``None`` (the default), no labels are
+                emitted and behavior is unchanged.  Useful for binding
+                ``VI``/``VO``/``GND`` to power-rail net names (e.g.
+                ``{"VI": "+5V", "VO": "+3.3V"}``) so power-input ERC
+                reads them as driven.  For every entry, an alias port is
+                also added under the net name so callers can retrieve
+                real pin coordinates via ``block.port("<net>")``.
         """
         super().__init__(sch, x, y)
         self.domain = domain
@@ -190,6 +204,34 @@ class LDOBlock(CircuitBlock):
         if en_tied_to_vin and en_pos is not None:
             # Connect EN to VIN (vertical wire)
             sch.add_wire(en_pos, (en_pos[0], vin_pos[1]))
+
+        # Optional pin-net labels.  KiCad's label-only connectivity requires
+        # the label coordinate to lie on a wire endpoint or segment; without
+        # a stub, labels placed at the bare pin float and trigger ERC's
+        # ``isolated_pin_label`` cascade.  For each ``pin_nets`` entry we
+        # resolve the real pin position via ``self.ldo.pin_position``
+        # (supporting either pin names or pin numbers), draw a one-grid
+        # (2.54 mm) horizontal stub *away from the symbol center* (left
+        # for pins on the symbol's left edge, right otherwise), and place
+        # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
+        # pattern from PR #2985; see issues #2980 and #2994.
+        if pin_nets is not None:
+            STUB = 2.54
+            for pin_key, net_name in pin_nets.items():
+                pin_pos = self.ldo.pin_position(pin_key)
+                # Stub away from the symbol center.  When the pin lies
+                # exactly on the center column we default to stubbing right.
+                if pin_pos[0] < x:
+                    label_x = pin_pos[0] - STUB
+                else:
+                    label_x = pin_pos[0] + STUB
+                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
+                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
+                # Expose the pin's real coordinate under the net name so
+                # external wiring can reach it.  Do not overwrite an
+                # existing port by the same name (preserves back-compat).
+                if net_name not in self.ports:
+                    self.ports[net_name] = pin_pos
 
     def connect_to_rails(
         self,
@@ -370,6 +412,7 @@ class BuckConverter(CircuitBlock):
         inductor_ref: str = "L1",
         diode_ref: str = "D1",
         auto_footprint: bool = False,
+        pin_nets: dict[str, str] | None = None,
     ):
         """
         Create a buck converter power supply block.
@@ -395,6 +438,20 @@ class BuckConverter(CircuitBlock):
             inductor_ref: Reference designator for inductor
             diode_ref: Reference designator for diode
             auto_footprint: If True, automatically select footprints
+            pin_nets: Optional mapping of regulator-IC pin name or number to
+                net label.  For each entry, a one-grid (2.54 mm) stub wire
+                is drawn from the pin away from the symbol center and the
+                net label is placed on the stub endpoint so KiCad's
+                label-on-wire ERC check is satisfied (see issue #2980,
+                mirrors the ``GateDriverBlock`` pattern introduced in
+                PR #2985).  When ``None`` (the default), no labels are
+                emitted and behavior is unchanged.  Useful for declaring
+                static-tied feedback pins (e.g. ``"FB": "+5V"`` for a
+                fixed-output LM2596 variant) or for binding ``VIN``/``GND``
+                to power-rail net names so power-input ERC reads them as
+                driven.  For every entry, an alias port is also added
+                under the net name so callers can retrieve real pin
+                coordinates via ``block.port("<net>")``.
         """
         super().__init__(sch, x, y)
         self.input_voltage = input_voltage
@@ -558,6 +615,34 @@ class BuckConverter(CircuitBlock):
         # Store internal positions for rail connections
         self._sw_node = l_in
         self._vout_node = c_out_pos
+
+        # Optional pin-net labels.  KiCad's label-only connectivity requires
+        # the label coordinate to lie on a wire endpoint or segment; without
+        # a stub, labels placed at the bare pin float and trigger ERC's
+        # ``isolated_pin_label`` cascade.  For each ``pin_nets`` entry we
+        # resolve the real pin position via ``self.regulator.pin_position``
+        # (supporting either pin names or pin numbers), draw a one-grid
+        # (2.54 mm) horizontal stub *away from the symbol center* (left
+        # for pins on the symbol's left edge, right otherwise), and place
+        # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
+        # pattern from PR #2985; see issues #2980 and #2994.
+        if pin_nets is not None:
+            STUB = 2.54
+            for pin_key, net_name in pin_nets.items():
+                pin_pos = self.regulator.pin_position(pin_key)
+                # Stub away from the symbol center.  When the pin lies
+                # exactly on the center column we default to stubbing right.
+                if pin_pos[0] < x:
+                    label_x = pin_pos[0] - STUB
+                else:
+                    label_x = pin_pos[0] + STUB
+                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
+                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
+                # Expose the pin's real coordinate under the net name so
+                # external wiring can reach it.  Do not overwrite an
+                # existing port by the same name (preserves back-compat).
+                if net_name not in self.ports:
+                    self.ports[net_name] = pin_pos
 
     def connect_to_rails(
         self,
@@ -944,6 +1029,9 @@ class DualSupplyCascade(CircuitBlock):
         # Numbering
         cap_ref_start: int = 3,
         auto_footprint: bool = False,
+        # Per-stage pin_nets passthrough (issue #2994)
+        buck_pin_nets: dict[str, str] | None = None,
+        ldo_pin_nets: dict[str, str] | None = None,
     ):
         """Create a dual-supply cascade with explicit per-stage configuration.
 
@@ -980,6 +1068,16 @@ class DualSupplyCascade(CircuitBlock):
                 so the cascade fits the board-05 numbering (C3-C6).
             auto_footprint: If True, automatically select footprints for
                 capacitors based on value.
+            buck_pin_nets: Optional mapping passed through to the buck
+                stage's :class:`BuckConverter` ``pin_nets`` kwarg.  See
+                :class:`BuckConverter` for details.  When ``None`` (the
+                default), no per-pin labels are emitted on the buck stage
+                and behavior is unchanged.
+            ldo_pin_nets: Optional mapping passed through to the LDO
+                stage's :class:`LDOBlock` ``pin_nets`` kwarg.  See
+                :class:`LDOBlock` for details.  When ``None`` (the
+                default), no per-pin labels are emitted on the LDO stage
+                and behavior is unchanged.
         """
         super().__init__(sch, x_buck, y)
         self.vin = vin
@@ -1011,6 +1109,7 @@ class DualSupplyCascade(CircuitBlock):
             inductor_ref=buck_inductor_ref,
             diode_ref=buck_diode_ref,
             auto_footprint=auto_footprint,
+            pin_nets=buck_pin_nets,
         )
 
         # ----- LDO stage -----
@@ -1030,6 +1129,7 @@ class DualSupplyCascade(CircuitBlock):
             en_tied_to_vin=ldo_en_tied_to_vin,
             output_voltage=_voltage_string(vout),
             auto_footprint=auto_footprint,
+            pin_nets=ldo_pin_nets,
         )
 
         # ----- Composed component dictionary -----
@@ -1161,6 +1261,8 @@ def create_dual_supply_cascade(
     buck_diode_ref: str = "D2",
     buck_inductor_ref: str = "L1",
     auto_footprint: bool = False,
+    buck_pin_nets: dict[str, str] | None = None,
+    ldo_pin_nets: dict[str, str] | None = None,
 ) -> DualSupplyCascade:
     """Create a buck → LDO cascade with sensible defaults from a config table.
 
@@ -1199,6 +1301,10 @@ def create_dual_supply_cascade(
         buck_diode_ref: Buck Schottky diode reference designator.
         buck_inductor_ref: Buck inductor reference designator.
         auto_footprint: If True, auto-select footprints for capacitors.
+        buck_pin_nets: Optional ``pin_nets`` mapping passed through to the
+            buck stage.  See :class:`BuckConverter` for details.
+        ldo_pin_nets: Optional ``pin_nets`` mapping passed through to the
+            LDO stage.  See :class:`LDOBlock` for details.
 
     Returns:
         Configured :class:`DualSupplyCascade` instance.
@@ -1276,4 +1382,6 @@ def create_dual_supply_cascade(
         ldo_en_tied_to_vin=True,
         cap_ref_start=cap_ref_start,
         auto_footprint=auto_footprint,
+        buck_pin_nets=buck_pin_nets,
+        ldo_pin_nets=ldo_pin_nets,
     )
