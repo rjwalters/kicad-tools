@@ -22,10 +22,18 @@ net-ordering exploration):
   (well under 70 allowlist), but DQ5 still blocked by DQ4 with the
   identical 0.44mm clearance failure as round 2 -- the underlying
   constraint is geometric, not orderable.
-- **Terminal outcome** (this PR / contract): scaffolding-only.  The
-  helper detects but does not act; a follow-up issue tracks the
-  layered-escape strategy that decouples via placement from net
-  ordering.
+- **Terminal outcome** (PR #2969): scaffolding-only.  The helper
+  detects but does not reorder.
+- **Issue #2983** (this contract): adds **corridor reservation**
+  on top of the scaffolding.  Ordering remains identity (PR #2969's
+  R1/R2/R3 contract preserved), but on multi-layer stack-ups the
+  helper now reserves a per-net lateral corridor for each
+  inner-corner pad (positions 1 and N-2 of the sorted row).  See
+  ``test_byte_lane_corridor_reservation.py`` for the
+  reservation-count contract.  The reservation primitive itself
+  is :meth:`EscapeRouter.reserve_inner_corner_lane_corridor`, a
+  single-ended generalisation of the diff-pair corridor primitive
+  from PR #2911.
 
 Root cause that motivates the eventual implementation (per the
 issue):
@@ -217,26 +225,39 @@ class TestIdentityOnSmallGroups:
 
 
 class TestScaffoldingIdentityOnByteLane:
-    """Mirrored byte-lane groups currently return identity (scaffolding cut).
+    """Mirrored byte-lane groups return identity, with corridor reservation.
 
-    The helper detects the byte-lane row -- the projection / sort
-    machinery runs eagerly so future analysis hooks see consistent
-    intermediate state -- but no reorder is applied.  A follow-up PR
-    will replace the scaffolding fallback with a layered-escape
-    strategy (corridor reservation, deferred via stitching, or
-    explicit lateral-lane assignment) without touching the three
-    integration hooks.
+    Issue #2983 updates the contract: the helper still returns the
+    input net order unchanged (PR #2969 R1/R2/R3 proved net-ordering
+    changes alone are insufficient and, in R1, regressed DRC), but
+    the **corridor reservation** side-effect now runs for each
+    detected mirrored byte-lane group.  The reservation lands ONLY
+    when a routable inner layer is available in the stack-up; the
+    fixture here does NOT pass a ``layer_stack`` so the internal
+    2-layer fallback is in effect and the reservation is correctly
+    skipped (the 2-layer guard prevents starving partner-net
+    escapes — see ``test_byte_lane_corridor_reservation.py`` for
+    the multi-layer reservation contract).
+
+    The detection / projection / sort machinery runs eagerly so
+    callers observe consistent intermediate state.  The integration
+    hooks (``route_all``, ``route_all_negotiated``, ``TwoPhaseRouter``)
+    consume the unchanged order and the escape pre-pass + main
+    routing loop honour the per-cell reservation via
+    ``RoutingGrid._mark_via``.
     """
 
     def test_nine_net_byte_lane_identity(self) -> None:
         """9-net byte-lane (DDR-byte minus DQS pair): detection runs,
-        no reorder applied -- output equals input.
+        no reorder applied — output equals input.
 
-        Scaffolding contract per PR #2969 round-4 terminal outcome:
-        net-ordering alone cannot resolve the geometric DQ5/DQ4
-        0.44mm clearance constraint observed across R1/R2/R3.  The
-        helper retains its detection logic and signature so a future
-        layered-escape PR can swap the body without touching callers.
+        Issue #2983 contract: ordering is identity, AND on a
+        multi-layer stack-up the corridor reservation runs as a
+        side effect.  This fixture uses the default 2-layer
+        Autorouter (no ``layer_stack``), so the reservation is
+        correctly skipped here by the 2-layer guard.  See
+        ``test_byte_lane_corridor_reservation.py`` for the
+        reservation count assertions on 4-layer stack-ups.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=9)
 
@@ -247,13 +268,18 @@ class TestScaffoldingIdentityOnByteLane:
         # Membership + length invariants hold trivially under identity.
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
+        # 2-layer fallback => no reservation on this fixture.
+        assert router._escape.byte_lane_corridor_reservations == 0
 
     def test_ten_net_byte_lane_identity(self) -> None:
         """A 10-net byte-lane (full DDR-byte): detection runs, but
-        no reorder is applied -- output equals input.
+        no reorder is applied — output equals input.
 
         See the module docstring for the R1/R2/R3 design-history
-        trace explaining why net-ordering alone is insufficient.
+        trace explaining why net-ordering alone is insufficient,
+        and ``test_byte_lane_corridor_reservation.py`` for the
+        Issue #2983 reservation-count assertions on multi-layer
+        stack-ups (where the corridor is actually carved out).
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=10)
         out = router._apply_byte_lane_inner_priority(net_ids)
@@ -262,6 +288,8 @@ class TestScaffoldingIdentityOnByteLane:
         assert out == net_ids
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
+        # 2-layer fallback => no reservation on this fixture.
+        assert router._escape.byte_lane_corridor_reservations == 0
 
 
 class TestMultiGroupPreservation:

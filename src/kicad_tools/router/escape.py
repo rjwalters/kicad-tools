@@ -869,6 +869,17 @@ class EscapeRouter:
         # the total number of grid cells reserved across all calls.
         self.pair_corridor_reservations: int = 0
         self.pair_corridor_reserved_cells: int = 0
+        # Issue #2983: Instrumentation counters for single-ended byte-lane
+        # inner-corner corridor reservations.  Mirrors the diff-pair
+        # ``pair_corridor_*`` pattern but tracks calls into
+        # ``_reserve_inner_corner_lane_corridor`` which generalises the
+        # mechanism to mirrored byte-lane (e.g. board 07 DDR data) pads
+        # at sorted positions 1 and N-2 of a co-located row.  Tests in
+        # ``tests/router/test_byte_lane_corridor_reservation.py`` assert
+        # both the call count (one per inner-corner net) and the cell
+        # count (non-zero on a 4-layer board with an inner signal layer).
+        self.byte_lane_corridor_reservations: int = 0
+        self.byte_lane_corridor_reserved_cells: int = 0
 
         # Issue #2605: Resolve manufacturer capability flags.  Caller-supplied
         # arg wins; otherwise fall back to ``rules.manufacturer``.  If the
@@ -1619,6 +1630,196 @@ class EscapeRouter:
                 sorted(owner_nets),
                 len(members),
                 members[0].direction.name,
+            )
+        return count
+
+    def reserve_inner_corner_lane_corridor(
+        self,
+        pad: Pad,
+        launch_dx: float,
+        launch_dy: float,
+        target_inner_layer: Layer | None = None,
+        corridor_length: float | None = None,
+        corridor_half_width: float | None = None,
+    ) -> int:
+        """Reserve an inner-layer lateral corridor for a single-ended pad.
+
+        Issue #2983: Generalises ``_reserve_pair_continuation_corridor``
+        to the **single-ended inner-corner case** on mirrored byte-lane
+        packages (e.g. board 07's DDR data byte on a mirrored QFN-48
+        pair).  Pin row order on U1.25-35 is
+        ``DQ0, DQ1, DQ2, DQ3, DM0, DQS_P, DQS_N, DQ4, DQ5, DQ6, DQ7``
+        (mirrored on U2.1-11) — the pads at sorted positions 1 and N-2
+        ("inner-corner") are squeezed by their corner neighbour's
+        through-hole via placement.  Reserving a lateral corridor on
+        an inner signal layer (typically In1.Cu on the JLCPCB 4-layer
+        tier-1 stack-up) BEFORE any corner-net escapes prevents the
+        partner via from colonising the only continuation lane.
+
+        This is the single-ended sibling of the diff-pair corridor
+        primitive: same grid mechanic
+        (``RoutingGrid.reserve_corridor_cells``), same per-cell
+        consultation in ``RoutingGrid._mark_via`` (non-matching nets
+        skip the cell), same instrumentation pattern.  The geometry
+        is simpler — one pad, one launch direction — so no centroid
+        or partner projection is needed.
+
+        Geometry:
+            * Origin = pad centre.
+            * Corridor extends ``corridor_length`` mm along the launch
+              vector (dx, dy).
+            * Corridor width = ``2 * corridor_half_width`` mm,
+              centred on the pad and oriented perpendicular to launch.
+
+        Defaults are sized for board 07's 0.8mm-pitch QFN-48: the
+        launch step is ``escape_clearance + 2 * trace_width`` and the
+        corridor extrudes ~3 launch steps long (matching the PR #2911
+        diff-pair recipe).  The lateral half-width is one launch step
+        — narrower than the diff-pair recipe because we only need to
+        protect ONE net, not a pair, and a wider reservation would
+        starve the second-inward neighbour (the same trade-off that
+        led PR #2911 to NOT widen ``lat_half`` for the partner-via
+        halo; see ``_reserve_pair_continuation_corridor`` AC6 note).
+
+        Args:
+            pad: The inner-corner pad whose lane is being protected.
+                Must have a non-zero ``pad.net``.
+            launch_dx: Outward x-component of launch direction.
+            launch_dy: Outward y-component of launch direction.
+                ``(launch_dx, launch_dy)`` will be normalised to a unit
+                vector; the caller can pass component-centroid
+                differences directly.
+            target_inner_layer: Inner copper layer for the reservation.
+                Defaults to ``_select_inner_escape_layer(pad.layer)``
+                which returns the first inner signal layer (In1.Cu on
+                a 4-layer board) or B.Cu on 2-layer boards.  The 2-layer
+                fallback path is short-circuited inside this helper
+                (same guard as the diff-pair version): reserving B.Cu
+                would block the pad's own through-hole vias.
+            corridor_length: Optional override for forward extent.
+                Defaults to ``3 * (escape_clearance + 2 * trace_w)``.
+            corridor_half_width: Optional override for lateral
+                half-width.  Defaults to ``escape_clearance + trace_w``.
+
+        Returns:
+            Number of grid cells reserved.  Returns 0 if the helper is
+            a no-op (e.g. zero net id, layer not in stack, 2-layer
+            board, zero launch vector).
+        """
+        # Skip no-op cases up front.
+        net_id = int(pad.net) if pad.net else 0
+        if net_id == 0:
+            return 0
+
+        length_norm = math.hypot(launch_dx, launch_dy)
+        if length_norm == 0:
+            return 0
+        dx = launch_dx / length_norm
+        dy = launch_dy / length_norm
+
+        # Select target layer.  Default mirrors the diff-pair primitive
+        # (first inner signal layer; B.Cu fallback when no inner signal
+        # layers are available — e.g. board 07's 4-layer stack-up where
+        # In1.Cu/In2.Cu are PLANES).  For the single-ended inner-corner
+        # case the B.Cu fallback is *valid*: a pad-specific reservation
+        # on B.Cu blocks OTHER nets' through-hole vias from invading
+        # the corridor while still allowing the pad's own escape via
+        # (which carries the same net id and matches the reservation).
+        # The 2-layer fallback (where B.Cu is the ONLY alternate signal
+        # layer) is still excluded because reserving cells on the only
+        # alternate routable surface would starve partner-net escapes
+        # — same hazard as the diff-pair primitive's 2-layer guard.
+        if target_inner_layer is None:
+            target_inner_layer = self._select_inner_escape_layer(pad.layer)
+
+        # Require at least 3 routable layers in the stack-up.  On
+        # 2-layer boards this fix is unnecessary (no via-blocking
+        # contention to resolve) and *harmful* (would block partner-net
+        # vias from completing).  On 4-layer (and deeper) stacks the
+        # corridor reservation is safe regardless of whether the
+        # selected layer is an inner signal layer (In1.Cu) or an outer
+        # routing layer (B.Cu) — partner-net vias will detour because
+        # the cells are reserved for *this* net only.
+        if self.grid.layer_stack is not None:
+            if self.grid.layer_stack.num_layers < 3:
+                logger.debug(
+                    "Inner-corner corridor skipped: 2-layer stack-up "
+                    "(no contention to resolve, reservation would starve "
+                    "partner escapes)"
+                )
+                return 0
+            target_def = self.grid.layer_stack.get_layer_by_name(
+                target_inner_layer.kicad_name
+            )
+            if target_def is None:
+                logger.debug(
+                    "Inner-corner corridor skipped: layer %s not in stack",
+                    target_inner_layer.name,
+                )
+                return 0
+
+        try:
+            target_idx = self.grid.layer_to_index(target_inner_layer.value)
+        except Exception:
+            logger.debug(
+                "Inner-corner corridor skipped: layer %s not in grid stack",
+                target_inner_layer.name,
+            )
+            return 0
+
+        # Resolve trace width from net class (same idiom as the diff-pair
+        # primitive).
+        trace_w = self._get_trace_width_for_net(pad.net_name or "")
+        launch_step = self.escape_clearance + 2 * trace_w
+        if corridor_length is None:
+            corridor_length = launch_step * 3.0
+        if corridor_half_width is None:
+            # One launch step — narrower than the diff-pair half-width
+            # (which spans the pair extent plus padding).  See docstring
+            # for the starvation-avoidance rationale.
+            corridor_half_width = launch_step
+
+        # Lateral unit vector (right-hand-rule perpendicular).
+        lat_dx, lat_dy = -dy, dx
+        cx, cy = pad.x, pad.y
+
+        step = self.grid.resolution * 0.5
+        cells: set[tuple[int, int]] = set()
+        t = 0.0
+        while t <= corridor_length:
+            u = -corridor_half_width
+            while u <= corridor_half_width:
+                wx = cx + dx * t + lat_dx * u
+                wy = cy + dy * t + lat_dy * u
+                gx, gy = self.grid.world_to_grid(wx, wy)
+                cells.add((gx, gy))
+                u += step
+            t += step
+
+        if not cells:
+            return 0
+
+        count = self.grid.reserve_corridor_cells(
+            layer_idx=target_idx,
+            cells=cells,
+            net_ids={net_id},
+        )
+        if count > 0:
+            self.byte_lane_corridor_reservations += 1
+            self.byte_lane_corridor_reserved_cells += count
+            logger.debug(
+                "Byte-lane inner-corner corridor reserved: "
+                "layer=%s cells=%d net=%d pad=%s.%s launch=(%.2f,%.2f) "
+                "length=%.2fmm half_width=%.2fmm",
+                target_inner_layer.name,
+                count,
+                net_id,
+                pad.ref,
+                pad.pin,
+                dx,
+                dy,
+                corridor_length,
+                corridor_half_width,
             )
         return count
 
