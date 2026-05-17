@@ -4407,20 +4407,100 @@ class Autorouter:
 
             # Inner-corner indices in the sorted row.  Position 1 (one in
             # from the top corner) and position n-2 (one in from the
-            # bottom corner) are the inner-corner members.  These are
-            # the rows for which the PR #2969 R1/R2/R3 attempts failed
-            # to land a net-ordering-only fix; see the method docstring
-            # for the full trace.
-            _inner_corner_indices = (1, n - 2)  # noqa: F841 -- kept as the future-PR target
-            _ = sorted_nets  # noqa: F841 -- referenced for static analyzers; future PR consumes
+            # bottom corner) are the inner-corner members.  PR #2969
+            # R1/R2/R3 proved net-ordering alone could not resolve the
+            # geometric collision (DQ5 still blocked by DQ4 via at
+            # 0.44mm).  Issue #2983 lands the **corridor reservation
+            # strategy** as the layered-escape fix: for each
+            # inner-corner net, pre-reserve a lateral corridor on an
+            # inner signal layer BEFORE any corner-net through-hole
+            # vias are placed.  The reservation is consulted per-cell
+            # by ``RoutingGrid._mark_via`` so partner vias detour
+            # around the corridor (see ``EscapeRouter.
+            # reserve_inner_corner_lane_corridor`` docstring for the
+            # full mechanic).
+            inner_corner_indices = (1, n - 2)
 
-        # Scaffolding fallback: return the input unchanged.  The three
-        # integration hooks (route_all, route_all_negotiated,
-        # TwoPhaseRouter) call this helper through the same surface,
-        # so a future PR can replace this block with a real reorder
-        # without touching the callers.  See follow-up issue:
-        #   "router: layered-escape strategy for mirrored byte-lane DDR
-        #    (decouples via placement from net ordering)"
+            # Compute the primary component's centroid from the row pad
+            # positions.  The launch direction for each inner-corner pad
+            # is OUTWARD from the centroid (perpendicular to the row
+            # axis: x-axis for vertical rows, y-axis for horizontal
+            # rows).  The QFN row in a mirrored byte-lane topology has
+            # pads on one face of the package; the centroid x/y on the
+            # row's *cross* axis sits inside the package body, so the
+            # outward direction is the sign of (pad - centroid) on that
+            # axis.
+            cx = sum(p[0] for p in net_to_pad.values()) / len(net_to_pad)
+            cy = sum(p[1] for p in net_to_pad.values()) / len(net_to_pad)
+
+            try:
+                escape = self._escape
+            except Exception:
+                # Defensive: lazy escape router init may fail on a
+                # malformed grid; fall back to identity ordering.
+                continue
+
+            for idx in inner_corner_indices:
+                if idx < 0 or idx >= len(sorted_nets):
+                    continue
+                nid = sorted_nets[idx]
+                pad_key: tuple[float, float] | None = net_to_pad.get(nid)
+                if pad_key is None:
+                    continue
+                px, py = pad_key
+
+                # Launch direction: perpendicular to the row long axis,
+                # outward from the primary-component centroid.
+                if y_span >= x_span:
+                    # Vertical row -- escape outward along x.
+                    launch_dx = 1.0 if px >= cx else -1.0
+                    launch_dy = 0.0
+                else:
+                    # Horizontal row -- escape outward along y.
+                    launch_dx = 0.0
+                    launch_dy = 1.0 if py >= cy else -1.0
+
+                # Resolve the actual Pad object for the helper.  We need
+                # the full Pad (with .net, .net_name, .layer) -- the
+                # ``net_to_pad`` dict only has (x, y).  Look it up via
+                # the primary component's pad table.
+                pad_obj = None
+                for pkey, p in self.pads.items():
+                    if (
+                        p.ref == primary_ref
+                        and p.net is not None
+                        and int(p.net) == nid
+                    ):
+                        pad_obj = p
+                        break
+                if pad_obj is None:
+                    continue
+
+                try:
+                    escape.reserve_inner_corner_lane_corridor(
+                        pad=pad_obj,
+                        launch_dx=launch_dx,
+                        launch_dy=launch_dy,
+                    )
+                except Exception:
+                    # Reservation is advisory; failure must not abort
+                    # routing.  The pre-fix behaviour (no reservation)
+                    # is the worst case.
+                    logger.debug(
+                        "Byte-lane corridor reservation failed for "
+                        "net %d (group %s); continuing without it",
+                        nid,
+                        grp_name,
+                        exc_info=True,
+                    )
+
+        # Identity ordering preserved: the corridor reservation is the
+        # mechanism that breaks the geometric collision (PR #2969 proved
+        # net-ordering changes alone could not).  Callers
+        # (``route_all``, ``route_all_negotiated``, ``TwoPhaseRouter``)
+        # consume the unchanged order and the escape pre-pass + main
+        # routing loop honour the per-cell reservation via
+        # ``RoutingGrid._mark_via``.
         return net_order
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
