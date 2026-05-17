@@ -90,15 +90,30 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                     }
                 }
 
-                if (allow_sharing && !cell.is_obstacle) {
-                    // Negotiated mode: allow sharing non-obstacle cells
+                if (allow_sharing) {
+                    // Negotiated mode: mirror Python
+                    // pathfinder.py::_is_trace_blocked rect-mask
+                    // (lines 1271-1296).  Issue #2989: own-net
+                    // ``is_obstacle`` cells (destination/partner pad
+                    // metal painted by PR #2928 + PR #2942) MUST
+                    // remain passable for the routing net.  Without
+                    // this gate, diff-pair partner B's pad rejects
+                    // unconditionally and the trace cannot reach the
+                    // partner endpoint (USB3/PCIE/MIPI partial
+                    // completion on board 06; USB_D-/USB_CC2/JOY_Y
+                    // on board 03).  Foreign-net obstacles still
+                    // hard-reject.
+                    if (cell.is_obstacle && cell.net != net) {
+                        return true;  // Foreign-net obstacle blocks
+                    }
                     if (cell.net == 0 && cell.usage_count == 0) {
                         return true;  // Static no-net obstacle
                     }
                     if (cell.net != net && cell.usage_count == 0) {
                         return true;  // Static obstacle from another net
                     }
-                    // Allow with cost penalty for routed cells
+                    // Allow with cost penalty for routed cells or
+                    // own-net obstacle cells.
                 } else {
                     // Standard mode: block if obstacle or different net
                     if (cell.is_obstacle || cell.net != net) {
@@ -129,7 +144,13 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
 
         const auto& cell = grid_.at(cx, cy, layer);
         if (cell.blocked) {
-            if (allow_sharing && !cell.is_obstacle) {
+            if (allow_sharing) {
+                // Negotiated mode: own-net obstacle cells remain
+                // passable (Issue #2989 sibling fix; see
+                // ``is_trace_blocked`` for the diff-pair rationale).
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
@@ -175,13 +196,33 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
 
                 const auto& cell = grid_.at(cx, cy, layer);
                 if (cell.blocked) {
-                    if (allow_sharing && !cell.is_obstacle) {
+                    if (allow_sharing) {
+                        // Negotiated mode: mirror Python
+                        // pathfinder.py::_is_via_blocked SoA branch
+                        // (lines 1428-1453).  Issue #2989: own-net
+                        // ``is_obstacle`` cells (destination /
+                        // diff-pair-partner pad metal painted by
+                        // PR #2928 first-touch + PR #2942 rect-aware
+                        // halo) MUST remain passable so the routing
+                        // net's own via can land inside its
+                        // destination pad's footprint.  Without this
+                        // gate, partner B's pad rejects every via
+                        // candidate -> A* cannot reach partner ->
+                        // diff-pair lands 1-of-2 endpoints.  Matches
+                        // USB3/PCIE/MIPI failure on board 06 and
+                        // USB_D-/USB_CC2/JOY_Y on board 03.
+                        // Foreign-net obstacles still hard-reject.
+                        if (cell.is_obstacle && cell.net != net) {
+                            return true;  // Foreign-net obstacle blocks
+                        }
                         if (cell.net == 0 && cell.usage_count == 0) {
                             return true;
                         }
                         if (cell.net != net && cell.usage_count == 0) {
                             return true;
                         }
+                        // Allow with cost for routed cells / own-net
+                        // obstacle.
                     } else {
                         if (cell.is_obstacle || cell.net != net) {
                             return true;
