@@ -78,6 +78,8 @@ class HalfBridge(CircuitBlock):
         cap_ref_start: int | None = None,
         diode_ref_start: int | None = None,
         hs_ls_spacing: float = 40,
+        gate_hs_net: str | None = None,
+        gate_ls_net: str | None = None,
     ):
         """
         Create a half-bridge circuit.
@@ -97,6 +99,15 @@ class HalfBridge(CircuitBlock):
             cap_ref_start: Starting reference for capacitor (defaults to ref_start)
             diode_ref_start: Starting reference for diode (defaults to ref_start)
             hs_ls_spacing: Vertical spacing between HS and LS MOSFETs
+            gate_hs_net: Optional net name to label at the high-side gate pin.
+                When provided, a short stub wire is drawn from the gate pin
+                outward (to the left, away from the MOSFET body) and the
+                label is placed on the stub endpoint so ERC's label-on-wire
+                check is satisfied (see issue #2980). When ``None`` (the
+                default), no label/stub is emitted and behavior is
+                unchanged.
+            gate_ls_net: Optional net name to label at the low-side gate
+                pin. Same semantics as ``gate_hs_net``.
         """
         super().__init__(sch, x, y)
         self.has_bootstrap = bootstrap_cap is not None
@@ -213,6 +224,24 @@ class HalfBridge(CircuitBlock):
         self._vin_pos = hs_drain
         self._gnd_pos = ls_source
 
+        # Optional gate-net labels.  KiCad's label-only connectivity requires
+        # the label coordinate to lie on a wire endpoint or segment; without
+        # a stub, labels at the bare gate pin float and trigger ERC's
+        # ``isolated_pin_label`` cascade (see issue #2980).  We draw a
+        # one-grid (2.54 mm) stub from each gate pin to the left (gates on
+        # ``Device:Q_NMOS`` exit the symbol to the left) and place the
+        # label on the stub endpoint.  External callers still wire to the
+        # ``GATE_HS``/``GATE_LS`` ports, which remain at the pin positions.
+        STUB = 2.54
+        if gate_hs_net is not None:
+            label_x = hs_gate[0] - STUB
+            sch.add_wire(hs_gate, (label_x, hs_gate[1]), warn_on_collision=False)
+            sch.add_label(gate_hs_net, label_x, hs_gate[1], rotation=0)
+        if gate_ls_net is not None:
+            label_x = ls_gate[0] - STUB
+            sch.add_wire(ls_gate, (label_x, ls_gate[1]), warn_on_collision=False)
+            sch.add_label(gate_ls_net, label_x, ls_gate[1], rotation=0)
+
     def connect_to_rails(
         self,
         vin_rail_y: float,
@@ -298,6 +327,8 @@ class ThreePhaseInverter(CircuitBlock):
         phase_labels: list[str] | None = None,
         phase_spacing: float = 75,
         hs_ls_spacing: float = 40,
+        gate_hs_nets: list[str] | None = None,
+        gate_ls_nets: list[str] | None = None,
     ):
         """
         Create a three-phase inverter.
@@ -314,11 +345,35 @@ class ThreePhaseInverter(CircuitBlock):
             phase_labels: Labels for phases (default: ["A", "B", "C"])
             phase_spacing: Horizontal spacing between phases
             hs_ls_spacing: Vertical spacing between HS and LS MOSFETs
+            gate_hs_nets: Optional list of per-phase high-side gate net
+                names (length must equal ``len(phase_labels)``).  When
+                provided, each phase's :class:`HalfBridge` emits a stub
+                wire + label at its HS gate pin so ERC sees a real
+                connection (see issue #2980).  When ``None`` (the
+                default), no labels are emitted.
+            gate_ls_nets: Optional list of per-phase low-side gate net
+                names.  Same semantics as ``gate_hs_nets``.
+
+        Raises:
+            ValueError: If ``gate_hs_nets`` or ``gate_ls_nets`` is provided
+                and its length does not match the phase count.
         """
         super().__init__(sch, x, y)
 
         if phase_labels is None:
             phase_labels = ["A", "B", "C"]
+
+        num_phases = len(phase_labels)
+        if gate_hs_nets is not None and len(gate_hs_nets) != num_phases:
+            raise ValueError(
+                f"gate_hs_nets length ({len(gate_hs_nets)}) must match "
+                f"phase_labels length ({num_phases})"
+            )
+        if gate_ls_nets is not None and len(gate_ls_nets) != num_phases:
+            raise ValueError(
+                f"gate_ls_nets length ({len(gate_ls_nets)}) must match "
+                f"phase_labels length ({num_phases})"
+            )
 
         self.phase_labels = phase_labels
         self.half_bridges: list[HalfBridge] = []
@@ -340,6 +395,8 @@ class ThreePhaseInverter(CircuitBlock):
                 cap_ref_start=i + 1 if bootstrap_cap else None,
                 diode_ref_start=i + 1 if bootstrap_cap else None,
                 hs_ls_spacing=hs_ls_spacing,
+                gate_hs_net=gate_hs_nets[i] if gate_hs_nets is not None else None,
+                gate_ls_net=gate_ls_nets[i] if gate_ls_nets is not None else None,
             )
             self.half_bridges.append(hb)
 
@@ -841,6 +898,7 @@ class GateDriverBlock(CircuitBlock):
         bootstrap_caps: str | None = "100nF",
         bypass_caps: list[str] | None = None,
         cap_ref_start: int = 1,
+        pin_nets: dict[str, str] | None = None,
     ):
         """
         Create a gate driver block.
@@ -858,6 +916,18 @@ class GateDriverBlock(CircuitBlock):
                 is composed and exposed via ``self._bootstrap_block``.
             bypass_caps: Bypass capacitor values (default: ["10uF", "100nF"])
             cap_ref_start: Starting reference number for capacitors
+            pin_nets: Optional mapping of driver-IC pin name or number to
+                net label.  For each entry, a one-grid (2.54 mm) stub wire
+                is drawn from the pin away from the symbol center and the
+                net label is placed on the stub endpoint so KiCad's
+                label-on-wire ERC check is satisfied (see issue #2980).
+                When ``None`` (the default), no labels are emitted and
+                behavior is unchanged.  The mapping keys must be valid
+                pin identifiers for the resolved ``driver_symbol``
+                (e.g. ``"UHSG"`` or ``"32"`` for ``Driver_Motor:DRV8308``).
+                For every entry, an alias port is also added under the
+                net name so callers can retrieve real pin coordinates via
+                ``block.port("<net>")``.
         """
         super().__init__(sch, x, y)
         self.driver_type = driver_type
@@ -935,6 +1005,39 @@ class GateDriverBlock(CircuitBlock):
                 # Avoid clobbering driver ports if names ever collide
                 if name not in self.ports:
                     self.ports[name] = pos
+
+        # Optional pin-net labels.  KiCad's label-only connectivity requires
+        # the label coordinate to lie on a wire endpoint or segment; without
+        # a stub, labels placed at the bare pin float and trigger ERC's
+        # ``isolated_pin_label`` cascade.  For each ``pin_nets`` entry we
+        # resolve the real pin position via ``self.driver.pin_position``
+        # (supporting either pin names or pin numbers), draw a one-grid
+        # (2.54 mm) horizontal stub *away from the symbol center* (left
+        # for pins on the symbol's left edge, right otherwise), and place
+        # the label on the stub endpoint.  See issue #2980.
+        #
+        # For every labelled pin we also add an alias port keyed by the
+        # net name, exposing the pin's real coordinates so callers can
+        # wire to ``block.port("<net>")`` instead of relying on the
+        # historical placeholder port coordinates.
+        if pin_nets is not None:
+            STUB = 2.54
+            for pin_key, net_name in pin_nets.items():
+                pin_pos = self.driver.pin_position(pin_key)
+                # Stub away from the symbol center.  When the pin lies
+                # exactly on the center column (pin_pos[0] == x) we
+                # default to stubbing right.
+                if pin_pos[0] < x:
+                    label_x = pin_pos[0] - STUB
+                else:
+                    label_x = pin_pos[0] + STUB
+                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
+                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
+                # Expose the pin's real coordinate under the net name so
+                # external wiring can reach it.  Do not overwrite an
+                # existing port by the same name (preserves back-compat).
+                if net_name not in self.ports:
+                    self.ports[net_name] = pin_pos
 
     def connect_to_rails(
         self,

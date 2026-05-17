@@ -438,6 +438,15 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # we instantiate BootstrapCapacitorArray explicitly below to demonstrate
     # the new factory's composability).
     # Note: C10-C11 are used by CrystalOscillator, so start at C15 for bypass
+    # The DRV8308 KiCad symbol used by ``GateDriverBlock`` (3-phase mode)
+    # exposes gate outputs under symbol names ``UHSG``/``ULSG``/``VHSG``/
+    # ``VLSG``/``WHSG``/``WLSG`` (pin numbers 32/34/35/37/38/40 on the
+    # symbol -- distinct from the DRV8301 footprint pin numbers in
+    # ``DRV8301_PINS`` below).  Passing ``pin_nets`` makes the block emit
+    # a short stub wire + label at each pin so KiCad's label-on-wire ERC
+    # check is satisfied (see #2980).  HS outputs feed the slew-rate
+    # resistor array (``GATE_DRV_*``); LS outputs are direct-driven to the
+    # MOSFET gates (``GATE_*L``).
     gate_driver = GateDriverBlock(
         sch,
         x=X_GATE_DRV,
@@ -448,6 +457,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
         bootstrap_caps=None,  # bootstrap caps created externally below
         bypass_caps=["100nF", "10uF"],
         cap_ref_start=15,  # C15-C16 for bypass (C12-C14 reserved for bootstrap)
+        pin_nets={
+            # High-side gate outputs (route through R20-R22 -> MOSFET gates).
+            "UHSG": "GATE_DRV_AH",
+            "VHSG": "GATE_DRV_BH",
+            "WHSG": "GATE_DRV_CH",
+            # Low-side gate outputs (direct-driven to MOSFET gates).
+            "ULSG": "GATE_AL",
+            "VLSG": "GATE_BL",
+            "WLSG": "GATE_CL",
+        },
     )
     gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
 
@@ -490,7 +509,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("\n7. Adding power stage (6 MOSFETs)...")
 
     # Create 3-phase inverter using ThreePhaseInverter block
-    # This creates 6 MOSFETs (Q1-Q6) in three half-bridge configuration
+    # This creates 6 MOSFETs (Q1-Q6) in three half-bridge configuration.
+    # ``gate_*_nets`` make each HalfBridge emit a stub wire + label at
+    # its Q.G pin so KiCad's label-on-wire ERC check sees a real
+    # connection -- this closes the second half of issue #2980 (without
+    # the kwargs, Q1-Q6 gate pins floated and ERC reported six
+    # ``pin_not_connected`` errors).
     inverter = ThreePhaseInverter(
         sch,
         x=X_PHASE_A,
@@ -501,6 +525,8 @@ def create_bldc_controller(output_dir: Path) -> Path:
         phase_labels=["A", "B", "C"],
         phase_spacing=75,
         hs_ls_spacing=40,
+        gate_hs_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+        gate_ls_nets=["GATE_AL", "GATE_BL", "GATE_CL"],
     )
     inverter.connect_to_rails(vin_rail_y=RAIL_VMOTOR, gnd_rail_y=RAIL_GND)
     print("   Three-phase inverter: Q1-Q6 (ThreePhaseInverter block)")
