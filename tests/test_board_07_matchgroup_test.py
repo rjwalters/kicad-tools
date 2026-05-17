@@ -117,11 +117,22 @@ class TestRoutedPcbArtifact:
         )
 
     def test_routed_pcb_declares_4layer_stackup(self, routed_pcb_text: str) -> None:
-        """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout."""
-        assert '(0 "F.Cu" signal)' in routed_pcb_text
-        assert '(1 "In1.Cu" signal)' in routed_pcb_text
-        assert '(2 "In2.Cu" signal)' in routed_pcb_text
-        assert '(31 "B.Cu" signal)' in routed_pcb_text
+        """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout.
+
+        Layer index assertions check by name only -- the literal
+        numeric index varies between PCB generators (the legacy
+        in-process route_pcb emits 0/1/2/31, while the modern
+        ``kct route`` subprocess pipeline (Issue #2991) emits a
+        different but equivalent numbering 0/4/6/2 per KiCad 10
+        conventions).  The board's stackup *identity* is what matters
+        for downstream zone-layer assignment; both numberings
+        round-trip through ``PCB.load()``.
+        """
+        for layer_name in ('"F.Cu" signal', '"In1.Cu" signal', '"In2.Cu" signal', '"B.Cu" signal'):
+            assert layer_name in routed_pcb_text, (
+                f"4-layer JLCPCB tier-1 stackup requires layer {layer_name!r} -- "
+                f"see board comment header re: F.Cu / In1.Cu (GND) / In2.Cu (PWR) / B.Cu."
+            )
 
     @pytest.mark.parametrize(
         "net_name",
