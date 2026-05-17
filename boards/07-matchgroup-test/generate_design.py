@@ -328,157 +328,181 @@ def write_sidecar(net_class_map: dict, output_dir: Path) -> Path:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB with per-group net-class engagement.
+    """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
-    Wires the protocol-specific NetClassRouting instances from
-    ``build_net_class_map()`` into the autorouter so each Phase 1-2
-    feature is exercised on the appropriate group.
+    Returns True if ``kct route`` reports full success (return code 0);
+    False if it produced a partial routing (still acceptable -- the
+    output file is written either way and downstream DRC continues).
+
+    Issue #2991: Previously this function called ``router.route_all()``
+    directly through the in-process API, configured with a custom
+    ``DesignRules(...)`` block.  Mirroring the sibling board-05 bake
+    in PR #2981, replace the in-process call with a subprocess
+    invocation of the ``kct route`` CLI:
+
+        --manufacturer jlcpcb --strategy negotiated --no-auto-layers
+        --layers 4 --seed 42 --timeout 600
+
+    Recipe-vs-AC deviation (Issue #2991, builder empirical validation
+    2026-05-17):
+
+      The issue body cites ``--auto-fix --auto-layers --auto-mfr-tier``
+      as the verified recipe yielding 29/31 nets.  Two independent
+      problems block that as-stated recipe; both were verified
+      empirically against main (commit 46bd8601) before the recipe
+      was adjusted to the form above:
+
+      1. ``--auto-mfr-tier`` regressed to ~17/31 nets, well under the
+         current in-process baseline of 25/31.  This matches Scout
+         commit ``92fc35cb`` (2026-05-16) which explicitly notes:
+         "Auto-mfr-tier path regressed to 3/31 per attempt (~40s/net
+         with C++ router vs previous 13s/net baseline, likely
+         VectorCollisionChecker overhead)".  ``--auto-mfr-tier`` is
+         NOT the recipe that produced the 29/31 result.
+
+      2. The Scout 2 verified 29/31 recipe -- ``negotiated +
+         differential-pairs, 4L`` (commit 92fc35cb) -- DOES yield
+         29/31 (94%) routing completion on this board.  However, the
+         CLI's ``--differential-pairs`` mode in main (as of 2026-05-17)
+         places diff-pair sibling traces at OVERLAPPING positions
+         (within-pair clearance -0.150mm, negative).  Under jlcpcb
+         tier-1 rules this produces ~20,300 ``diffpair_clearance_intra``
+         violations -- a catastrophic routed-DRC regression that blows
+         past the 70-error allowlist by ~290x.
+
+      The rich ``NetClassRouting`` per-pair / per-group declarations
+      that ``build_net_class_map()`` assembled previously fed the
+      in-process router, but ``kct route`` does NOT accept
+      ``--net-class-map`` or equivalent (verified via ``kct route
+      --help``).  This is the same gap the curator flagged as an
+      "open concern" on issue #2991: the routing-time NetClassRouting
+      fields (``intra_pair_clearance``, ``coupled_continuity_threshold``,
+      etc.) do not project through the subprocess boundary.
+
+      To stay under the DRC tolerance (HARD LIMIT: do not widen
+      ``.github/routed-drc-tolerance.yml``), this recipe omits
+      ``--differential-pairs``.  Net yield is ~25/31 (status-quo parity
+      with the prior in-process baseline) and DRC stays under 60
+      errors (under the 70 allowlist).  When the upstream
+      diff-pair-overlap router bug is fixed (follow-up issue), this
+      recipe can re-add ``--differential-pairs`` for the 29/31 yield.
+
+    What each flag does:
+
+    - ``--manufacturer jlcpcb``: triggers the jlcpcb design-rule
+      profile so the router applies the tier-1 trace/space/via floor.
+    - ``--strategy negotiated``: the negotiated rip-up/reroute strategy
+      (explicit for clarity; this is also the default).
+    - ``--no-auto-layers --layers 4``: pin a 4-layer stackup (the
+      board's declared topology: F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu).
+      The router's layer-escalation loop would otherwise spend the
+      wall-clock budget probing 2L and 6L attempts before settling on
+      4L; pinning saves time for actual routing.
+    - ``--seed 42``: deterministic output.  The Phase 3N CI gate
+      (``scripts/ci/check_matchgroup_coverage.py``) re-invokes this
+      script with ``--step route --seed 42`` and asserts a byte-stable
+      re-route across PRs.  ``kct route`` honours ``--seed`` by
+      seeding the global ``random`` module (route_cmd.py:5296-5299).
+      This is the issue's stated HARD LIMIT and is preserved.
+    - ``--timeout 600``: outer wall-clock budget; per-net timeout
+      defaults to 30 s.  600 s gives the pure-Python fallback path on
+      CI runners (no native router_cpp.*.so) enough budget for 31
+      nets while remaining under the GitHub Actions 10-min ceiling.
+
+    Skip nets ``GND``, ``+1V2``, ``+1V8`` remain handled via copper
+    pours on inner planes (In1.Cu / In2.Cu) emitted post-route by
+    ``auto_create_zones_for_pour_nets``.
+
+    Per-group ``NetClassRouting`` sidecar engagement note:
+        The rich ``NetClassRouting`` instances assembled by
+        ``build_net_class_map()`` (DDR / MIPI / HDMI / ADDR) are
+        emitted into the ``net_class_map.json`` sidecar BEFORE the
+        subprocess runs.  ``kct check`` consumes that sidecar to fire
+        ``match_group_length_skew`` and the diff-pair rules during DRC.
 
     NOTE on Phase 3H (#2723) dependency:
-        The ``--length-match-groups`` CLI flag and the
-        ``apply_match_group_tuning`` orchestrator are NOT yet in main.
-        Once #2723 lands, this function should call
-        ``apply_match_group_tuning`` between ``route_all`` and the
-        post-route optimization to actually meander group members
-        toward equal length.  Until then, ``_finalize_routing`` (auto-
-        called by ``route_all``) populates the ``MatchGroupTracker``
-        with measured skew so AC#7's tracker-query check exercises a
-        real signal -- but the *tuning* step is a no-op.
+        When ``--length-match-groups`` and ``apply_match_group_tuning``
+        land, the CLI itself will perform group-level meander
+        insertion; no further change here will be required.
     """
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
-    from kicad_tools.router.optimizer import (
-        GridCollisionChecker,
-        OptimizationConfig,
-        TraceOptimizer,
-    )
-
     print("\n" + "=" * 60)
-    print("Routing PCB...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issue #2991)...")
     print("=" * 60)
-
-    # JLCPCB tier-1 design rules: 0.15mm trace / 0.15mm space / 0.3mm via.
-    # Identical to board 06 so the same calibrated rules drive both
-    # diff-pair and match-group regression tests.
-    rules = DesignRules(
-        grid_resolution=0.05,
-        trace_width=0.15,
-        trace_clearance=0.15,
-        via_drill=0.25,
-        via_diameter=0.45,
-    )
 
     # Power and ground nets are handled via copper pours on the inner
     # planes (In1.Cu = GND, In2.Cu = PWR).  Skip them at the trace
     # router so they don't fight for outer-layer corridors.
     skip_nets = ["GND", "+1V2", "+1V8"]
 
-    print(f"\n1. Loading PCB: {input_path}")
-    print(
-        f"   Grid: {rules.grid_resolution}mm  Trace: {rules.trace_width}mm  Clearance: {rules.trace_clearance}mm"
-    )
-    print(f"   Skipping pour nets: {skip_nets}")
-
-    router, net_map = load_pcb_for_routing(
-        str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
-
-    # Install per-group net classes.  The router consumes:
-    #   - length_match_group via detect_match_groups (Phase 1C #2689)
-    #     during _finalize_routing (Phase 1D #2690 producer wiring)
-    #   - length_match_reference via _resolve_reference (Phase 1A)
-    #   - length_match_tolerance_mm via the future
-    #     match_group_length_skew DRC rule (Phase 2G #2702)
-    #   - skew_tolerance_mm via DiffPairLengthTracker / Phase 3I
-    #     serpentine for the DQS / MIPI / HDMI pair members
+    # Emit the JSON sidecar BEFORE invoking the subprocess.  The CI
+    # gate (scripts/ci/check_matchgroup_coverage.py:223-235) requires
+    # the sidecar to exist on disk after the route step completes,
+    # even when ``kct route`` exits non-zero (partial routing).  The
+    # sidecar is the single source of truth for the group / diff-pair
+    # declarations consumed by ``kct check --net-class-map``.
     net_class_map = build_net_class_map()
-    router.net_class_map.update(net_class_map)
-
-    # Emit the JSON sidecar for standalone DRC.
-    write_sidecar(net_class_map, output_path.parent)
-
-    print(f"\n2. Net classes installed: {len(net_class_map)} entries")
+    print(f"\n1. Net classes assembled: {len(net_class_map)} entries")
     print(f"   Diff pairs declared: {len(generate_pcb.DIFFPAIRS)}")
     print("   Match groups (length_match_group): 4")
+    write_sidecar(net_class_map, output_path.parent)
 
-    print(f"\n3. Board: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--manufacturer",
+        "jlcpcb",
+        "--strategy",
+        "negotiated",
+        "--no-auto-layers",
+        "--layers",
+        "4",
+        "--seed",
+        "42",
+        "--timeout",
+        "600",
+        "--skip-nets",
+        ",".join(skip_nets),
+    ]
 
-    print("\n4. Routing nets...")
-    # Issue #2835: pass per-net + outer wall-clock budgets so dense
-    # match-group N-port routing cannot hang in A* heap-key churn
-    # (board 07 with --seed 42 was observed to hang 27+ min without
-    # any timeout bracket).  Mirrors the recommendation in the
-    # Router.route_all() #2794 warning and the bracket semantics added
-    # by PR #2779 / #2775.
-    #
-    # Outer timeout=600.0 (not 240.0): the CI runner has no C++ router
-    # (router_cpp.*.so absent), so the pure-Python fallback runs
-    # 10-100x slower. With timeout=240.0 only ~14/31 nets complete on
-    # CI -- not enough for detect_match_groups -> derive_group_skew_data
-    # to engage match_group_length_skew, which trips the silent-regression
-    # gate in scripts/ci/check_matchgroup_coverage.py. 600.0s gives the
-    # pure-Python fallback budget for 31 nets while remaining under the
-    # GitHub Actions 10-min job ceiling. Per-net timeout stays at 30s --
-    # that's the #2779 bracket worth preserving.
-    router.route_all(per_net_timeout=30.0, timeout=600.0)
+    print(f"\n2. Input: {input_path}")
+    print(f"   Output: {output_path}")
+    print(f"   Skipping pour nets: {skip_nets}")
+    print(f"   Command: {' '.join(cmd)}")
+    print("\n3. Routing...")
 
-    # _finalize_routing has now populated _match_group_tracker via
-    # the Phase 1D producer wiring (#2690).  Capture the skew snapshot
-    # before optimization so AC#7 can prove the tracker is queryable.
-    pre_skews = dict(router.match_group_tracker.get_all_skews())
-    print(f"   Match-group skews (post-route, pre-tune): {pre_skews}")
+    result = subprocess.run(cmd, capture_output=False, text=True)
 
-    stats_raw = router.get_statistics()
-    print(
-        f"   Raw: {stats_raw['routes']} routes / {stats_raw['segments']} segments / {stats_raw['vias']} vias"
-    )
+    # ``kct route`` returns 0 on full success and a non-zero code on
+    # partial / failed routing.  Either way it writes a routed PCB to
+    # ``output_path`` (the partial-results file is at
+    # ``<stem>_partial.kicad_pcb``).  As long as the output file
+    # exists, downstream steps (zone generation + DRC) can run; report
+    # success/partial purely informationally.
+    success = result.returncode == 0
+
+    if not output_path.exists():
+        print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
+        return False
+
+    if success:
+        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
+    else:
+        print(
+            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
+            "(partial routing; downstream zone + DRC will continue)"
+        )
 
     # Phase 3H (#2723) integration point.  When --length-match-groups
-    # lands, insert apply_match_group_tuning HERE -- the tuner needs
-    # the populated match_group_tracker (above) and produces meandered
-    # routes that the optimizer (below) then cleans up.
-    # TODO Phase 3H (#2723): apply_match_group_tuning(router, ...)
-
-    print("\n5. Optimizing traces...")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    collision_checker = GridCollisionChecker(router.grid)
-    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_routes.append(optimizer.optimize_route(route))
-    router.routes = optimized_routes
-
-    stats = router.get_statistics()
-    print(
-        f"\n6. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"
-    )
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    # Stitch routes back into the unrouted PCB.
-    original_content = input_path.read_text()
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-    print(f"\n7. Routed PCB: {output_path}")
+    # lands, the CLI's own routing pipeline will apply
+    # apply_match_group_tuning between route_all and the optimizer; no
+    # further change required HERE.
+    # TODO Phase 3H (#2723): verify --length-match-groups consumes the
+    # net_class_map.json sidecar so group meandering engages.
 
     # Issue #2835: emit copper-pour zones for GND + power nets so the
     # net-status report doesn't flag pour-net pads (~179 pads on this
@@ -488,9 +512,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # outline), power nets (+1V2 / +1V8) distributed across In2.Cu / F.Cu
     # with per-net bounding outlines.
     #
-    # Use the board's authoritative ``skip_nets`` declaration so the
-    # zone-net set matches the router-skip set exactly.
-    print("\n8. Generating copper-pour zones...")
+    # ``kct route`` may pour zones for known power nets internally on
+    # some recipes, but the board's per-net layer-aware zone declaration
+    # is more authoritative.  ``auto_create_zones_for_pour_nets`` is
+    # idempotent (it adds zones by net+layer; duplicate calls are
+    # detected by the upstream ``auto_pour_if_missing`` helper used
+    # elsewhere).  Use the board's authoritative ``skip_nets``
+    # declaration so the zone-net set matches the router-skip set
+    # exactly.
+    print("\n4. Generating copper-pour zones...")
     try:
         from kicad_tools.router.net_class import NetClass
         from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
@@ -507,13 +537,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print(f"   Created {zone_count} zone(s) for {[n for n, _ in pour_nets_decl]}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Zone generation skipped: {exc}")
-
-    total_signal_nets = len([n for n in router.nets if n > 0])
-    success = stats["nets_routed"] == total_signal_nets
-    if success:
-        print(f"   SUCCESS: all {total_signal_nets} signal nets routed")
-    else:
-        print(f"   PARTIAL: {stats['nets_routed']}/{total_signal_nets} signal nets routed")
 
     return success
 
