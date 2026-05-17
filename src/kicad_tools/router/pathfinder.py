@@ -434,6 +434,153 @@ class Router:
         """Return True if ``(x, y)`` represents a waypoint node."""
         return x < 0 and y < 0 and (x, y) in self._waypoint_world_coords
 
+    # ------------------------------------------------------------------
+    # Escape-hint waypoints (Issue #2974)
+    # ------------------------------------------------------------------
+    #
+    # IC perimeter pads (LQFP-48 NRST/SWO/SWDIO/SWCLK on board-04) sit in
+    # a narrow channel between flanking foreign-net pins.  Pure
+    # octile/Manhattan heuristics fan out around the chip body for tens
+    # of seconds before discovering the escape direction.
+    # ``_detect_escape_hint`` is a grid-density predicate that returns
+    # the escape unit vector when the pad's geometry matches the corner-
+    # flank signature; ``_escape_hint_cells`` produces cells along that
+    # ray for seeding into the A* open set, reusing the #2330 waypoint
+    # straight-line edge cost contract (admissibility preserved).
+
+    # Wedge sampling skips the pad's own clearance ring (same-net cells
+    # at radius 1..2) and looks for foreign blockers at radius 2..6.
+    _ESCAPE_HINT_RADIUS_MIN: int = 2
+    _ESCAPE_HINT_RADIUS_MAX: int = 6
+    # Body wedge must be ~fully blocked (4 of 5 cells foreign).
+    _ESCAPE_HINT_BODY_MIN: int = 4
+    # Each perpendicular wedge must show flanking neighbour pins.
+    _ESCAPE_HINT_FLANK_MIN: int = 2
+    # Body wedge must dominate the escape wedge by this many cells.
+    _ESCAPE_HINT_ASYMMETRY: int = 2
+    # Initial walk-out step before falling back to closer/farther cells.
+    _ESCAPE_HINT_STEP: int = 3
+    # Per-net deadline multiplier applied ONLY when the predicate fires
+    # (Issue #2974 secondary fallback).  3x is enough to lift the 30s
+    # caller budget to 90s, matching the curator-recommended ceiling
+    # for perimeter-corner-flanked nets without touching the global
+    # deadline or any other net's budget.
+    _ESCAPE_HINT_DEADLINE_MULT: float = 3.0
+
+    def _cell_is_foreign_blocker(self, cell, net: int) -> bool:
+        """Return True if ``cell`` is a foreign pad/zone blocker for ``net``.
+
+        Mirrors the static-foreign-obstacle classifier at
+        pathfinder.py:1480 (``is_obstacle and cell_net != net``) so
+        :meth:`_detect_escape_hint` counts the same cells the main A*
+        loop would reject.  ``cell.net`` records the first pad that
+        claimed the cell; on overlap the second touch flips
+        ``is_obstacle = True`` (grid.py:1357), which we honour here.
+        """
+        if cell.net == net:
+            return False
+        if cell.is_zone and cell.net != 0:
+            return True
+        if cell.is_obstacle:
+            return True
+        return bool(cell.blocked and cell.pad_blocked)
+
+    def _detect_escape_hint(
+        self, pad: Pad, layers: list[int]
+    ) -> tuple[int, int] | None:
+        """Return an escape direction ``(dx, dy)`` for a corner-flanked pad.
+
+        Samples foreign-blocker density in each cardinal direction.  A
+        pad is corner-flanked when one wedge (chip body) is densely
+        blocked, the opposite wedge (escape) is comparatively open, and
+        both perpendicular wedges show flanking blockers.  Returns the
+        escape unit vector or ``None`` if the geometry doesn't match --
+        typical for centre-of-board components, large THT pads, and
+        connectors with generous keepouts.
+        """
+        if not layers:
+            return None
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return None
+
+        # Pad's primary layer is representative; perimeter geometry is
+        # symmetrical across copper layers in practice.
+        layer = layers[0]
+        r_min, r_max = self._ESCAPE_HINT_RADIUS_MIN, self._ESCAPE_HINT_RADIUS_MAX
+        dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        counts: dict[tuple[int, int], int] = {d: 0 for d in dirs}
+
+        for d in dirs:
+            dx, dy = d
+            for step in range(r_min, r_max + 1):
+                cx, cy = gx + dx * step, gy + dy * step
+                if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                    break
+                if self._cell_is_foreign_blocker(self.grid.grid[layer][cy][cx], pad.net):
+                    counts[d] += 1
+
+        body_dir = max(counts, key=counts.get)
+        if counts[body_dir] < self._ESCAPE_HINT_BODY_MIN:
+            return None
+        escape_dir = (-body_dir[0], -body_dir[1])
+        if counts[body_dir] - counts[escape_dir] < self._ESCAPE_HINT_ASYMMETRY:
+            return None
+        # Perpendicular wedges must show flanking neighbour pins.
+        perp_dirs = [(-body_dir[1], body_dir[0]), (body_dir[1], -body_dir[0])]
+        for pd in perp_dirs:
+            if counts[pd] < self._ESCAPE_HINT_FLANK_MIN:
+                return None
+        return escape_dir
+
+    def _escape_hint_cells(
+        self,
+        pad: Pad,
+        escape_dir: tuple[int, int],
+        net: int,
+        layers: list[int],
+    ) -> list[tuple[int, int, int, float]]:
+        """Produce ``(gx, gy, layer, edge_cost)`` seeds for an escape hint.
+
+        Walks outward from the pad along ``escape_dir`` and returns the
+        first cells that are not foreign-blocked -- the first toehold
+        A* can land on in the escape corridor.  ``edge_cost`` is the
+        Euclidean distance from the pad's world position to the cell,
+        in grid-cell units, mirroring :meth:`_waypoint_grid_edges` so
+        admissibility is preserved.  Returns an empty list when the
+        escape ray runs into a wall, in which case the route falls
+        back to the unmodified A* search.
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        dx, dy = escape_dir
+        seeds: list[tuple[int, int, int, float]] = []
+
+        # Prefer the closest clear cell along the ray.  A farther seed
+        # would inflate edge_cost and bias A* against revisiting closer
+        # alternatives if the corridor turns out to need a detour.
+        start_step = max(1, self._ESCAPE_HINT_STEP - 1)
+        for step in range(start_step, self._ESCAPE_HINT_RADIUS_MAX + 1):
+            cx, cy = gx + dx * step, gy + dy * step
+            if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                break
+            wcx, wcy = self.grid.grid_to_world(cx, cy)
+            edge_cost = math.sqrt((pad.x - wcx) ** 2 + (pad.y - wcy) ** 2) / self.grid.resolution
+
+            usable = False
+            for layer in layers:
+                cell = self.grid.grid[layer][cy][cx]
+                if self._cell_is_foreign_blocker(cell, net):
+                    continue
+                # Skip routed cells from other nets (not obstacles, but
+                # not safe to seed into).
+                if cell.blocked and cell.net not in (0, net):
+                    continue
+                seeds.append((cx, cy, layer, edge_cost))
+                usable = True
+            if usable:
+                break
+        return seeds
+
     def add_routed_segments(self, segments: list[Segment]) -> None:
         """Add committed route segments for crossing detection.
 
@@ -2078,12 +2225,50 @@ class Router:
         else:
             end_wp_goal_cells = set()
 
+        # Issue #2974: Escape-hint seed for corner-flanked perimeter
+        # pads.  Reuses the #2330 waypoint edge-cost contract:
+        # ``g_score = euclidean(pad -> seed_cell) * cost_straight``.
+        # The seed inherits ``direction = escape_dir`` so its
+        # descendants get the turn-cost bonus for continuing outward.
+        # When ``_detect_escape_hint`` declines, the block is a no-op.
+        escape_dir = self._detect_escape_hint(start, start_layers)
+        if escape_dir is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                start, escape_dir, start.net, start_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, escape_dir, heuristic_context)
+                if seed_g < g_scores_arr[cl, cy, cx]:
+                    g_scores_arr[cl, cy, cx] = seed_g
+                    heapq.heappush(
+                        open_set,
+                        AStarNode(seed_g + weight * seed_h, seed_g, cx, cy, cl,
+                                  direction=escape_dir),
+                    )
+
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
 
-        # Per-net wall-clock timeout (Issue #1605)
-        # Check every 1024 iterations to amortize time.monotonic() overhead
-        deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+        # Per-net wall-clock timeout (Issue #1605).
+        #
+        # Issue #2974 secondary fallback: when the start pad is corner-
+        # flanked, give A* up to ``_ESCAPE_HINT_DEADLINE_MULT`` times
+        # the caller's budget so the perimeter detour has room to
+        # converge.  This is a TARGETED extension -- it never widens
+        # the global deadline, and nets whose pads don't trip the
+        # predicate continue to honour ``per_net_timeout`` exactly.
+        effective_timeout = per_net_timeout
+        if (
+            per_net_timeout is not None
+            and per_net_timeout > 0.0
+            and escape_dir is not None
+        ):
+            effective_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
+        deadline = (
+            time.monotonic() + effective_timeout
+            if effective_timeout is not None
+            else None
+        )
         timeout_check_interval = 1024
 
         while open_set and iterations < max_iterations:
@@ -3326,6 +3511,44 @@ class Router:
                         backward_g[bkey] = wp_g
                         backward_nodes[bkey] = wp_node
                         heapq.heappush(backward_open, wp_node)
+
+        # Issue #2974: Escape-hint seeds (bidirectional).  Same
+        # contract as the forward-only path above: each seed cell
+        # carries the straight-line edge cost from its pad and the
+        # ``escape_dir`` as its incoming direction.
+        forward_escape = self._detect_escape_hint(start, start_layers)
+        if forward_escape is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                start, forward_escape, start.net, start_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, forward_escape, forward_context)
+                fkey = (cx, cy, cl)
+                if fkey not in forward_g or seed_g < forward_g[fkey]:
+                    seed_node = AStarNode(
+                        seed_g + weight * seed_h, seed_g, cx, cy, cl,
+                        direction=forward_escape,
+                    )
+                    forward_g[fkey] = seed_g
+                    forward_nodes[fkey] = seed_node
+                    heapq.heappush(forward_open, seed_node)
+
+        backward_escape = self._detect_escape_hint(end, end_layers)
+        if backward_escape is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                end, backward_escape, end.net, end_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, backward_escape, backward_context)
+                bkey = (cx, cy, cl)
+                if bkey not in backward_g or seed_g < backward_g[bkey]:
+                    seed_node = AStarNode(
+                        seed_g + weight * seed_h, seed_g, cx, cy, cl,
+                        direction=backward_escape,
+                    )
+                    backward_g[bkey] = seed_g
+                    backward_nodes[bkey] = seed_node
+                    heapq.heappush(backward_open, seed_node)
 
         # Best meeting point tracking
         best_path_cost = float("inf")
