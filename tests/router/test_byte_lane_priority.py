@@ -2,16 +2,23 @@
 
 The :meth:`Autorouter._apply_byte_lane_inner_priority` helper detects
 mirrored byte-lane match groups (e.g. board 07's DDR data byte on a
-mirrored QFN-48 pair) and demotes the second-inward row neighbours of
-the inner-corner so the inner-corner net (the pad one step in from
-each row corner) routes BEFORE the second-inward neighbour can claim
-its lateral lane.
+mirrored QFN-48 pair) and PROMOTES the inner-corner row members (the
+pad one step in from each row corner) to a rank that places them
+BEFORE all other byte-lane siblings (corners, second-inward, middle)
+in the routing order.
 
-Judge feedback (PR #2969 review): an earlier broader plan also
-demoted corner nets (0 / n-1), but that pushed DRC errors over the
-allowlist on board 07's match-group regression gate.  The corner net
-keeps its default rank now -- the heuristic only constrains positions
-``(2, n-3)`` so the rest of the priority-sort ordering is untouched.
+Judge feedback trace (PR #2969 review):
+
+- Round 1 (broader plan): demoted both corner (0, n-1) AND
+  second-inward (2, n-3) -- got 27/31 nets but DRC was 86, over the
+  70 allowlist.
+- Round 2 (constrained demote, second-inward only): DRC dropped to 4
+  but yield regressed to 20/31 and ``match_group_length_skew`` was
+  silently not exercised.
+- Round 3 (this contract, promote inner-corner directly): the Judge's
+  recommended dual.  The route log refuted the earlier speculative
+  concern about lifting DM0 -- DM0 routed fine while DQ5/DQ2 stayed
+  squeezed -- so promoting the inner-corner is safe.
 
 Root cause that motivates this helper (per the issue):
 
@@ -35,10 +42,11 @@ The helper's contract:
 3.  **Identity on small groups** -- groups with fewer than 5 members
     don't exhibit the mirrored byte-lane topology; the helper degrades
     to identity for them.
-4.  **Inner-corner demotion** -- on a mirrored byte-lane group, the
-    second-inward neighbour of each inner-corner is demoted behind
-    its inner-corner sibling.  Corner nets and non-neighbour middle
-    members keep their original priority position.
+4.  **Inner-corner promotion** -- on a mirrored byte-lane group, the
+    inner-corner nets (positions 1 and n-2 along the row) are
+    promoted to the front of the routing order ahead of all other
+    byte-lane siblings.  Corner nets and second-inward nets keep
+    their default rank.
 5.  **Multi-group preservation** -- non-byte-lane groups in the same
     routing pass are not affected.
 6.  **Length and membership invariant** -- output is always a
@@ -198,20 +206,21 @@ class TestIdentityOnSmallGroups:
         """A 4-net group is below the byte-lane threshold."""
         router, net_ids, _ = _make_byte_lane_router(group_size=4)
         out = router._apply_byte_lane_inner_priority(net_ids)
-        # Below MIN_BYTE_LANE_SIZE=5 -> no demotion -> identity.
+        # Below MIN_BYTE_LANE_SIZE=5 -> no promotion -> identity.
         assert out == net_ids
 
 
-class TestInnerCornerDemotion:
-    """Mirrored byte-lane promotes inner-corner above immediate neighbours."""
+class TestInnerCornerPromotion:
+    """Mirrored byte-lane promotes inner-corner ahead of all siblings."""
 
-    def test_nine_net_byte_lane_demotes_second_inward(self) -> None:
-        """9-net byte-lane (DDR-byte minus DQS pair): positions 2/6
-        (second-inward) get demoted below positions 1/7 (inner-corner).
+    def test_nine_net_byte_lane_promotes_inner_corner(self) -> None:
+        """9-net byte-lane (DDR-byte minus DQS pair): positions 1/7
+        (inner-corner) are promoted to rank 0 and lead the routing
+        order ahead of corners (0/8), second-inward (2/6), and the
+        middle members.
 
-        Per Judge feedback on PR #2969, the corner pads at positions
-        0 and n-1 keep their default rank -- only the second-inward
-        neighbours are demoted.
+        Round 3 contract per PR #2969 review: promote inner-corner
+        directly rather than demoting neighbours.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=9)
 
@@ -224,96 +233,75 @@ class TestInnerCornerDemotion:
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
 
-        # The demoted neighbours are at sorted indices {2, 6} only --
-        # the second-inward pads.  Corner pads (0, 8) keep their
-        # default priority-sort rank.
         idx = {nid: i for i, nid in enumerate(out)}
 
         inner_top = net_ids[1]
-        corner_top = net_ids[0]
-        second_inward_top = net_ids[2]
         inner_bottom = net_ids[7]
+        corner_top = net_ids[0]
         corner_bottom = net_ids[8]
+        second_inward_top = net_ids[2]
         second_inward_bottom = net_ids[6]
 
-        assert idx[inner_top] < idx[second_inward_top], (
-            f"Inner-corner top ({inner_top}) must precede second-inward "
-            f"top ({second_inward_top}): {idx[inner_top]} vs "
-            f"{idx[second_inward_top]}"
+        # The two inner-corner nets are rank 0; everything else is
+        # rank 1.  Under stable sort, the two inner-corner ids
+        # occupy positions 0 and 1 of the output (in their original
+        # relative order: inner_top at input pos 1 < inner_bottom at
+        # input pos 7).
+        assert idx[inner_top] == 0, (
+            f"Inner-corner top ({inner_top}) should be promoted to "
+            f"output position 0, got {idx[inner_top]}"
         )
-        assert idx[inner_bottom] < idx[second_inward_bottom], (
-            f"Inner-corner bottom ({inner_bottom}) must precede "
-            f"second-inward bottom ({second_inward_bottom}): "
-            f"{idx[inner_bottom]} vs {idx[second_inward_bottom]}"
-        )
-
-        # Corner pads keep their default rank (rank-1) -- they are
-        # tied with inner-corner under the demotion sort and preserve
-        # original input order via the stable secondary key.  Concretely,
-        # net_ids[0] was input position 0 and net_ids[1] was input
-        # position 1, so corner_top (input pos 0) must precede
-        # inner_top (input pos 1) in the output -- this is the
-        # opposite of the previous (broader) implementation which
-        # explicitly demoted corner_top below inner_top.
-        assert idx[corner_top] < idx[inner_top], (
-            f"Corner top ({corner_top}) keeps default rank and must "
-            f"precede inner_top ({inner_top}) under stable secondary "
-            f"key on input order: {idx[corner_top]} vs {idx[inner_top]}"
-        )
-        assert idx[inner_bottom] < idx[corner_bottom], (
-            f"Inner-corner bottom ({inner_bottom}) at input position 7 "
-            f"must precede corner_bottom ({corner_bottom}) at input "
-            f"position 8 under stable secondary key: "
-            f"{idx[inner_bottom]} vs {idx[corner_bottom]}"
+        assert idx[inner_bottom] == 1, (
+            f"Inner-corner bottom ({inner_bottom}) should be promoted "
+            f"to output position 1, got {idx[inner_bottom]}"
         )
 
-    def test_ten_net_byte_lane_preserves_middle_position(self) -> None:
-        """A 10-net byte-lane (full DDR-byte) leaves middle nets in
-        their priority-sort positions, only demoting the two
-        second-inward neighbours of inner-corner pads.
+        # Inner-corner must precede its neighbours (both corner and
+        # second-inward) on the same side of the row.
+        assert idx[inner_top] < idx[corner_top]
+        assert idx[inner_top] < idx[second_inward_top]
+        assert idx[inner_bottom] < idx[corner_bottom]
+        assert idx[inner_bottom] < idx[second_inward_bottom]
 
-        Per Judge feedback on PR #2969, only positions (2, n-3) are
-        demoted -- corners (0, n-1) keep their default rank.
+        # Among the rank-1 (default) nets, the stable secondary key
+        # preserves the original input ordering: corner_top (input
+        # pos 0) precedes second_inward_top (input pos 2), and so on.
+        assert idx[corner_top] < idx[second_inward_top]
+        assert idx[second_inward_bottom] < idx[corner_bottom]
+
+    def test_ten_net_byte_lane_promotes_inner_corner(self) -> None:
+        """A 10-net byte-lane (full DDR-byte): inner-corner pads
+        (positions 1, 8) are promoted to rank 0 and occupy the first
+        two output positions.  Corner pads (0, 9), second-inward
+        pads (2, 7), and middle pads (3-6) all keep their default
+        rank and retain their input ordering relative to each other.
         """
-        # Mimics the full DDR byte: 10 nets in a row.  Inner-corner
-        # indices = (1, 8); demoted indices = (2, 7); middle indices
-        # = (3, 4, 5, 6) which keep their rank.  Corners (0, 9) also
-        # keep their rank now.
         router, net_ids, _ = _make_byte_lane_router(group_size=10)
         out = router._apply_byte_lane_inner_priority(net_ids)
 
         idx = {nid: i for i, nid in enumerate(out)}
 
-        # Middle members (sorted indices 3..6) keep their relative
-        # order: they all have the same default rank, so the stable
-        # sort preserves input ordering between them.
-        middle_ids = [net_ids[3], net_ids[4], net_ids[5], net_ids[6]]
-        middle_positions = [idx[nid] for nid in middle_ids]
-        assert middle_positions == sorted(middle_positions), (
-            "Middle byte-lane members must keep their priority-sort "
-            f"order; got positions {middle_positions} for ids {middle_ids}"
+        inner_top = net_ids[1]
+        inner_bottom = net_ids[8]
+
+        # Inner-corner nets sort to the front.
+        assert idx[inner_top] == 0
+        assert idx[inner_bottom] == 1
+
+        # All other byte-lane members retain their priority-sort
+        # ordering relative to each other under the stable secondary
+        # key.  ``rest`` is everything except the two promoted
+        # inner-corner ids; their output positions should be a
+        # monotonically increasing sequence starting at 2.
+        rest = [nid for i, nid in enumerate(net_ids) if i not in (1, 8)]
+        rest_positions = [idx[nid] for nid in rest]
+        assert rest_positions == sorted(rest_positions), (
+            "Non-promoted byte-lane members must keep their original "
+            f"order; got {rest_positions} for ids {rest}"
         )
-
-        # The demoted neighbours (sorted indices 2 and 7 only) must
-        # appear AFTER the middle and corner members in the output.
-        demoted_ids = [net_ids[2], net_ids[7]]
-        for mid in middle_ids:
-            for did in demoted_ids:
-                assert idx[mid] < idx[did], (
-                    f"Middle net {mid} (pos {idx[mid]}) must precede "
-                    f"demoted neighbour {did} (pos {idx[did]})"
-                )
-
-        # Corners (sorted indices 0 and 9) keep their default rank
-        # and must precede the demoted second-inward neighbours.
-        corner_ids = [net_ids[0], net_ids[9]]
-        for cid in corner_ids:
-            for did in demoted_ids:
-                assert idx[cid] < idx[did], (
-                    f"Corner net {cid} (pos {idx[cid]}) keeps default "
-                    f"rank and must precede demoted second-inward "
-                    f"neighbour {did} (pos {idx[did]})"
-                )
+        # And they must all be at positions >= 2 (after the two
+        # promoted inner-corner nets).
+        assert min(rest_positions) == 2
 
 
 class TestMultiGroupPreservation:
@@ -406,13 +394,14 @@ class TestPermutationInvariant:
 
         # Sorted indices along x: 0=corner left, 1=inner-corner left,
         # 2=second-inward left, ..., 4=second-inward right,
-        # 5=inner-corner right, 6=corner right.  Per Judge feedback
-        # on PR #2969, only the second-inward neighbours (sorted
-        # indices 2 and n-3=4) are demoted.  The inner-corner nets
-        # (net_ids[1], net_ids[5]) must precede those second-inward
-        # neighbours.  Corner nets (net_ids[0], net_ids[6]) keep
-        # their default rank.
+        # 5=inner-corner right, 6=corner right.  Round 3 contract per
+        # PR #2969 review: PROMOTE the inner-corner nets (sorted
+        # indices 1 and n-2=5) to rank 0.  They must precede both
+        # their corner neighbour (sorted indices 0 and 6) and their
+        # second-inward neighbour (sorted indices 2 and 4).
+        assert idx[net_ids[1]] < idx[net_ids[0]]
         assert idx[net_ids[1]] < idx[net_ids[2]]
+        assert idx[net_ids[5]] < idx[net_ids[6]]
         assert idx[net_ids[5]] < idx[net_ids[4]]
 
 
@@ -452,6 +441,6 @@ class TestNonMirroredTopologyGracefulFallback:
         router.net_class_map = net_class_map
 
         out = router._apply_byte_lane_inner_priority(net_ids)
-        # No primary component has 5+ group-member pads -> no demotion
+        # No primary component has 5+ group-member pads -> no promotion
         # plan -> identity.
         assert out == net_ids
