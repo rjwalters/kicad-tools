@@ -404,7 +404,12 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
             while j < n and pcb_content[j].isspace():
                 j += 1
             token_start = j
-            while j < n and not pcb_content[j].isspace() and pcb_content[j] != "(" and pcb_content[j] != ")":
+            while (
+                j < n
+                and not pcb_content[j].isspace()
+                and pcb_content[j] != "("
+                and pcb_content[j] != ")"
+            ):
                 j += 1
             token = pcb_content[token_start:j]
             if depth == 1 and token in ("segment", "via"):
@@ -1878,9 +1883,7 @@ def _detect_pcb_layer_profile(pcb_path: Path) -> tuple[int, bool]:
     copper_names: list[str] = []
     layers_match = re.search(r"\(layers\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
     if layers_match:
-        for layer_match in re.finditer(
-            r'\((\d+)\s+"([^"]+\.Cu)"\s+(\w+)', layers_match.group(1)
-        ):
+        for layer_match in re.finditer(r'\((\d+)\s+"([^"]+\.Cu)"\s+(\w+)', layers_match.group(1)):
             copper_names.append(layer_match.group(2))
 
     num_copper = len(copper_names) if copper_names else 2
@@ -2163,6 +2166,29 @@ def _auto_skip_pour_nets(
     return [], []
 
 
+def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False) -> None:
+    """Merge the pre-loaded --net-class-map sidecar into the router (Issue #2996).
+
+    ``main()`` validates and deserializes the sidecar early (so error
+    paths short-circuit before any routing work runs) and stashes the
+    resolved ``{net_name: NetClassRouting}`` map on
+    ``args._loaded_net_class_map``.  Each post-load callsite (the
+    standalone path in ``main()`` plus the three ``route_with_*``
+    wrappers) calls this helper to merge the rich per-pair / per-group
+    fields onto the router's name-pattern-classified map.
+
+    Idempotent and a no-op when the flag was not supplied.
+    """
+    loaded = getattr(args, "_loaded_net_class_map", None)
+    if not loaded:
+        return
+    router.net_class_map.update(loaded)
+    if not quiet:
+        from kicad_tools.cli.progress import flush_print
+
+        flush_print(f"  Net-class map: merged {len(loaded)} sidecar entries")
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -2344,6 +2370,9 @@ def route_with_layer_escalation(
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
+
+        # Issue #2996: merge --net-class-map sidecar onto router's map.
+        _apply_net_class_map_sidecar(router, args, quiet=quiet)
 
         # Issue #2396: Ensure pristine per-attempt state.  Today this is a
         # no-op (load_pcb_for_routing creates a fresh Autorouter) but it
@@ -3051,6 +3080,9 @@ def route_with_rule_relaxation(
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
+
+        # Issue #2996: merge --net-class-map sidecar onto router's map.
+        _apply_net_class_map_sidecar(router, args, quiet=quiet)
 
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
@@ -4122,6 +4154,9 @@ def route_with_combined_escalation(
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
 
+            # Issue #2996: merge --net-class-map sidecar onto router's map.
+            _apply_net_class_map_sidecar(router, args, quiet=quiet)
+
             # Issue #1841: Tell the autorouter which pour nets lack zones
             router._pour_nets_without_zones = set(_no_zone)
 
@@ -4830,6 +4865,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (Issue #2996).  Merged into the autorouter's "
+            "name-pattern-classified net_class_map so per-pair / per-group "
+            "fields (intra_pair_clearance, coupled_routing, "
+            "coupled_continuity_threshold, target_diff_impedance, "
+            "length_match_group) project through to the routing-time "
+            "pathfinder.  Mirrors the kct check --net-class-map flag."
+        ),
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -5428,6 +5477,34 @@ def main(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Issue #2996: Validate and load the optional --net-class-map sidecar
+    # early -- before dispatching to any of the route_with_* sub-flows --
+    # so the error paths (missing file / malformed JSON / invalid structure)
+    # short-circuit with exit 1 and a clear message regardless of which
+    # routing path the args select.  The loaded map is stashed on
+    # ``args._loaded_net_class_map`` for downstream consumers (each
+    # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
+    args._loaded_net_class_map = None
+    if getattr(args, "net_class_map", None) is not None:
+        import json as _ncm_json
+
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        ncm_path = Path(args.net_class_map).resolve()
+        if not ncm_path.exists():
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        try:
+            _ncm_data = _ncm_json.loads(ncm_path.read_text())
+        except _ncm_json.JSONDecodeError as e:
+            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
+            return 1
+        try:
+            args._loaded_net_class_map = net_class_map_from_dict(_ncm_data)
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
+            return 1
+
     # Normalize --auto-fix-passes: explicit value implies --auto-fix
     if args.auto_fix_passes is not None:
         if args.auto_fix_passes < 1:
@@ -5839,6 +5916,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
+
+    # Issue #2996: merge --net-class-map sidecar onto router's map.
+    _apply_net_class_map_sidecar(router, args, quiet=quiet)
 
     # Pass fine zones from multi-resolution plan to the router (Issue #1828).
     # This enables SubGridRouter to use fine-grid resolution for escape
