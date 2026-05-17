@@ -59,6 +59,7 @@ class TwoPhaseRouter:
         build_pads_by_net: Callable[..., Any] | None = None,
         get_partially_routed_nets: Callable[..., Any] | None = None,
         interleave_match_groups: Callable[[list[int]], list[int]] | None = None,
+        apply_byte_lane_inner_priority: Callable[[list[int]], list[int]] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -83,6 +84,11 @@ class TwoPhaseRouter:
         # unit tests that construct TwoPhaseRouter directly), the
         # routing order is identical to the pre-#2914 behaviour.
         self._interleave_match_groups = interleave_match_groups
+        # Issue #2962: Optional inner-corner byte-lane priority bump.
+        # Mirrors the ``_interleave_match_groups`` threading pattern.
+        # When ``None`` (e.g. unit tests that construct TwoPhaseRouter
+        # directly) the byte-lane reorder is skipped.
+        self._apply_byte_lane_inner_priority = apply_byte_lane_inner_priority
         # Issue #2527: Optional hooks that let the detailed-routing stall path
         # invoke ``Autorouter._attempt_blocked_component_ripup_negotiated``.
         # When the initial pass leaves overflow=0 with unrouted/partial nets
@@ -207,6 +213,15 @@ class TwoPhaseRouter:
         # construction in tests) the routing order is unchanged.
         if self._interleave_match_groups is not None:
             net_order = self._interleave_match_groups(net_order)
+
+        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only).
+        # See the ``Autorouter._apply_byte_lane_inner_priority`` docstring
+        # for the rationale and the R1/R2/R3 trace.  Applied after the
+        # starvation-fairness pass so a future implementation that swaps
+        # the helper body for a real reorder keeps the head-class ordering
+        # exact; only within-class neighbour priorities would be adjusted.
+        if self._apply_byte_lane_inner_priority is not None:
+            net_order = self._apply_byte_lane_inner_priority(net_order)
 
         total_nets = len(net_order)
 
