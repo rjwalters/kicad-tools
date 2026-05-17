@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
+from kicad_tools.core.geometry import point_to_segment_distance
+
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper
@@ -3051,6 +3053,93 @@ class EscapeRouter:
         return rect_dist - seg.width / 2
 
     @staticmethod
+    def _segment_clears_foreign_via(
+        seg: Segment,
+        via: Via,
+        trace_clearance: float,
+        hard_intersection_only: bool = False,
+    ) -> bool:
+        """Return True iff a segment clears a foreign-net via.
+
+        Issue #2998: Symmetric sibling of PR #2952 / Issue #2947.  Where
+        #2947 protected a NEW via from foreign segments/pads via
+        ``_check_via_placement_cached`` + ``point_clear_of_copper``, this
+        helper protects a NEW segment from a foreign-net via.  The
+        escape phase commits segments directly to the grid via
+        ``apply_escape_routes`` -> ``grid.mark_route`` without any
+        geometric clearance validation, so an escape segment may clip
+        a previously-committed foreign-net via.
+
+        Layer-awareness: the segment occupies one copper layer; the via
+        spans a contiguous layer range (``via.layers[0]..[1]``).  A
+        segment must clear a via only when the via spans the segment's
+        layer.
+
+        Same-net filtering is the CALLER's responsibility (mirrors the
+        ``point_clear_of_copper`` boundary convention; the caller has
+        more context to enforce diff-pair / split-net policies).
+
+        Two thresholds (parameterised by ``hard_intersection_only``):
+
+        * STANDARD (``hard_intersection_only=False``)::
+
+            dist(via_center, segment_centerline)
+              >= via.diameter/2 + seg.width/2 + trace_clearance
+
+          Full manufacturer clearance.  Rejects both hard intersections
+          AND marginal sub-clearance violations.  This is the predicate
+          the C++ post-route validator uses at
+          ``cpp/src/grid.cpp:510-536`` (block 1c) and the predicate
+          mirrored by PR #2952's ``set_via_foreign_context`` for the
+          opposite via-vs-segment direction.
+
+        * HARD-INTERSECTION (``hard_intersection_only=True``)::
+
+            dist(via_center, segment_centerline)
+              >= via.diameter/2 + seg.width/2
+
+          Drops the ``trace_clearance`` term: only flags cases where
+          copper physically overlaps copper (negative edge-to-edge
+          clearance).  Used by ``apply_escape_routes`` to drop only
+          the unrecoverable-by-routing escapes -- marginal
+          sub-clearance escapes are kept and reported as DRC
+          violations downstream, mirroring the existing "in-pad
+          rescue ... violates clearance" warning semantics (PR #2945
+          / Issue #2944 last-resort policy).  This narrow threshold
+          preserves net completion when an alternate escape path is
+          impractical (e.g. fine-pitch LQFP boxed-in pads where the
+          in-pad rescue is the only viable escape and dropping it
+          regresses 9/9 completion -- the board-04 NRST/OSC_OUT
+          cluster).
+
+        Args:
+            seg: The candidate escape segment.
+            via: A foreign-net via to validate against.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm.
+            hard_intersection_only: When True, ignore ``trace_clearance``
+                in the threshold (see HARD-INTERSECTION mode above).
+
+        Returns:
+            True if the segment clears the via, False on violation.
+        """
+        # Layer overlap check: vias span layers[0]..layers[1] inclusive.
+        v_lo = min(via.layers[0].value, via.layers[1].value)
+        v_hi = max(via.layers[0].value, via.layers[1].value)
+        if not (v_lo <= seg.layer.value <= v_hi):
+            return True  # Via doesn't reach the segment's layer.
+
+        dist = point_to_segment_distance(
+            via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+        )
+        required = via.diameter / 2 + seg.width / 2
+        if not hard_intersection_only:
+            required += trace_clearance
+        # 1e-9 epsilon mirrors ``point_clear_of_copper``'s convention so a
+        # segment exactly at the clearance threshold is admitted.
+        return dist >= required - 1e-9
+
+    @staticmethod
     def _is_pin_boxed_by_plane_neighbours(
         pad: Pad,
         package: PackageInfo,
@@ -4626,15 +4715,99 @@ class EscapeRouter:
         Marks escape paths on the grid to reserve them for routing,
         and converts escape routes to standard Route objects.
 
+        Issue #2998: Before committing each escape, validate the escape's
+        segments against foreign-net vias from (a) already-committed
+        routes in ``self.grid.routes`` (from earlier escape passes or
+        previously-routed nets) and (b) earlier escapes committed in this
+        same call.  This is the symmetric sibling of PR #2952's
+        via-vs-foreign-segment check: a new SEGMENT must clear a foreign
+        VIA, not just the reverse direction PR #2952 already covered.
+
+        Threshold choice (HARD INTERSECTION ONLY): the gate flags only
+        escapes whose segment copper physically OVERLAPS a foreign-net
+        via's copper (negative edge-to-edge clearance).  Marginal
+        sub-clearance violations -- segment copper edge within
+        ``trace_clearance`` mm of via copper edge but NOT overlapping
+        -- are kept and reported as DRC violations downstream,
+        mirroring the existing "in-pad rescue ... violates clearance"
+        warning semantics (PR #2945 / Issue #2944 last-resort policy).
+
+        This narrow threshold prevents a more aggressive predicate from
+        regressing fine-pitch LQFP boxed-in pads (e.g. board-04 NRST on
+        a 0.5mm-pitch LQFP-48 west edge) whose only viable escape is
+        the in-pad rescue and whose sub-clearance violation is part of
+        the existing allowlist baseline.  Dropping such an escape leaves
+        the pad unroutable and regresses 9/9 net completion -- the
+        cure becomes worse than the disease.
+
+        IMPORTANT: when an escape is rejected by the clearance gate, it
+        is REMOVED IN PLACE from ``escapes`` so the caller's downstream
+        override loop in :meth:`Autorouter.generate_escape_routes`
+        (``core.py:10127``) sees only the committed escapes.  Without
+        this in-place mutation, ``_escape_pad_overrides`` would be
+        populated for dropped escapes, pointing the main router at a
+        virtual escape endpoint whose escape segment was never actually
+        committed -- producing a connectivity gap between the original
+        pad and the virtual endpoint.
+
         Args:
-            escapes: List of escape routes to apply
+            escapes: List of escape routes to apply.  Mutated in place
+                (offending escapes removed) so the caller's override
+                loop iterates only the committed subset.
 
         Returns:
-            List of Route objects representing the escapes
+            List of Route objects representing the escapes that passed
+            clearance validation.  Escapes whose segments clip a foreign
+            via with HARD intersection (negative clearance) are skipped;
+            the main router picks up the pad cleanly from the original
+            pad position rather than from a clipped escape endpoint.
         """
         routes: list[Route] = []
 
+        # Issue #2998: trace_clearance used for the segment-vs-foreign-via
+        # gate.  Mirrors the predicate the C++ post-route validator uses
+        # at ``cpp/src/grid.cpp:510-536`` (block 1c).
+        trace_clearance = self.rules.trace_clearance
+
+        # Issue #2998: counters for diagnostics on dropped escapes.
+        skipped_seg_vs_via = 0
+
+        # Issue #2998: track which escapes survived the gate so we can
+        # mutate ``escapes`` in place after iteration (Python list
+        # mutation during iteration is brittle).
+        committed_escapes: list[EscapeRoute] = []
+
         for escape in escapes:
+            # Build the foreign-via list lazily once per escape.  Vias
+            # from already-committed routes in ``self.grid.routes``
+            # include both (a) vias from prior escape commits in earlier
+            # ``apply_escape_routes`` calls (e.g. for other packages) and
+            # (b) vias from routes committed in this same call (because
+            # ``grid.mark_route`` below appends to ``self.grid.routes``).
+            current_net = escape.pad.net
+            if escape.segments:
+                violation = False
+                for seg in escape.segments:
+                    # HARD-INTERSECTION threshold: only flag copper
+                    # overlap (negative clearance).  See predicate
+                    # docstring for the rationale (board-04 NRST
+                    # regression risk).
+                    if self._segment_violates_foreign_via_clearance(
+                        seg, current_net, trace_clearance,
+                        hard_intersection_only=True,
+                    ):
+                        violation = True
+                        break
+                if violation:
+                    skipped_seg_vs_via += 1
+                    logger.info(
+                        "Escape commit: deferred %s pin %s (ref=%s) to main "
+                        "router -- segment overlaps foreign-net via copper "
+                        "(Issue #2998 -- the SWDIO/BOOT0 family).",
+                        escape.pad.net_name, escape.pad.pin, escape.pad.ref,
+                    )
+                    continue
+
             route = Route(
                 net=escape.pad.net,
                 net_name=escape.pad.net_name,
@@ -4645,5 +4818,65 @@ class EscapeRouter:
             # Mark on grid
             self.grid.mark_route(route)
             routes.append(route)
+            committed_escapes.append(escape)
+
+        # Issue #2998: mutate ``escapes`` in place so the caller's
+        # override loop (``Autorouter.generate_escape_routes``) sees only
+        # committed escapes.  Dropping an escape from the override map is
+        # essential -- a stale override would redirect the main router to
+        # a non-existent escape endpoint and leave the original pad
+        # unconnected, regressing completion.
+        if skipped_seg_vs_via:
+            escapes[:] = committed_escapes
+            logger.info(
+                "Escape commit: %d escape(s) deferred to main router due to "
+                "hard intersection with foreign-net via (Issue #2998)",
+                skipped_seg_vs_via,
+            )
 
         return routes
+
+    def _segment_violates_foreign_via_clearance(
+        self,
+        seg: Segment,
+        current_net: int,
+        trace_clearance: float,
+        hard_intersection_only: bool = False,
+    ) -> bool:
+        """Return True iff ``seg`` violates clearance against any
+        foreign-net via committed to ``self.grid.routes``.
+
+        Issue #2998: helper for ``apply_escape_routes`` pre-commit gate.
+        Iterates over every committed via on every committed route,
+        filters out same-net vias (caller filters via ``current_net``),
+        and applies the layer-aware ``_segment_clears_foreign_via``
+        predicate.  Returns True on the first violation.
+
+        Args:
+            seg: The candidate escape segment.
+            current_net: Net id of the segment being committed.
+                Foreign-net vias have ``via.net != current_net``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm.
+            hard_intersection_only: When True, only flag escapes whose
+                segment copper physically overlaps the foreign via's
+                copper (negative clearance).  Forwarded to the
+                ``_segment_clears_foreign_via`` predicate.  See its
+                docstring for the rationale.
+
+        Returns:
+            True if any foreign-net via fails the clearance predicate.
+        """
+        # Iterate committed routes for foreign-net vias.  The grid stores
+        # routes in insertion order; vias from earlier escapes in this
+        # same call are already present here.
+        for route in self.grid.routes:
+            if route.net == current_net:
+                continue  # Same-net via -- skipped by convention.
+            for via in route.vias:
+                if not self._segment_clears_foreign_via(
+                    seg, via, trace_clearance,
+                    hard_intersection_only=hard_intersection_only,
+                ):
+                    return True
+        return False
