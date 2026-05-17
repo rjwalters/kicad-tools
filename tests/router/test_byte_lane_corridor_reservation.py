@@ -162,9 +162,7 @@ class TestCorridorReservationOnPlaneStackup:
     def test_reservation_count_equals_two_per_byte_lane(self) -> None:
         """Mirrored 10-net byte-lane => 2 inner-corner pads => 2 calls."""
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
 
         # Force escape router init so counters are accessible.
         escape = router._escape
@@ -185,9 +183,7 @@ class TestCorridorReservationOnPlaneStackup:
     def test_nine_net_byte_lane_two_reservations(self) -> None:
         """9-net byte-lane (DDR-byte minus DQS pair) — still 2 inner corners."""
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=9, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=9, layer_stack=stack)
 
         out = router._apply_byte_lane_inner_priority(net_ids)
         assert out == net_ids
@@ -209,9 +205,7 @@ class TestCorridorReservationOnSignalStackup:
 
     def test_reserves_on_inner_signal_layer(self) -> None:
         stack = LayerStack.four_layer_all_signal()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
 
         out = router._apply_byte_lane_inner_priority(net_ids)
         assert out == net_ids
@@ -238,9 +232,7 @@ class TestReservationSequencingBeforeViaMarking:
 
     def test_counters_bump_within_apply_helper(self) -> None:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
 
         # Before helper: no reservations.
         assert router._escape.byte_lane_corridor_reservations == 0
@@ -270,9 +262,7 @@ class TestTwoLayerStackupGuard:
 
     def test_no_reservation_on_two_layer_stack(self) -> None:
         stack = LayerStack.two_layer()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
 
         router._apply_byte_lane_inner_priority(net_ids)
         # No reservations on 2-layer stack-up.
@@ -286,9 +276,7 @@ class TestTwoLayerStackupGuard:
         produces no reservations, matching the test_byte_lane_priority
         existing assertions where no stack is supplied.
         """
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=None
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=None)
 
         router._apply_byte_lane_inner_priority(net_ids)
         assert router._escape.byte_lane_corridor_reservations == 0
@@ -313,9 +301,7 @@ class TestOrderingStillIdentity:
 
     def test_identity_on_4_layer_signal_stack(self) -> None:
         stack = LayerStack.four_layer_all_signal()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
         out = router._apply_byte_lane_inner_priority(net_ids)
         assert out == net_ids
         assert set(out) == set(net_ids)
@@ -323,9 +309,7 @@ class TestOrderingStillIdentity:
 
     def test_identity_on_plane_stack(self) -> None:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=10, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
         out = router._apply_byte_lane_inner_priority(net_ids)
         assert out == net_ids
 
@@ -347,9 +331,7 @@ class TestNoReservationOnUnsupportedInputs:
     def test_four_member_group_no_reservation(self) -> None:
         """Below MIN_BYTE_LANE_SIZE=5 => no reservation."""
         stack = LayerStack.four_layer_all_signal()
-        router, net_ids, _ = _make_byte_lane_router(
-            group_size=4, layer_stack=stack
-        )
+        router, net_ids, _ = _make_byte_lane_router(group_size=4, layer_stack=stack)
         out = router._apply_byte_lane_inner_priority(net_ids)
         assert out == net_ids
         assert router._escape.byte_lane_corridor_reservations == 0
