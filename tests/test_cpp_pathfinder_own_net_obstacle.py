@@ -1,0 +1,169 @@
+"""Regression tests for Issue #2989 / #2990: C++ pathfinder must admit
+own-net obstacle cells in negotiated mode.
+
+Background
+==========
+
+PR #2928 marks isolated pad-metal cells as ``is_obstacle=True`` on first
+touch.  PR #2972 (closes #2963) added the own-net gate to the Python
+mirror (``pathfinder.py::Pathfinder._is_via_blocked`` SoA branch at
+line 1442, plus ``_is_trace_blocked``'s rect-mask which was already
+net-gated).
+
+The PR #2972 description listed the C++ mirror as fixed for the cost
+function (``grid.cpp::get_negotiated_cost``) but the *blocking* checks
+in ``pathfinder.cpp`` (``is_via_blocked_diag``, ``is_trace_blocked``,
+``is_diagonal_blocked``) were not updated.  All three retained the
+pattern::
+
+    if (allow_sharing && !cell.is_obstacle) {
+        // negotiated branch (own-net obstacle skipped entirely)
+    } else {
+        if (cell.is_obstacle || cell.net != net) return true;  // <- bug
+    }
+
+This branch rejects own-net obstacle cells unconditionally because the
+``else`` arm fires whenever ``cell.is_obstacle`` is true -- even when
+``allow_sharing`` is true and the cell belongs to the routing net.
+
+The C++ backend is the default backend, so this is the live bug behind:
+
+* Board 03 USB_D-/USB_CC2/JOY_Y diff-pair partial completion (#2990).
+* Board 06 USB3 / PCIE / MIPI diff-pair partial completion (#2989).
+
+The fix mirrors the Python SoA branch pattern: split first on
+``allow_sharing``, then in the negotiated arm only reject obstacle
+cells when ``cell.net != net``.
+
+These tests exercise the three C++ predicates directly through the
+pybind interface so the regression is caught without needing a full
+board route.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from kicad_tools.router.cpp_backend import (
+    CppGrid,
+    CppPathfinder,
+    is_cpp_available,
+)
+from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.layers import LayerStack
+from kicad_tools.router.rules import DesignRules
+
+requires_cpp = pytest.mark.skipif(
+    not is_cpp_available(),
+    reason="C++ router backend not available",
+)
+
+
+def _make_grid_and_rules() -> tuple[RoutingGrid, DesignRules]:
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.2,
+        via_drill=0.35,
+        via_diameter=0.6,
+        via_clearance=0.2,
+        grid_resolution=0.1,
+    )
+    grid = RoutingGrid(
+        width=5.0,
+        height=5.0,
+        rules=rules,
+        layer_stack=LayerStack.four_layer_all_signal(),
+    )
+    return grid, rules
+
+
+def _paint_own_net_obstacle(
+    cpp_grid: CppGrid, gx: int, gy: int, net: int
+) -> None:
+    """Mark the cell at grid (gx, gy) as a same-net obstacle on every
+    layer.  Mirrors the post-PR #2928 isolated-pad first-touch
+    bookkeeping the Python ``EscapeRouter`` does.
+    """
+    for layer_idx in range(cpp_grid._impl.layers):
+        cpp_grid._impl.mark_blocked(gx, gy, layer_idx, net, True)
+
+
+@requires_cpp
+class TestIsViaBlockedOwnNetObstacle:
+    """Issue #2989 sibling of #2963: ``Pathfinder::is_via_blocked`` must
+    admit a via candidate whose cell is an own-net ``is_obstacle`` in
+    negotiated (``allow_sharing=True``) mode.
+    """
+
+    def test_own_net_obstacle_admits_via_negotiated(self) -> None:
+        """Negotiated-mode via probe at an own-net obstacle cell must
+        NOT be rejected.  This is the diff-pair partner B pad case --
+        partner B's pad is own-net but is_obstacle=True (painted by
+        PR #2942 rect-aware halo + PR #2928 first-touch), and without
+        the own-net gate the via probe rejects unconditionally, leaving
+        the partner endpoint unreachable.
+        """
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        pad_net = 7
+        gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
+        _paint_own_net_obstacle(cpp_grid, gx, gy, pad_net)
+
+        # allow_sharing=True (negotiated mode) is the regression site.
+        assert not pathfinder._impl.is_via_blocked(
+            gx, gy, pad_net, True, 0
+        ), (
+            "Issue #2989: same-net via must be admitted on an own-net "
+            "is_obstacle cell in negotiated mode (diff-pair partner B "
+            "pad reachability for USB3/PCIE/MIPI escapes)."
+        )
+
+    def test_foreign_net_obstacle_rejects_via_negotiated(self) -> None:
+        """Foreign-net obstacle cells must STILL be rejected.  The fix
+        is a refinement, not a relaxation -- PR #2928's invariant
+        (foreign isolated pad metal blocks foreign vias) is preserved.
+        """
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        obstacle_net = 7
+        probe_net = 99
+        gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
+        _paint_own_net_obstacle(cpp_grid, gx, gy, obstacle_net)
+
+        assert pathfinder._impl.is_via_blocked(
+            gx, gy, probe_net, True, 0
+        ), (
+            "Issue #2989: foreign-net obstacle cells must still reject "
+            "the via (preserves PR #2928's invariant)."
+        )
+
+    def test_own_net_obstacle_rejects_via_standard(self) -> None:
+        """In standard (non-negotiated) mode, obstacle cells reject
+        the via even for the own net -- the standard branch retains
+        the strict pre-negotiation contract.  Only the negotiated
+        branch needed the own-net gate.
+        """
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        pad_net = 7
+        gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
+        _paint_own_net_obstacle(cpp_grid, gx, gy, pad_net)
+
+        # Standard mode keeps the strict reject -- A* in standard mode
+        # never enters obstacle metal anyway (escape probes use the
+        # negotiated path).
+        assert pathfinder._impl.is_via_blocked(
+            gx, gy, pad_net, False, 0
+        ), (
+            "Standard-mode via probe at any obstacle cell stays "
+            "conservative; only negotiated mode admits own-net obstacles."
+        )
