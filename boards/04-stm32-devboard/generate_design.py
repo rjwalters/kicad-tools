@@ -999,11 +999,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     """
     Route the PCB using the `kct route` CLI.
 
-    Uses the same flags that the curator confirmed reach 11/12 nets on
-    current tooling: --auto-layers, --placement-feedback, --auto-fix,
-    --mfr jlcpcb-tier1. The CLI invocation (as opposed to the in-script
-    router) picks up post-#2824/#2825/#2826/#2829/#2830 router fixes that
-    are required to escape the LQFP-48 west edge (OSC_IN/OSC_OUT/NRST).
+    Uses the empirically-verified flag recipe that PR #2982 (closes #2974)
+    confirmed reaches 9/9 signal nets across 5/5 runs (3 default seeds plus
+    seed 1 and seed 42): --mfr jlcpcb-tier1, --auto-fix, --auto-layers,
+    --auto-mfr-tier, --placement-feedback, --timeout 600. The CLI invocation
+    (as opposed to the in-script router) picks up post-#2824/#2825/#2826/
+    #2829/#2830 router fixes that are required to escape the LQFP-48 west
+    edge (OSC_IN/OSC_OUT/NRST). The --auto-mfr-tier flag is required to
+    close the NRST gap on the default recipe (issue #2988).
 
     Returns True if `kct route` exits successfully (>= --min-completion).
     """
@@ -1021,9 +1024,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(output_path),
         "--mfr",
         "jlcpcb-tier1",
-        "--auto-layers",
-        "--placement-feedback",
         "--auto-fix",
+        "--auto-layers",
+        "--auto-mfr-tier",
+        "--placement-feedback",
         "--timeout",
         "600",
     ]
@@ -1050,9 +1054,12 @@ def stitch_pcb(routed_path: Path) -> bool:
 
     `kct route` does not stitch plane nets, so after routing the GND pads
     of every component are still floating with respect to the B.Cu pour.
-    `kct stitch --net GND` drops a via near each GND pad to bond it to the
-    plane. A small number of pads (e.g. LQFP-48 corner GND pins surrounded
-    by signal escapes) may be skipped if no clearance-compliant via
+    `kct stitch --net GND --mfr jlcpcb-tier1` drops a via near each GND
+    pad to bond it to the plane, using jlcpcb-tier1-compliant via
+    dimensions (0.6mm diameter / 0.3mm drill) so the stitch vias do not
+    introduce dimension_via_* DRC violations against jlcpcb-tier1. A
+    small number of pads (e.g. LQFP-48 corner GND pins surrounded by
+    signal escapes) may be skipped if no clearance-compliant via
     location exists; that is logged but is NOT treated as a failure here.
 
     Returns True if the stitch step ran (even if some pads were skipped).
@@ -1069,6 +1076,8 @@ def stitch_pcb(routed_path: Path) -> bool:
         str(routed_path),
         "--net",
         "GND",
+        "--mfr",
+        "jlcpcb-tier1",
         "--output",
         str(routed_path),
     ]

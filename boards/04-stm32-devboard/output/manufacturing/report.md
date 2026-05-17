@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-13 | jlcpcb"
+date: "Rev 1 | 2026-05-17 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 17 (0 SMD, 0 THT, 17 other) |
 | Nets | 12 |
-| Traces | 223 segments |
-| Vias | 26 |
+| Traces | 97 segments |
+| Vias | 25 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -84,23 +84,18 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 101 |
+| Errors | 8 |
 | Warnings | 0 |
-| Blocking | 101 |
+| Blocking | 8 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| clearance_pad_segment | 44 |
-| dimension_via_drill | 14 |
-| dimension_via_diameter | 14 |
-| dimension_annular_ring | 14 |
-| clearance_segment_via | 4 |
-| clearance_pad_via | 4 |
-| clearance_segment_segment | 4 |
+| clearance_segment_via | 3 |
 | via_in_pad | 3 |
+| clearance_pad_via | 2 |
 
 
 \newpage
@@ -111,8 +106,7 @@ Demonstrates circuit blocks API
 
 ### Action Items
 
-- **[CRITICAL]** Fix 101 blocking DRC violations (clearance_pad_segment (44), dimension_via_drill (14), dimension_via_diameter (14))
-- **[CRITICAL]** Increase min via drill: 0.200mm < 0.300mm required
+- **[CRITICAL]** Fix 8 blocking DRC violations (clearance_segment_via (3), via_in_pad (3), clearance_pad_via (2))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 
 
@@ -127,7 +121,7 @@ Demonstrates circuit blocks API
 | Complete Nets | 11 / 12 |
 | Zone-Connected Nets | 3 |
 | Incomplete Nets | 1 |
-| Unconnected Pads | 3 |
+| Unconnected Pads | 1 |
 
 ### Zone-Connected Nets
 
