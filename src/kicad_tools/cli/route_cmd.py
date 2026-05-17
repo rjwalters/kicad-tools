@@ -348,12 +348,121 @@ def _emit_single_pad_net_warning(
     )
 
 
+def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
+    """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
+
+    Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
+    ``output_path`` (so the user's input file isn't mutated by ``auto_pour``),
+    subsequent ``_write_routed_pcb`` calls re-read the **previous write's**
+    output rather than the original input.  Each write then *appends* the
+    current route s-expression on top of stale segments/vias from the prior
+    write, doubling (or worse) the via population in the output file.
+
+    The duplicated vias trigger ``dimension_drill_clearance`` errors --
+    -0.300mm clearance == two coincident drills on the same net -- because
+    they are literally the same physical via emitted twice with different
+    UUIDs.
+
+    The fix is to remove any top-level routed-element blocks before
+    inserting fresh ones: the in-memory router state is the source of
+    truth, and the new ``route_sexp`` already contains every segment and
+    via that should appear in the output.  Footprints, pads, zones, and
+    other PCB structure are preserved because we only strip blocks whose
+    first token is ``segment`` or ``via``.
+
+    Args:
+        pcb_content: Original PCB file content.
+
+    Returns:
+        Tuple of ``(stripped_content, segments_removed, vias_removed)``.
+        Counts are returned so callers can log a diagnostic when a stale
+        write is observed.
+    """
+    # Walk the content counting depth, identifying top-level forms whose
+    # first token is "segment" or "via" and excising them.  Footprints
+    # contain their own (pad ...) blocks, never (segment ...) or top-level
+    # (via ...), so stripping at depth=1 is safe.
+    out: list[str] = []
+    i = 0
+    n = len(pcb_content)
+    depth = 0
+    in_string = False
+    prev_char = ""
+    segments_removed = 0
+    vias_removed = 0
+    while i < n:
+        ch = pcb_content[i]
+        if ch == '"' and prev_char != "\\":
+            in_string = not in_string
+            out.append(ch)
+            prev_char = ch
+            i += 1
+            continue
+        if not in_string and ch == "(":
+            # Peek at the token following the paren.
+            j = i + 1
+            while j < n and pcb_content[j].isspace():
+                j += 1
+            token_start = j
+            while j < n and not pcb_content[j].isspace() and pcb_content[j] != "(" and pcb_content[j] != ")":
+                j += 1
+            token = pcb_content[token_start:j]
+            if depth == 1 and token in ("segment", "via"):
+                # Skip the entire form: find matching ")".
+                form_depth = 1
+                k = j
+                form_in_string = False
+                form_prev = ""
+                while k < n and form_depth > 0:
+                    c = pcb_content[k]
+                    if c == '"' and form_prev != "\\":
+                        form_in_string = not form_in_string
+                    elif not form_in_string:
+                        if c == "(":
+                            form_depth += 1
+                        elif c == ")":
+                            form_depth -= 1
+                    form_prev = c
+                    k += 1
+                if token == "segment":
+                    segments_removed += 1
+                else:
+                    vias_removed += 1
+                # Skip whitespace that was preceding this form (trailing
+                # newline/tab from the previous emission) to keep the
+                # resulting file tidy.
+                while out and out[-1] in (" ", "\t"):
+                    out.pop()
+                # Also drop a single trailing newline so we collapse the
+                # blank line the form previously occupied.
+                if out and out[-1] == "\n":
+                    out.pop()
+                i = k
+                prev_char = ")"
+                continue
+            depth += 1
+        elif not in_string and ch == ")":
+            depth -= 1
+        out.append(ch)
+        prev_char = ch
+        i += 1
+    return "".join(out), segments_removed, vias_removed
+
+
 def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     """Insert S-expression fragments before the final closing parenthesis of a PCB file.
 
     This correctly removes only the last closing parenthesis from the PCB content
     and re-adds it after the inserted fragments. Unlike ``rstrip(")")``, which
     strips ALL trailing ``)``, this function preserves the S-expression structure.
+
+    Issue #2976: Before inserting fresh route s-expressions, any pre-existing
+    ``(segment ...)`` and ``(via ...)`` blocks at the top level are stripped.
+    This prevents accumulation when ``pcb_path == output_path`` (which happens
+    after ``_stage_input_for_auto_pour``): each ``_write_routed_pcb`` call
+    used to *append* the current route state on top of the previous write,
+    producing duplicate same-net vias that the DRC flagged with negative
+    drill-edge clearance.
 
     Args:
         pcb_content: Original PCB file content.
@@ -362,6 +471,7 @@ def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     Returns:
         Modified PCB content with fragments inserted before the final ``)``.
     """
+    pcb_content, _stripped_segs, _stripped_vias = _strip_route_blocks(pcb_content)
     content = pcb_content.rstrip()
     if content.endswith(")"):
         content = content[:-1].rstrip()
