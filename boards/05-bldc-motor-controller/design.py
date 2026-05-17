@@ -218,6 +218,13 @@ def create_bldc_controller(output_dir: Path) -> Path:
     #   - U2 (AMS1117-3.3 LDO) + C5 (input) + C6 (output)
     print("\n3. Adding cascaded power tree (24V → 5V → 3.3V)...")
 
+    # The buck (U1) and LDO (U2) symbols carry Power-input pins on VIN /
+    # GND and an Input-type FB pin (fixed-output LM2596 variants).  Without
+    # an explicit label-on-wire stub at each pin, KiCad ERC reports
+    # ``power_pin_not_driven`` (VIN/GND/VI) and ``pin_not_connected`` (FB,
+    # VO).  The ``pin_nets`` kwargs below emit short stub-wires + labels
+    # at each named pin so ERC sees the pin as driven via net-name
+    # continuity (VMOTOR, +5V, +3.3V, GND).  See issue #2994.
     cascade = create_dual_supply_cascade(
         sch,
         x_buck=X_BUCK,
@@ -231,6 +238,21 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ldo_ref="U2",
         buck_diode_ref="D2",  # D1 is used for TVS diode
         buck_inductor_ref="L1",
+        # U1 (LM2596-5.0): VIN <- VMOTOR rail, GND <- GND rail, FB tied
+        # to +5V (fixed-output variant senses output directly).
+        buck_pin_nets={
+            "VIN": "VMOTOR",
+            "GND": "GND",
+            "FB": "+5V",
+        },
+        # U2 (AMS1117-3.3): VI <- +5V rail, VO -> +3.3V rail (drives the
+        # downstream MCU).  GND already wired by ``connect_to_rails`` but
+        # we add a label here for symmetry / clarity.
+        ldo_pin_nets={
+            "VI": "+5V",
+            "VO": "+3.3V",
+            "GND": "GND",
+        },
     )
 
     # Patch footprints on the LDO stage so the BOM matches the
@@ -407,7 +429,14 @@ def create_bldc_controller(output_dir: Path) -> Path:
     sch.add_label("OSC_OUT", xtal_out_pos[0] + 5, xtal_out_pos[1], rotation=0,
                   validate_connection=False)
 
-    # Debug header (SWD)
+    # Debug header (SWD).  SWD-6 pinout: 1=VCC, 2=SWDIO, 3=GND, 4=SWCLK,
+    # 5=GND, 6=NRST.  ``connect_to_rails`` already wires pin 1 (VCC) and
+    # pin 3 (first GND) via topology, but ERC requires a label-on-wire
+    # stub at each pin to see it as driven.  Pin 5 (second GND) is not
+    # covered by the block's ``_build_ports`` dedup logic, so it falls
+    # through to ``pin_not_connected``.  Use ``pin_nets`` to declare the
+    # rail nets for pins 1 and 5 explicitly; signal pins 2/4/6 follow
+    # below with the same kwarg (replaces the prior inline stub loop).
     debug = DebugHeader(
         sch,
         x=X_MCU + 100,
@@ -415,19 +444,17 @@ def create_bldc_controller(output_dir: Path) -> Path:
         interface="swd",
         pins=6,
         ref="J4",
+        pin_nets={
+            "1": "+3.3V",
+            "2": "SWDIO",
+            "3": "GND",
+            "4": "SWCLK",
+            "5": "GND",
+            "6": "NRST",
+        },
     )
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
     print(f"   Debug header: {debug.header.reference}")
-
-    # Add SWD signal labels on debug header pins (these also appear on the
-    # MCU side as labels with the same name -> they share a net).
-    swd_pin_map = {"2": "SWDIO", "4": "SWCLK", "6": "NRST"}
-    for pin_num, label_text in swd_pin_map.items():
-        pin_pos = debug.header.pin_position(pin_num)
-        end_pos = (pin_pos[0] - 5, pin_pos[1])
-        sch.add_wire(pin_pos, end_pos, warn_on_collision=False)
-        sch.add_label(label_text, end_pos[0], end_pos[1], rotation=0,
-                      validate_connection=False)
 
     # =========================================================================
     # Section 6: Gate Driver (using GateDriverBlock + BootstrapCapacitorArray)

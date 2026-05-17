@@ -115,6 +115,7 @@ class DebugHeader(CircuitBlock):
         header_symbol: str | None = None,
         resistor_symbol: str = "Device:R",
         header_footprint: str = "",
+        pin_nets: dict[str, str] | None = None,
     ):
         """
         Create a debug header block.
@@ -132,6 +133,21 @@ class DebugHeader(CircuitBlock):
             header_symbol: KiCad symbol for header (auto-selected if None)
             resistor_symbol: KiCad symbol for resistors
             header_footprint: Footprint for header (e.g., "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical")
+            pin_nets: Optional mapping of header pin number (e.g.
+                ``"1"``) or pin name to net label.  For each entry, a
+                one-grid (2.54 mm) stub wire is drawn from the pin away
+                from the symbol center and the net label is placed on
+                the stub endpoint so KiCad's label-on-wire ERC check is
+                satisfied (see issue #2980, mirrors the
+                ``GateDriverBlock`` pattern introduced in PR #2985).
+                When ``None`` (the default), no labels are emitted and
+                behavior is unchanged.  Useful for declaring pins that
+                ``connect_to_rails`` does not cover -- typically the
+                GND-key pins on 6/10-pin SWD layouts (pin 3, 5 on SWD-6
+                or pin 5, 9 on SWD-10) or any signal pin not addressed
+                via the standard pinout.  For every entry, an alias
+                port is also added under the net name so callers can
+                retrieve real pin coordinates via ``block.port("<net>")``.
         """
         super().__init__(sch, x, y)
         self.interface = interface.lower()
@@ -181,6 +197,34 @@ class DebugHeader(CircuitBlock):
 
         # Build ports dictionary
         self.ports = self._build_ports()
+
+        # Optional pin-net labels.  KiCad's label-only connectivity requires
+        # the label coordinate to lie on a wire endpoint or segment; without
+        # a stub, labels placed at the bare pin float and trigger ERC's
+        # ``isolated_pin_label`` cascade.  For each ``pin_nets`` entry we
+        # resolve the real pin position via ``self.header.pin_position``
+        # (supporting either pin names or pin numbers), draw a one-grid
+        # (2.54 mm) horizontal stub *away from the symbol center* (left
+        # for pins on the symbol's left edge, right otherwise), and place
+        # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
+        # pattern from PR #2985; see issues #2980 and #2994.
+        if pin_nets is not None:
+            STUB = 2.54
+            for pin_key, net_name in pin_nets.items():
+                pin_pos = self.header.pin_position(pin_key)
+                # Stub away from the symbol center.  When the pin lies
+                # exactly on the center column we default to stubbing right.
+                if pin_pos[0] < x:
+                    label_x = pin_pos[0] - STUB
+                else:
+                    label_x = pin_pos[0] + STUB
+                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
+                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
+                # Expose the pin's real coordinate under the net name so
+                # external wiring can reach it.  Do not overwrite an
+                # existing port by the same name (preserves back-compat).
+                if net_name not in self.ports:
+                    self.ports[net_name] = pin_pos
 
     def _validate_config(self) -> None:
         """Validate interface and pin count combination."""
