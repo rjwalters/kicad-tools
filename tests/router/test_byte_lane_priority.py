@@ -1,26 +1,34 @@
-"""Tests for inner-corner byte-lane priority bumping (Issue #2962).
+"""Tests for the mirrored byte-lane scaffolding hook (Issue #2962).
 
 The :meth:`Autorouter._apply_byte_lane_inner_priority` helper detects
 mirrored byte-lane match groups (e.g. board 07's DDR data byte on a
-mirrored QFN-48 pair) and PROMOTES the inner-corner row members (the
-pad one step in from each row corner) to a rank that places them
-BEFORE all other byte-lane siblings (corners, second-inward, middle)
-in the routing order.
+mirrored QFN-48 pair) but, in this scaffolding-only cut, **returns the
+input net order unchanged**.  The detection / projection / sort
+machinery and the three integration hook sites (``route_all``,
+``route_all_negotiated``, ``TwoPhaseRouter``) are preserved as the
+surface for a future layered-escape PR.
 
-Judge feedback trace (PR #2969 review):
+PR #2969 design history (preserved as the AC for issue #2962's
+net-ordering exploration):
 
-- Round 1 (broader plan): demoted both corner (0, n-1) AND
-  second-inward (2, n-3) -- got 27/31 nets but DRC was 86, over the
+- **Round 1** (broader plan): demoted both corner (0, n-1) AND
+  second-inward (2, n-3).  Got 27/31 nets but DRC was 86, over the
   70 allowlist.
-- Round 2 (constrained demote, second-inward only): DRC dropped to 4
-  but yield regressed to 20/31 and ``match_group_length_skew`` was
-  silently not exercised.
-- Round 3 (this contract, promote inner-corner directly): the Judge's
-  recommended dual.  The route log refuted the earlier speculative
-  concern about lifting DM0 -- DM0 routed fine while DQ5/DQ2 stayed
-  squeezed -- so promoting the inner-corner is safe.
+- **Round 2** (constrained, demote second-inward only): DRC dropped
+  to 4 but yield regressed to 20/31 and ``match_group_length_skew``
+  was silently not exercised.
+- **Round 3** (promote inner-corner to rank 0 directly): the
+  Judge's recommended "dual" interpretation.  Yield 24/31, DRC 12
+  (well under 70 allowlist), but DQ5 still blocked by DQ4 with the
+  identical 0.44mm clearance failure as round 2 -- the underlying
+  constraint is geometric, not orderable.
+- **Terminal outcome** (this PR / contract): scaffolding-only.  The
+  helper detects but does not act; a follow-up issue tracks the
+  layered-escape strategy that decouples via placement from net
+  ordering.
 
-Root cause that motivates this helper (per the issue):
+Root cause that motivates the eventual implementation (per the
+issue):
 
     Pin row order on U1.25-35 is
     ``DQ0, DQ1, DQ2, DQ3, DM0, DQS_P, DQS_N, DQ4, DQ5, DQ6, DQ7``
@@ -33,7 +41,7 @@ Root cause that motivates this helper (per the issue):
         remaining lateral lane.
     The inner-corner nets are squeezed out.
 
-The helper's contract:
+The helper's current scaffolding contract:
 
 1.  **Identity on tiny inputs** -- ``net_order`` shorter than 4 is
     returned unchanged.
@@ -42,11 +50,9 @@ The helper's contract:
 3.  **Identity on small groups** -- groups with fewer than 5 members
     don't exhibit the mirrored byte-lane topology; the helper degrades
     to identity for them.
-4.  **Inner-corner promotion** -- on a mirrored byte-lane group, the
-    inner-corner nets (positions 1 and n-2 along the row) are
-    promoted to the front of the routing order ahead of all other
-    byte-lane siblings.  Corner nets and second-inward nets keep
-    their default rank.
+4.  **Identity on mirrored byte-lane groups** -- detection runs but
+    no reorder is applied.  A future PR will replace this with a
+    placement-aware layered-escape strategy.
 5.  **Multi-group preservation** -- non-byte-lane groups in the same
     routing pass are not affected.
 6.  **Length and membership invariant** -- output is always a
@@ -210,98 +216,52 @@ class TestIdentityOnSmallGroups:
         assert out == net_ids
 
 
-class TestInnerCornerPromotion:
-    """Mirrored byte-lane promotes inner-corner ahead of all siblings."""
+class TestScaffoldingIdentityOnByteLane:
+    """Mirrored byte-lane groups currently return identity (scaffolding cut).
 
-    def test_nine_net_byte_lane_promotes_inner_corner(self) -> None:
-        """9-net byte-lane (DDR-byte minus DQS pair): positions 1/7
-        (inner-corner) are promoted to rank 0 and lead the routing
-        order ahead of corners (0/8), second-inward (2/6), and the
-        middle members.
+    The helper detects the byte-lane row -- the projection / sort
+    machinery runs eagerly so future analysis hooks see consistent
+    intermediate state -- but no reorder is applied.  A follow-up PR
+    will replace the scaffolding fallback with a layered-escape
+    strategy (corridor reservation, deferred via stitching, or
+    explicit lateral-lane assignment) without touching the three
+    integration hooks.
+    """
 
-        Round 3 contract per PR #2969 review: promote inner-corner
-        directly rather than demoting neighbours.
+    def test_nine_net_byte_lane_identity(self) -> None:
+        """9-net byte-lane (DDR-byte minus DQS pair): detection runs,
+        no reorder applied -- output equals input.
+
+        Scaffolding contract per PR #2969 round-4 terminal outcome:
+        net-ordering alone cannot resolve the geometric DQ5/DQ4
+        0.44mm clearance constraint observed across R1/R2/R3.  The
+        helper retains its detection logic and signature so a future
+        layered-escape PR can swap the body without touching callers.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=9)
 
-        # Input order = creation order = sorted by y (pad position).
-        # Position 0 = corner top, 1 = inner-corner top, 2 = second-
-        # inward top, ..., 7 = inner-corner bottom, 8 = corner bottom.
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        # Membership + length preserved.
+        # Identity contract: output is the input list, unchanged.
+        assert out == net_ids
+        # Membership + length invariants hold trivially under identity.
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
 
-        idx = {nid: i for i, nid in enumerate(out)}
+    def test_ten_net_byte_lane_identity(self) -> None:
+        """A 10-net byte-lane (full DDR-byte): detection runs, but
+        no reorder is applied -- output equals input.
 
-        inner_top = net_ids[1]
-        inner_bottom = net_ids[7]
-        corner_top = net_ids[0]
-        corner_bottom = net_ids[8]
-        second_inward_top = net_ids[2]
-        second_inward_bottom = net_ids[6]
-
-        # The two inner-corner nets are rank 0; everything else is
-        # rank 1.  Under stable sort, the two inner-corner ids
-        # occupy positions 0 and 1 of the output (in their original
-        # relative order: inner_top at input pos 1 < inner_bottom at
-        # input pos 7).
-        assert idx[inner_top] == 0, (
-            f"Inner-corner top ({inner_top}) should be promoted to "
-            f"output position 0, got {idx[inner_top]}"
-        )
-        assert idx[inner_bottom] == 1, (
-            f"Inner-corner bottom ({inner_bottom}) should be promoted "
-            f"to output position 1, got {idx[inner_bottom]}"
-        )
-
-        # Inner-corner must precede its neighbours (both corner and
-        # second-inward) on the same side of the row.
-        assert idx[inner_top] < idx[corner_top]
-        assert idx[inner_top] < idx[second_inward_top]
-        assert idx[inner_bottom] < idx[corner_bottom]
-        assert idx[inner_bottom] < idx[second_inward_bottom]
-
-        # Among the rank-1 (default) nets, the stable secondary key
-        # preserves the original input ordering: corner_top (input
-        # pos 0) precedes second_inward_top (input pos 2), and so on.
-        assert idx[corner_top] < idx[second_inward_top]
-        assert idx[second_inward_bottom] < idx[corner_bottom]
-
-    def test_ten_net_byte_lane_promotes_inner_corner(self) -> None:
-        """A 10-net byte-lane (full DDR-byte): inner-corner pads
-        (positions 1, 8) are promoted to rank 0 and occupy the first
-        two output positions.  Corner pads (0, 9), second-inward
-        pads (2, 7), and middle pads (3-6) all keep their default
-        rank and retain their input ordering relative to each other.
+        See the module docstring for the R1/R2/R3 design-history
+        trace explaining why net-ordering alone is insufficient.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=10)
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        idx = {nid: i for i, nid in enumerate(out)}
-
-        inner_top = net_ids[1]
-        inner_bottom = net_ids[8]
-
-        # Inner-corner nets sort to the front.
-        assert idx[inner_top] == 0
-        assert idx[inner_bottom] == 1
-
-        # All other byte-lane members retain their priority-sort
-        # ordering relative to each other under the stable secondary
-        # key.  ``rest`` is everything except the two promoted
-        # inner-corner ids; their output positions should be a
-        # monotonically increasing sequence starting at 2.
-        rest = [nid for i, nid in enumerate(net_ids) if i not in (1, 8)]
-        rest_positions = [idx[nid] for nid in rest]
-        assert rest_positions == sorted(rest_positions), (
-            "Non-promoted byte-lane members must keep their original "
-            f"order; got {rest_positions} for ids {rest}"
-        )
-        # And they must all be at positions >= 2 (after the two
-        # promoted inner-corner nets).
-        assert min(rest_positions) == 2
+        # Identity contract.
+        assert out == net_ids
+        assert len(out) == len(net_ids)
+        assert set(out) == set(net_ids)
 
 
 class TestMultiGroupPreservation:
@@ -333,17 +293,12 @@ class TestMultiGroupPreservation:
         net_order = byte_lane_ids + extra_ids
         out = router._apply_byte_lane_inner_priority(net_order)
 
+        # Under the scaffolding cut the full input order is preserved,
+        # which trivially keeps the standalone nets in place.
+        assert out == net_order
         # Membership preserved.
         assert set(out) == set(net_order)
         assert len(out) == len(net_order)
-
-        # Standalone nets keep their relative order (stable sort).
-        idx = {nid: i for i, nid in enumerate(out)}
-        extra_positions = [idx[nid] for nid in extra_ids]
-        assert extra_positions == sorted(extra_positions), (
-            "Standalone (non-group) nets must keep their priority-sort "
-            f"order; got {extra_positions} for ids {extra_ids}"
-        )
 
 
 class TestPermutationInvariant:
@@ -357,8 +312,16 @@ class TestPermutationInvariant:
         )
 
     def test_horizontal_row_orientation(self) -> None:
-        """A horizontal row (pads share y, vary x) is detected by the
-        axis-with-greater-variance rule and reordered along x."""
+        """A horizontal row (pads share y, vary x) exercises the
+        axis-with-greater-variance detection branch but, in the
+        scaffolding cut, still returns identity.
+
+        Round-4 contract per PR #2969: even when the detection logic
+        successfully classifies the row, no reorder is applied.  The
+        axis-selection branch is exercised here for coverage so a
+        future layered-escape implementation has a regression
+        fingerprint to compare against.
+        """
         cls = NetClassRouting(
             name="HORIZ_BUS",
             priority=1,
@@ -390,19 +353,10 @@ class TestPermutationInvariant:
         router.net_class_map = net_class_map
 
         out = router._apply_byte_lane_inner_priority(net_ids)
-        idx = {nid: i for i, nid in enumerate(out)}
 
-        # Sorted indices along x: 0=corner left, 1=inner-corner left,
-        # 2=second-inward left, ..., 4=second-inward right,
-        # 5=inner-corner right, 6=corner right.  Round 3 contract per
-        # PR #2969 review: PROMOTE the inner-corner nets (sorted
-        # indices 1 and n-2=5) to rank 0.  They must precede both
-        # their corner neighbour (sorted indices 0 and 6) and their
-        # second-inward neighbour (sorted indices 2 and 4).
-        assert idx[net_ids[1]] < idx[net_ids[0]]
-        assert idx[net_ids[1]] < idx[net_ids[2]]
-        assert idx[net_ids[5]] < idx[net_ids[6]]
-        assert idx[net_ids[5]] < idx[net_ids[4]]
+        # Identity contract: horizontal row detection runs but no
+        # reorder is applied.
+        assert out == net_ids
 
 
 class TestNonMirroredTopologyGracefulFallback:

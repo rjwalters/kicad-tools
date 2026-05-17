@@ -3852,54 +3852,68 @@ class Autorouter:
         return out
 
     def _apply_byte_lane_inner_priority(self, net_order: list[int]) -> list[int]:
-        """Promote inner-corner byte-lane members above their immediate neighbors.
+        """Scaffolding-only detection hook for mirrored byte-lane match groups.
+
+        Status: **scaffolding only (identity return)**.  This helper
+        detects mirrored byte-lane match groups (e.g. board 07's DDR
+        data byte on a mirrored QFN-48 pair) but does NOT modify the
+        net order.  It exists as the integration surface for a future
+        layered-escape strategy (see follow-up issue
+        ``router: layered-escape strategy for mirrored byte-lane DDR
+        (decouples via placement from net ordering)``).
 
         Issue #2962: On board 07 a DDR data byte (10 nets routed between
-        mirrored QFN-48 packages U1 and U2) repeatedly leaves DQ1 and DQ6
+        mirrored QFN-48 packages U1 and U2) repeatedly leaves the
+        inner-corner pads (DQ1 / DQ6, one step in from each row corner)
         unrouted.  Pin row order on U1.25-35 is
         ``DQ0, DQ1, DQ2, DQ3, DM0, DQS_P, DQS_N, DQ4, DQ5, DQ6, DQ7``
-        (mirrored on U2.1-11).  DQ1 and DQ6 sit at *inner-corner*
-        positions -- one step in from the corner pad.  Root cause:
+        (mirrored on U2.1-11).  Root cause:
 
         1. The DQS differential pair routes first (diff-pair pre-pass),
            consuming the center channel.
         2. Remaining DQ nets fill by ``_get_net_priority`` ordering
            (essentially bbox-diagonal for same-class nets).
-        3. By the time DQ1 (id 5) and DQ6 (id 10) attempt, their
-           corner neighbor (DQ0/DQ7) has escaped through the corner
-           gap and the next-inward neighbor (DQ2/DQ5) has consumed
-           the only remaining lateral lane.  Both inner-corner nets
-           are squeezed out.
+        3. By the time DQ1 / DQ6 attempt, their corner neighbour
+           (DQ0/DQ7) has escaped through the corner gap and the next-
+           inward neighbour (DQ2/DQ5) has consumed the only remaining
+           lateral lane.  Both inner-corner nets are squeezed out.
 
-        The fix (round 3, "dual interpretation"): detect inner-corner
-        positions of a *mirrored byte-lane* match group and PROMOTE
-        the inner-corner nets themselves (positions 1 and N-2) to a
-        rank that places them BEFORE all other byte-lane siblings
-        (corner, second-inward, middle) in the routing order.  Corner
-        pads (0 and N-1) and second-inward pads (2 and N-3) keep
-        their default rank.  This lets the inner-corner claim its
-        lateral lane first, before any neighbour consumes it.
+        Design history -- PR #2969 trace (preserved as the AC for
+        issue #2962's net-ordering exploration):
 
-        Judge feedback trace (PR #2969):
-
-        - Round 1 (broader plan): demote BOTH corner (0, N-1) AND
+        - **Round 1** (broader plan): demote BOTH corner (0, N-1) AND
           second-inward (2, N-3).  Got 27/31 nets but 86 DRC errors,
           over the 70 allowlist.  The corner demotion forced detours
           through tight-clearance geometry on the same row.
-        - Round 2 (constrained, demote second-inward only): DRC
+        - **Round 2** (constrained, demote second-inward only): DRC
           dropped to 4 (well under 70), but net yield regressed to
           20/31 and ``match_group_length_skew`` was silently not
           exercised because too few group members routed to
           completion.  The DQ5/DQ2 inner-corner squeeze did not
           resolve.
-        - Round 3 (this implementation, promote inner-corner): the
-          Judge's recommended dual.  The route log refuted the
-          earlier speculative concern about lifting DM0 -- DM0
-          routed fine while DQ5/DQ2 remained squeezed -- so
-          promoting the inner-corner is safe and targets the actual
-          blocker.
+        - **Round 3** (promote inner-corner to rank 0 directly): the
+          Judge's recommended "dual" interpretation.  Yield 24/31,
+          DRC 12 (well under 70 allowlist), but DQ5 still blocked by
+          DQ4 with the SAME 0.44mm clearance failure as round 2 --
+          the underlying constraint is geometric, not orderable.
+        - **Conclusion** (this PR, terminal outcome): convert the
+          helper to scaffolding-only (identity return).  The
+          detection / projection / sort machinery and all three
+          integration hook sites are kept in place as the surface
+          for a future PR that implements a layered-escape strategy
+          (corridor reservation, deferred via stitching for the
+          inner-corner pads, or explicit lateral-lane assignment --
+          all approaches that decouple via placement from priority).
 
-        Detection (geometry-only, no hardcoded net names):
+        Three integration hooks remain wired (``route_all``,
+        ``route_all_negotiated``, and ``TwoPhaseRouter`` via the
+        ``apply_byte_lane_inner_priority`` parameter on
+        ``_create_two_phase_router``).  All three sites run
+        ``_interleave_match_groups`` BEFORE this helper, preserving
+        PR #2914's starvation-fairness guarantee.
+
+        Detection (kept for inspection / future use, geometry-only,
+        no hardcoded net names):
 
         1. Identify match groups with at least ``MIN_BYTE_LANE_SIZE``
            members.  Smaller groups don't exhibit the mirrored byte-lane
@@ -3912,31 +3926,21 @@ class Autorouter:
         4. Project pads onto the axis with greater spatial variance
            (the row's long axis).  Sort by that projection.
         5. The pads at sorted index 1 and N-2 are "inner-corner".
-        6. PROMOTE the inner-corner nets to rank 0 so they route
-           BEFORE the default rank-1 members (including their corner
-           and second-inward neighbours).
 
-        We do NOT change the priority class -- the bump is applied as
-        a within-class reordering after ``_interleave_match_groups``
-        has already run.  This means:
-
-        - Diff-pair coupling (DQS pair) is unaffected: it's already
-          routed by the pre-pass before this function sees the order.
-        - Connector-sibling promotion (#2482) is preserved: that
-          adjustment runs on the *unsorted* class-priority key,
-          while we operate on the post-interleave list.
-        - The ``_interleave_match_groups`` starvation guarantee
-          (#2914) is preserved: this function reorders within the
-          head-class run; starvable-group promoted leaders remain in
-          their post-interleave positions.
+        The detection loop runs eagerly but is otherwise side-effect
+        free; the eventual reorder step is intentionally omitted in
+        this scaffolding cut.  Future work can replace the
+        ``# (scaffolding fallback) ...`` block at the end with a real
+        layered-escape implementation without touching the three
+        callers.
 
         Args:
             net_order: Routing order after ``_interleave_match_groups``.
 
         Returns:
-            Reordered list (same length and membership).  On any
-            internal failure (missing match-group detector, single
-            net per component, etc.) the input is returned unchanged.
+            ``net_order`` unchanged.  Detection telemetry is currently
+            discarded; future revisions may emit a diagnostic via the
+            logger or thread a placement-aware reorder through here.
         """
         # Minimum group size to qualify as a mirrored byte-lane.  A
         # 4-net group can't be congested enough at its row middle to
@@ -3990,14 +3994,11 @@ class Autorouter:
             if nid in net_order_set:
                 groups.setdefault(grp, []).append(nid)
 
-        # Build priority overrides: net_id -> rank (lower = earlier).
-        # The default rank is 1; PROMOTED inner-corner nets get rank 0
-        # so they sort BEFORE the rank-1 sibling group members.
-        # (Round 3 dual interpretation per Judge feedback on PR #2969:
-        # promote inner-corner directly rather than demoting neighbours.
-        # See the method docstring for the round-1/2/3 trace.)
-        promote_ranks: dict[int, int] = {}
-
+        # Detection-only scan.  We walk each candidate group, identify
+        # its primary component, project pads onto the row axis, and
+        # locate the inner-corner indices -- but DO NOT promote (the
+        # round-3 promote-rank-0 implementation was a no-op against the
+        # underlying geometric constraint; see method docstring).
         for grp_name, grp_net_ids in groups.items():
             if len(grp_net_ids) < MIN_BYTE_LANE_SIZE:
                 continue
@@ -4050,7 +4051,9 @@ class Autorouter:
             if max(x_span, y_span) < 1e-6:
                 continue  # Degenerate: all pads at the same point
 
-            # Sort group members along the row axis.
+            # Sort group members along the row axis.  The sorted_nets
+            # list is the natural place for a future layered-escape
+            # implementation to attach lane-assignment metadata.
             if y_span >= x_span:
                 # Vertical row -- sort by y
                 sorted_nets = sorted(net_to_pad.keys(), key=lambda n: net_to_pad[n][1])
@@ -4064,59 +4067,21 @@ class Autorouter:
 
             # Inner-corner indices in the sorted row.  Position 1 (one in
             # from the top corner) and position n-2 (one in from the
-            # bottom corner) are the inner-corner members.
-            inner_corner_indices = (1, n - 2)
+            # bottom corner) are the inner-corner members.  These are
+            # the rows for which the PR #2969 R1/R2/R3 attempts failed
+            # to land a net-ordering-only fix; see the method docstring
+            # for the full trace.
+            _inner_corner_indices = (1, n - 2)  # noqa: F841 -- kept as the future-PR target
+            _ = sorted_nets  # noqa: F841 -- referenced for static analyzers; future PR consumes
 
-            # Round 3 dual interpretation per Judge feedback on PR #2969:
-            # PROMOTE the inner-corner nets themselves to rank 0 so they
-            # route BEFORE any of their byte-lane siblings (corner,
-            # second-inward, or middle).  Corner (0, n-1) and
-            # second-inward (2, n-3) keep their default rank-1.
-            #
-            # Why promote instead of demote:
-            # - Round 1 demoted both corner (0, n-1) and second-inward
-            #   (2, n-3): yield 27/31 but DRC 86 (over the 70 allowlist).
-            # - Round 2 demoted only second-inward (2, n-3): DRC dropped
-            #   to 4 but yield regressed to 20/31 and
-            #   ``match_group_length_skew`` wasn't exercised.
-            # - Round 3 (this): promote inner-corner (1, n-2) directly.
-            #   The route log refuted the earlier speculative concern
-            #   about lifting DM0 -- DM0 routed fine while DQ5/DQ2
-            #   stayed squeezed -- so promoting the inner-corner is
-            #   safe and targets the actual blocker.
-            for i in inner_corner_indices:
-                nid = sorted_nets[i]
-                # If a net is an inner-corner in more than one group
-                # the rank-0 assignment is idempotent (single promotion
-                # level).
-                promote_ranks[nid] = 0
-
-        if not promote_ranks:
-            return net_order
-
-        # Apply the promotion plan via stable sort: rank-0 nets (the
-        # inner-corners) sort BEFORE the rank-1 default sibling group
-        # members.  Original order within each rank is preserved by the
-        # secondary key, so corner and second-inward neighbours retain
-        # their priority-sort ordering relative to each other.
-        original_index = {nid: i for i, nid in enumerate(net_order)}
-        default_rank = 1
-
-        def _byte_lane_sort_key(net_id: int) -> tuple[int, int]:
-            return (promote_ranks.get(net_id, default_rank), original_index[net_id])
-
-        out = sorted(net_order, key=_byte_lane_sort_key)
-
-        # Length-preservation safety net (mirrors _interleave_match_groups).
-        if len(out) != len(net_order) or set(out) != set(net_order):
-            logger.error(
-                "_apply_byte_lane_inner_priority produced inconsistent output "
-                "(in=%d, out=%d); falling back to identity ordering",
-                len(net_order),
-                len(out),
-            )
-            return net_order
-        return out
+        # Scaffolding fallback: return the input unchanged.  The three
+        # integration hooks (route_all, route_all_negotiated,
+        # TwoPhaseRouter) call this helper through the same surface,
+        # so a future PR can replace this block with a real reorder
+        # without touching the callers.  See follow-up issue:
+        #   "router: layered-escape strategy for mirrored byte-lane DDR
+        #    (decouples via placement from net ordering)"
+        return net_order
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
@@ -4391,14 +4356,12 @@ class Autorouter:
         # match suffix-inference patterns) receive an identity ordering.
         net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Inner-corner byte-lane priority bump.  In mirrored
-        # byte-lane topologies (board 07 DDR data byte on QFN-48 pair),
-        # the pads one in from each row corner ("inner-corner" pins)
-        # have neither the corner gap nor a free lateral lane available
-        # once their neighbors route first.  Promote those nets above
-        # their immediate row neighbors so they claim a lateral lane
-        # before corner nets escape via the corner gap.  Boards without
-        # a mirrored byte-lane match group degenerate to identity.
+        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only).
+        # ``_apply_byte_lane_inner_priority`` currently returns ``net_order``
+        # unchanged.  The detection / projection / sort machinery is
+        # preserved as the integration surface for a future layered-escape
+        # PR; see that method's docstring for the R1/R2/R3 trace and the
+        # follow-up issue link.
         net_order = self._apply_byte_lane_inner_priority(net_order)
 
         if parallel:
@@ -5588,11 +5551,12 @@ class Autorouter:
         # for the fairness-vs-priority trade-off rationale.
         net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Inner-corner byte-lane priority bump (see
-        # ``_apply_byte_lane_inner_priority`` docstring).  Identical hook
-        # to ``route_all``: applied AFTER ``_interleave_match_groups``
-        # so the head-class run keeps the starvation-fairness ordering
-        # and we adjust only within-class neighbor priorities.
+        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only;
+        # see ``_apply_byte_lane_inner_priority`` docstring).  Identical
+        # hook to ``route_all``: applied AFTER ``_interleave_match_groups``
+        # so a future implementation that swaps the helper body for a real
+        # reorder keeps the starvation-fairness ordering and adjusts only
+        # within-class neighbour priorities.
         net_order = self._apply_byte_lane_inner_priority(net_order)
 
         total_nets = len(net_order)

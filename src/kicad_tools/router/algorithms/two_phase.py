@@ -214,11 +214,12 @@ class TwoPhaseRouter:
         if self._interleave_match_groups is not None:
             net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Inner-corner byte-lane priority bump.  See the
-        # ``Autorouter._apply_byte_lane_inner_priority`` docstring for the
-        # rationale.  Applied after the starvation-fairness pass so the
-        # head-class ordering is preserved exactly; only within-class
-        # neighbor priorities for byte-lane match-groups are adjusted.
+        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only).
+        # See the ``Autorouter._apply_byte_lane_inner_priority`` docstring
+        # for the rationale and the R1/R2/R3 trace.  Applied after the
+        # starvation-fairness pass so a future implementation that swaps
+        # the helper body for a real reorder keeps the head-class ordering
+        # exact; only within-class neighbour priorities would be adjusted.
         if self._apply_byte_lane_inner_priority is not None:
             net_order = self._apply_byte_lane_inner_priority(net_order)
 
