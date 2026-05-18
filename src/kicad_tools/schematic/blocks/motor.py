@@ -985,7 +985,7 @@ class GateDriverBlock(CircuitBlock):
         else:
             self.bootstrap_caps = []
 
-        # Add bypass capacitors
+        # Add bypass capacitors.
         # Build add_symbol kwargs once -- mirrors the DecouplingCaps pattern
         # at blocks/power/passives.py:64-66 so the bypass caps inherit a
         # footprint (explicit or auto-selected) rather than landing in the
@@ -993,8 +993,16 @@ class GateDriverBlock(CircuitBlock):
         bypass_add_kwargs: dict = {"auto_footprint": auto_footprint}
         if bypass_cap_footprint is not None:
             bypass_add_kwargs["footprint"] = bypass_cap_footprint
+        # The starting ref must skip only as many caps as the bootstrap
+        # array actually consumed.  When ``bootstrap_caps is None`` the
+        # bootstrap array is empty, so the bypass caps start at
+        # ``cap_ref_start`` directly.  Deriving the offset from
+        # ``len(self.bootstrap_caps)`` (rather than from ``num_phases``)
+        # ties the skip to actual consumption and is drift-resistant if
+        # ``BootstrapCapacitorArray`` ever changes its ref-consumption
+        # contract.  See issue #3008.
         self.bypass_caps = []
-        bypass_start = cap_ref_start + num_phases
+        bypass_start = cap_ref_start + len(self.bootstrap_caps)
         for i, cap_value in enumerate(bypass_caps):
             cap_ref = f"C{bypass_start + i}"
             cap_x = x + 20 + i * 10

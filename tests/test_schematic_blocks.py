@@ -4178,6 +4178,94 @@ class TestGateDriverBlockMocked:
             assert call.kwargs.get("auto_footprint") is False
             assert "footprint" not in call.kwargs
 
+    # ---------------------------------------------------------------
+    # Bypass-cap ref-sequence tests (issue #3008)
+    #
+    # Verify that the bypass-cap starting ref correctly accounts for
+    # whether a bootstrap array was actually allocated.  The 4-cell
+    # matrix below covers (3-phase, half-bridge) x (bootstrap_caps set,
+    # bootstrap_caps=None).  Before #3008, bypass_start always added
+    # ``num_phases`` even when ``bootstrap_caps=None`` consumed zero
+    # refs -- on board-05 (cap_ref_start=15, bootstrap_caps=None,
+    # 3-phase) bypass caps landed at C18/C19 instead of C15/C16.
+    # ---------------------------------------------------------------
+    @staticmethod
+    def _collect_cap_refs(mock_schematic):
+        """Return the ref column for every add_symbol(\"Device:C\", ...) call."""
+        return [
+            call.args[3]
+            for call in mock_schematic.add_symbol.call_args_list
+            if call.args and call.args[0] == "Device:C"
+        ]
+
+    def test_bypass_refs_no_bootstrap_three_phase(self, mock_schematic):
+        """3-phase + bootstrap_caps=None: bypass starts at cap_ref_start (issue #3008 AC #1)."""
+        GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="DRV8301",
+            driver_type="3-phase",
+            bootstrap_caps=None,
+            bypass_caps=["10uF", "100nF"],
+            cap_ref_start=15,
+        )
+        cap_refs = self._collect_cap_refs(mock_schematic)
+        # No bootstrap caps consumed, so bypass takes C15, C16.
+        assert cap_refs == ["C15", "C16"]
+
+    def test_bypass_refs_with_bootstrap_three_phase(self, mock_schematic):
+        """3-phase + bootstrap_caps set: bootstrap C15-C17, bypass C18-C19 (AC #2 regression guard)."""
+        GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="DRV8301",
+            driver_type="3-phase",
+            bootstrap_caps="100nF",
+            bypass_caps=["10uF", "100nF"],
+            cap_ref_start=15,
+        )
+        cap_refs = self._collect_cap_refs(mock_schematic)
+        # Bootstrap consumes C15-C17 (3 caps), bypass takes C18, C19.
+        assert cap_refs == ["C15", "C16", "C17", "C18", "C19"]
+
+    def test_bypass_refs_no_bootstrap_half_bridge(self, mock_schematic):
+        """half-bridge + bootstrap_caps=None: bypass starts at cap_ref_start (issue #3008 AC #3)."""
+        GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="IR2110",
+            driver_type="half-bridge",
+            bootstrap_caps=None,
+            bypass_caps=["10uF", "100nF"],
+            cap_ref_start=15,
+        )
+        cap_refs = self._collect_cap_refs(mock_schematic)
+        # No bootstrap caps consumed, so bypass takes C15, C16 (not C16, C17).
+        assert cap_refs == ["C15", "C16"]
+
+    def test_bypass_refs_with_bootstrap_half_bridge(self, mock_schematic):
+        """half-bridge + bootstrap_caps set: bootstrap C15, bypass C16-C17 (AC #4 regression guard)."""
+        GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="IR2110",
+            driver_type="half-bridge",
+            bootstrap_caps="100nF",
+            bypass_caps=["10uF", "100nF"],
+            cap_ref_start=15,
+        )
+        cap_refs = self._collect_cap_refs(mock_schematic)
+        # Bootstrap consumes C15 (1 cap), bypass takes C16, C17.
+        assert cap_refs == ["C15", "C16", "C17"]
+
 
 class TestMotorControlFactoryFunctions:
     """Tests for motor control factory functions."""
