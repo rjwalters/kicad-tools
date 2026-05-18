@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..base import CircuitBlock
 from ...exceptions import PinNotFoundError
+from .._stub_helpers import _emit_pin_net_stub, _stub_endpoint_would_collide
 from ..interfaces import PowerPort
 
 if TYPE_CHECKING:
@@ -210,28 +211,21 @@ class LDOBlock(CircuitBlock):
         # a stub, labels placed at the bare pin float and trigger ERC's
         # ``isolated_pin_label`` cascade.  For each ``pin_nets`` entry we
         # resolve the real pin position via ``self.ldo.pin_position``
-        # (supporting either pin names or pin numbers), draw a one-grid
-        # (2.54 mm) horizontal stub *away from the symbol center* (left
-        # for pins on the symbol's left edge, right otherwise), and place
-        # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
-        # pattern from PR #2985; see issues #2980 and #2994.
+        # (supporting either pin names or pin numbers) and delegate to
+        # ``_emit_pin_net_stub`` which draws a one-grid (2.54 mm)
+        # horizontal stub *away from the symbol center* (left for pins on
+        # the symbol's left edge, right otherwise), places the label on
+        # the stub endpoint, and auto-shifts to the opposite side if the
+        # primary endpoint would land on a foreign wire.  Mirrors the
+        # ``GateDriverBlock`` pattern from PR #2985; see issues #2980,
+        # #2994, #3011, and #3015.
         if pin_nets is not None:
-            STUB = 2.54
             for pin_key, net_name in pin_nets.items():
                 pin_pos = self.ldo.pin_position(pin_key)
-                # Stub away from the symbol center.  When the pin lies
-                # exactly on the center column we default to stubbing right.
-                if pin_pos[0] < x:
-                    label_x = pin_pos[0] - STUB
-                else:
-                    label_x = pin_pos[0] + STUB
-                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
-                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
-                # Expose the pin's real coordinate under the net name so
-                # external wiring can reach it.  Do not overwrite an
-                # existing port by the same name (preserves back-compat).
-                if net_name not in self.ports:
-                    self.ports[net_name] = pin_pos
+                _emit_pin_net_stub(
+                    sch, pin_pos, x, net_name, self.ports,
+                    block_label="LDOBlock ",
+                )
 
     def connect_to_rails(
         self,
@@ -643,41 +637,46 @@ class BuckConverter(CircuitBlock):
             STUB = 2.54
             for pin_key, net_name in pin_nets.items():
                 pin_pos = self.regulator.pin_position(pin_key)
-                # Stub away from the symbol center.  When the pin lies
-                # exactly on the center column we default to stubbing right.
-                if pin_pos[0] < x:
-                    label_x = pin_pos[0] - STUB
-                else:
-                    label_x = pin_pos[0] + STUB
 
-                # Detect FB-stub-on-foreign-wire collision and divert FB to
-                # a direct wire to the output-cap node.  Limited to the FB
-                # pin (and pin number "4" on LM2596 variants) so the
-                # generic stub-and-label behavior for other pins is
-                # preserved.  See issue #3011.
-                if pin_key in ("FB", "4") and self._fb_stub_would_collide(
-                    sch, label_x, pin_pos[1]
-                ):
-                    # L-shaped wire FB -> (vout_x, fb_y) -> vout_node.
-                    vx, vy = self._vout_node
-                    sch.add_wire(
-                        pin_pos, (vx, pin_pos[1]), warn_on_collision=False
-                    )
-                    sch.add_wire(
-                        (vx, pin_pos[1]), self._vout_node, warn_on_collision=False
-                    )
-                    sch.add_junction(vx, vy)
-                    if net_name not in self.ports:
-                        self.ports[net_name] = pin_pos
-                    continue
+                # FB-pin special case (issue #3011): on fixed-output buck
+                # variants the FB pin is electrically the VOUT net.  Rather
+                # than emit a label-on-stub that may collide with a foreign
+                # wire and silently bridge two nets, divert FB to a real
+                # L-shaped wire joining it to the output-cap node when the
+                # primary-side stub endpoint would collide.  The general
+                # auto-shift behavior in ``_emit_pin_net_stub`` is *not*
+                # right for FB because the textbook fixed-output topology
+                # ties FB to VOUT through real copper -- diverting yields
+                # a stronger electrical guarantee than a shifted label.
+                if pin_key in ("FB", "4"):
+                    # Primary side per symbol-center heuristic; FB collision
+                    # check follows PR #3014's geometry exactly.
+                    if pin_pos[0] < x:
+                        label_x = pin_pos[0] - STUB
+                    else:
+                        label_x = pin_pos[0] + STUB
+                    if self._fb_stub_would_collide(sch, label_x, pin_pos[1]):
+                        vx, vy = self._vout_node
+                        sch.add_wire(
+                            pin_pos, (vx, pin_pos[1]), warn_on_collision=False
+                        )
+                        sch.add_wire(
+                            (vx, pin_pos[1]), self._vout_node,
+                            warn_on_collision=False,
+                        )
+                        sch.add_junction(vx, vy)
+                        if net_name not in self.ports:
+                            self.ports[net_name] = pin_pos
+                        continue
 
-                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
-                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
-                # Expose the pin's real coordinate under the net name so
-                # external wiring can reach it.  Do not overwrite an
-                # existing port by the same name (preserves back-compat).
-                if net_name not in self.ports:
-                    self.ports[net_name] = pin_pos
+                # Generic emit-with-auto-shift for every other pin (and
+                # for FB when there's no primary-side collision).  See
+                # ``_emit_pin_net_stub`` for the auto-shift / raise
+                # semantics.
+                _emit_pin_net_stub(
+                    sch, pin_pos, x, net_name, self.ports,
+                    block_label="BuckConverter ",
+                )
 
     @staticmethod
     def _fb_stub_would_collide(sch, x: float, y: float) -> bool:
@@ -685,22 +684,13 @@ class BuckConverter(CircuitBlock):
 
         Used by the FB-pin path in ``__init__`` to decide between the
         default stub-and-label emission and the direct-wire-to-VOUT fallback
-        (issue #3011).  Robust against mock ``Schematic`` objects used in
-        unit tests: returns ``False`` if ``sch.wires`` is missing or not a
-        real list, or if ``_find_wire_collisions_for_point`` is unavailable.
+        (issue #3011).  Thin delegate to ``_stub_endpoint_would_collide``
+        in ``_stub_helpers``; preserved here as a public static method so
+        existing tests (``tests/test_blocks_buck_converter_fb_bridge.py``)
+        keep working without modification.  See issue #3015 for the
+        promotion to a module-level helper.
         """
-        wires = getattr(sch, "wires", None)
-        if not isinstance(wires, list) or not wires:
-            return False
-        finder = getattr(sch, "_find_wire_collisions_for_point", None)
-        if not callable(finder):
-            return False
-        try:
-            collisions = finder(x, y)
-        except Exception:  # noqa: BLE001 - defensive: mocks can raise
-            return False
-        # Be defensive: a real call returns a list of Wire objects.
-        return isinstance(collisions, list) and len(collisions) > 0
+        return _stub_endpoint_would_collide(sch, x, y)
 
     def connect_to_rails(
         self,

@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -232,15 +233,23 @@ class HalfBridge(CircuitBlock):
         # ``Device:Q_NMOS`` exit the symbol to the left) and place the
         # label on the stub endpoint.  External callers still wire to the
         # ``GATE_HS``/``GATE_LS`` ports, which remain at the pin positions.
-        STUB = 2.54
+        #
+        # Use the generic ``_emit_pin_net_stub`` helper to gain collision
+        # detection + auto-shift + raise-on-both-sides semantics (issue
+        # #3015).  Pass ``x_center=hs_gate[0] + 1.0`` so the primary side
+        # is always *left* (preserves PR #2985 behavior) while still
+        # allowing auto-shift to the right when the left endpoint would
+        # land on a foreign wire.
         if gate_hs_net is not None:
-            label_x = hs_gate[0] - STUB
-            sch.add_wire(hs_gate, (label_x, hs_gate[1]), warn_on_collision=False)
-            sch.add_label(gate_hs_net, label_x, hs_gate[1], rotation=0)
+            _emit_pin_net_stub(
+                sch, hs_gate, hs_gate[0] + 1.0, gate_hs_net, self.ports,
+                block_label="HalfBridge ",
+            )
         if gate_ls_net is not None:
-            label_x = ls_gate[0] - STUB
-            sch.add_wire(ls_gate, (label_x, ls_gate[1]), warn_on_collision=False)
-            sch.add_label(gate_ls_net, label_x, ls_gate[1], rotation=0)
+            _emit_pin_net_stub(
+                sch, ls_gate, ls_gate[0] + 1.0, gate_ls_net, self.ports,
+                block_label="HalfBridge ",
+            )
 
     def connect_to_rails(
         self,
@@ -1096,23 +1105,16 @@ class GateDriverBlock(CircuitBlock):
         # wire to ``block.port("<net>")`` instead of relying on the
         # historical placeholder port coordinates.
         if pin_nets is not None:
-            STUB = 2.54
             for pin_key, net_name in pin_nets.items():
                 pin_pos = self.driver.pin_position(pin_key)
-                # Stub away from the symbol center.  When the pin lies
-                # exactly on the center column (pin_pos[0] == x) we
-                # default to stubbing right.
-                if pin_pos[0] < x:
-                    label_x = pin_pos[0] - STUB
-                else:
-                    label_x = pin_pos[0] + STUB
-                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
-                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
-                # Expose the pin's real coordinate under the net name so
-                # external wiring can reach it.  Do not overwrite an
-                # existing port by the same name (preserves back-compat).
-                if net_name not in self.ports:
-                    self.ports[net_name] = pin_pos
+                # Delegate to ``_emit_pin_net_stub`` which performs the
+                # stub-direction heuristic + collision-aware auto-shift
+                # (raises ``ValueError`` if both sides collide; see issue
+                # #3015).
+                _emit_pin_net_stub(
+                    sch, pin_pos, x, net_name, self.ports,
+                    block_label="GateDriverBlock ",
+                )
 
     def connect_to_rails(
         self,
