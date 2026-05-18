@@ -1,0 +1,4 @@
+Comment,Designator,Footprint,LCSC Part #
+330R,"R1,R2,R3,R4",Resistor_SMD:R_0805_2012Metric,C17630
+LED,"D1,D2,D3,D4,D5,D6,D7,D8,D9",LED_SMD:LED_0805_2012Metric,C72038
+MCU,U1,Package_DIP:DIP-8_W7.62mm,C57215
