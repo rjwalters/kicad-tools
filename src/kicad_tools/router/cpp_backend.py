@@ -790,6 +790,56 @@ class CppPathfinder:
         self._per_call_timing_enabled: bool = False
         self._per_call_timings: list[dict] = []
 
+        # Issue #3002 (PR #3006 follow-up): Foreign-net via context for the
+        # segment-vs-foreign-via clearance gate.  Mirrors the Python
+        # pathfinder's ``_foreign_vias`` attribute (see
+        # ``pathfinder.py:set_segment_foreign_context``).  Populated by
+        # ``Autorouter._update_router_segment_foreign_context`` via
+        # :meth:`set_segment_foreign_context` below; consumed during
+        # :meth:`_validate_route_clearance` as a Python-side post-check
+        # after the C++ validator returns (the C++ validator already
+        # walks ``self.routes`` vias, but the Python-side list lets the
+        # Autorouter push richer context -- e.g. vias surfaced by the
+        # negotiated post-iteration re-validation hook that may not yet
+        # appear in ``grid.routes`` when a sibling iteration's segment
+        # commits).
+        self._foreign_vias: list = []  # list[Via]
+
+    def set_segment_foreign_context(
+        self,
+        foreign_vias: list | None = None,
+    ) -> None:
+        """Set foreign-net via context for new-segment clearance gating.
+
+        Issue #3002 (PR #3006 follow-up): C++ backend sibling of
+        :meth:`pathfinder.Router.set_segment_foreign_context`.  Without
+        this method on ``CppPathfinder`` the ``hasattr`` guard in
+        ``Autorouter._update_router_segment_foreign_context`` silently
+        no-ops the entire segment-vs-foreign-via gate when the C++
+        backend is active (the production default).
+
+        The C++ ``validate_route`` call invoked by
+        :meth:`_validate_route_clearance` already walks the C++ side's
+        stored vias against new segments, so vias that are *already* in
+        ``grid.routes`` at the time a new route is validated will be
+        caught by C++.  However, the negotiated post-iteration
+        re-validation hook (Issue #3002) surfaces vias whose presence
+        the pre-commit gate needs to react to in the NEXT iteration's
+        re-routes -- and those vias may not be in ``grid.routes`` from
+        the C++ side's perspective until the autorouter pushes the
+        explicit foreign-via list here.  This setter stores that list
+        for the Python-side post-validation pass in
+        :meth:`_validate_route_clearance`.
+
+        Same-net filtering is the CALLER's responsibility (matches
+        :meth:`pathfinder.Router.set_segment_foreign_context`).
+
+        Args:
+            foreign_vias: List of :class:`Via` objects whose net differs
+                from the segment's own net.  Pass ``None`` to clear.
+        """
+        self._foreign_vias = list(foreign_vias) if foreign_vias else []
+
     def enable_per_call_timing(self, enabled: bool = True) -> None:
         """Enable or disable per-A*-call wall-clock instrumentation.
 
@@ -1504,6 +1554,28 @@ class CppPathfinder:
 
         if not vresult.valid:
             return (vresult.violation_x, vresult.violation_y)
+
+        # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
+        # post-check.  ``validate_route`` already walks the C++ side's
+        # stored vias, but the autorouter can push additional foreign-net
+        # vias via :meth:`set_segment_foreign_context` -- e.g. vias that
+        # the negotiated post-iteration re-validation hook has surfaced
+        # but that are not yet in the C++ side's ``stored_vias_`` snapshot.
+        # Walks ``self._foreign_vias`` with the STANDARD threshold,
+        # mirroring the predicate consumed by the Python pathfinder at
+        # ``pathfinder.py:_validate_route_clearance``.
+        if self._foreign_vias:
+            from .via_clearance import segment_clears_foreign_via
+            for seg in route.segments:
+                for via in self._foreign_vias:
+                    if via.net == start.net:
+                        continue  # Same-net via -- skipped by convention.
+                    if not segment_clears_foreign_via(
+                        seg, via,
+                        trace_clearance=self._rules.trace_clearance,
+                        hard_intersection_only=False,
+                    ):
+                        return (via.x, via.y)
 
         return None
 

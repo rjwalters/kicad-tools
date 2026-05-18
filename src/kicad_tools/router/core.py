@@ -185,9 +185,16 @@ class IterationMetrics:
     Lex order (used by :meth:`is_better_than`):
 
     1. ``routed_count`` descending — more routed nets is always better.
-    2. ``overflow`` ascending — with equal route counts, lower overflow is
-       better.  This is the new dimension Issue #2803 needs.
-    3. ``iteration`` descending — on a complete tie, prefer the later
+    2. ``clearance_violations`` ascending — Issue #3002 (PR #3006
+       follow-up): a re-route that fixes a segment-vs-foreign-via
+       clearance violation without reducing overflow must NOT be rolled
+       back to the prior state.  Promoted ABOVE overflow because a
+       DRC-clean board with marginally higher overflow is strictly
+       preferable to a DRC-dirty board with lower overflow.
+    3. ``overflow`` ascending — with equal route counts and equal
+       clearance violations, lower overflow is better (the Issue #2803
+       dimension).
+    4. ``iteration`` descending — on a complete tie, prefer the later
        iteration so perturbation/escape strategies have a chance to bake
        in.
 
@@ -195,20 +202,30 @@ class IterationMetrics:
         iteration: Iteration index (0 = initial pass, 1..N = rip-up iters).
         routed_count: Number of nets with at least one route at iter end.
         overflow: Grid total overflow at iter end (lower is better).
+        clearance_violations: Count of nets with segment-vs-foreign-via
+            clearance violations at iter end (Issue #3002; lower is
+            better).  Defaults to 0 for back-compat with existing call
+            sites that don't compute the count.
     """
 
     iteration: int
     routed_count: int
     overflow: int
+    clearance_violations: int = 0
 
     @property
-    def sort_key(self) -> tuple[int, int, int]:
+    def sort_key(self) -> tuple[int, int, int, int]:
         """Tuple suitable for ``min()`` / sort key.
 
         Negated where descending is desired so the *smallest* tuple is the
         *best* iteration.
         """
-        return (-self.routed_count, self.overflow, -self.iteration)
+        return (
+            -self.routed_count,
+            self.clearance_violations,
+            self.overflow,
+            -self.iteration,
+        )
 
     def is_better_than(self, other: IterationMetrics) -> bool:
         """Return True if ``self`` is strictly better than ``other``.
@@ -6292,10 +6309,25 @@ class Autorouter:
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_routed_count = sum(1 for r in net_routes.values() if r)
         best_iteration = 0  # 0 = initial pass
+
+        # Issue #3002 (PR #3006 follow-up): Compute initial clearance-
+        # violation count so the lex-tuple comparator (see
+        # :class:`IterationMetrics`) can prefer DRC-clean iterations
+        # over DRC-dirty ones even when overflow is identical.  A
+        # hook-driven re-route that fixes a clearance violation without
+        # changing overflow MUST survive the post-loop restore; the
+        # only way to make that survive is to factor the violation
+        # count into the lex tuple.
+        initial_violations = len(
+            neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+            )
+        )
         best_metrics = IterationMetrics(
             iteration=0,
             routed_count=best_routed_count,
             overflow=overflow,
+            clearance_violations=initial_violations,
         )
 
         # Issue #2803: Lightweight trajectory log (three ints per iteration,
@@ -6322,10 +6354,20 @@ class Autorouter:
             nonlocal best_routed_count, best_iteration
 
             routed_now = sum(1 for r in net_routes.values() if r)
+            # Issue #3002 (PR #3006 follow-up): Count segment-vs-foreign-via
+            # violations so the lex-tuple comparator can preserve a hook-
+            # driven re-route that fixes a clearance violation without
+            # reducing overflow.
+            violations_now = len(
+                neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                )
+            )
             metrics = IterationMetrics(
                 iteration=iter_index,
                 routed_count=routed_now,
                 overflow=overflow_val,
+                clearance_violations=violations_now,
             )
             iteration_trajectory.append(metrics)
 
@@ -6359,10 +6401,12 @@ class Autorouter:
                 suffix = (
                     f" | best-so-far=iter-{best_metrics.iteration} "
                     f"(routed={best_metrics.routed_count}, "
+                    f"clearance_viol={best_metrics.clearance_violations}, "
                     f"overflow={best_metrics.overflow})"
                 )
             flush_print(
                 f"  iter {iter_index} | routed={routed_now}/{total_nets} | "
+                f"clearance_viol={violations_now} | "
                 f"overflow={overflow_val}{suffix}"
             )
 
@@ -6386,10 +6430,20 @@ class Autorouter:
                 # produced equal route count with lower overflow is still
                 # preserved.
                 current_routed = sum(1 for r in net_routes.values() if r)
+                # Issue #3002 (PR #3006 follow-up): include clearance-
+                # violation count in the lex tuple at the top-of-iteration
+                # snapshot site too -- matches the end-of-iteration capture
+                # below.
+                current_violations = len(
+                    neg_router.find_nets_with_segment_via_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                    )
+                )
                 current_metrics = IterationMetrics(
                     iteration=iteration - 1,  # captured state is end of prior iter
                     routed_count=current_routed,
                     overflow=overflow,
+                    clearance_violations=current_violations,
                 )
                 if current_metrics.is_better_than(best_metrics):
                     best_metrics = current_metrics
@@ -7653,17 +7707,29 @@ class Autorouter:
         # the final iteration produced — which can be strictly worse than a
         # prior iteration on either dimension.
         current_routed = sum(1 for r in net_routes.values() if r)
+        # Issue #3002 (PR #3006 follow-up): include clearance-violation
+        # count in the final lex-tuple comparison.  A best snapshot with
+        # zero clearance violations must NOT be overwritten by a final
+        # state with marginally lower overflow but live DRC violations.
+        final_violations = len(
+            neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+            )
+        )
         final_metrics = IterationMetrics(
             iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
             routed_count=current_routed,
             overflow=overflow,
+            clearance_violations=final_violations,
         )
         if best_metrics.is_better_than(final_metrics):
             flush_print(
                 f"  Restoring iteration {best_iteration} state "
                 f"(routed={best_metrics.routed_count}, "
+                f"clearance_viol={best_metrics.clearance_violations}, "
                 f"overflow={best_metrics.overflow}) instead of final "
                 f"(routed={final_metrics.routed_count}, "
+                f"clearance_viol={final_metrics.clearance_violations}, "
                 f"overflow={final_metrics.overflow})"
             )
             # Unmark all current routes from the grid

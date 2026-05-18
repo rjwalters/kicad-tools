@@ -313,3 +313,121 @@ class TestFindNetsWithSegmentViaViolations:
         assert neg.find_nets_with_segment_via_violations(
             net_routes, trace_clearance=0.15
         ) == []
+
+
+# ---------------------------------------------------------------------------
+# CppPathfinder.set_segment_foreign_context (Issue #3002 PR #3006 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestCppBackendSegmentForeignContext:
+    """Verify the C++ backend exposes the segment-foreign-context setter
+    so the ``hasattr`` guard in
+    ``Autorouter._update_router_segment_foreign_context`` does NOT
+    silently short-circuit the gate on the production C++ path.
+
+    Empirical evidence from the judge's review of PR #3006 showed the
+    segment-vs-foreign-via fix never reached the board-04 SWDIO/BOOT0
+    bug because ``CppPathfinder`` had no such setter and the
+    Autorouter's guard reduced the entire chain to a no-op.
+    """
+
+    def test_cpp_pathfinder_exposes_setter(self):
+        """``CppPathfinder`` must define ``set_segment_foreign_context``
+        so ``hasattr`` in ``Autorouter._update_router_segment_foreign_context``
+        returns True and the autorouter pushes context to the C++ path.
+        """
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        assert hasattr(CppPathfinder, "set_segment_foreign_context"), (
+            "CppPathfinder must expose set_segment_foreign_context so the "
+            "Autorouter's hasattr guard does not silently no-op the gate "
+            "(Issue #3002 PR #3006 follow-up)."
+        )
+
+    def test_cpp_pathfinder_stores_foreign_vias(self):
+        """The C++ backend stores the foreign-via list under
+        ``_foreign_vias`` so the Python-side post-check in
+        :meth:`_validate_route_clearance` can consult it.
+        """
+        from kicad_tools.router.cpp_backend import (
+            CppPathfinder,
+            is_cpp_available,
+        )
+
+        if not is_cpp_available():
+            import pytest
+            pytest.skip("C++ backend not available in this environment")
+
+        # Construct via the lightweight ``__new__`` path -- we only
+        # exercise the setter, not the full constructor (which requires
+        # a CppGrid).  ``_foreign_vias`` defaults are set in __init__,
+        # so we initialize it manually to mirror the init path.
+        pf = CppPathfinder.__new__(CppPathfinder)
+        pf._foreign_vias = []  # Mirror __init__ default.
+
+        # Push a foreign-net via.
+        foreign_via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=42,
+        )
+        pf.set_segment_foreign_context(foreign_vias=[foreign_via])
+        assert pf._foreign_vias == [foreign_via]
+
+        # Clear by passing None.
+        pf.set_segment_foreign_context(foreign_vias=None)
+        assert pf._foreign_vias == []
+
+        # Default arg also clears.
+        pf.set_segment_foreign_context(foreign_vias=[foreign_via])
+        pf.set_segment_foreign_context()
+        assert pf._foreign_vias == []
+
+
+# ---------------------------------------------------------------------------
+# IterationMetrics clearance-violations dimension (Issue #3002 PR #3006)
+# ---------------------------------------------------------------------------
+
+
+class TestIterationMetricsClearanceViolations:
+    """Verify clearance violations participate in the lex tuple so a
+    hook-driven re-route that fixes a clearance violation without
+    reducing overflow survives the post-loop best-state restore.
+    """
+
+    def test_clearance_violations_promoted_above_overflow(self):
+        """Fewer clearance violations wins even if overflow is higher."""
+        from kicad_tools.router.core import IterationMetrics
+
+        clean_higher_overflow = IterationMetrics(
+            iteration=2, routed_count=30, overflow=10, clearance_violations=0,
+        )
+        dirty_lower_overflow = IterationMetrics(
+            iteration=1, routed_count=30, overflow=5, clearance_violations=1,
+        )
+        assert clean_higher_overflow.is_better_than(dirty_lower_overflow)
+        assert not dirty_lower_overflow.is_better_than(clean_higher_overflow)
+
+    def test_routed_count_still_primary(self):
+        """A higher routed_count always beats a lower one, even with
+        more clearance violations (consistent with Issue #2803).
+        """
+        from kicad_tools.router.core import IterationMetrics
+
+        more_routed_dirty = IterationMetrics(
+            iteration=1, routed_count=30, overflow=10, clearance_violations=5,
+        )
+        less_routed_clean = IterationMetrics(
+            iteration=0, routed_count=29, overflow=0, clearance_violations=0,
+        )
+        assert more_routed_dirty.is_better_than(less_routed_clean)
+        assert not less_routed_clean.is_better_than(more_routed_dirty)
+
+    def test_default_clearance_violations_zero(self):
+        """Default value preserves back-compat with call sites that
+        construct ``IterationMetrics`` without the new dimension.
+        """
+        from kicad_tools.router.core import IterationMetrics
+
+        m = IterationMetrics(iteration=1, routed_count=10, overflow=0)
+        assert m.clearance_violations == 0
