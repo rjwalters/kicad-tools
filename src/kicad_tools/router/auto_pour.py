@@ -297,6 +297,159 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     pcb_path.write_text("".join(out_parts))
 
 
+def auto_skip_pour_nets(
+    pcb_path: Path,
+    skip_nets: list[str],
+    quiet: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Detect non-pathfinder nets in the PCB and add them to the skip list.
+
+    Reads net definitions from the PCB file and classifies them.  Nets
+    whose net class declares a non-pathfinder routing intent are appended
+    to *skip_nets* so the router excludes them:
+
+    - ``route_via="pour"`` (or legacy ``is_pour_net=True``) -- the net is
+      satisfied by a copper zone if one exists in the PCB; otherwise the
+      net falls through to ``no_zone_nets`` and is routed as a signal.
+    - ``route_via="manual"`` (Issue #2772) -- the designer is responsible
+      for routing the net by hand (e.g. wide motor-phase traces); the net
+      is unconditionally skipped regardless of zone presence and a
+      distinct ``Manual:`` log line is emitted.
+
+    An explicit ``route_via="pathfinder"`` always wins over the legacy
+    ``is_pour_net=True`` inference -- the new declarative field lets
+    designers override the name-pattern classifier for a specific class.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        skip_nets: Mutable list of net names already marked for skipping
+            (e.g. from ``--skip-nets`` CLI flag).  Modified in place.
+        quiet: Suppress informational output.
+
+    Returns:
+        Tuple of (auto_skipped, no_zone_nets):
+        - auto_skipped: Net names that were auto-skipped (zone-routed
+          pour nets and ``route_via="manual"`` nets combined).
+        - no_zone_nets: Pour net names that lack zones and must be
+          routed as signals.  Pass these to the autorouter's
+          ``_pour_nets_without_zones`` attribute so that
+          ``_filter_pour_nets()`` does not re-skip them (Issue #1841).
+
+    Notes:
+        Promoted from the leading-underscore CLI internal
+        ``kicad_tools.cli.route_cmd._auto_skip_pour_nets`` (Issue #3035)
+        so in-process router callers (board generate_design.py scripts
+        using ``router.route_all_negotiated()`` instead of subprocessing
+        ``kct route``) can reach it without importing a CLI private.
+
+        ``kicad_tools.cli.route_cmd`` keeps a
+        ``from ... import auto_skip_pour_nets as _auto_skip_pour_nets``
+        alias so all existing call sites and the test patches at
+        ``@patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", ...)``
+        in ``tests/test_layer_escalation.py`` and
+        ``tests/test_route_auto_fix.py`` keep working unchanged.  Do
+        not remove that alias without also updating those patch targets.
+    """
+    try:
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        pcb_text = Path(pcb_path).read_text()
+        net_names: dict[int, str] = {}
+        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
+            net_num, name = int(m.group(1)), m.group(2)
+            if net_num > 0:
+                net_names[net_num] = name
+
+        if net_names:
+            net_class_map = classify_and_apply_rules(net_names)
+            # Only auto-skip pour nets that actually have zones in the PCB.
+            # Nets classified as pour by name (e.g. +5V) but without a zone
+            # must still be routed as signals.
+            nets_with_zones: set[str] = set()
+            # Match traditional KiCad 7/8 format: (zone ... (net_name "GND") ...)
+            for zm in re.finditer(
+                r'\(zone\s+.*?\(net_name\s+"([^"]+)"\)',
+                pcb_text,
+                re.DOTALL,
+            ):
+                nets_with_zones.add(zm.group(1))
+            # Match KiCad 9 name-only format: (zone ... (net "GND") ...)
+            for zm in re.finditer(r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', pcb_text):
+                nets_with_zones.add(zm.group(1))
+            del pcb_text  # free memory
+
+            # Issue #2772: route_via takes precedence over the legacy
+            # ``is_pour_net`` flag.  An explicit ``route_via="pathfinder"``
+            # overrides ``is_pour_net=True`` (designer-declared opt-IN to
+            # pathfinder routing for an otherwise-pour-classified class);
+            # ``route_via="pour"`` or ``"manual"`` are the opt-OUT signals.
+            def _wants_pour(routing) -> bool:
+                if routing.route_via == "pathfinder":
+                    return False
+                if routing.route_via == "pour":
+                    return True
+                # Legacy fall-back: pre-#2772 classes with default
+                # ``route_via="pathfinder"`` but ``is_pour_net=True``.
+                return routing.is_pour_net
+
+            def _wants_manual(routing) -> bool:
+                return routing.route_via == "manual"
+
+            # ERC-marker nets (PWR_FLAG and friends) are misclassified as
+            # pour nets by the name pattern but carry no copper and have
+            # no zone -- exclude them from both the auto-skip and the
+            # "pour nets without zones" warning so the user does not see
+            # a misleading "use zone fill" log line for a non-existent
+            # zone.  See _is_erc_marker_net above for the filter.
+            pour_skip = [
+                name
+                for name, routing in net_class_map.items()
+                if _wants_pour(routing)
+                and name not in skip_nets
+                and name in nets_with_zones
+                and not _is_erc_marker_net(name)
+            ]
+            # ``route_via="manual"`` nets are always skipped (designer
+            # routes them by hand); zone presence is irrelevant.  ERC
+            # markers are still excluded for the same reason as above.
+            manual_skip = [
+                name
+                for name, routing in net_class_map.items()
+                if _wants_manual(routing) and name not in skip_nets and not _is_erc_marker_net(name)
+            ]
+            auto_skip = pour_skip + manual_skip
+            if pour_skip:
+                skip_nets.extend(pour_skip)
+                if not quiet:
+                    print(
+                        f"Auto-skip: {', '.join(sorted(pour_skip))} (pour nets — use zone fill)"
+                    )
+            if manual_skip:
+                skip_nets.extend(manual_skip)
+                if not quiet:
+                    print(
+                        f"Manual: {', '.join(sorted(manual_skip))} (skipped — route_via=manual)"
+                    )
+            # Warn about pour nets without zones (excluding ERC markers
+            # which never get zones by design).  ``route_via="manual"``
+            # nets are intentionally NOT in this list -- the designer has
+            # declared they will handle routing by hand, not via a zone.
+            no_zone = [
+                name
+                for name, routing in net_class_map.items()
+                if _wants_pour(routing)
+                and name not in skip_nets
+                and name not in nets_with_zones
+                and not _is_erc_marker_net(name)
+            ]
+            if no_zone and not quiet:
+                print(f"Routing: {', '.join(sorted(no_zone))} (power nets without zones)")
+            return auto_skip, no_zone
+    except Exception:
+        pass  # Fall back to user-supplied skip_nets only
+    return [], []
+
+
 def auto_pour_if_missing(
     pcb_path: Path,
     *,
