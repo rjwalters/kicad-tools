@@ -566,6 +566,173 @@ class TestApplyEscapeRoutesGate:
         assert len(committed) == 1
         assert committed[0].net == 10  # BOOT0
 
+    def test_swdio_then_boot0_ordering_blocked(self):
+        """Issue #3013: SWDIO-first / BOOT0-second ordering -- the
+        production order on board-04's U2 south edge -- must catch the
+        same violation that BOOT0-first / SWDIO-second catches.
+
+        PR #2999's single-pass loop interleaved via-commit and segment-
+        validation per escape: when SWDIO is processed FIRST, BOOT0's
+        in-pad via is not yet in ``self.grid.routes`` so SWDIO's gate
+        sees an empty foreign-via universe and commits the segment.
+        Then BOOT0 commits its via on top of the SWDIO segment.
+
+        The two-pass commit (Pass A collects every planned via into a
+        probe list before Pass B validates segments) closes this
+        ordering hole.  This test fails WITHOUT the fix (SWDIO commits)
+        and passes WITH the fix (SWDIO drops, BOOT0 commits).
+        """
+        router, grid, rules = _make_router()
+
+        # SWDIO escape: B.Cu segment that runs through (5, 5).
+        # Processed FIRST (production order on board-04's south edge).
+        swdio_pad = Pad(
+            x=4.0, y=5.0, width=0.3, height=1.4,
+            net=5, net_name="SWDIO", layer=Layer.F_CU,
+            ref="U1", pin="34",
+        )
+        swdio_seg = Segment(
+            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+        )
+        from kicad_tools.router.escape import EscapeDirection
+        swdio_esc = EscapeRoute(
+            pad=swdio_pad,
+            direction=EscapeDirection.EAST,
+            escape_point=(8.0, 5.0),
+            escape_layer=Layer.B_CU,
+            via_pos=None,
+            segments=[swdio_seg],
+            via=None,
+            ring_index=0,
+        )
+
+        # BOOT0 escape: in-pad via at (5, 5) plus a tiny stub on B.Cu.
+        # Processed SECOND -- the via has not committed when SWDIO is
+        # gated in the OLD single-pass loop.
+        boot0_pad = Pad(
+            x=5.0, y=5.0, width=0.3, height=1.4,
+            net=10, net_name="BOOT0", layer=Layer.F_CU,
+            ref="U1", pin="44",
+        )
+        boot0_via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=10, net_name="BOOT0", in_pad=True,
+        )
+        boot0_seg = Segment(
+            x1=5.0, y1=5.0, x2=5.0, y2=6.0,  # Goes north, clear of SWDIO
+            width=0.2, layer=Layer.B_CU, net=10, net_name="BOOT0",
+        )
+        boot0_esc = EscapeRoute(
+            pad=boot0_pad,
+            direction=EscapeDirection.NORTH,
+            escape_point=(5.0, 6.0),
+            escape_layer=Layer.B_CU,
+            via_pos=(5.0, 5.0),
+            segments=[boot0_seg],
+            via=boot0_via,
+            ring_index=0,
+        )
+
+        # Production order on board-04: SWDIO first.
+        escapes = [swdio_esc, boot0_esc]
+        committed = router.apply_escape_routes(escapes)
+
+        # With the two-pass fix, BOOT0's via is visible during SWDIO's
+        # segment gate (Pass A loaded it into the probe list), so the
+        # SWDIO segment is rejected and BOOT0 commits.
+        assert len(committed) == 1, (
+            "Issue #3013: SWDIO-first ordering must drop SWDIO when its "
+            "segment would clip BOOT0's planned via (two-pass commit)"
+        )
+        assert committed[0].net == 10, (
+            "Issue #3013: BOOT0 (net 10) must be the survivor"
+        )
+        # In-place mutation contract preserved (PR #2999): the dropped
+        # SWDIO escape is removed from the input list so the override
+        # loop in ``Autorouter.generate_escape_routes`` skips it.
+        assert escapes == [boot0_esc], (
+            "Issue #3013: dropped escape must be removed from input list"
+        )
+
+    def test_two_pass_dropped_escape_via_not_committed(self):
+        """Issue #3013 (rollback correctness): when Pass B rejects an
+        escape, NO grid mutation has occurred for that escape.
+
+        Pass A is probe-only -- it builds an in-memory list without
+        touching ``self.grid.routes``.  Pass B mutates the grid ONLY
+        for survivors via ``grid.mark_route``.  So a rejected escape
+        leaves no orphan via, no orphan segment, no half-committed
+        copper on the grid.
+
+        This guards the cleanliness of the probe-list strategy: if a
+        future refactor accidentally calls ``grid.mark_route`` during
+        Pass A, this test would catch the leak.
+        """
+        router, grid, rules = _make_router()
+
+        # Foreign via at (5, 5) -- via already on the grid before the call.
+        pre_existing_via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=10, net_name="BOOT0", in_pad=True,
+        )
+        grid.mark_route(Route(
+            net=10, net_name="BOOT0",
+            segments=[], vias=[pre_existing_via],
+        ))
+        routes_before = len(grid.routes)
+        assert routes_before == 1
+
+        # SWDIO escape that WILL be rejected.  It also carries its own
+        # via -- the test ensures that via does NOT survive on the grid.
+        swdio_pad = Pad(
+            x=4.0, y=5.0, width=0.3, height=1.4,
+            net=5, net_name="SWDIO", layer=Layer.F_CU,
+            ref="U1", pin="34",
+        )
+        swdio_via = Via(
+            x=4.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=5, net_name="SWDIO", in_pad=True,
+        )
+        swdio_seg = Segment(
+            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+        )
+        from kicad_tools.router.escape import EscapeDirection
+        swdio_esc = EscapeRoute(
+            pad=swdio_pad,
+            direction=EscapeDirection.EAST,
+            escape_point=(8.0, 5.0),
+            escape_layer=Layer.B_CU,
+            via_pos=(4.0, 5.0),
+            segments=[swdio_seg],
+            via=swdio_via,
+            ring_index=0,
+        )
+
+        committed = router.apply_escape_routes([swdio_esc])
+
+        # The escape is rejected (segment clips pre-existing BOOT0 via).
+        assert committed == [], (
+            "Issue #3013: SWDIO with segment clipping BOOT0 via must drop"
+        )
+        # The grid state is UNCHANGED: no extra route, no orphan via.
+        assert len(grid.routes) == routes_before, (
+            "Issue #3013: rejected escape must NOT leave any route on the grid "
+            "(Pass A is probe-only -- no grid mutation for dropped escapes)"
+        )
+        # Confirm specifically that the SWDIO via is not on any route on
+        # the grid (defensive: catches a future Pass A leak even if some
+        # other route accidentally counted).
+        for route in grid.routes:
+            for via in route.vias:
+                assert not (via.net == 5 and via.x == 4.0 and via.y == 5.0), (
+                    "Issue #3013: dropped SWDIO escape's via leaked onto the grid"
+                )
+
 
 class TestSegmentClearsForeignViaLayerEdgeCases:
     """Layer-range edge cases for buried / blind / micro vias."""
