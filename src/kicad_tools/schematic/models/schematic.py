@@ -159,6 +159,15 @@ class Schematic(
         # Embedded lib_symbols from loaded schematics (preserved for round-trip)
         self._embedded_lib_symbols: dict[str, SExp] = {}
 
+        # Synthesized power-symbol lib_symbol definitions (per net name).
+        # Populated by ``add_pwr_symbol()`` so that #PWR symbols can publish
+        # arbitrary global net names (e.g. ``VMOTOR``, ``+3.3V``) without
+        # relying on KiCad's stock ``power:`` library — whose symbol names
+        # bake in the net name (``+24V``, ``+3V3``) and therefore drive the
+        # WRONG global net when project convention uses ``VMOTOR`` / ``+3.3V``
+        # as rail labels.  Key is the net name (lib_id local part).
+        self._synthesized_pwr_defs: dict[str, SExp] = {}
+
         # Track continuous rails for T-connection warnings
         # Each entry: (y, x_start, x_end) for horizontal rails
         self._continuous_rails: list[tuple[float, float, float]] = []
