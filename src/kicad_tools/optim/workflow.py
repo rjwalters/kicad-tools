@@ -197,6 +197,24 @@ class WorkflowConfig:
     # Fixed components (list of reference designators)
     fixed_refs: list[str] = field(default_factory=list)
 
+    # Routing-based fitness (KiCad-2 / Issue #2720).
+    # When True, the evolutionary / hybrid strategies construct a
+    # ``CppAstarRoutingEvaluator`` from the loaded PCB and inject it into the
+    # placement GA so the routability term is computed by *actual* C++ A*
+    # routing (the inner loop of the cascaded architecture, epic
+    # spheresemi/sphere#7199) instead of the average-pairwise-spacing proxy.
+    #
+    # Default ``False`` keeps existing production runs unchanged until the
+    # A/B benchmark validates this signal.  Has no effect on the
+    # force-directed strategy.
+    use_routing_fitness: bool = False
+
+    # Optional path to the source ``.kicad_pcb`` to use when constructing the
+    # router factory.  When ``None``, ``OptimizationWorkflow.run()`` will
+    # attempt to derive the path from the loaded PCB; if the PCB has no path
+    # (was constructed in-memory), ``use_routing_fitness`` becomes a no-op.
+    pcb_path_for_routing: Path | None = None
+
 
 class OptimizationWorkflow:
     """
@@ -338,6 +356,64 @@ class OptimizationWorkflow:
             message="Optimization completed successfully",
         )
 
+    def _build_routing_evaluator(self) -> Any | None:
+        """Construct a :class:`CppAstarRoutingEvaluator` for the loaded PCB.
+
+        Returns ``None`` (silently) when:
+
+        * ``self.config.use_routing_fitness`` is ``False`` (the common case);
+        * the PCB has no resolvable file path (the factory needs one to load
+          the base router); or
+        * the router-evaluator imports fail (e.g. C++ extension not built and
+          a friendly fallback is desired — the GA's routability path already
+          falls back to the spacing proxy when the evaluator raises).
+
+        This keeps the workflow API's surface stable: callers opt in via the
+        flag, but the workflow does not raise if the optional dependency is
+        unavailable.
+        """
+        if not self.config.use_routing_fitness:
+            return None
+
+        # Resolve the PCB file path: explicit override wins, otherwise read
+        # from the loaded PCB's stored path.
+        pcb_path = self.config.pcb_path_for_routing
+        if pcb_path is None:
+            pcb_path = getattr(self.pcb, "_path", None)
+        if pcb_path is None:
+            # Cannot construct a router factory without a file path.  The GA
+            # will silently fall back to the spacing proxy.
+            return None
+
+        try:
+            from kicad_tools.optim.router_factory import build_pcb_router_factory
+            from kicad_tools.router.evaluators import (
+                CppAstarRoutingEvaluator,
+                RoutingEvaluatorConfig,
+            )
+        except ImportError:
+            return None
+
+        try:
+            factory = build_pcb_router_factory(pcb_path)
+        except Exception:
+            # Loading the PCB for routing failed (e.g. invalid grid).  Don't
+            # crash the workflow — just disable the routing-fitness signal.
+            return None
+
+        return CppAstarRoutingEvaluator(
+            router_factory=factory,
+            config=RoutingEvaluatorConfig(
+                # Keep inner-loop fast by default; callers wanting tighter
+                # tuning can construct the workflow with their own evaluator.
+                pop_size=5,
+                generations=2,
+                seed=None,
+                timeout_seconds=5.0,
+                num_workers=1,
+            ),
+        )
+
     def _run_evolutionary(
         self,
         callback: Callable[[int, float], None] | None = None,
@@ -350,13 +426,17 @@ class OptimizationWorkflow:
             generations=self.config.generations,
             population_size=self.config.population,
             grid_snap=self.config.grid if self.config.grid > 0 else 0.127,
+            use_routing_fitness=self.config.use_routing_fitness,
         )
+
+        routing_evaluator = self._build_routing_evaluator()
 
         optimizer = EvolutionaryPlacementOptimizer.from_pcb(
             self.pcb,
             config=config,
             fixed_refs=self.config.fixed_refs,
             enable_clustering=self.config.enable_clustering,
+            routing_evaluator=routing_evaluator,
         )
 
         # Add keepout zones
@@ -405,6 +485,7 @@ class OptimizationWorkflow:
             generations=self.config.generations,
             population_size=self.config.population,
             grid_snap=self.config.grid if self.config.grid > 0 else 0.127,
+            use_routing_fitness=self.config.use_routing_fitness,
         )
 
         physics_kwargs: dict = {
@@ -415,11 +496,14 @@ class OptimizationWorkflow:
             physics_kwargs["boundary_margin"] = self.config.boundary_margin
         physics_config = PlacementConfig(**physics_kwargs)
 
+        routing_evaluator = self._build_routing_evaluator()
+
         evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
             self.pcb,
             config=evo_config,
             fixed_refs=self.config.fixed_refs,
             enable_clustering=self.config.enable_clustering,
+            routing_evaluator=routing_evaluator,
         )
 
         # Add keepout zones

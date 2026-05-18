@@ -151,6 +151,20 @@ class EvolutionaryConfig:
     use_gpu: bool = True  # Enable GPU acceleration when available
     performance_config: PerformanceConfig | None = None  # None = auto-detect
 
+    # Routing-based fitness (KiCad-2 / Issue #2720).
+    # When True, the GA's routability term is computed by an injected
+    # ``RoutingEvaluator`` (e.g. ``CppAstarRoutingEvaluator``) instead of the
+    # average-pairwise-spacing proxy.  This is the *outer-loop* swap of the
+    # cascaded place-and-route architecture (epic spheresemi/sphere#7199).
+    #
+    # The flag is intentionally **off by default** so existing production
+    # placement runs are unchanged until the A/B benchmark validates it.
+    # Setting this flag to True without also injecting a ``routing_evaluator``
+    # into ``EvolutionaryPlacementOptimizer`` is a no-op (the GA falls back to
+    # the spacing proxy).  ``OptimizationWorkflow`` constructs and injects the
+    # concrete evaluator when this flag is True.
+    use_routing_fitness: bool = False
+
 
 @dataclass
 class Individual:
