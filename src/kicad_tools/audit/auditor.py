@@ -745,41 +745,49 @@ class ManufacturingAudit:
 
             results = checker.check_all()
 
-            # The standalone ``connectivity`` rule (Issue #3041) reports
-            # unrouted multi-pad nets at error severity for ``kct check``.
-            # The audit framework, however, has its own
-            # :meth:`_check_connectivity` step that classifies the same
-            # gaps as advisory (WARNING) vs. blocking (NOT_READY) based
-            # on zone presence -- a board with zones may resolve the
-            # nominal gap via zone fill on KiCad re-open.  To avoid
-            # double-counting the same defect (once as blocking DRC,
-            # once as advisory-or-blocking connectivity) AND to preserve
-            # the existing audit verdict semantics, we strip
-            # ``connectivity`` rule_id violations from the audit's DRC
-            # error/blocking tally.  The connectivity status field still
-            # drives the verdict per its own zone-advisory rules.
-            other_violations = [v for v in results.violations if v.rule_id != "connectivity"]
-            other_errors = sum(1 for v in other_violations if v.is_error)
-            other_warnings = sum(1 for v in other_violations if v.is_warning)
+            # Some rules (e.g. ``connectivity`` from Issue #3041) report
+            # at error severity for the standalone ``kct check`` CLI but
+            # must NOT count toward manufacturability-blocking verdicts
+            # because a sibling status field already classifies the same
+            # defect with finer-grained logic.  For ``connectivity`` the
+            # audit's own :meth:`_check_connectivity` step distinguishes
+            # zone-bridged incomplete nets (advisory WARNING) from
+            # genuinely-unrouted nets (blocking NOT_READY) based on zone
+            # presence -- a board with zones may resolve the nominal gap
+            # via zone fill on KiCad re-open.
+            #
+            # Issue #3044 lifted the per-call-site hardcoded
+            # ``rule_id == "connectivity"`` filter (originally introduced
+            # by PR #3060) into a central
+            # :attr:`DRCChecker.ADVISORY_RULE_IDS` classifier so every
+            # entry point can filter by severity instead of by literal
+            # rule_id.  All non-advisory rules still drive the blocking
+            # tally; advisory rules surface in ``violations_by_type`` for
+            # introspection but never block.
+            non_advisory_violations = [
+                v for v in results.violations if not DRCChecker.is_advisory_rule(v.rule_id)
+            ]
+            non_advisory_errors = sum(1 for v in non_advisory_violations if v.is_error)
+            non_advisory_warnings = sum(1 for v in non_advisory_violations if v.is_warning)
 
-            status.error_count = other_errors
-            status.warning_count = other_warnings
-            status.blocking_count = other_errors  # Errors block manufacturing
-            status.passed = other_errors == 0
+            status.error_count = non_advisory_errors
+            status.warning_count = non_advisory_warnings
+            status.blocking_count = non_advisory_errors  # Errors block manufacturing
+            status.passed = non_advisory_errors == 0
 
             # Build per-type violation breakdown (all severities).  We
-            # include the connectivity rule_id in the breakdown so
-            # consumers can still introspect that the rule ran -- it
-            # just does not count toward the blocking verdict.
+            # include advisory rule_ids in the breakdown so consumers can
+            # still introspect that the rules ran -- they just do not
+            # count toward the blocking verdict.
             by_rule: dict[str, int] = {}
             for v in results.violations:
                 by_rule[v.rule_id] = by_rule.get(v.rule_id, 0) + 1
             status.violations_by_type = by_rule
 
-            if other_errors > 0:
+            if non_advisory_errors > 0:
                 # Get summary of errors for the details string
                 error_rules: dict[str, int] = {}
-                for v in other_violations:
+                for v in non_advisory_violations:
                     if v.is_error:
                         error_rules[v.rule_id] = error_rules.get(v.rule_id, 0) + 1
                 top_rules = sorted(error_rules.items(), key=lambda x: -x[1])[:3]
