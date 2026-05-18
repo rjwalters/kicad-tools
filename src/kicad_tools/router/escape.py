@@ -4723,6 +4723,30 @@ class EscapeRouter:
         via-vs-foreign-segment check: a new SEGMENT must clear a foreign
         VIA, not just the reverse direction PR #2952 already covered.
 
+        Issue #3013 (TWO-PASS COMMIT): the original PR #2999 single-pass
+        loop interleaved via-commit and segment-validation per escape,
+        so an escape processed EARLY in the list (e.g. SWDIO) had its
+        segment validated against an incomplete via universe -- LATER
+        escapes (e.g. BOOT0's in-pad rescue via) had not yet committed
+        their vias to ``self.grid.routes`` when SWDIO's segment was
+        gated.  Result: SWDIO's segment committed, then BOOT0's via
+        landed on top of it.  The fix splits the loop into two passes:
+
+        * **Pass A (probe)** walks ``escapes`` and collects every
+          escape's planned via into an in-memory probe list, without
+          mutating ``self.grid.routes``.  No segment commits occur in
+          Pass A.  This makes the entire via universe for this call
+          visible before any segment is validated.
+
+        * **Pass B (validate + commit)** walks ``escapes`` again and,
+          for each escape, validates its segments against
+          ``self.grid.routes`` PLUS the Pass A probe list (threaded
+          via the optional ``extra_routes`` kwarg on
+          :meth:`_segment_violates_foreign_via_clearance`).  Survivors
+          commit normally via ``grid.mark_route``.  Rejected escapes
+          leave no orphan grid state because Pass A never mutated the
+          grid -- only the survivors' vias land on the grid.
+
         Threshold choice (HARD INTERSECTION ONLY): the gate flags only
         escapes whose segment copper physically OVERLAPS a foreign-net
         via's copper (negative edge-to-edge clearance).  Marginal
@@ -4777,13 +4801,44 @@ class EscapeRouter:
         # mutation during iteration is brittle).
         committed_escapes: list[EscapeRoute] = []
 
+        # Issue #3013 -- Pass A: collect every planned via into an
+        # in-memory probe list.  No grid mutation here.  Each entry is
+        # a synthetic Route holding ONE via (and no segments), so the
+        # standard ``_segment_violates_foreign_via_clearance`` iterator
+        # -- which walks ``route.vias`` regardless of segment count --
+        # accepts it uniformly with the grid's own routes.  The probe
+        # list is threaded into Pass B via the predicate's
+        # ``extra_routes`` kwarg; iteration order does not matter for
+        # the probe (vias are atomic geometric primitives -- one round
+        # piece of copper per layer span), so the call's full via
+        # universe is visible to every segment validated in Pass B
+        # regardless of escape order.
+        probe_via_routes: list[Route] = []
+        for escape in escapes:
+            if escape.via is None:
+                continue
+            probe_via_routes.append(Route(
+                net=escape.pad.net,
+                net_name=escape.pad.net_name,
+                segments=[],
+                vias=[escape.via],
+            ))
+
+        # Issue #3013 -- Pass B: validate segments against the union of
+        # ``self.grid.routes`` and the Pass A probe list, then commit
+        # survivors.  Rejected escapes leave no orphan state because
+        # Pass A never mutated the grid -- only survivors' vias land
+        # via the normal ``grid.mark_route`` call below.
         for escape in escapes:
             # Build the foreign-via list lazily once per escape.  Vias
             # from already-committed routes in ``self.grid.routes``
             # include both (a) vias from prior escape commits in earlier
             # ``apply_escape_routes`` calls (e.g. for other packages) and
-            # (b) vias from routes committed in this same call (because
-            # ``grid.mark_route`` below appends to ``self.grid.routes``).
+            # (b) vias from routes committed earlier IN THIS CALL via
+            # the ``grid.mark_route`` below.  Pass A's probe list adds
+            # (c) vias from escapes processed LATER in this call --
+            # closing the SWDIO-first / BOOT0-second ordering hole that
+            # PR #2999's single-pass loop left open (Issue #3013).
             current_net = escape.pad.net
             if escape.segments:
                 violation = False
@@ -4795,6 +4850,7 @@ class EscapeRouter:
                     if self._segment_violates_foreign_via_clearance(
                         seg, current_net, trace_clearance,
                         hard_intersection_only=True,
+                        extra_routes=probe_via_routes,
                     ):
                         violation = True
                         break
@@ -4842,15 +4898,29 @@ class EscapeRouter:
         current_net: int,
         trace_clearance: float,
         hard_intersection_only: bool = False,
+        extra_routes: list[Route] | None = None,
     ) -> bool:
         """Return True iff ``seg`` violates clearance against any
-        foreign-net via committed to ``self.grid.routes``.
+        foreign-net via committed to ``self.grid.routes`` (or in the
+        optional ``extra_routes`` probe list).
 
         Issue #2998: helper for ``apply_escape_routes`` pre-commit gate.
         Iterates over every committed via on every committed route,
         filters out same-net vias (caller filters via ``current_net``),
         and applies the layer-aware ``_segment_clears_foreign_via``
         predicate.  Returns True on the first violation.
+
+        Issue #3013 (``extra_routes``): the two-pass commit in
+        ``apply_escape_routes`` builds an in-memory probe list of
+        planned vias for all escapes in the current call BEFORE any
+        segment is validated, then threads that list here so the
+        predicate sees the full via universe for the call regardless
+        of escape iteration order.  Without this, the SWDIO-first /
+        BOOT0-second ordering on board-04's U2 produced a clearance
+        violation at B.Cu (43.8, 19.7): SWDIO's segment was validated
+        against an empty foreign-via universe (BOOT0's via had not yet
+        committed) and committed; then BOOT0's via landed on top of
+        the SWDIO segment.
 
         Args:
             seg: The candidate escape segment.
@@ -4863,13 +4933,21 @@ class EscapeRouter:
                 copper (negative clearance).  Forwarded to the
                 ``_segment_clears_foreign_via`` predicate.  See its
                 docstring for the rationale.
+            extra_routes: Optional in-memory probe list of additional
+                Route objects whose vias should participate in the
+                clearance check.  Used by the two-pass commit in
+                ``apply_escape_routes`` (Issue #3013) to surface vias
+                planned for later-iterated escapes in the same call.
+                Same-net filtering still applies via ``current_net``.
 
         Returns:
             True if any foreign-net via fails the clearance predicate.
         """
         # Iterate committed routes for foreign-net vias.  The grid stores
         # routes in insertion order; vias from earlier escapes in this
-        # same call are already present here.
+        # same call are already present here.  Issue #3013: extra_routes
+        # supplies the planned-but-not-yet-committed via universe for
+        # the current ``apply_escape_routes`` call (two-pass commit).
         for route in self.grid.routes:
             if route.net == current_net:
                 continue  # Same-net via -- skipped by convention.
@@ -4879,4 +4957,14 @@ class EscapeRouter:
                     hard_intersection_only=hard_intersection_only,
                 ):
                     return True
+        if extra_routes:
+            for route in extra_routes:
+                if route.net == current_net:
+                    continue  # Same-net via -- skipped by convention.
+                for via in route.vias:
+                    if not self._segment_clears_foreign_via(
+                        seg, via, trace_clearance,
+                        hard_intersection_only=hard_intersection_only,
+                    ):
+                        return True
         return False
