@@ -493,6 +493,28 @@ loom-clean --deep --dry-run  # Preview deep clean
 loom-clean --force  # Non-interactive, safe for automation
 ```
 
+**Cleaning Up Claude Agent Worktrees** (`.claude/worktrees/agent-*`):
+
+`loom-clean` only handles `feature/issue-N` branches and `.loom/worktrees/issue-N` paths. The Claude Agent SDK's `isolation: "worktree"` option creates a separate family of worktrees at `.claude/worktrees/agent-<id>` with branches named `worktree-agent-<id>` that `loom-clean` does NOT touch. When agents crash or exit via TaskStop they leave the worktree marked `locked` (so `git worktree remove` without `-f -f` fails) and the branch behind, so these accumulate over time.
+
+Use the project-local `clean-agent-worktrees.sh` script to sweep them up:
+
+```bash
+# Preview (always do this first)
+./.loom/scripts/clean-agent-worktrees.sh --dry-run
+
+# Default: clean any agent worktree with no active processes holding CWD
+./.loom/scripts/clean-agent-worktrees.sh
+
+# Conservative: also keep anything modified in the last hour
+./.loom/scripts/clean-agent-worktrees.sh --strict
+
+# Even more conservative: keep anything modified in the last 24h
+./.loom/scripts/clean-agent-worktrees.sh --strict --age-hours 24
+```
+
+**Safety**: The script PID-gates via `lsof +d` and will never remove a worktree that has any process holding CWD inside it. It is safe to run while other agents are active.
+
 **Manual cleanup** (if needed):
 ```bash
 # List worktrees
@@ -500,6 +522,9 @@ git worktree list
 
 # Remove specific stale worktree
 git worktree remove .loom/worktrees/issue-42 --force
+
+# Force-remove a worktree that git refuses (locked flag set by crashed agent)
+git worktree remove -f -f .claude/worktrees/agent-abc123
 
 # Prune orphaned worktrees
 git worktree prune
