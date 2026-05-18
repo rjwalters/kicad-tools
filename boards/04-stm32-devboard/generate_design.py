@@ -1057,10 +1057,18 @@ def stitch_pcb(routed_path: Path) -> bool:
     `kct stitch --net GND --mfr jlcpcb-tier1` drops a via near each GND
     pad to bond it to the plane, using jlcpcb-tier1-compliant via
     dimensions (0.6mm diameter / 0.3mm drill) so the stitch vias do not
-    introduce dimension_via_* DRC violations against jlcpcb-tier1. A
-    small number of pads (e.g. LQFP-48 corner GND pins surrounded by
-    signal escapes) may be skipped if no clearance-compliant via
-    location exists; that is logged but is NOT treated as a failure here.
+    introduce dimension_via_* DRC violations against jlcpcb-tier1.
+
+    For LQFP-48 corner GND pads (U2.8 and U2.23 on this board) the
+    standard 0.6mm via cannot fit inside the dense 0.5mm-pitch escape
+    pattern -- it collides with neighbour signal traces.  ``--micro-via``
+    retries those failing pads with a 0.3mm/0.15mm drill via, which is
+    geometrically small enough to fit between adjacent escape traces.
+    jlcpcb-tier1 supports micro-vias as part of its Capability Plus
+    process (the same tier that already supplies the in-pad via support
+    used by the escape router), so the micro-vias produced here do not
+    introduce a separate manufacturer-tier dependency.  See issue #3033
+    for the U2.8 / U2.23 use case.
 
     Returns True if the stitch step ran (even if some pads were skipped).
     """
@@ -1078,6 +1086,7 @@ def stitch_pcb(routed_path: Path) -> bool:
         "GND",
         "--mfr",
         "jlcpcb-tier1",
+        "--micro-via",
         "--output",
         str(routed_path),
     ]
