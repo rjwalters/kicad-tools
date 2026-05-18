@@ -1,0 +1,4 @@
+Comment,Designator,Footprint,LCSC Part #
+10k,"R1,R2",Resistor_SMD:R_0805_2012Metric,C17414
+IN,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C49257
+OUT,J2,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C49257
