@@ -100,6 +100,8 @@ def _init_type_category_map() -> None:
             ViolationType.SHORTING_ITEMS: ViolationCategory.CONNECTIVITY,
             ViolationType.NET_UNDECLARED: ViolationCategory.CONNECTIVITY,
             ViolationType.SINGLE_PAD_NET: ViolationCategory.CONNECTIVITY,
+            # Multi-pad net unrouted/incomplete (Issue #3041).
+            ViolationType.CONNECTIVITY: ViolationCategory.CONNECTIVITY,
             # Cosmetic: visual only
             ViolationType.SILK_OVER_COPPER: ViolationCategory.COSMETIC,
             ViolationType.SILK_OVERLAP: ViolationCategory.COSMETIC,
@@ -220,6 +222,13 @@ class ViolationType(Enum):
     # Netlist integrity
     NET_UNDECLARED = "net_undeclared"
     SINGLE_PAD_NET = "single_pad_net"
+    # Multi-pad net not fully routed by traces/vias/zones (Issue #3041).
+    # Distinct from UNCONNECTED_ITEMS (KiCad-cli ratsnest residual) and
+    # from SINGLE_PAD_NET (structural one-pad declarations).  This rule
+    # fires when a multi-pad net's pads form more than one connected
+    # component in the routed copper, OR when no pads are connected at
+    # all.  Severity: error.
+    CONNECTIVITY = "connectivity"
 
     # Misc
     FOOTPRINT = "footprint"
@@ -334,6 +343,13 @@ class ViolationType(Enum):
             # netlist integrity rule from validate netlist checker
             "net_undeclared": cls.NET_UNDECLARED,
             "single_pad_net": cls.SINGLE_PAD_NET,
+            # Connectivity rule from validate connectivity checker
+            # (Issue #3041).  MUST be aliased explicitly: the fuzzy
+            # fallback at the bottom of from_string() does not have a
+            # branch for "connectivity" and would drop through to
+            # UNKNOWN, silently corrupting the violation ``type`` field
+            # for downstream consumers that filter by exact type value.
+            "connectivity": cls.CONNECTIVITY,
             # zone fill rules from validate zone_fill checker
             "zone_unfilled": cls.ZONE_UNFILLED,
             "zone_fill_disabled": cls.ZONE_FILL_DISABLED,

@@ -745,21 +745,41 @@ class ManufacturingAudit:
 
             results = checker.check_all()
 
-            status.error_count = results.error_count
-            status.warning_count = results.warning_count
-            status.blocking_count = results.error_count  # Errors block manufacturing
-            status.passed = results.error_count == 0
+            # The standalone ``connectivity`` rule (Issue #3041) reports
+            # unrouted multi-pad nets at error severity for ``kct check``.
+            # The audit framework, however, has its own
+            # :meth:`_check_connectivity` step that classifies the same
+            # gaps as advisory (WARNING) vs. blocking (NOT_READY) based
+            # on zone presence -- a board with zones may resolve the
+            # nominal gap via zone fill on KiCad re-open.  To avoid
+            # double-counting the same defect (once as blocking DRC,
+            # once as advisory-or-blocking connectivity) AND to preserve
+            # the existing audit verdict semantics, we strip
+            # ``connectivity`` rule_id violations from the audit's DRC
+            # error/blocking tally.  The connectivity status field still
+            # drives the verdict per its own zone-advisory rules.
+            other_violations = [v for v in results.violations if v.rule_id != "connectivity"]
+            other_errors = sum(1 for v in other_violations if v.is_error)
+            other_warnings = sum(1 for v in other_violations if v.is_warning)
 
-            # Build per-type violation breakdown (all severities)
+            status.error_count = other_errors
+            status.warning_count = other_warnings
+            status.blocking_count = other_errors  # Errors block manufacturing
+            status.passed = other_errors == 0
+
+            # Build per-type violation breakdown (all severities).  We
+            # include the connectivity rule_id in the breakdown so
+            # consumers can still introspect that the rule ran -- it
+            # just does not count toward the blocking verdict.
             by_rule: dict[str, int] = {}
             for v in results.violations:
                 by_rule[v.rule_id] = by_rule.get(v.rule_id, 0) + 1
             status.violations_by_type = by_rule
 
-            if results.error_count > 0:
+            if other_errors > 0:
                 # Get summary of errors for the details string
                 error_rules: dict[str, int] = {}
-                for v in results.violations:
+                for v in other_violations:
                     if v.is_error:
                         error_rules[v.rule_id] = error_rules.get(v.rule_id, 0) + 1
                 top_rules = sorted(error_rules.items(), key=lambda x: -x[1])[:3]
