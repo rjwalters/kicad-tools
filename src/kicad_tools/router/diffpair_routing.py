@@ -160,6 +160,7 @@ class CoupledPathfinder:
         target_spacing_cells: int,
         net_class_map: dict[str, NetClassRouting] | None = None,
         allow_swap_via: bool = False,
+        min_spacing_cells: int = 0,
     ):
         """Initialize coupled pathfinder.
 
@@ -173,12 +174,29 @@ class CoupledPathfinder:
                 positions across an inner layer.  Used when source and
                 sink polarity orientations are mirrored (USB-C-shaped
                 pads).
+            min_spacing_cells: Issue #3012: Hard floor on the center-to-
+                center spacing (in grid cells) the search will tolerate
+                between P and N positions.  Derived in
+                ``route_differential_pair_coupled`` from
+                ``(trace_width + intra_pair_clearance) / grid.resolution``
+                so that within-pair edge-to-edge clearance is preserved
+                even when the approach-phase tolerance widens or the
+                asymmetric "converge" moves fire.  Defaults to ``0``
+                (legacy permissive behaviour) so callers that don't
+                supply per-pair NetClassRouting are unaffected.
+                Endpoint cells (start and goal pad positions) are
+                exempt from the floor -- those are the cells the pads
+                themselves occupy and the floor would otherwise
+                disqualify the search's only chance to land.
         """
         self.grid = grid
         self.rules = rules
         self.target_spacing_cells = target_spacing_cells
         self.net_class_map = net_class_map or {}
         self.allow_swap_via = allow_swap_via
+        # Issue #3012: store the within-pair spacing floor.  ``0`` means
+        # no floor (legacy behaviour).
+        self.min_spacing_cells = max(0, int(min_spacing_cells))
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -353,6 +371,21 @@ class CoupledPathfinder:
             if abs(new_spacing - target_spacing_cells) > tolerance:
                 continue
 
+            # Issue #3012: Hard floor on within-pair spacing.  Independent
+            # of the approach-phase tolerance, the search must not place
+            # P and N centerlines closer than
+            # ``(trace_width + intra_pair_clearance) / grid.resolution``
+            # cells apart, or post-route the partner-net edges overlap.
+            # The floor is bypassed when BOTH new positions sit on
+            # endpoint cells (start or goal pads) -- those cells are
+            # owned by the pad footprints whose own spacing is set by
+            # the physical board geometry, not the router.
+            if self.min_spacing_cells > 0 and not (p_is_endpoint and n_is_endpoint):
+                # Use a small epsilon so a Euclidean spacing of exactly
+                # min_spacing_cells (axis-aligned) is accepted.
+                if new_spacing + 1e-9 < self.min_spacing_cells:
+                    continue
+
             # Calculate cost
             new_direction = (dx, dy)
             cost = self.rules.cost_straight
@@ -391,14 +424,34 @@ class CoupledPathfinder:
                     new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
                     tolerance = max(1, target_spacing_cells)
                     if abs(new_spacing - target_spacing_cells) <= tolerance:
-                        # Direction tracking only reflects P's motion;
-                        # tag with the new direction so the cost-of-turn
-                        # logic still fires when the path bends.
-                        cost = self.rules.cost_straight
-                        if state.direction != (0, 0) and state.direction != (dx, dy):
-                            cost += self.rules.cost_turn
-                        new_state = CoupledState(cand_p, cand_n, (dx, dy))
-                        neighbors.append((new_state, cost, False))
+                        # Issue #3012: enforce the within-pair spacing
+                        # floor in the asymmetric P-advance move.  The
+                        # asymmetric moves only fire in the approach
+                        # phase, where the legacy tolerance was wide
+                        # enough to let centerlines coincide; without
+                        # this floor we observe -0.150mm overlap on
+                        # board 07 diff pairs.  Endpoint cells (P at
+                        # its pad AND N at its pad) bypass the floor
+                        # since the pads themselves define the spacing.
+                        n_is_endpoint = self._is_at_goal(
+                            cand_n, n_goal
+                        ) or self._is_at_goal(cand_n, n_start)
+                        bypass_floor = p_is_endpoint and n_is_endpoint
+                        if (
+                            self.min_spacing_cells > 0
+                            and not bypass_floor
+                            and new_spacing + 1e-9 < self.min_spacing_cells
+                        ):
+                            pass  # reject this candidate
+                        else:
+                            # Direction tracking only reflects P's motion;
+                            # tag with the new direction so the cost-of-turn
+                            # logic still fires when the path bends.
+                            cost = self.rules.cost_straight
+                            if state.direction != (0, 0) and state.direction != (dx, dy):
+                                cost += self.rules.cost_turn
+                            new_state = CoupledState(cand_p, cand_n, (dx, dy))
+                            neighbors.append((new_state, cost, False))
 
                 # N advances, P holds.
                 cand_p2 = state.p_pos
@@ -415,6 +468,21 @@ class CoupledPathfinder:
                 new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
                 tolerance = max(1, target_spacing_cells)
                 if abs(new_spacing - target_spacing_cells) > tolerance:
+                    continue
+                # Issue #3012: same within-pair spacing floor as the
+                # P-advance branch.  P holds at its current position
+                # here; the floor is bypassed only when P happens to
+                # already be at its pad AND the candidate N is at its
+                # pad.
+                p_is_endpoint_held = self._is_at_goal(
+                    cand_p2, p_goal
+                ) or self._is_at_goal(cand_p2, p_start)
+                bypass_floor = p_is_endpoint_held and n_is_endpoint
+                if (
+                    self.min_spacing_cells > 0
+                    and not bypass_floor
+                    and new_spacing + 1e-9 < self.min_spacing_cells
+                ):
                     continue
                 cost = self.rules.cost_straight
                 if state.direction != (0, 0) and state.direction != (dx, dy):
@@ -1542,10 +1610,29 @@ class DiffPairRouter:
         if len(p_pads) == 2 and len(n_pads) == 2:
             # Backward-compatible fast path.
             legacy = self._pair_pads_for_coupled_routing(p_pads, n_pads)
-            coupled_specs = [
-                CoupledSegmentSpec(p_start=ps, p_end=pe, n_start=ns, n_end=ne, polarity_swap=False)
-                for ps, pe, ns, ne in legacy
-            ]
+            coupled_specs = []
+            for ps, pe, ns, ne in legacy:
+                # Issue #3012: detect polarity-swap in the 2-pad fast
+                # path.  ``_pair_pads_for_coupled_routing`` returns the
+                # pair ordered by start-pad proximity, but the *end*
+                # pads can still flip polarity (board-07 DDR test
+                # footprint inverts P/N row positions between the two
+                # QFNs).  Without this detection the coupled search
+                # tries to maintain constant spacing on a path whose
+                # endpoints sit in mirror orientations -- impossible
+                # without a swap-via -- and the search collapses the
+                # spacing to 0 mid-run instead.  Mirrors the existing
+                # detection in the npad path (line 1424).
+                polarity_swap = self._polarity_swap_between(ps, ns, pe, ne)
+                coupled_specs.append(
+                    CoupledSegmentSpec(
+                        p_start=ps,
+                        p_end=pe,
+                        n_start=ns,
+                        n_end=ne,
+                        polarity_swap=polarity_swap,
+                    )
+                )
             stub_specs: list[StubEdgeSpec] = []
         else:
             coupled_specs, stub_specs = self._pair_pads_for_coupled_routing_npad(p_pads, n_pads)
@@ -1560,8 +1647,42 @@ class DiffPairRouter:
             print("    WARNING: Complex pad configuration, falling back to independent routing")
             return self.route_differential_pair_independent(pair, spacing)
 
-        # Calculate spacing in grid cells
-        spacing_cells = int(spacing / self.autorouter.grid.resolution)
+        # Issue #3012: Calculate the effective spacing.  The legacy
+        # behaviour used ``int(spacing / resolution)`` where ``spacing``
+        # came from the per-type ``DifferentialPairRules.spacing``
+        # default (0.15-0.2 mm) -- which is an EDGE-TO-EDGE clearance,
+        # not a CENTER-TO-CENTER target.  When the pair's
+        # ``NetClassRouting`` declares a richer ``intra_pair_clearance``
+        # (board 07: 0.1 mm with 0.15 mm trace width), we derive the
+        # center-to-center floor as ``trace_width + intra_pair_clearance``
+        # and feed that as the spacing target so the search lays the
+        # centerlines far enough apart for the partner-edge clearance to
+        # hold post-route.  Use ``math.ceil`` instead of ``int`` so we
+        # never round DOWN below the threshold.
+        net_class_map = self.autorouter.net_class_map or {}
+        pair_net_class = net_class_map.get(pair.positive.net_name)
+        if pair_net_class is not None:
+            pair_trace_width = float(pair_net_class.trace_width)
+            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+        else:
+            pair_trace_width = float(self.autorouter.rules.trace_width)
+            # Without a per-pair class, fall back to the legacy edge-to-
+            # edge ``pair.rules.spacing`` interpretation by treating it
+            # as the intra clearance.  This preserves the pre-#3012
+            # behaviour for callers that don't supply a net_class_map.
+            pair_intra_clearance = float(spacing)
+
+        required_center_spacing = pair_trace_width + pair_intra_clearance
+        min_spacing_cells = max(
+            1, math.ceil(required_center_spacing / self.autorouter.grid.resolution)
+        )
+
+        # Target spacing in grid cells.  Use the larger of the legacy
+        # ``spacing/resolution`` value (which historically governed) and
+        # the new floor so wider edge-to-edge targets still win when
+        # set, and the floor never under-counts.
+        legacy_spacing_cells = math.ceil(spacing / self.autorouter.grid.resolution)
+        spacing_cells = max(legacy_spacing_cells, min_spacing_cells)
 
         # If any segment requires polarity-swap, enable swap-via moves.
         any_polarity_swap = any(s.polarity_swap for s in coupled_specs)
@@ -1573,6 +1694,7 @@ class DiffPairRouter:
             spacing_cells,
             net_class_map=self.autorouter.net_class_map,
             allow_swap_via=any_polarity_swap,
+            min_spacing_cells=min_spacing_cells,
         )
 
         routes: list[Route] = []
