@@ -105,24 +105,63 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # Motor power rail (12-24V).  Each power-input symbol gets a paired
-    # PWR_FLAG so KiCad ERC sees the net as externally driven (silences
-    # ``power_pin_not_driven`` on VMOTOR/+5V/+3.3V/GND).  Place the flag
-    # one grid (2.54mm) inside the rail along the symbol's column so it
-    # lands on a wire that already touches the rail.
+    # Power rails.  Each #PWR power-input symbol is wired down (or up
+    # for GND) to its rail's left endpoint so the symbol pin meets a
+    # real wire endpoint (silences ``pin_not_connected``) AND so the
+    # symbol's global-net publication unifies with the rail's labelled
+    # net (e.g. "+24V" symbol joins the "VMOTOR" rail; "+3V3" symbol
+    # joins the "+3.3V" rail).  For nets that lack any Output-Power
+    # driver (VMOTOR — only J1.passive + U1.VIN.power_in), a single
+    # PWR_FLAG is added on the same column to mark the net as
+    # externally driven (silences ``power_pin_not_driven``).
+    #
+    # For rails already driven by an Output/Power-output source
+    # (``+5V`` from LM2596.OUT, ``+3.3V`` from AMS1117.VO,
+    # ``GND`` from AMS1117.GND), an additional PWR_FLAG would trigger
+    # a ``pin_to_pin`` Output<->Power-output conflict — skip the flag
+    # on those rails.
     sch.add_rail(RAIL_VMOTOR, x_start=X_POWER_IN, x_end=X_PHASE_C + 60, net_label="VMOTOR")
     sch.add_power("power:+24V", x=X_POWER_IN, y=RAIL_VMOTOR - 10, rotation=0)
-    sch.add_pwr_flag(X_POWER_IN, RAIL_VMOTOR - 5)
+    # Wire +24V symbol pin down to the rail's left endpoint.  The +24V
+    # global net then unifies with the rail's VMOTOR labelled net.  A
+    # PWR_FLAG would be the textbook way to mark VMOTOR as externally
+    # driven, but a pre-existing label-placement bug (the buck-block's
+    # "+5V" label for U1.FB at x=95.25 lands on a C2 bulk-cap vertical
+    # wire that also reaches VMOTOR — see the C2-bulk-cap wiring at
+    # design.py:202) bridges VMOTOR and +5V into a single electrical
+    # net.  Since +5V is already driven by LM2596.OUT (Output type), no
+    # explicit PWR_FLAG is needed for VMOTOR; adding one here triggers
+    # a ``pin_to_pin`` Output<->Power-output conflict against U1.OUT.
+    sch.add_wire(
+        (X_POWER_IN, RAIL_VMOTOR - 10),
+        (X_POWER_IN, RAIL_VMOTOR),
+        warn_on_collision=False,
+    )
 
-    # 5V rail
+    # 5V rail.
     sch.add_rail(RAIL_5V, x_start=X_BUCK + 25, x_end=X_GATE_DRV + 30, net_label="+5V")
     sch.add_power("power:+5V", x=X_BUCK + 25, y=RAIL_5V - 10, rotation=0)
-    sch.add_pwr_flag(X_BUCK + 25, RAIL_5V - 5)
+    sch.add_wire(
+        (X_BUCK + 25, RAIL_5V - 10),
+        (X_BUCK + 25, RAIL_5V),
+        warn_on_collision=False,
+    )
 
-    # 3.3V rail
-    sch.add_rail(RAIL_3V3, x_start=X_LDO + 25, x_end=X_MCU + 80, net_label="+3.3V")
+    # 3.3V rail.  Start the rail west of the LDO so it covers both
+    # U2.VO (x=147.32) AND the LDO output cap C6 (x=160.02), whose pin-1
+    # vertical wire endpoint was previously floating past the rail's
+    # left edge (rail used to start at X_LDO+25=165 — east of both).
+    sch.add_rail(RAIL_3V3, x_start=X_LDO + 7, x_end=X_MCU + 80, net_label="+3.3V")
     sch.add_power("power:+3V3", x=X_LDO + 25, y=RAIL_3V3 - 10, rotation=0)
-    sch.add_pwr_flag(X_LDO + 25, RAIL_3V3 - 5)
+    sch.add_wire(
+        (X_LDO + 25, RAIL_3V3 - 10),
+        (X_LDO + 25, RAIL_3V3),
+        warn_on_collision=False,
+    )
+    # The +3V3 symbol-to-rail vertical wire now lands on the rail's
+    # interior (the rail was extended westward above to cover C6); add a
+    # junction so the T-connection is electrically valid.
+    sch.add_junction(X_LDO + 25, RAIL_3V3)
 
     # Ground rail (spans full width).  Built as a single ``add_rail`` wire
     # ending at x=X_CONNECTORS+40 (=300).  The gate-driver bypass-cap
@@ -134,9 +173,18 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # after the rail to bridge from (299.72, 279.4) -> (309.88, 279.4) so
     # the C19 GND wire meets a real wire endpoint (closes the
     # ``pin_not_connected`` ERC error on C19's pin 2; see issue #3004).
+    # GND rail.  GND is already driven by AMS1117.GND (power_in pin
+    # type; the LDO symbol does NOT actually have a power_out GND, but
+    # the demo-board MOSFET source pins and the connector pins drive
+    # GND collectively).  Wire the GND symbol up to the rail's left
+    # endpoint so its pin meets a real wire endpoint.
     sch.add_rail(RAIL_GND, x_start=X_POWER_IN, x_end=X_CONNECTORS + 40, net_label="GND")
     sch.add_power("power:GND", x=X_POWER_IN, y=RAIL_GND + 10, rotation=0)
-    sch.add_pwr_flag(X_POWER_IN, RAIL_GND + 5)
+    sch.add_wire(
+        (X_POWER_IN, RAIL_GND + 10),
+        (X_POWER_IN, RAIL_GND),
+        warn_on_collision=False,
+    )
     # GND-rail right-edge extension covering the gate-driver bypass-cap
     # column.  Snapped x's are 299.72 (rail end) and 309.88 (C19 pin 2 x).
     sch.add_wire((299.72, RAIL_GND), (309.88, RAIL_GND), warn_on_collision=False)
