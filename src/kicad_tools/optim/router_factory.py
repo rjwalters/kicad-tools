@@ -58,6 +58,7 @@ See :func:`build_pcb_router_factory` for the public entry point used by
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -199,14 +200,12 @@ class PlacementRouterFactory:
         # this method, so we guard.
         reset = getattr(router, "_reset_for_new_trial", None)
         if callable(reset):
-            try:
+            # If the grid rebuild fails (e.g. pad now outside board bounds),
+            # let the inner GA see the partial state — it will report 0
+            # routability and the placement GA will penalize accordingly.
+            # Suppressing here keeps the factory robust.
+            with contextlib.suppress(Exception):
                 reset()
-            except Exception:
-                # If the grid rebuild fails (e.g. pad now outside board
-                # bounds), let the inner GA see the partial state — it will
-                # report 0 routability and the placement GA will penalize
-                # accordingly.  Suppressing here keeps the factory robust.
-                pass
 
         return router
 

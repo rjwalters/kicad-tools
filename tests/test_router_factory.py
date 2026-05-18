@@ -13,7 +13,6 @@ Verifies that :class:`PlacementRouterFactory`:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import pytest
@@ -23,7 +22,6 @@ from kicad_tools.optim.router_factory import (
     _build_factory_from_router,
     build_pcb_router_factory,
 )
-
 
 # ---------------------------------------------------------------------------
 # Lightweight fakes — just enough surface for the factory to deep-copy and

@@ -12,10 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from kicad_tools.optim.workflow import OptimizationWorkflow, WorkflowConfig
-
 
 # ---------------------------------------------------------------------------
 # Defaults

@@ -58,7 +58,6 @@ from kicad_tools.router.evaluators import (
 )
 from kicad_tools.schema.pcb import PCB
 
-
 # ---------------------------------------------------------------------------
 # Test budget — keep small so the gated benchmark still completes quickly.
 # Increase locally to validate against the epic's "50-100 configs in <5s" bar.
