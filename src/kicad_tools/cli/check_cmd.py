@@ -166,6 +166,31 @@ def main(argv: list[str] | None = None) -> int:
             "rules degrade to no-ops (Issue #2684)."
         ),
     )
+    # Issue #3061: auto-derive the pad_grid tolerance from each board's
+    # pad-offset histogram by default for the CLI.  Users can opt back into
+    # the fixed-0.05mm behaviour with --pad-grid-strict, or pin a custom
+    # value with --pad-grid-tolerance.
+    pad_grid_group = parser.add_mutually_exclusive_group()
+    pad_grid_group.add_argument(
+        "--pad-grid-strict",
+        action="store_true",
+        help=(
+            "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
+            "instead of auto-deriving per-board from the pad-offset "
+            "histogram (issue #3061).  Default: auto-derive."
+        ),
+    )
+    pad_grid_group.add_argument(
+        "--pad-grid-tolerance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Override the pad_grid L2 tolerance with an explicit value "
+            "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
+            "auto-derivation."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -267,8 +292,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Resolve pad_grid tolerance policy (issue #3061).
+    # Precedence: explicit value > strict mode > auto-derive (CLI default).
+    if args.pad_grid_tolerance is not None:
+        pad_grid_threshold: float | None = args.pad_grid_tolerance
+        pad_grid_auto_derive = False
+    elif args.pad_grid_strict:
+        pad_grid_threshold = None  # Falls through to DEFAULT_PAD_GRID_TOLERANCE_MM
+        pad_grid_auto_derive = False
+    else:
+        pad_grid_threshold = None
+        pad_grid_auto_derive = True
+
     # Run selected checks
-    results = run_selected_checks(checker, only_set, skip_set)
+    results = run_selected_checks(
+        checker,
+        only_set,
+        skip_set,
+        pad_grid_threshold=pad_grid_threshold,
+        pad_grid_auto_derive=pad_grid_auto_derive,
+    )
 
     # Apply errors-only filter
     violations = list(results.violations)
@@ -306,9 +349,33 @@ def run_selected_checks(
     checker: DRCChecker,
     only_set: set[str] | None,
     skip_set: set[str],
+    pad_grid_threshold: float | None = None,
+    pad_grid_auto_derive: bool = True,
 ) -> DRCResults:
-    """Run the selected DRC checks based on filters."""
+    """Run the selected DRC checks based on filters.
+
+    Args:
+        checker: The DRC checker pre-loaded with the PCB and rules.
+        only_set: Optional whitelist of check category names.
+        skip_set: Set of check category names to skip.
+        pad_grid_threshold: Explicit pad_grid L2 tolerance in mm, or
+            ``None`` to use the threshold-resolution policy below.
+            Issue #3061.
+        pad_grid_auto_derive: When ``True`` and ``pad_grid_threshold``
+            is ``None``, the pad_grid check derives the threshold from
+            the board's pad-offset histogram (issue #3061).  Defaults
+            to ``True`` for the CLI; ``False`` preserves the PR #3057
+            fixed-0.05mm behaviour.
+    """
     results = DRCResults()
+
+    # Build the pad_grid invocation as a thunk so the map below can
+    # remain uniform (every value is a zero-arg callable).
+    def _pad_grid_check() -> DRCResults:
+        return checker.check_pad_grid_alignment(
+            threshold=pad_grid_threshold,
+            auto_derive_threshold=pad_grid_auto_derive,
+        )
 
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
@@ -327,7 +394,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "match_group_length_skew": checker.check_match_group_length_skew,
         "netlist": checker.check_netlist,
-        "pad_grid": checker.check_pad_grid_alignment,
+        "pad_grid": _pad_grid_check,
         "placement": checker.check_footprint_placement,
         "silkscreen": checker.check_silkscreen,
         "single_pad_net": checker.check_single_pad_nets,

@@ -428,6 +428,30 @@ def _add_check_parser(subparsers) -> None:
             "(Issue #2684)."
         ),
     )
+    # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
+    # default for the CLI.  --pad-grid-strict opts back into the PR #3057
+    # fixed-0.05mm constant; --pad-grid-tolerance pins a custom value.
+    pad_grid_group = check_parser.add_mutually_exclusive_group()
+    pad_grid_group.add_argument(
+        "--pad-grid-strict",
+        action="store_true",
+        help=(
+            "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
+            "instead of auto-deriving per-board from the pad-offset "
+            "histogram (issue #3061).  Default: auto-derive."
+        ),
+    )
+    pad_grid_group.add_argument(
+        "--pad-grid-tolerance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Override the pad_grid L2 tolerance with an explicit value "
+            "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
+            "auto-derivation."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:

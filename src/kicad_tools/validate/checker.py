@@ -583,6 +583,7 @@ class DRCChecker:
         self,
         grid_resolution: float = 0.1,
         threshold: float | None = None,
+        auto_derive_threshold: bool = False,
     ) -> DRCResults:
         """Check that every pad aligns to the router grid.
 
@@ -596,11 +597,19 @@ class DRCChecker:
             grid_resolution: Router grid resolution in mm (default ``0.1``,
                 matching the ``Autorouter`` and ``KCT_ROUTE_GRID`` default).
             threshold: Maximum L2 deviation considered "on-grid", in mm.
-                Defaults to
+                When ``None`` and ``auto_derive_threshold`` is ``False``,
+                defaults to
                 :data:`kicad_tools.router.preflight.DEFAULT_PAD_GRID_TOLERANCE_MM`
                 (``0.05`` mm), chosen to clear stock KiCad library footprints
                 whose pads sit 0.03-0.05 mm off the 0.1 mm grid by design.
-                Genuine placement errors at >= 0.06 mm still flag.
+                Genuine placement errors at >= 0.06 mm still flag.  An
+                explicit ``threshold`` always wins over
+                ``auto_derive_threshold``.
+            auto_derive_threshold: When ``True`` and ``threshold`` is
+                ``None``, derive the threshold per-board from the
+                pad-offset histogram (issue #3061).  Defaults to
+                ``False`` so the Python API preserves PR #3057 behaviour;
+                ``kct check`` opts in by default.
 
         Returns:
             :class:`DRCResults` with one ``pad_grid`` violation (severity
@@ -624,6 +633,7 @@ class DRCChecker:
             grid_resolution=grid_resolution,
             threshold=threshold,
             clearance=self.design_rules.min_clearance_mm,
+            auto_derive_threshold=auto_derive_threshold,
         )
 
         results.rules_checked += 1
