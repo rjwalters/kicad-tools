@@ -583,6 +583,16 @@ cd kicad-tools
 # Set up development environment (installs all dev dependencies)
 uv sync --extra dev
 
+# Build the C++ router backend (REQUIRED for production routing speed,
+# delivers 10-100x A* speedup vs pure-Python; takes ~30s on first build,
+# cached thereafter). uv sync does NOT build this — fresh checkouts and
+# fresh worktrees need this step explicitly.
+uv run kct build-native
+
+# Verify the C++ backend is installed
+uv run kct build-native --check
+# Expected: "C++ backend: available (version 1.0.0)"
+
 # Run tests
 uv run pytest
 
@@ -592,6 +602,20 @@ uv run ruff check .
 # Format code
 uv run ruff format .
 ```
+
+> **Routing performance note**: Without the C++ backend, board routing falls
+> back to pure-Python A* — typically 5-10x slower per net, which can push
+> medium boards (e.g. board 07 in `boards/07-matchgroup-test/`) past the
+> default 6-minute CI cap. If `kct route` appears stuck or per-net log lines
+> take tens of seconds, run `kct build-native --check` first — a missing
+> extension is the most common cause.
+
+#### Fresh worktree checklist
+
+When creating a new git worktree (e.g. via `./.loom/scripts/worktree.sh`),
+the worktree's `.venv/` does not inherit the C++ extension built in the
+main checkout. After `cd` into the worktree, run `uv run kct build-native`
+once before any routing benchmarks.
 
 ### Available Commands
 

@@ -482,6 +482,53 @@ ladder). The two non-obvious cases:
 
 ## Performance
 
+### Native C++ Backend (Build First!)
+
+The router has a C++ A* implementation that delivers a **10-100x speedup**
+over pure Python for the inner pathfinding loop. **It is not built by
+`uv sync`** — you must explicitly run `kct build-native` once after every
+fresh checkout or new git worktree.
+
+```bash
+# Check whether the C++ extension is already built
+kct build-native --check
+# "C++ backend: available (version 1.0.0)"  <-- good
+# "C++ backend: not installed"              <-- run kct build-native
+
+# Build (takes ~30s; one-time cost per worktree)
+kct build-native
+```
+
+`kct route` automatically uses the C++ backend when it's present and falls
+back to pure-Python silently when it isn't. The routing log prints the
+active backend:
+
+```text
+Backend:    cpp v1.0.0 (native, 10-100x faster)   <-- C++ active
+Backend:    python (fallback)                     <-- C++ missing/broken
+```
+
+**If `kct route` appears stuck or per-net log lines show tens of seconds**,
+verify the backend before tuning anything else — a missing C++ extension is
+the single most common cause of router slowness on developer workstations
+and CI runners.
+
+```bash
+# Force backend selection (default = auto)
+kct route board.kicad_pcb --backend cpp     # require C++ (error if missing)
+kct route board.kicad_pcb --backend python  # force pure-Python
+```
+
+#### Fresh worktree gotcha
+
+When using git worktrees (`.loom/worktrees/issue-N/`), each worktree has
+its own `.venv/` and its own `src/kicad_tools/router/router_cpp.*.so`.
+Building in the main checkout does **not** propagate to worktrees. After
+`cd` into a new worktree, always run `uv run kct build-native` once
+before benchmarking routing performance.
+
+---
+
 ### Long-Running Routes (Checkpointing)
 
 Multi-layer boards with hundreds of nets can run for minutes. `kct route`
