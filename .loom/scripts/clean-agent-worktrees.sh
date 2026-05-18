@@ -71,40 +71,41 @@ find_repo_root() {
 }
 
 show_help() {
-    cat <<EOF
-${BLUE}clean-agent-worktrees.sh - Clean up stale .claude/worktrees/agent-* artifacts${NC}
-
-${YELLOW}USAGE:${NC}
-    clean-agent-worktrees.sh [OPTIONS]
-
-${YELLOW}OPTIONS:${NC}
-    --dry-run            Show what would be removed without doing it
-    --age-hours N        Threshold (in hours) below which a worktree is
-                         considered "recent". Default: 1. Only matters with
-                         --strict.
-    --strict             Skip a worktree if it is recent OR has active PIDs.
-                         Without --strict, only the PID gate causes a skip
-                         (recent-but-idle worktrees are removed).
-    --help, -h           Show this help
-
-${YELLOW}EXAMPLES:${NC}
-    # Preview
-    clean-agent-worktrees.sh --dry-run
-
-    # Default: clean any worktree with no active PIDs
-    clean-agent-worktrees.sh
-
-    # Conservative: also keep anything modified in the last 1h
-    clean-agent-worktrees.sh --strict
-
-    # Even more conservative: keep anything modified in last 24h
-    clean-agent-worktrees.sh --strict --age-hours 24
-
-${YELLOW}SAFETY:${NC}
-    The PID gate (lsof +d) is the primary safety signal: a worktree with any
-    process holding CWD inside it is NEVER removed. The age gate is only
-    consulted in --strict mode.
-EOF
+    # Use printf '%b' so the ANSI escape sequences embedded in $BLUE/$YELLOW/$NC
+    # are interpreted rather than printed literally. A plain `cat <<EOF` would
+    # emit raw `\033[…]` sequences.
+    printf '%b\n' "${BLUE}clean-agent-worktrees.sh - Clean up stale .claude/worktrees/agent-* artifacts${NC}"
+    printf '\n'
+    printf '%b\n' "${YELLOW}USAGE:${NC}"
+    printf '    clean-agent-worktrees.sh [OPTIONS]\n'
+    printf '\n'
+    printf '%b\n' "${YELLOW}OPTIONS:${NC}"
+    printf '    --dry-run            Show what would be removed without doing it\n'
+    printf '    --age-hours N        Threshold (in hours) below which a worktree is\n'
+    printf '                         considered "recent". Default: 1. Only matters with\n'
+    printf '                         --strict.\n'
+    printf '    --strict             Skip a worktree if it is recent OR has active PIDs.\n'
+    printf '                         Without --strict, only the PID gate causes a skip\n'
+    printf '                         (recent-but-idle worktrees are removed).\n'
+    printf '    --help, -h           Show this help\n'
+    printf '\n'
+    printf '%b\n' "${YELLOW}EXAMPLES:${NC}"
+    printf '    # Preview\n'
+    printf '    clean-agent-worktrees.sh --dry-run\n'
+    printf '\n'
+    printf '    # Default: clean any worktree with no active PIDs\n'
+    printf '    clean-agent-worktrees.sh\n'
+    printf '\n'
+    printf '    # Conservative: also keep anything modified in the last 1h\n'
+    printf '    clean-agent-worktrees.sh --strict\n'
+    printf '\n'
+    printf '    # Even more conservative: keep anything modified in last 24h\n'
+    printf '    clean-agent-worktrees.sh --strict --age-hours 24\n'
+    printf '\n'
+    printf '%b\n' "${YELLOW}SAFETY:${NC}"
+    printf '    The PID gate (lsof +d) is the primary safety signal: a worktree with any\n'
+    printf '    process holding CWD inside it is NEVER removed. The age gate is only\n'
+    printf '    consulted in --strict mode.\n'
 }
 
 # --- Arg parsing ---
@@ -194,7 +195,7 @@ if [[ -d "$AGENT_WT_DIR" ]]; then
             # know that *something* references the directory. Use exit status.
             # We also use -F pt so output is parseable.
             active_pids=$(lsof +d "$wt_path" -F pt 2>/dev/null \
-                | awk '/^p/{pid=substr($0,2)} /^tcwd/{print pid}' \
+                | awk '/^p/{pid=substr($0,2)} /^fcwd/{print pid}' \
                 | sort -u \
                 | tr '\n' ' ' \
                 | sed 's/ $//' || true)
