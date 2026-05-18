@@ -72,6 +72,7 @@ CHECK_CATEGORIES = [
     "silkscreen",
     "single_pad_net",
     "solder_mask",
+    "via_in_pad",
     "zones",
 ]
 
@@ -308,7 +309,12 @@ def run_selected_checks(
     """Run the selected DRC checks based on filters."""
     results = DRCResults()
 
-    # Map of category to check method
+    # Map of category to check method.  This dict MUST stay a superset
+    # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
+    # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
+    # value here).  The regression test in
+    # ``tests/test_check_cmd_coverage.py`` enforces the invariant for
+    # Issue #3046.
     check_methods = {
         "clearance": checker.check_clearances,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
@@ -324,6 +330,7 @@ def run_selected_checks(
         "silkscreen": checker.check_silkscreen,
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
+        "via_in_pad": checker.check_via_in_pad,
         "zones": checker.check_zones,
     }
 

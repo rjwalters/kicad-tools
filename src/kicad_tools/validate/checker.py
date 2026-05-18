@@ -97,6 +97,37 @@ class DRCChecker:
         profile = get_profile(manufacturer)
         self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz)
 
+    # The canonical ordered list of bound-method names that
+    # :meth:`check_all` invokes.  Exposed as a class attribute so the CLI
+    # dispatcher (``cli/check_cmd.py::run_selected_checks``) can assert
+    # at test time that its category dict is a superset of every check
+    # ``check_all`` runs (regression test for Issue #3046 -- the CLI used
+    # to silently omit ``check_via_in_pad`` and ``check_all`` used to
+    # omit ``check_pad_grid_alignment``).
+    #
+    # Adding a new ``check_X`` method to this class therefore requires
+    # updating exactly two places: this tuple AND the ``check_methods``
+    # dict in ``cli/check_cmd.py``.  The regression test in
+    # ``tests/test_check_cmd_coverage.py`` enforces the second half.
+    CHECK_ALL_METHODS: tuple[str, ...] = (
+        "check_clearances",
+        "check_diffpair_clearance_intra",
+        "check_diffpair_length_skew",
+        "check_diffpair_routing_continuity",
+        "check_dimensions",
+        "check_edge_clearances",
+        "check_impedance",
+        "check_match_group_length_skew",
+        "check_silkscreen",
+        "check_solder_mask_pads",
+        "check_footprint_placement",
+        "check_netlist",
+        "check_single_pad_nets",
+        "check_pad_grid_alignment",
+        "check_via_in_pad",
+        "check_zones",
+    )
+
     def check_all(
         self,
         filters: list[ViolationFilter] | None = None,
@@ -114,22 +145,10 @@ class DRCChecker:
         """
         results = DRCResults()
 
-        # Run each category of checks
-        results.merge(self.check_clearances())
-        results.merge(self.check_diffpair_clearance_intra())
-        results.merge(self.check_diffpair_length_skew())
-        results.merge(self.check_diffpair_routing_continuity())
-        results.merge(self.check_dimensions())
-        results.merge(self.check_edge_clearances())
-        results.merge(self.check_impedance())
-        results.merge(self.check_match_group_length_skew())
-        results.merge(self.check_silkscreen())
-        results.merge(self.check_solder_mask_pads())
-        results.merge(self.check_footprint_placement())
-        results.merge(self.check_netlist())
-        results.merge(self.check_single_pad_nets())
-        results.merge(self.check_via_in_pad())
-        results.merge(self.check_zones())
+        # Run each category of checks (order matches CHECK_ALL_METHODS).
+        for method_name in self.CHECK_ALL_METHODS:
+            method = getattr(self, method_name)
+            results.merge(method())
 
         # Apply filters if provided
         if filters:
