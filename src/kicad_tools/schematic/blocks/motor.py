@@ -899,6 +899,8 @@ class GateDriverBlock(CircuitBlock):
         bypass_caps: list[str] | None = None,
         cap_ref_start: int = 1,
         pin_nets: dict[str, str] | None = None,
+        bypass_cap_footprint: str | None = None,
+        auto_footprint: bool = False,
     ):
         """
         Create a gate driver block.
@@ -928,6 +930,17 @@ class GateDriverBlock(CircuitBlock):
                 For every entry, an alias port is also added under the
                 net name so callers can retrieve real pin coordinates via
                 ``block.port("<net>")``.
+            bypass_cap_footprint: Explicit footprint string (e.g.,
+                ``"Capacitor_SMD:C_0805_2012Metric"``) forwarded to each
+                bypass cap's ``add_symbol`` call.  When ``None`` (default),
+                no explicit footprint is set, preserving back-compat for
+                existing callers.  Takes precedence over ``auto_footprint``
+                when both are provided.  Mirrors the convention used by
+                :class:`DecouplingCaps` and the regulator blocks.
+            auto_footprint: If ``True``, forwarded as ``auto_footprint=True``
+                to each bypass cap's ``add_symbol`` call so the schematic's
+                footprint-selector profile chooses a footprint based on the
+                cap value.  Default ``False`` preserves back-compat.
         """
         super().__init__(sch, x, y)
         self.driver_type = driver_type
@@ -973,13 +986,22 @@ class GateDriverBlock(CircuitBlock):
             self.bootstrap_caps = []
 
         # Add bypass capacitors
+        # Build add_symbol kwargs once -- mirrors the DecouplingCaps pattern
+        # at blocks/power/passives.py:64-66 so the bypass caps inherit a
+        # footprint (explicit or auto-selected) rather than landing in the
+        # schematic with an empty footprint field (see issue #3009).
+        bypass_add_kwargs: dict = {"auto_footprint": auto_footprint}
+        if bypass_cap_footprint is not None:
+            bypass_add_kwargs["footprint"] = bypass_cap_footprint
         self.bypass_caps = []
         bypass_start = cap_ref_start + num_phases
         for i, cap_value in enumerate(bypass_caps):
             cap_ref = f"C{bypass_start + i}"
             cap_x = x + 20 + i * 10
             cap_y = y - 15
-            cap = sch.add_symbol("Device:C", cap_x, cap_y, cap_ref, cap_value)
+            cap = sch.add_symbol(
+                "Device:C", cap_x, cap_y, cap_ref, cap_value, **bypass_add_kwargs
+            )
             self.bypass_caps.append(cap)
             self.components[f"C_BYPASS{i + 1}"] = cap
 
