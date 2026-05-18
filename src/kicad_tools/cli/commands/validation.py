@@ -225,6 +225,11 @@ def run_check_command(args) -> int:
         sub_argv.append("--suppress-library")
     if getattr(args, "net_class_map", None):
         sub_argv.extend(["--net-class-map", args.net_class_map])
+    # Issue #3061: forward pad_grid tolerance flags.
+    if getattr(args, "pad_grid_strict", False):
+        sub_argv.append("--pad-grid-strict")
+    if getattr(args, "pad_grid_tolerance", None) is not None:
+        sub_argv.extend(["--pad-grid-tolerance", str(args.pad_grid_tolerance)])
     return check_main(sub_argv)
 
 
