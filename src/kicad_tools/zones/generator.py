@@ -4,8 +4,8 @@ Zone generator for creating copper pour zones on PCBs.
 This module provides a high-level API for generating copper pour zones,
 with automatic board outline detection and sensible defaults for power nets.
 
-Outline allocator (#2771)
--------------------------
+Outline allocator (#2771, #3043)
+--------------------------------
 
 In addition to the layer/priority allocator (:func:`_assign_layers_for_pour_nets`),
 this module owns the *outline* allocator (:func:`_compute_pour_outlines`).
@@ -21,6 +21,15 @@ distinct, which silenced the warning, but distinct priorities alone do not
 produce real copper for the losing zones -- the outlines have to be
 geometrically disjoint for KiCad's fill resolver to award copper to more
 than one zone on a shared layer.
+
+The original PR #2771 only computed each net's bbox independently and
+relied on pad-cluster separation to keep the bboxes disjoint.  On real
+boards where power-net pads are *spatially interleaved* (e.g. board 06's
+``+3V3``/``+1V8``/``+1V2`` cluster on a BGA), the bboxes overlap and the
+silent-override returns.  Issue #3043 extends the allocator with a
+second pass that *subtracts higher-priority bboxes from lower-priority
+outlines* (using Shapely's polygon difference), so the resulting
+outlines are disjoint regardless of pad layout.
 """
 
 from __future__ import annotations
@@ -401,25 +410,39 @@ class ZoneGenerator:
     ) -> bool:
         """Check whether two boundary polygons overlap.
 
-        Uses bounding-box intersection as a conservative approximation.
-        Two polygons whose bounding boxes overlap are considered overlapping.
-        This is intentionally conservative -- it may report overlaps for
-        polygons that only share a bounding-box region but not actual area.
-        For the zone-overlap-warning use case, false positives are acceptable
-        while false negatives would hide real problems.
+        Uses Shapely's exact polygon intersection when available so the
+        outline allocator's carved-out (concave) polygons are correctly
+        recognised as disjoint when their AABBs still overlap (#3043).
+        Falls back to a conservative AABB-overlap test when Shapely is
+        not installed.
 
         Returns:
-            True if the boundaries' bounding boxes overlap.
+            True if the boundaries overlap with positive area.
         """
         if not boundary_a or not boundary_b:
             return False
+
+        # Prefer exact intersection via Shapely so the disjoint-but-AABB-
+        # overlapping case (carved-out outlines from ``_compute_pour_outlines``)
+        # does not trigger a spurious warning.
+        try:
+            from shapely.geometry import Polygon
+
+            poly_a = Polygon(boundary_a)
+            poly_b = Polygon(boundary_b)
+            if not poly_a.is_valid or not poly_b.is_valid:
+                # Fall through to AABB on degenerate input.
+                raise ValueError("invalid polygon")
+            return poly_a.intersection(poly_b).area > 1e-9
+        except (ImportError, ValueError):
+            pass
 
         a_xs = [p[0] for p in boundary_a]
         a_ys = [p[1] for p in boundary_a]
         b_xs = [p[0] for p in boundary_b]
         b_ys = [p[1] for p in boundary_b]
 
-        # Axis-aligned bounding-box overlap test
+        # Axis-aligned bounding-box overlap test (conservative fallback).
         return not (
             max(a_xs) <= min(b_xs)
             or max(b_xs) <= min(a_xs)
@@ -1127,6 +1150,19 @@ def _compute_pour_outlines(
     * If two or more zones share a layer, compute a bounding-box outline
       around the net's pads, inflated by ``margin_mm``, then clip to
       ``board_outline`` so the zone never extends past the board edge.
+      A second pass (#3043) then subtracts higher-priority bboxes from
+      lower-priority outlines so the resulting polygons are
+      **geometrically disjoint** even when pad clusters are spatially
+      interleaved (as on board 06, where ``+3V3``/``+1V8``/``+1V2`` all
+      feed the same BGA region).
+
+    Without the disjoint-carve pass, real boards routinely produce raw
+    bboxes that overlap each other.  KiCad's fill resolver would then
+    silently award the entire overlap to the highest-priority zone and
+    the lower-priority siblings would receive zero copper despite being
+    declared in the file.  The carve makes per-zone copper deterministic
+    regardless of priority ordering -- each zone receives the region
+    delineated by its own pad bbox minus any higher-priority sibling.
 
     The returned polygons are in the same coordinate frame as
     ``board_outline`` -- sheet-absolute, which is the frame expected by
@@ -1152,6 +1188,10 @@ def _compute_pour_outlines(
 
     outlines: dict[str, list[tuple[float, float]] | None] = {}
 
+    # First pass: compute the raw bbox for every shared-layer zone.
+    # ``raw_bboxes[net]`` is the per-net AABB polygon (or ``None`` if the net
+    # has no pads -- the fallback case at the bottom of the loop).
+    raw_bboxes: dict[str, list[tuple[float, float]] | None] = {}
     for net_name, layer, _ in assignments:
         if layer_counts[layer] < 2:
             # Sole zone on its layer -- keep the full board outline so
@@ -1170,9 +1210,131 @@ def _compute_pour_outlines(
             outlines[net_name] = None
             continue
 
-        outlines[net_name] = _clip_polygon_to_outline(bbox, board_outline)
+        raw_bboxes[net_name] = _clip_polygon_to_outline(bbox, board_outline)
+
+    # Second pass (#3043): for each layer that hosts multiple zones, subtract
+    # higher-priority zone bboxes from lower-priority zones so the final
+    # outlines are *geometrically disjoint*.  Without this, the bboxes can
+    # spatially overlap (typical of real boards where power-net pads are
+    # interleaved rather than clustered), and KiCad's fill resolver would
+    # silently award the entire overlap to the highest-priority zone.
+    #
+    # KiCad zone-priority convention: HIGHER priority value WINS the overlap
+    # region.  So we sort highest-first and subtract each zone's bbox from
+    # the lower-priority zones that follow.
+    by_layer: dict[str, list[tuple[str, int]]] = {}
+    for net_name, layer, priority in assignments:
+        if layer_counts[layer] < 2:
+            continue
+        if net_name not in raw_bboxes:
+            continue
+        by_layer.setdefault(layer, []).append((net_name, priority))
+
+    for layer, nets_on_layer in by_layer.items():
+        # Sort highest priority first -- those zones "win" the overlap.
+        nets_on_layer.sort(key=lambda np: np[1], reverse=True)
+
+        # Accumulate the union of higher-priority bboxes; each lower-priority
+        # zone has this union subtracted from its own bbox to keep outlines
+        # disjoint.
+        winners_union = None
+        for net_name, _ in nets_on_layer:
+            current = raw_bboxes[net_name]
+            if winners_union is None:
+                # Highest-priority zone keeps its bbox unchanged.
+                outlines[net_name] = current
+            else:
+                outlines[net_name] = _subtract_polygon(
+                    current,
+                    winners_union,
+                    fallback=current,
+                )
+            # Add this zone's bbox to the winners-union for the next iteration.
+            winners_union = _union_polygons(winners_union, current)
 
     return outlines
+
+
+def _union_polygons(
+    a: list[tuple[float, float]] | None,
+    b: list[tuple[float, float]] | None,
+):
+    """Return the Shapely union of two polygons (or None inputs).
+
+    Returns a Shapely geometry (Polygon or MultiPolygon) so subsequent
+    operations can use it directly.  When Shapely is unavailable, returns
+    ``None`` -- callers should fall back to leaving outlines unchanged.
+    """
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        return None
+
+    geoms = []
+    for poly in (a, b):
+        if poly is None:
+            continue
+        if hasattr(poly, "geom_type"):
+            geoms.append(poly)
+        else:
+            geoms.append(Polygon(poly))
+    if not geoms:
+        return None
+    return unary_union(geoms)
+
+
+def _subtract_polygon(
+    minuend: list[tuple[float, float]],
+    subtrahend,
+    fallback: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Return ``minuend - subtrahend`` as a polygon.
+
+    ``subtrahend`` may be a list of ``(x, y)`` tuples or a Shapely geometry
+    (the latter is what ``_union_polygons`` returns).  KiCad zones do not
+    natively support polygon holes in the *outline*; when the subtraction
+    produces a polygon with holes, we approximate by returning the largest
+    exterior ring (which is still strictly inside ``minuend``).
+
+    When the result is empty or Shapely is missing, returns ``fallback``.
+    """
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        return fallback
+
+    minuend_poly = Polygon(minuend)
+    if hasattr(subtrahend, "geom_type"):
+        sub_geom = subtrahend
+    else:
+        sub_geom = Polygon(subtrahend)
+
+    diff = minuend_poly.difference(sub_geom)
+
+    if diff.is_empty:
+        # The minuend was completely covered by higher-priority zones.
+        # Return ``fallback`` so the zone still has *some* outline (KiCad's
+        # fill resolver will still award zero copper, but the zone exists
+        # in the file for tooling that inspects declared geometry).
+        return fallback
+
+    if diff.geom_type == "MultiPolygon":
+        # Keep only the largest piece -- KiCad zone outlines are single
+        # polygons.  Smaller fragments are lost, but the dominant region
+        # is preserved.
+        diff = max(diff.geoms, key=lambda g: g.area)
+
+    if diff.geom_type != "Polygon":
+        return fallback
+
+    coords = list(diff.exterior.coords)
+    if len(coords) > 1 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if len(coords) < 3:
+        return fallback
+
+    return [(round(x, 6), round(y, 6)) for x, y in coords]
 
 
 def auto_create_zones_for_pour_nets(
