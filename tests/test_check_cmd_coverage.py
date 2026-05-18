@@ -176,3 +176,172 @@ class TestCategoryListMatchesDispatcher:
             "check_methods dict.  Drift means --only/--skip silently "
             "accepts/rejects unknown categories."
         )
+
+
+class TestEntryPointRegistryParity:
+    """Cross-pipeline parity across the 6 DRC entry points (Issue #3044).
+
+    Every entry point listed below must resolve its rule universe through
+    :meth:`DRCChecker.check_all` (which is now :attr:`CHECK_ALL_METHODS`-
+    driven).  This guards against the failure mode behind #3044: the CLI
+    used to maintain a hand-rolled dict that drifted from ``check_all``
+    (Issue #3046 / PR #3055), and the audit pipeline hardcoded a literal
+    ``rule_id == "connectivity"`` filter (PR #3060) as a one-off
+    workaround.
+
+    The 6 entry points, per the issue's curator notes, are:
+
+    1. ``kct check`` CLI -- ``cli/check_cmd.py::run_selected_checks``.
+    2. :meth:`DRCChecker.check_all` library API (drives entry points 3-5).
+    3. ``kct fix-drc`` -- ``cli/fix_drc_cmd.py::_run_python_drc``.
+    4. ``kct reason`` -- ``cli/reason_cmd.py::main`` (DRC bootstrap).
+    5. ``kct route`` post-pass DRC -- ``cli/route_cmd.py::run_post_route_drc``.
+    6. ``ManufacturingAudit`` (used by ``kct audit`` / ``kct export`` /
+       ``kct fleet status``) -- ``audit/auditor.py::_check_drc``.
+
+    Entry points 3, 4, 5, 6 all delegate to ``check_all`` via a fresh
+    :class:`DRCChecker` instance, so the regression contract for them is
+    "they MUST NOT hand-roll their own method list" -- enforced
+    syntactically below.  Entry point 1 is already covered by the
+    sibling :class:`TestDispatcherIsSupersetOfCheckAll` (the CLI must be
+    a superset).
+
+    The advisory-rule classifier introduced for this issue
+    (:attr:`DRCChecker.ADVISORY_RULE_IDS`) is the documented escape
+    hatch: entry points that gate manufacturability (``_check_drc`` and,
+    indirectly, ``kct export``) MAY filter advisory rules out of their
+    blocking tally, but they MUST do so via the classifier -- not via
+    literal ``rule_id == "X"`` comparisons.
+    """
+
+    @staticmethod
+    def _read_source(module_path: str) -> str:
+        """Return the source text of a module file.
+
+        Resolves the module relative to ``src/kicad_tools/`` so the test
+        keeps working when run from any cwd inside the repo.
+        """
+        import importlib
+        from pathlib import Path
+
+        mod = importlib.import_module(module_path)
+        assert mod.__file__ is not None, f"{module_path} has no __file__"
+        return Path(mod.__file__).read_text()
+
+    def test_fix_drc_resolves_via_check_all(self) -> None:
+        """``kct fix-drc`` must use ``check_all`` -- not its own list."""
+        src = self._read_source("kicad_tools.cli.fix_drc_cmd")
+        assert "checker.check_all()" in src, (
+            "kct fix-drc must invoke checker.check_all() so it inherits "
+            "the unified rule registry.  See Issue #3044."
+        )
+
+    def test_reason_resolves_via_check_all(self) -> None:
+        """``kct reason`` must use ``check_all`` -- not its own list."""
+        src = self._read_source("kicad_tools.cli.reason_cmd")
+        assert "checker.check_all()" in src, (
+            "kct reason must invoke checker.check_all() so it inherits "
+            "the unified rule registry.  See Issue #3044."
+        )
+
+    def test_route_post_pass_resolves_via_check_all(self) -> None:
+        """``kct route`` post-pass DRC must use ``check_all``."""
+        src = self._read_source("kicad_tools.cli.route_cmd")
+        assert "checker.check_all()" in src, (
+            "kct route post-pass DRC must invoke checker.check_all() so "
+            "it inherits the unified rule registry.  See Issue #3044."
+        )
+
+    def test_audit_resolves_via_check_all(self) -> None:
+        """``ManufacturingAudit._check_drc`` must use ``check_all``."""
+        src = self._read_source("kicad_tools.audit.auditor")
+        assert "checker.check_all()" in src, (
+            "ManufacturingAudit._check_drc must invoke checker.check_all() "
+            "so it inherits the unified rule registry.  See Issue #3044."
+        )
+
+    def test_audit_uses_advisory_classifier_not_literal(self) -> None:
+        """The audit MUST filter advisory rules via the classifier, not
+        via literal ``rule_id == "X"`` comparisons.
+
+        This is the regression test for PR #3060's one-off workaround
+        (``v.rule_id != "connectivity"``).  When a future rule needs
+        advisory classification, adding it to
+        :attr:`DRCChecker.ADVISORY_RULE_IDS` should be sufficient; the
+        audit must never need a code change.
+        """
+        src = self._read_source("kicad_tools.audit.auditor")
+        # The classifier must be invoked from the audit.
+        assert "is_advisory_rule" in src, (
+            "ManufacturingAudit must invoke DRCChecker.is_advisory_rule "
+            "to filter advisory rules out of the blocking tally.  See "
+            "Issue #3044."
+        )
+        # And the literal-rule filter from PR #3060 must be gone.
+        assert 'rule_id != "connectivity"' not in src, (
+            "ManufacturingAudit must not filter advisory rules by "
+            "literal rule_id comparison.  Use DRCChecker.is_advisory_rule "
+            "instead.  See Issue #3044."
+        )
+
+    def test_advisory_rule_ids_contains_connectivity(self) -> None:
+        """The ``connectivity`` rule is the seed advisory rule.
+
+        It was reclassified from the literal audit-side filter (PR #3060)
+        to the central :attr:`DRCChecker.ADVISORY_RULE_IDS` set as part
+        of this issue.  Removing it from the set would silently change
+        every gating-aware entry point (audit, export) to treat
+        connectivity gaps as blocking -- which is exactly the
+        double-counting regression PR #3060 originally fixed.
+        """
+        assert "connectivity" in DRCChecker.ADVISORY_RULE_IDS, (
+            "connectivity must be classified as advisory; see PR #3060 "
+            "for the audit-side rationale (zone-bridged incomplete nets "
+            "are already classified by ConnectivityStatus, not DRC)."
+        )
+
+    def test_is_advisory_rule_classifier(self) -> None:
+        """The :meth:`DRCChecker.is_advisory_rule` classifier returns
+        True for advisory rule_ids and False for everything else."""
+        assert DRCChecker.is_advisory_rule("connectivity") is True
+        # Spot-check several blocking rules.
+        for rule_id in (
+            "clearance_pad_segment",
+            "via_in_pad",
+            "pad_grid",
+            "dimension_min_trace_width",
+            "edge_clearance",
+            "single_pad_net",
+        ):
+            assert DRCChecker.is_advisory_rule(rule_id) is False, (
+                f"{rule_id} must not be classified as advisory"
+            )
+
+    def test_entry_points_see_same_rule_universe_modulo_severity(self) -> None:
+        """All 6 entry points must see the same rule UNIVERSE.
+
+        ``check_all`` is the single source of truth.  Every entry point
+        either invokes ``check_all`` directly (entry points 3-6) or is
+        constrained by :class:`TestDispatcherIsSupersetOfCheckAll` to be
+        a superset (entry point 1).  This test consolidates the
+        invariant by asserting the ``check_all`` method names are
+        precisely the set of rules the CLI dispatcher exposes (no
+        accidental CLI-only or check_all-only methods).
+        """
+        checker = _build_minimal_checker()
+        category_to_method = _extract_dispatcher_methods(checker)
+
+        dispatcher_methods = set(category_to_method.values())
+        check_all_methods = set(DRCChecker.CHECK_ALL_METHODS)
+
+        # The CLI dispatcher is the entry point with the widest method
+        # set (it has both the check_all union AND any CLI-only methods
+        # like pad_grid had pre-#3055).  After #3055, the two must be
+        # identical.
+        assert dispatcher_methods == check_all_methods, (
+            "Entry-point parity violation: CLI dispatcher and check_all "
+            "must invoke the same set of check_* methods.  Differences: "
+            f"CLI-only={dispatcher_methods - check_all_methods}, "
+            f"check_all-only={check_all_methods - dispatcher_methods}.  "
+            "See Issue #3044."
+        )

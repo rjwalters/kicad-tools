@@ -130,6 +130,39 @@ class DRCChecker:
         "check_zones",
     )
 
+    # Per-rule severity classification (Issue #3044).
+    #
+    # Rules listed here are *advisory* -- they run in every entry point
+    # and their violations appear in JSON / table output, but downstream
+    # gating consumers (``ManufacturingAudit._check_drc``, ``kct export``
+    # preflight) MUST NOT treat them as blocking, because a sibling
+    # status field already classifies the same defect with finer-grained
+    # logic (e.g., ``ConnectivityStatus`` distinguishes zone-bridged
+    # incomplete nets from genuinely-unrouted nets).  All other rules
+    # default to ``blocking`` severity.
+    #
+    # This replaces the per-call-site hardcoded ``rule_id == "X"`` filter
+    # that PR #3060 used as a one-off workaround in ``auditor.py:761``.
+    # When adding a new rule whose severity differs from "blocking",
+    # update this set in ONE place; ``ManufacturingAudit._check_drc``
+    # (and any future advisory-aware consumers) will pick it up via the
+    # :meth:`is_advisory_rule` classifier.
+    #
+    # The standalone ``kct check`` CLI does NOT consult this set --
+    # advisory rules still surface their errors to CI consumers; only
+    # gating verdicts (audit / export readiness) filter on it.
+    ADVISORY_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
+
+    @classmethod
+    def is_advisory_rule(cls, rule_id: str) -> bool:
+        """Return True iff ``rule_id`` is classified as advisory.
+
+        Advisory rules are reported by every DRC entry point but do not
+        count toward manufacturability-blocking verdicts.  See
+        :attr:`ADVISORY_RULE_IDS` for the rationale and the current set.
+        """
+        return rule_id in cls.ADVISORY_RULE_IDS
+
     def check_all(
         self,
         filters: list[ViolationFilter] | None = None,
