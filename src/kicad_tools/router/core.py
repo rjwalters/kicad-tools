@@ -1580,6 +1580,50 @@ class Autorouter:
             foreign_tracks=foreign_tracks,
         )
 
+    def _update_router_segment_foreign_context(self, current_net: int) -> None:
+        """Update router foreign-net via context for new-segment clearance.
+
+        Issue #3002: Symmetric sibling of
+        :meth:`_update_router_via_foreign_context` (PR #2952 / Issue
+        #2947).  Where the via-foreign-context push protects a NEW via
+        from foreign segments / pads, this push protects a NEW segment
+        from foreign-net VIAs.
+
+        Background: ``pathfinder.Router._validate_route_clearance`` is
+        called pre-commit at :meth:`pathfinder._reconstruct_route` and
+        :meth:`pathfinder.route_bidirectional`.  It walks
+        ``self.grid.routes`` for foreign vias via
+        :meth:`Grid.validate_segment_clearance` -- but that only sees
+        vias already committed at the moment the segment validates.
+        Cross-net ordering bugs in the negotiated rip-up loop slip
+        through when net A's segment commits BEFORE net B's via lands
+        (board-04 SWDIO/BOOT0, PCB (143.8, 119.7) B.Cu).
+
+        This push gives the router a snapshot of every foreign-net via
+        already in ``self.routes`` at the START of the current net's
+        routing pass, including vias the negotiated post-iteration
+        re-validation hook may have just surfaced.  The router uses
+        :func:`segment_clears_foreign_via` (STANDARD threshold) to
+        reject candidate segments before they enter ``grid.routes``.
+
+        Same-net vias are filtered out here (matches the boundary
+        convention of :meth:`_update_router_via_foreign_context`).
+
+        Args:
+            current_net: The net ID being routed (foreign = vias whose
+                net != current_net).
+        """
+        if not hasattr(self.router, "set_segment_foreign_context"):
+            return  # C++ backend or test stub without the hook -- no-op.
+
+        foreign_vias = []
+        for route in self.routes:
+            if route.net == current_net:
+                continue
+            foreign_vias.extend(route.vias)
+
+        self.router.set_segment_foreign_context(foreign_vias=foreign_vias)
+
     def route_net(
         self,
         net: int,
@@ -1615,6 +1659,9 @@ class Autorouter:
         # ``_check_via_placement_cached`` can apply the same world-coord
         # clearance predicate the escape phase uses (PR #2945).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Push foreign-net via context so segment commit
+        # gating (``_validate_route_clearance``) sees up-to-date vias.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
 
@@ -5379,6 +5426,8 @@ class Autorouter:
         # interleaved path's ``self.router.route()`` calls honor the same
         # world-coord via clearance predicate route_net() does (PR #2952).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: N-port path also needs segment-vs-foreign-via gating.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
 
@@ -7694,6 +7743,10 @@ class Autorouter:
         # ``route_net()`` calls this on its own path; the negotiated
         # strategy bypasses ``route_net()`` so we wire it here.
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Negotiated path also needs segment-vs-foreign-via
+        # gating -- this is the very path where SWDIO/BOOT0 ordering
+        # bug at PCB (143.8, 119.7) B.Cu was observed.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -8028,6 +8081,9 @@ class Autorouter:
         # aware A* honors the world-coord via clearance predicate the
         # negotiated / route_net paths already invoke (PR #2952).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Corridor-aware A* also needs segment-vs-foreign-
+        # via gating.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
