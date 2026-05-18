@@ -785,20 +785,39 @@ def create_serpentine(
     length_to_add: float,
     min_amplitude: float = 0.3,
     min_segment_length: float = 1.0,
+    partner_route: Route | None = None,
+    intra_pair_clearance_mm: float | None = None,
 ) -> bool:
     """Add serpentine meander to a route to increase its length.
 
     Finds a suitable straight segment and replaces it with a serpentine
     pattern to add the required length.
 
+    When ``partner_route`` and ``intra_pair_clearance_mm`` are both
+    provided, the serpentine bulges AWAY from the partner trace (using
+    the same ``_outer_normal_hint`` logic as the audited Phase 3I
+    tuner) and is rejected via a DRC self-check (mirrors
+    ``_post_insertion_clearance_ok``) before being committed to the
+    route.  This prevents the inline shim from introducing
+    ``diffpair_clearance_intra`` violations on tightly-spaced pairs
+    (Issue #3003).
+
     Args:
         route: The route to modify
         length_to_add: Additional length needed in mm
         min_amplitude: Minimum serpentine amplitude in mm
         min_segment_length: Minimum segment length for serpentine in mm
+        partner_route: Optional partner trace; when provided alongside
+            ``intra_pair_clearance_mm`` the bulge direction is chosen
+            away from the partner and a clearance check is run before
+            committing.
+        intra_pair_clearance_mm: Optional edge-to-edge clearance floor
+            in mm.  Required for the clearance-aware path; ignored when
+            ``partner_route`` is ``None``.
 
     Returns:
-        True if serpentine was added, False if no suitable segment found
+        True if serpentine was added, False if no suitable segment
+        found OR the proposed bulge would violate the partner clearance.
     """
     if length_to_add <= 0:
         return False
@@ -850,13 +869,34 @@ def create_serpentine(
     perp_x = -dir_y
     perp_y = dir_x
 
+    # Issue #3003: when a partner trace is available, bias ``current_side``
+    # so the bulge points AWAY from the partner.  The default of +1 (the
+    # hardcoded pre-#3003 value) bulges blindly toward whichever side the
+    # perpendicular happens to face, which on a tight diff pair lands the
+    # serpentine right on top of the partner.  We reuse the same outer-
+    # normal heuristic as the audited Phase 3I tuner
+    # (``_outer_normal_hint`` in ``diffpair_length_tuning``): dot the
+    # perpendicular against the unit vector from the partner's closest
+    # point to the insertion segment's midpoint.  A positive dot means
+    # +1 already points outward; a negative dot means we must start at
+    # -1 to bulge outward.
+    initial_side = 1
+    if partner_route is not None and partner_route.segments:
+        from .diffpair_length_tuning import _outer_normal_hint
+
+        hint_x, hint_y = _outer_normal_hint(best_segment, partner_route)
+        # Dot the (segment-frame) perpendicular against the outer normal.
+        # Use the side whose perpendicular projection is non-negative.
+        if perp_x * hint_x + perp_y * hint_y < 0.0:
+            initial_side = -1
+
     # Create serpentine segments
     new_segments: list[Segment] = []
     step_length = seg_length / (num_bends + 1)
 
     current_x = best_segment.x1
     current_y = best_segment.y1
-    current_side = 1  # Alternates between +1 and -1
+    current_side = initial_side  # Alternates between +1 and -1
 
     for bend in range(num_bends + 1):
         # Move to next point along the segment direction
@@ -915,6 +955,35 @@ def create_serpentine(
         current_x = next_x
         current_y = next_y
 
+    # Issue #3003: DRC self-check before committing.  If the caller
+    # supplied a partner route and an intra_pair_clearance threshold,
+    # verify the new bulges do not violate that threshold against the
+    # partner.  On rejection, leave the route untouched and report
+    # failure -- the caller (match_pair_lengths -> route_differential_
+    # pair_coupled) will fall through to the length-warning path, which
+    # is a valid output (matches the no-suitable-segment branch).
+    if partner_route is not None and intra_pair_clearance_mm is not None:
+        from kicad_tools.core.geometry import segment_clearance
+
+        for new_seg in new_segments:
+            for pseg in partner_route.segments:
+                if pseg.layer != new_seg.layer:
+                    continue
+                clearance = segment_clearance(
+                    new_seg.x1,
+                    new_seg.y1,
+                    new_seg.x2,
+                    new_seg.y2,
+                    new_seg.width,
+                    pseg.x1,
+                    pseg.y1,
+                    pseg.x2,
+                    pseg.y2,
+                    pseg.width,
+                )
+                if clearance + 1e-9 < intra_pair_clearance_mm:
+                    return False
+
     # Replace the original segment with serpentine segments
     route.segments = (
         route.segments[:best_segment_idx] + new_segments + route.segments[best_segment_idx + 1 :]
@@ -928,19 +997,32 @@ def match_pair_lengths(
     n_route: Route,
     max_delta: float,
     add_serpentines: bool = True,
+    intra_pair_clearance_mm: float | None = None,
 ) -> bool:
     """Match lengths of differential pair traces.
 
     Adds serpentine meander to the shorter trace to match lengths.
+
+    Issue #3003: when ``intra_pair_clearance_mm`` is provided, the
+    serpentine generator runs the clearance-aware path
+    (bulge-away-from-partner + DRC self-check).  When omitted, the
+    legacy unconditional bulge path is preserved for backward
+    compatibility with callers that have no notion of intra-pair
+    clearance.
 
     Args:
         p_route: Positive trace route
         n_route: Negative trace route
         max_delta: Maximum allowed length difference in mm
         add_serpentines: Whether to add serpentines (if False, just check)
+        intra_pair_clearance_mm: Optional intra-pair clearance floor in
+            mm; when provided the serpentine is bulged away from the
+            partner and DRC-checked against it before commit.
 
     Returns:
         True if lengths are matched (within tolerance), False otherwise
+        (either lengths still mismatched OR the proposed serpentine
+        would violate the partner clearance and was rejected).
     """
     p_length = calculate_route_length([p_route])
     n_length = calculate_route_length([n_route])
@@ -956,9 +1038,19 @@ def match_pair_lengths(
     length_to_add = delta - max_delta * 0.5  # Leave some margin
 
     if p_length < n_length:
-        return create_serpentine(p_route, length_to_add)
+        return create_serpentine(
+            p_route,
+            length_to_add,
+            partner_route=n_route if intra_pair_clearance_mm is not None else None,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+        )
     else:
-        return create_serpentine(n_route, length_to_add)
+        return create_serpentine(
+            n_route,
+            length_to_add,
+            partner_route=p_route if intra_pair_clearance_mm is not None else None,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+        )
 
 
 class DiffPairRouter:
@@ -1542,25 +1634,65 @@ class DiffPairRouter:
         warning = None
 
         if delta > pair.rules.max_length_delta:
-            print(f"    Length mismatch: {delta:.3f}mm, attempting serpentine...")
+            # Issue #3003: gate the inline serpentine shim on
+            # ``length_critical=True``.  The intent is that length
+            # matching for length-critical pairs is performed by the
+            # audited Phase 3I tuner (``tune_diff_pair_skew``), which
+            # already runs an outer-normal bulge + post-insertion DRC
+            # self-check.  For pairs that are NOT length_critical the
+            # shim used to bulge blindly into the partner trace,
+            # producing ``diffpair_clearance_intra`` violations on
+            # tightly-spaced pairs.
+            #
+            # Look up the per-pair ``NetClassRouting`` via the autorouter's
+            # ``net_class_map`` (keyed by positive net name -- both halves
+            # share the same class).  When no class is configured (the
+            # synthetic-test case) we default to length_critical=True so
+            # the legacy code path remains exercised, but we still pass
+            # ``intra_pair_clearance_mm`` so the bulge is partner-aware.
+            net_class_map = getattr(self.autorouter, "net_class_map", None) or {}
+            net_class = net_class_map.get(pair.positive.net_name)
+            if net_class is not None:
+                length_critical = bool(net_class.length_critical)
+                intra_clearance = net_class.effective_intra_pair_clearance()
+            else:
+                length_critical = True
+                intra_clearance = self.autorouter.rules.trace_clearance
 
-            # Try to add serpentine to shorter route
-            if p_routes and n_routes:
-                matched = match_pair_lengths(
-                    p_routes[0],
-                    n_routes[0],
-                    pair.rules.max_length_delta,
-                    add_serpentines=True,
+            if not length_critical:
+                print(
+                    f"    Length mismatch: {delta:.3f}mm; "
+                    f"net class {pair.positive.net_name!r} is NOT length_critical, "
+                    "skipping inline serpentine (Phase 3I tuner will handle "
+                    "this pair if --length-match-diffpairs is enabled)."
                 )
+            else:
+                print(f"    Length mismatch: {delta:.3f}mm, attempting serpentine...")
 
-                if matched:
-                    # Recalculate lengths
-                    p_length = calculate_route_length(p_routes)
-                    n_length = calculate_route_length(n_routes)
-                    pair.routed_length_p = p_length
-                    pair.routed_length_n = n_length
-                    delta = pair.length_delta
-                    print(f"    After serpentine: delta={delta:.3f}mm")
+                # Try to add serpentine to shorter route
+                if p_routes and n_routes:
+                    matched = match_pair_lengths(
+                        p_routes[0],
+                        n_routes[0],
+                        pair.rules.max_length_delta,
+                        add_serpentines=True,
+                        intra_pair_clearance_mm=intra_clearance,
+                    )
+
+                    if matched:
+                        # Recalculate lengths
+                        p_length = calculate_route_length(p_routes)
+                        n_length = calculate_route_length(n_routes)
+                        pair.routed_length_p = p_length
+                        pair.routed_length_n = n_length
+                        delta = pair.length_delta
+                        print(f"    After serpentine: delta={delta:.3f}mm")
+                    else:
+                        print(
+                            "    Serpentine rejected (no suitable segment OR "
+                            "would violate intra-pair clearance); falling through "
+                            "to length-mismatch warning."
+                        )
 
         if delta > pair.rules.max_length_delta:
             warning = LengthMismatchWarning(
