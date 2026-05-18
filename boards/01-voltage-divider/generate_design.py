@@ -422,165 +422,137 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
+def _count_vout_segments(routed_pcb_path: Path) -> int:
+    """Count ``(segment ...)`` entries with ``(net "VOUT")`` in a routed PCB.
+
+    Used as a post-subprocess guard against the Issue #3031 regression: the
+    negotiated router can produce a routed PCB whose VOUT net has zero
+    traced segments (silent failure mode in which ``nets_routed`` over-counts
+    pre-placed pads).  We re-read the file and scan it directly so the
+    guarantee survives the migration to ``kct route`` (no in-process
+    ``router`` object to inspect any more).
+    """
+    import re
+
+    text = routed_pcb_path.read_text()
+
+    # Resolve the VOUT net number from the file's net table.  KiCad writes
+    # ``(net N "NAME")`` entries near the top of the PCB.
+    net_match = re.search(r'\(net\s+(\d+)\s+"VOUT"\)', text)
+    if not net_match:
+        # VOUT not present at all -- treat as zero segments so the caller
+        # can surface the regression rather than silently passing.
+        return 0
+    vout_net_id = int(net_match.group(1))
+
+    # ``(segment ... (net N) ...)`` -- match each (segment ...) block and
+    # check its (net N) child.  Non-greedy match on a depth-1 paren group.
+    segment_count = 0
+    for seg_match in re.finditer(
+        r"\(segment\b[^()]*(?:\([^()]*\)[^()]*)*\)",
+        text,
+    ):
+        block = seg_match.group(0)
+        net_in_seg = re.search(r"\(net\s+(\d+)\)", block)
+        if net_in_seg and int(net_in_seg.group(1)) == vout_net_id:
+            segment_count += 1
+    return segment_count
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """
-    Route the PCB using the autorouter.
+    """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
-    Returns True if all nets were routed successfully.
-    """
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
-    from kicad_tools.router.auto_pour import auto_skip_pour_nets
-    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    Returns True if ``kct route`` reports full success (return code 0);
+    False if it produced a partial routing or the post-subprocess
+    Issue #3031 guard (VOUT must have at least one segment) trips.
 
+    Why subprocess (not the in-process ``Autorouter`` API):
+
+    The in-process ``router.route_all_negotiated()`` path on this board
+    requires manual replication of carve-out logic that ``kct route``
+    applies automatically (pour-net classification, auto-zone emission,
+    optimizer pass, artifact cleanup).  PR #3034 added all of that as
+    inline code -- ~170 LOC duplicating what ``kct route`` already does
+    in production.  Issue #3047 migrates board 01 to the subprocess
+    pattern that boards 02 / 05 / 07 use so the gold-standard examples
+    stay aligned with the production CLI and don't drift when the router
+    internals evolve.
+
+    The Issue #3031 zero-segment regression guard for VOUT is preserved
+    via a post-subprocess file read (see ``_count_vout_segments``).
+    """
     print("\n" + "=" * 60)
     print("Routing PCB...")
     print("=" * 60)
 
-    # Configure design rules
-    # Note: grid_resolution should be < trace_clearance for reliable DRC
-    rules = DesignRules(
-        grid_resolution=0.1,  # 0.1mm grid (fine for DRC compliance)
-        trace_width=0.3,  # 0.3mm traces
-        trace_clearance=0.2,  # 0.2mm clearance
-        via_drill=0.3,  # 0.3mm via drill
-        via_diameter=0.6,  # 0.6mm via pad
-    )
+    # GND is a pour net (auto-poured into a copper zone by ``kct route``).
+    # VIN / VOUT are signal nets on this board and must be routed as
+    # traces, so they are NOT in skip_nets.  ``kct route`` handles the
+    # pour-without-zone carve-out internally (Issue #3031, Issue #1841).
+    skip_nets = ["GND"]
 
-    print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Grid resolution: {rules.grid_resolution}mm")
-    print(f"   Trace width: {rules.trace_width}mm")
-    print(f"   Clearance: {rules.trace_clearance}mm")
-
-    # Mirror what ``kct route`` does: pour-classified nets (VIN/VOUT here)
-    # without copper zones must be routed as signals, otherwise the
-    # negotiated router's _filter_pour_nets() will skip them and leave the
-    # PCB empty (Issue #3031, Issue #1841).
-    skip_nets = ["GND"]  # GND is a pour net, not routed as traces
-    _skipped, no_zone_nets = auto_skip_pour_nets(input_path, skip_nets, quiet=True)
-
-    # Load the PCB
-    router, net_map = load_pcb_for_routing(
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
-    if no_zone_nets:
-        router._pour_nets_without_zones = set(no_zone_nets)
-        print(f"   Routing pour-classified nets as signals (no zones): {sorted(no_zone_nets)}")
+        "--output",
+        str(output_path),
+        "--strategy",
+        "negotiated",
+        "--iterations",
+        "30",
+        "--per-net-timeout",
+        "30",
+        "--timeout",
+        "240",
+        "--seed",
+        "42",
+        "--skip-nets",
+        ",".join(skip_nets),
+    ]
 
-    print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
+    print(f"\n1. Input: {input_path}")
+    print(f"   Output: {output_path}")
+    print(f"   Skipping nets: {skip_nets}")
+    print(f"   Command: {' '.join(cmd)}")
+    print("\n2. Routing...")
 
-    # Route all nets using the negotiated congestion router (Issue #2794).
-    # The legacy ``route_all()`` path silently produces zero segments on this
-    # board (Issue #3031) — VOUT in particular ends up with no routed traces
-    # even though the success counter reads 2/3 from pre-placed power rails.
-    print("\n2. Routing nets...")
-    router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0)
+    result = subprocess.run(cmd, capture_output=False, text=True)
 
-    # Mirror what ``kct route`` does post-routing: strip net-0 orphan traces
-    # left by the sub-grid escape pre-pass so the connectivity check counts
-    # only real per-net segments.  Without this, the escape pre-pass orphans
-    # cause ``get_statistics`` to under-report ``nets_routed`` even when DRC
-    # passes.
-    router.cleanup_artifacts()
+    if not output_path.exists():
+        print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
+        return False
 
-    # Count nets actually targeted for routing (multi-pad signal nets).
-    # Single-pad nets and pour nets are excluded from the denominator so the
-    # success metric mirrors ``kct route``'s reporting.
-    multi_pad_net_ids = {
-        net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-    }
+    # ``kct route`` returns 0 on full success and a non-zero code on
+    # partial / failed routing.  Either way it writes a routed PCB to
+    # ``output_path``; downstream DRC + manufacturing checks decide if
+    # the partial output is acceptable.
+    success = result.returncode == 0
 
-    # Get statistics before optimization
-    stats_before = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
-
-    print("\n3. Raw routing results (before optimization):")
-    print(f"   Routes created: {stats_before['routes']}")
-    print(f"   Segments: {stats_before['segments']}")
-    print(f"   Vias: {stats_before['vias']}")
-    print(f"   Total length: {stats_before['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats_before['nets_routed']}")
-
-    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
-    print("\n4. Optimizing traces...")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    optimizer = TraceOptimizer(config=opt_config)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    # Get statistics after optimization
-    stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
-
-    segments_before = stats_before["segments"]
-    segments_after = stats["segments"]
-    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
-
-    print(f"   Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
-    print(f"   Vias: {stats_before['vias']} -> {stats['vias']}")
-
-    print("\n5. Final routing results:")
-    print(f"   Routes created: {stats['routes']}")
-    print(f"   Segments: {stats['segments']}")
-    print(f"   Vias: {stats['vias']}")
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    # Save routed PCB
-    print(f"\n6. Saving routed PCB: {output_path}")
-
-    original_content = input_path.read_text()
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-
-    # Guard against the Issue #3031 regression: the negotiated router can
-    # still return a routed PCB with zero segments on a given signal net if
-    # the loaded pad geometry is degenerate.  VOUT is the only true signal
-    # net on this board (VIN/GND are power rails pre-placed at footprint
-    # generation), so if it has no segments the manufactured board is wrong
-    # regardless of what nets_routed reports.
-    vout_net_id = next((nid for name, nid in net_map.items() if name == "VOUT"), None)
-    if vout_net_id is not None:
-        vout_segments = sum(len(r.segments) for r in router.routes if r.net == vout_net_id)
-        print(f"\n   VOUT segments routed: {vout_segments}")
-        if vout_segments == 0:
-            print(
-                "   ERROR: VOUT has zero routed segments — this is the "
-                "Issue #3031 regression. The routed PCB is not manufacturable."
-            )
-            return False
-
-    # Success = every targeted multi-pad net has all its pads connected.
-    # Skipped nets (e.g. GND, pour-with-zone nets) are excluded from the
-    # denominator so the gold-standard summary matches ``kct route``'s
-    # reporting on this board.
-    nets_to_route = len(multi_pad_net_ids)
-    success = stats["nets_routed"] == nets_to_route
+    # Issue #3031 regression guard, preserved post-migration: VOUT is the
+    # only true signal net on this board (VIN / GND are power rails
+    # pre-placed at footprint generation).  If VOUT has zero routed
+    # segments in the output PCB, the manufactured board is wrong --
+    # regardless of what ``kct route``'s success counter reports.
+    vout_segments = _count_vout_segments(output_path)
+    print(f"\n   VOUT segments routed: {vout_segments}")
+    if vout_segments == 0:
+        print(
+            "   ERROR: VOUT has zero routed segments in the output PCB -- "
+            "this is the Issue #3031 regression. The routed PCB is not "
+            "manufacturable."
+        )
+        return False
 
     if success:
-        print(f"\n   SUCCESS: All {nets_to_route} multi-pad signal nets routed!")
+        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
+        print(
+            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
+            "(partial routing; downstream DRC will continue)"
+        )
 
     return success
 
