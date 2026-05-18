@@ -29,6 +29,16 @@
 # Schema:
 #   tolerances:
 #     <path-relative-to-repo-root>: <max_errors>
+#   manufacturers:                      # optional, default --mfr jlcpcb
+#     <path-relative-to-repo-root>: <profile-name>
+#
+# Default behaviour: every routed PCB is measured with `kct check --mfr
+# jlcpcb` (the standard tier most boards target).  A board whose design
+# intentionally requires a different profile -- e.g. board-04 routes with
+# `--micro-via` GND stitching that is only legal under jlcpcb-tier1's
+# Capability-Plus process, even though most boards target the stricter
+# default tier -- can override the profile here so the CI gate measures
+# the same rules its `generate_design.py` actually targets.
 #
 # Coord-space fix (PR #2753 / issue #2742) -- IMPORTANT:
 #   Prior to PR #2753, `PCB.load()` left `Segment.start`/`end`, `Via.position`,
@@ -303,4 +313,37 @@ tolerances:
   # Exit clause: drop to 0 once the OSC_OUT cluster (2 segment-via +
   # 2 pad-via at U2.5/U2.7 on the LQFP-48 0.5mm-pitch geometry) is
   # resolved by pin-edge fanout or a smaller via tier.
+  #
+  # Issue #3033 / PR #3038 (this entry's most recent touch):
+  #   Board-04's stitch step now uses `--mfr jlcpcb-tier1 --micro-via`
+  #   to recover the U2.23 LQFP-48 corner GND pad that the standard
+  #   0.6mm via cannot fit (drops stitch skips 2 -> 1).  Micro-vias
+  #   are legal under jlcpcb-tier1 (Capability Plus) but report as
+  #   `via_in_pad` errors under the strict default `--mfr jlcpcb`.
+  #   The CI gate measured 7 errors under default jlcpcb (3 via_in_pad
+  #   + 2 clearance_segment_via + 2 clearance_pad_via) vs 4 under
+  #   jlcpcb-tier1 (the cluster matching this floor).
+  #
+  #   Rather than inflate this floor to 7 and silently grandfather the
+  #   3 designed-in micro-vias as "tolerable defects", the CI gate
+  #   measures board-04 with its actual target profile via the
+  #   `manufacturers:` mapping below (see the schema at the top of
+  #   the file).  The floor of 4 continues to track ONLY real OSC_OUT
+  #   geometry violations under the profile this board ships against.
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 4
+
+# Per-board manufacturer overrides for the CI gate (optional).
+#
+# Default behaviour: every routed PCB is measured with `kct check --mfr
+# jlcpcb`.  Override here when a board's `generate_design.py` deliberately
+# targets a different profile.  Adding an entry is a documented design
+# choice -- not a way to silence DRC errors -- so it requires reviewer
+# sign-off in the PR that introduces the override.
+manufacturers:
+  # Board-04 routes GND stitching with `--micro-via` (drops to a
+  # 0.3/0.15mm via tier) to recover the U2.23 LQFP-48 corner GND pad
+  # that the standard 0.6mm via cannot fit.  Micro-vias are part of
+  # jlcpcb-tier1's Capability-Plus process, so the CI gate measures
+  # this board against the same `--mfr jlcpcb-tier1` profile the
+  # design ships against (issue #3033 / PR #3038).
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: jlcpcb-tier1

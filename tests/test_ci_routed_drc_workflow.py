@@ -276,6 +276,66 @@ class TestHelperLoadAllowlist:
             self.helper.load_allowlist(f)
 
 
+class TestHelperLoadManufacturers:
+    """Unit tests for ``load_manufacturers`` -- the optional per-board
+    ``--mfr`` profile override map (issue #3033 / PR #3038).  The map is
+    a separate top-level mapping in the same YAML file so the original
+    ``load_allowlist`` API and its tests stay backward-compatible."""
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        """A missing YAML file means every board uses the default profile."""
+        assert self.helper.load_manufacturers(tmp_path / "does-not-exist.yml") == {}
+
+    def test_no_manufacturers_key_returns_empty(self, tmp_path: Path) -> None:
+        """A YAML file with only ``tolerances:`` (the common case) returns
+        an empty manufacturers map; every board uses the default profile."""
+        f = tmp_path / "tolerances-only.yml"
+        f.write_text("tolerances:\n  boards/x/output/x_routed.kicad_pcb: 1\n")
+        assert self.helper.load_manufacturers(f) == {}
+
+    def test_valid_manufacturers_parses(self, tmp_path: Path) -> None:
+        f = tmp_path / "with-mfr.yml"
+        f.write_text(
+            "tolerances:\n"
+            "  boards/04-y/output/y_routed.kicad_pcb: 4\n"
+            "manufacturers:\n"
+            "  boards/04-y/output/y_routed.kicad_pcb: jlcpcb-tier1\n"
+        )
+        assert self.helper.load_manufacturers(f) == {
+            "boards/04-y/output/y_routed.kicad_pcb": "jlcpcb-tier1",
+        }
+
+    def test_manufacturers_must_be_mapping(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad-mfr.yml"
+        f.write_text("manufacturers:\n  - oops\n")
+        with pytest.raises(ValueError, match="'manufacturers' field must be a mapping"):
+            self.helper.load_manufacturers(f)
+
+    def test_empty_string_profile_rejected(self, tmp_path: Path) -> None:
+        f = tmp_path / "empty-profile.yml"
+        f.write_text("manufacturers:\n  boards/x/output/x_routed.kicad_pcb: ''\n")
+        with pytest.raises(ValueError, match="non-empty string profile name"):
+            self.helper.load_manufacturers(f)
+
+    def test_non_string_profile_rejected(self, tmp_path: Path) -> None:
+        f = tmp_path / "int-profile.yml"
+        f.write_text("manufacturers:\n  boards/x/output/x_routed.kicad_pcb: 42\n")
+        with pytest.raises(ValueError, match="non-empty string profile name"):
+            self.helper.load_manufacturers(f)
+
+    def test_live_allowlist_manufacturers_load(self) -> None:
+        """The real allowlist must load cleanly through the manufacturers
+        reader too (mirrors TestRealAllowlistRoundtrip for the new field)."""
+        result = self.helper.load_manufacturers(ALLOWLIST_PATH)
+        assert isinstance(result, dict)
+        for key, value in result.items():
+            assert isinstance(key, str)
+            assert isinstance(value, str) and value
+
+
 class TestHelperCheckFile:
     """Unit tests for ``check_file`` -- the per-PCB gate logic.
 
@@ -337,6 +397,35 @@ class TestHelperCheckFile:
         assert "routed-drc-tolerance.yml" in msg
         assert "5 error" in msg
         assert errors == 5
+
+    def test_mfr_override_forwards_to_count_errors(self) -> None:
+        """Issue #3033 / PR #3038: the per-board `manufacturers:` override
+        must reach ``count_errors`` as the ``mfr`` keyword (not be silently
+        dropped).  Pin this so a future refactor of the call chain doesn't
+        regress board-04's tier-aware measurement."""
+        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+            passed, msg, errors = self.helper.check_file(
+                Path("foo.kicad_pcb"), allowed=4, mfr="jlcpcb-tier1"
+            )
+        assert passed
+        assert errors == 4
+        # The mfr must propagate verbatim to count_errors.
+        mock.assert_called_once()
+        call_kwargs = mock.call_args.kwargs
+        assert call_kwargs.get("mfr") == "jlcpcb-tier1"
+        # And surface in the human-readable message so contributors
+        # can tell which profile produced the count.
+        assert "jlcpcb-tier1" in msg
+
+    def test_mfr_default_is_jlcpcb(self) -> None:
+        """When no override is supplied, ``check_file`` must fall back to
+        the strict ``jlcpcb`` profile (the historical default)."""
+        with patch.object(self.helper, "count_errors", return_value=0) as mock:
+            self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
+        call_kwargs = mock.call_args.kwargs
+        # Default may be passed explicitly or omitted; both routes resolve
+        # to "jlcpcb" via the function signature default.
+        assert call_kwargs.get("mfr", self.helper.DEFAULT_MANUFACTURER) == "jlcpcb"
 
 
 class TestHelperMain:
@@ -615,6 +704,69 @@ class TestMainDriftWarningEmission:
         assert "::warning file=" in proc.stdout
         assert rel_pcb in proc.stdout
         assert "Tighten to 15" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# main() integration: per-board manufacturer overrides (issue #3033 / PR #3038).
+# ---------------------------------------------------------------------------
+
+
+class TestMainManufacturerOverride:
+    """Integration tests for ``main()`` honoring the optional ``manufacturers:``
+    map (issue #3033 / PR #3038).  Pins that a board listed under the
+    overrides actually has its overridden profile reach ``count_errors``,
+    and that boards NOT listed continue to use the default ``jlcpcb``
+    profile (the historical behavior)."""
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def _make_pcb(self, tmp_path: Path) -> Path:
+        pcb_dir = tmp_path / "boards" / "04-test" / "output"
+        pcb_dir.mkdir(parents=True)
+        pcb = pcb_dir / "test_routed.kicad_pcb"
+        pcb.touch()
+        return pcb
+
+    def test_per_board_mfr_override_reaches_count_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A board with a ``manufacturers:`` entry must have its overridden
+        profile passed to ``count_errors`` via the ``mfr`` keyword."""
+        # Create the placeholder PCB file on disk; main() will look it up
+        # via Path(rel).is_file() relative to cwd.
+        self._make_pcb(tmp_path)
+        # main() resolves the file via Path(...).is_file() from cwd and
+        # then strips cwd via Path.resolve().relative_to(Path.cwd()) for
+        # the allowlist lookup key.  chdir into tmp_path so the rel path
+        # resolves correctly on disk AND the lookup key matches the
+        # allowlist entry.
+        monkeypatch.chdir(tmp_path)
+        rel = "boards/04-test/output/test_routed.kicad_pcb"
+        allowlist = tmp_path / "tolerance.yml"
+        allowlist.write_text(f"tolerances:\n  {rel}: 4\nmanufacturers:\n  {rel}: jlcpcb-tier1\n")
+        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+            rc = self.helper.main(["--allowlist", str(allowlist), rel])
+        assert rc == 0
+        mock.assert_called_once()
+        assert mock.call_args.kwargs.get("mfr") == "jlcpcb-tier1"
+
+    def test_unlisted_board_uses_default_mfr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A board with no ``manufacturers:`` entry must continue to use
+        the default ``jlcpcb`` profile (backward compatibility)."""
+        self._make_pcb(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        rel = "boards/04-test/output/test_routed.kicad_pcb"
+        allowlist = tmp_path / "tolerance.yml"
+        # tolerances entry only; no manufacturers section at all.
+        allowlist.write_text(f"tolerances:\n  {rel}: 4\n")
+        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+            rc = self.helper.main(["--allowlist", str(allowlist), rel])
+        assert rc == 0
+        mock.assert_called_once()
+        assert mock.call_args.kwargs.get("mfr") == self.helper.DEFAULT_MANUFACTURER
 
 
 # ---------------------------------------------------------------------------
