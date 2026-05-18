@@ -2196,6 +2196,20 @@ def route_with_layer_escalation(
     # on the plane connections instead of routing power as signals.
     last_power_stall_nets: list[str] = []
 
+    # Issue #3051: Build the checkpoint callback ONCE before the
+    # escalation loop so every per-attempt ``route_all_negotiated`` call
+    # gets best-so-far persistence (closes the iteration-0 kill-loses-
+    # work hole observed in the curator audit).  The primary single-
+    # attempt path at the bottom of ``main()`` already wires this
+    # callback; without lifting it here, kills mid-loop on the
+    # layer-escalation path produce an empty output PCB.
+    _checkpoint_cb = _make_checkpoint_callback(
+        pcb_path,
+        output_path,
+        float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
+        quiet=quiet,
+    )
+
     for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack attempt.  Without this guard the loop would
@@ -2328,6 +2342,9 @@ def route_with_layer_escalation(
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    # Issue #3051: forward checkpoint callback so kills
+                    # mid-loop persist the best-so-far snapshot.
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -2906,6 +2923,17 @@ def route_with_rule_relaxation(
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
 
+    # Issue #3051: Build the checkpoint callback ONCE before the
+    # relaxation loop so every per-tier ``route_all_negotiated`` call
+    # gets best-so-far persistence (closes the iteration-0 kill-loses-
+    # work hole observed in the curator audit).
+    _checkpoint_cb = _make_checkpoint_callback(
+        pcb_path,
+        output_path,
+        float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
+        quiet=quiet,
+    )
+
     # Issue #2823: precompute total tier count so per-attempt budget can
     # divide the remaining wall-clock budget fairly across all tiers
     # rather than letting tier 0 greedily consume the full ``--timeout``.
@@ -3030,6 +3058,9 @@ def route_with_rule_relaxation(
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    # Issue #3051: forward checkpoint callback so kills
+                    # mid-loop persist the best-so-far snapshot.
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -3958,6 +3989,17 @@ def route_with_combined_escalation(
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
 
+    # Issue #3051: Build the checkpoint callback ONCE before the 2D
+    # combined-escalation matrix so every ``route_all_negotiated`` cell
+    # gets best-so-far persistence (closes the iteration-0 kill-loses-
+    # work hole observed in the curator audit).
+    _checkpoint_cb = _make_checkpoint_callback(
+        pcb_path,
+        output_path,
+        float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
+        quiet=quiet,
+    )
+
     # 2D search: prioritize fewer layers first, then stricter rules.
     # Issue #2823: precompute total cell count so per-attempt budget can
     # divide the remaining wall-clock budget fairly across the entire 2D
@@ -4094,6 +4136,9 @@ def route_with_combined_escalation(
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
+                        # Issue #3051: forward checkpoint callback so kills
+                        # mid-loop persist the best-so-far snapshot.
+                        checkpoint_callback=_checkpoint_cb,
                     )
                 elif args.strategy == "basic":
                     router.route_all()
