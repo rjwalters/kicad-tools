@@ -745,3 +745,136 @@ class TestAutoPourSplitGround:
         assert layers_by_net.get("GNDA") is not None
         assert layers_by_net.get("GNDD") is not None
         assert layers_by_net["GNDA"] != layers_by_net["GNDD"]
+
+
+# ----------------------------------------------------------------------
+# Issue #3035 -- public API surface for auto_skip_pour_nets
+# ----------------------------------------------------------------------
+
+
+class TestAutoSkipPourNetsPublicAPI:
+    """Smoke tests for ``auto_skip_pour_nets`` as a public symbol (#3035).
+
+    Promoted from the leading-underscore CLI internal
+    ``kicad_tools.cli.route_cmd._auto_skip_pour_nets`` so in-process
+    router callers (board ``generate_design.py`` scripts) can reach it
+    without importing a CLI private.  Verifies:
+
+    * The new public path resolves and returns the expected
+      ``(auto_skip, no_zone_nets)`` tuple shape.
+    * The CLI-side alias still resolves to the *same* function object so
+      existing ``@patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets")``
+      decorators in the test suite keep targeting the live implementation.
+    * Behaviour on a small fixture matches the documented contract: pour
+      nets with zones land in ``auto_skip``, pour-classified nets without
+      zones land in ``no_zone_nets``.
+    """
+
+    def test_public_path_and_cli_alias_are_same_function(self):
+        """``auto_skip_pour_nets`` is reachable from both the public and
+        legacy CLI paths and they resolve to the *same* function object.
+
+        ``tests/test_layer_escalation.py`` and
+        ``tests/test_route_auto_fix.py`` patch the CLI alias name; if
+        these two stopped being the same object, those patches would
+        silently no-op against the real call sites (which import the
+        public symbol indirectly via the alias).
+        """
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+        from kicad_tools.router.auto_pour import auto_skip_pour_nets
+
+        assert auto_skip_pour_nets is _auto_skip_pour_nets
+
+    def test_power_net_without_zone_lands_in_no_zone(self, tmp_path: Path):
+        """A power-classified net with no zone is returned in ``no_zone_nets``.
+
+        Mirrors the board 01 fixture (VIN + VOUT are pour-classified by
+        name but the unrouted PCB has no zones for them, so they must be
+        routed as signals via ``router._pour_nets_without_zones``).
+        """
+        from kicad_tools.router.auto_pour import auto_skip_pour_nets
+
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+            pad_nets=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        skip_nets: list[str] = []
+        auto_skip, no_zone = auto_skip_pour_nets(pcb_path, skip_nets, quiet=True)
+
+        # No zones exist, so all pour-classified nets fall through to
+        # no_zone (not auto_skip).  VIN/VOUT/GND all classify as power
+        # or ground by name pattern.
+        assert auto_skip == []
+        assert set(no_zone) == {"VIN", "VOUT", "GND"}
+        # ``skip_nets`` is left untouched because nothing was added.
+        assert skip_nets == []
+
+    def test_power_net_with_zone_lands_in_auto_skip(self, tmp_path: Path):
+        """A power-classified net with a zone is appended to ``skip_nets``.
+
+        When the PCB already has a copper zone for a pour-classified net,
+        that net should be routed via the zone fill rather than as a
+        signal trace -- it lands in ``auto_skip`` and gets appended to
+        the caller's ``skip_nets`` list.
+        """
+        from kicad_tools.router.auto_pour import auto_skip_pour_nets
+
+        zone_gnd = (
+            '(zone (net 3) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+            "(connect_pads (clearance 0.25)) "
+            "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+            "(polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))))"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND"), (4, "SIG1")],
+            pad_nets=[(1, "VIN"), (2, "VOUT"), (3, "GND"), (4, "SIG1")],
+            zones=[zone_gnd],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        skip_nets: list[str] = []
+        auto_skip, no_zone = auto_skip_pour_nets(pcb_path, skip_nets, quiet=True)
+
+        # GND has a zone -> auto_skipped (caller routes via fill).
+        # VIN/VOUT have no zone -> fall through to no_zone for signal
+        # routing.
+        assert "GND" in auto_skip
+        assert "GND" in skip_nets  # mutated in place
+        assert set(no_zone) == {"VIN", "VOUT"}
+
+    def test_existing_skip_nets_preserved(self, tmp_path: Path):
+        """User-supplied ``skip_nets`` entries are not re-added or duplicated.
+
+        The function appends to the caller's list in place; nets already
+        present must not be processed (they are already skipped) and
+        must not appear in the returned ``auto_skip`` either.
+        """
+        from kicad_tools.router.auto_pour import auto_skip_pour_nets
+
+        zone_gnd = (
+            '(zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+            "(connect_pads (clearance 0.25)) "
+            "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+            "(polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))))"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "SIG1")],
+            pad_nets=[(1, "GND"), (2, "SIG1")],
+            zones=[zone_gnd],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        # Pre-populate skip_nets with GND (already user-skipped)
+        skip_nets: list[str] = ["GND"]
+        auto_skip, no_zone = auto_skip_pour_nets(pcb_path, skip_nets, quiet=True)
+
+        # GND is already in skip_nets, so it is NOT re-added by the
+        # carve-out and does NOT appear in auto_skip.
+        assert "GND" not in auto_skip
+        assert skip_nets.count("GND") == 1
+        assert no_zone == []

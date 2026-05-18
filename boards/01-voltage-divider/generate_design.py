@@ -428,8 +428,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     Returns True if all nets were routed successfully.
     """
-    from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
     from kicad_tools.router import DesignRules, load_pcb_for_routing
+    from kicad_tools.router.auto_pour import auto_skip_pour_nets
     from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
     print("\n" + "=" * 60)
@@ -456,7 +456,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # negotiated router's _filter_pour_nets() will skip them and leave the
     # PCB empty (Issue #3031, Issue #1841).
     skip_nets = ["GND"]  # GND is a pour net, not routed as traces
-    _skipped, no_zone_nets = _auto_skip_pour_nets(input_path, skip_nets, quiet=True)
+    _skipped, no_zone_nets = auto_skip_pour_nets(input_path, skip_nets, quiet=True)
 
     # Load the PCB
     router, net_map = load_pcb_for_routing(
