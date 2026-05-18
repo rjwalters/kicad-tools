@@ -2331,6 +2331,56 @@ def _add_route_parser(subparsers) -> None:
         "--generations", type=int, default=10, help="Evolutionary optimizer generations"
     )
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
+    # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
+    # CI runs see byte-identical routes; when set, the negotiated loop
+    # partitions the grid into ``--partition-rows`` x ``--partition-cols``
+    # regions and routes non-adjacent regions concurrently across
+    # ``--max-parallel-workers`` workers per region group.  Expected 2-3x
+    # speedup on congested boards (e.g. board 07) per the
+    # ``route_all_negotiated`` docstring.
+    route_parser.add_argument(
+        "--region-parallel",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable region-based parallel routing (Issue #965). Partitions "
+            "the routing grid into regions and routes non-adjacent regions "
+            "in parallel during each negotiated-congestion iteration. "
+            "Expected 2-3x speedup on dense multi-net boards. Default off "
+            "preserves single-threaded routing (deterministic with --seed)."
+        ),
+    )
+    route_parser.add_argument(
+        "--partition-rows",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "Number of region rows for --region-parallel partitioning "
+            "(default: 2). Only effective when --region-parallel is set."
+        ),
+    )
+    route_parser.add_argument(
+        "--partition-cols",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "Number of region columns for --region-parallel partitioning "
+            "(default: 2). Only effective when --region-parallel is set."
+        ),
+    )
+    route_parser.add_argument(
+        "--max-parallel-workers",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Maximum parallel workers per region group for --region-parallel "
+            "(default: 4). Only effective when --region-parallel is set."
+        ),
+    )
     route_parser.add_argument(
         "--timeout",
         type=float,

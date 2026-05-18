@@ -300,6 +300,18 @@ def run_route_command(args) -> int:
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:
         sub_argv.extend(["--seed", str(args.seed)])
+    # Issue #3054 (Phase 2 of #3045): forward --region-parallel and partition
+    # tuning flags to the inner parser.  All four flags are opt-in and only
+    # forwarded when set to non-default values, so existing scripts using
+    # ``kct route`` without these flags produce byte-identical output.
+    if getattr(args, "region_parallel", False):
+        sub_argv.append("--region-parallel")
+    if getattr(args, "partition_rows", 2) != 2:
+        sub_argv.extend(["--partition-rows", str(args.partition_rows)])
+    if getattr(args, "partition_cols", 2) != 2:
+        sub_argv.extend(["--partition-cols", str(args.partition_cols)])
+    if getattr(args, "max_parallel_workers", 4) != 4:
+        sub_argv.extend(["--max-parallel-workers", str(args.max_parallel_workers)])
     if getattr(args, "strict", False):
         sub_argv.append("--strict")
     # Issue #3033 / #3062: Forward --strict-in-pad-clearance opt-in to the
