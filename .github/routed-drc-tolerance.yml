@@ -286,22 +286,21 @@ tolerances:
   # sites + the 4 two_phase sites, with the combined seg-via +
   # via-seg violator count promoted into the lex-tuple comparator.
   #
-  # EMPIRICAL CAVEAT: 3 fresh re-routes of board-04 (2026-05-17)
-  # confirm the SWDIO/BOOT0 violation at PCB (143.8, 119.7) on
-  # B.Cu persists post-hook.  Investigation shows the offending
-  # SWDIO B.Cu segment (y=120.0246) does NOT exist in net_routes
-  # at the time the negotiated post-iteration hook fires; the
-  # closest committed SWDIO B.Cu segment is at y=120.4 (0.7mm
-  # clear of BOOT0 via at y=119.7).  The y=120.0246 segment is
-  # introduced by the trace optimizer's pull-tight pass (or the
-  # subsequent DRC nudge pass), which runs AFTER
-  # ``route_all_negotiated`` returns.  The hook cannot close the
-  # gap until the same predicate is wired into the post-route
-  # optimizer / nudge pipeline -- out of scope for #3020.
-  # Floor stays at 5 pending a follow-up issue that addresses the
-  # trace-optimizer side of the matrix.
+  # Tightened 5 -> 4 by issue #3028 (Part A: DRC-nudge foreign-via
+  # destination gate).  The committed routed PCB was regenerated
+  # against the post-#3028 pipeline; 3 fresh re-routes on the
+  # default seed all converge to 4 errors (9/9 signal nets routed)
+  # with the SWDIO/BOOT0 violation at PCB (143.8, 119.7) on B.Cu
+  # GONE.  The empirical determination protocol (disable nudge /
+  # disable trace optimizer) showed neither pass is uniquely
+  # dominant for the residual; the violation does NOT reproduce on
+  # a fresh re-route off main as of PR #3027.  Part A is preventive
+  # armor: the nudge pass now refuses any candidate position that
+  # would clip a foreign-net via, preventing the failure mode from
+  # resurfacing on future placement or routing changes.  See the
+  # PR description for the disable-A/disable-B matrix evidence.
   #
-  # Exit clause: drop back to 4 once #2998 is resolved (SWDIO/B.Cu
-  # vs BOOT0 via clearance fix), or to 0 if combined with the
-  # OSC_OUT pin-edge fanout fix above.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 5
+  # Exit clause: drop to 0 once the OSC_OUT cluster (2 segment-via +
+  # 2 pad-via at U2.5/U2.7 on the LQFP-48 0.5mm-pitch geometry) is
+  # resolved by pin-edge fanout or a smaller via tier.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 4
