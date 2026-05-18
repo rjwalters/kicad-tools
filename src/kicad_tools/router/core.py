@@ -6355,12 +6355,20 @@ class Autorouter:
         # recovery, end-of-iter capture) reuse a memoized result when
         # state has not mutated.  The initial pass uses the dedicated
         # ``("init",)`` key.
-        initial_violations = len(
-            neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
-                cache_key=("init",),
-            )
+        # Issue #3020: combine the segment-vs-via and via-vs-segment
+        # violator counts so the lex tuple captures BOTH directions
+        # of the clearance matrix.  A best-iteration restore must
+        # prefer a state with fewer total violations regardless of
+        # which side of the matrix improved.
+        initial_seg_via = neg_router.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("init",),
         )
+        initial_via_seg = neg_router.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("init",),
+        )
+        initial_violations = len(initial_seg_via) + len(initial_via_seg)
         best_metrics = IterationMetrics(
             iteration=0,
             routed_count=best_routed_count,
@@ -6400,12 +6408,18 @@ class Autorouter:
             # captures.  Distinct phase tag so the post-loop "final"
             # restore can hit the cache and reuse the last iteration's
             # post-state walk.
-            violations_now = len(
-                neg_router.find_nets_with_segment_via_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iter_index),
-                )
+            # Issue #3020: combine seg-via and via-seg violator counts
+            # so both directions of the 4-quadrant clearance matrix
+            # survive the lex-tuple restore comparator.
+            post_seg_via = neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("post", iter_index),
             )
+            post_via_seg = neg_router.find_nets_with_via_segment_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("post", iter_index),
+            )
+            violations_now = len(post_seg_via) + len(post_via_seg)
             metrics = IterationMetrics(
                 iteration=iter_index,
                 routed_count=routed_now,
@@ -6481,12 +6495,17 @@ class Autorouter:
                 # iteration snapshot.  State here equals the end-state
                 # of the prior iteration -> reuse the ``("post", K-1)``
                 # cache from the previous _capture_iteration_end call.
-                current_violations = len(
-                    neg_router.find_nets_with_segment_via_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
-                        cache_key=("post", iteration - 1),
-                    )
+                # Issue #3020: combine both directions of the
+                # clearance matrix in the lex tuple comparator.
+                current_seg_via = neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
                 )
+                current_via_seg = neg_router.find_nets_with_via_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
+                )
+                current_violations = len(current_seg_via) + len(current_via_seg)
                 current_metrics = IterationMetrics(
                     iteration=iteration - 1,  # captured state is end of prior iter
                     routed_count=current_routed,
@@ -6707,6 +6726,45 @@ class Autorouter:
                         ]
                         flush_print(
                             f"  Including {len(new_violators)} segment-vs-foreign-via "
+                            f"violator(s) in recovery: {', '.join(violator_names)}"
+                        )
+
+                # Issue #3020: Symmetric sibling of the segment-vs-via
+                # hook above -- walks every committed VIA against
+                # every foreign-net SEGMENT (including permanent
+                # escape segments) and feeds VIA-OWNING nets back
+                # into ``nets_to_reroute``.  Escape segments are
+                # non-rippable infrastructure (see
+                # ``_escape_pad_overrides`` policy at
+                # ``core.py:10123-10145``), so the fix MUST be on
+                # the via side -- A* will pick a different layer-
+                # transition point on the via's parent net.
+                #
+                # Concrete failure this catches: board-04
+                # SWDIO/BOOT0 at PCB (143.8, 119.7) on B.Cu.  SWDIO
+                # escape segment landed in escape phase; BOOT0's
+                # main-router via lands later on B.Cu within
+                # via_radius + half_seg_w + clearance of SWDIO's
+                # segment.  PR #3006 cannot see this because it
+                # gates on SEGMENT commit; this hook gates on VIA
+                # commit (post-iteration).
+                via_seg_violators = neg_router.find_nets_with_via_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
+                )
+                if via_seg_violators:
+                    new_via_violators = [
+                        n for n in via_seg_violators
+                        if n not in nets_to_reroute and n not in off_grid_nets
+                    ]
+                    if new_via_violators:
+                        for v_net in new_via_violators:
+                            nets_to_reroute.append(v_net)
+                        violator_names = [
+                            self.net_names.get(n, f"Net_{n}") for n in new_via_violators
+                        ]
+                        flush_print(
+                            f"  Including {len(new_via_violators)} via-vs-foreign-segment "
                             f"violator(s) in recovery: {', '.join(violator_names)}"
                         )
 
@@ -7777,12 +7835,19 @@ class Autorouter:
             for routes in net_routes.values()
             for route in routes
         )
-        final_violations = len(
-            neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
-                cache_key=("final", final_route_count, final_via_count),
-            )
+        # Issue #3020: combine both directions of the clearance
+        # matrix in the final lex-tuple comparator so a best snapshot
+        # with fewer total violations (in either direction) survives
+        # the post-loop restore.
+        final_seg_via = neg_router.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("final", final_route_count, final_via_count),
         )
+        final_via_seg = neg_router.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("final", final_route_count, final_via_count),
+        )
+        final_violations = len(final_seg_via) + len(final_via_seg)
         final_metrics = IterationMetrics(
             iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
             routed_count=current_routed,
