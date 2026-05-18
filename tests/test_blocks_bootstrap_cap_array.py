@@ -25,6 +25,14 @@ def mock_schematic():
         comp.value = args[0] if args else kwargs.get("value")
         comp.x = x
         comp.y = y
+        # Reflect the footprint kwarg (if any) onto the mock component
+        # so tests can assert `.footprint` after construction -- mirrors
+        # the real SymbolInstance.footprint attribute populated by
+        # `Schematic.add_symbol`.  Empty string default matches the
+        # production default for back-compat callers.  Without this hook,
+        # ``cap.footprint`` resolves to a fresh ``Mock()`` auto-attr which
+        # silently equals anything and lets bad assertions pass.
+        comp.footprint = kwargs.get("footprint", "")
         comp.pin_position.side_effect = lambda name: {
             "1": (x, y - 5),
             "2": (x, y + 5),
@@ -213,6 +221,67 @@ class TestBootstrapCapacitorArrayMocked:
         block = create_bootstrap_capacitor_array(mock_schematic, x=0, y=0)
         assert isinstance(block, BootstrapCapacitorArray)
 
+    def test_explicit_cap_footprint(self, mock_schematic):
+        """Explicit cap_footprint sets .footprint on every bootstrap cap.
+
+        Regression for issue #3017 -- bootstrap caps used to land in the
+        schematic with footprint="" because BootstrapCapacitorArray didn't
+        forward any footprint kwarg to add_symbol.  Mirrors PR #3016's
+        ``test_gate_driver_explicit_bypass_cap_footprint``.
+        """
+        fp = "Capacitor_SMD:C_0805_2012Metric"
+        block = create_bootstrap_capacitor_array(
+            mock_schematic,
+            x=0,
+            y=0,
+            phases=3,
+            cap_footprint=fp,
+        )
+
+        assert len(block.caps) == 3
+        for cap in block.caps:
+            assert cap.footprint == fp
+
+        # Every cap call to add_symbol must carry footprint=fp.
+        assert len(mock_schematic.add_symbol.call_args_list) == 3
+        for call in mock_schematic.add_symbol.call_args_list:
+            assert call.kwargs.get("footprint") == fp
+
+    def test_auto_footprint_forwarded(self, mock_schematic):
+        """auto_footprint=True is forwarded to every bootstrap-cap add_symbol call."""
+        block = create_bootstrap_capacitor_array(
+            mock_schematic,
+            x=0,
+            y=0,
+            phases=3,
+            auto_footprint=True,
+        )
+
+        assert len(block.caps) == 3
+        assert len(mock_schematic.add_symbol.call_args_list) == 3
+        for call in mock_schematic.add_symbol.call_args_list:
+            assert call.kwargs.get("auto_footprint") is True
+
+    def test_default_back_compat(self, mock_schematic):
+        """Default construction (no footprint kwargs) preserves back-compat.
+
+        With no new kwargs supplied, add_symbol is called with
+        auto_footprint=False and no explicit footprint kwarg (matches
+        the pre-#3017 production behavior so existing callers see no
+        change).
+        """
+        block = create_bootstrap_capacitor_array(mock_schematic, x=0, y=0, phases=3)
+
+        assert len(block.caps) == 3
+        for cap in block.caps:
+            assert cap.footprint == ""
+
+        assert len(mock_schematic.add_symbol.call_args_list) == 3
+        for call in mock_schematic.add_symbol.call_args_list:
+            # Default forwards auto_footprint=False, no explicit footprint kwarg.
+            assert call.kwargs.get("auto_footprint") is False
+            assert "footprint" not in call.kwargs
+
 
 class TestGateDriverBlockComposition:
     """Verify GateDriverBlock composes BootstrapCapacitorArray internally."""
@@ -246,3 +315,70 @@ class TestGateDriverBlockComposition:
         assert isinstance(driver._bootstrap_block, BootstrapCapacitorArray)
         assert driver._bootstrap_block.phases == 1
         assert len(driver.bootstrap_caps) == 1
+
+    def test_gate_driver_forwards_bootstrap_cap_footprint(self, mock_schematic):
+        """``bootstrap_cap_footprint`` on GateDriverBlock flows to internal
+        ``BootstrapCapacitorArray`` so its caps land with a real footprint.
+
+        Regression for issue #3017 -- PR #3016 wired ``bypass_cap_footprint``
+        / ``auto_footprint`` onto the bypass-cap loop but did not thread
+        anything through to the internal ``BootstrapCapacitorArray``
+        instantiation at ``motor.py:958-967``.  Asserting on every
+        ``Device:C`` ``add_symbol`` call that targets a bootstrap-numbered
+        ref (C1..C3 at the default ``cap_ref_start=1``) is the most direct
+        way to confirm the forward without depending on call ordering.
+        """
+        fp = "Capacitor_SMD:C_0805_2012Metric"
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            driver_type="3-phase",
+            value="DRV8301",
+            bootstrap_caps="100nF",
+            bootstrap_cap_footprint=fp,
+        )
+
+        # Three bootstrap caps must all carry the explicit footprint.
+        assert len(driver.bootstrap_caps) == 3
+        for cap in driver.bootstrap_caps:
+            assert cap.footprint == fp
+
+        # Every bootstrap cap call to add_symbol must carry footprint=fp.
+        # Bootstrap caps use refs C{cap_ref_start}..C{cap_ref_start + phases - 1}
+        # (default cap_ref_start=1 -> C1..C3).  Bypass caps follow at C4+ and
+        # are addressed by the donor pattern in PR #3016.
+        bootstrap_calls = [
+            call for call in mock_schematic.add_symbol.call_args_list
+            if call.args
+            and call.args[0] == "Device:C"
+            and call.args[3] in {"C1", "C2", "C3"}
+        ]
+        assert len(bootstrap_calls) == 3
+        for call in bootstrap_calls:
+            assert call.kwargs.get("footprint") == fp
+
+    def test_gate_driver_bootstrap_footprint_falls_back_to_bypass(self, mock_schematic):
+        """``bypass_cap_footprint`` alone propagates to bootstrap caps too.
+
+        The fallback chain documented in ``GateDriverBlock.__init__``: when
+        ``bootstrap_cap_footprint is None`` and ``bypass_cap_footprint`` is
+        provided, the bootstrap array inherits the bypass footprint.  This
+        matches the common board-05 reality where bootstrap and bypass caps
+        share the same 0805 package.
+        """
+        fp = "Capacitor_SMD:C_0805_2012Metric"
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            driver_type="3-phase",
+            value="DRV8301",
+            bootstrap_caps="100nF",
+            bypass_cap_footprint=fp,
+            # bootstrap_cap_footprint omitted -> falls back to bypass_cap_footprint
+        )
+
+        assert len(driver.bootstrap_caps) == 3
+        for cap in driver.bootstrap_caps:
+            assert cap.footprint == fp

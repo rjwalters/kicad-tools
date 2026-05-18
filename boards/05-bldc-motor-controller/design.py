@@ -687,6 +687,8 @@ def create_bldc_controller(output_dir: Path) -> Path:
 
     # External 3-phase bootstrap cap network (BST_x to PHASE_x).
     # Uses C12-C14 to preserve existing PCB-side ref numbering and layout.
+    # Match the rest of the board's 0805 passives so C12/C13/C14 land in the
+    # netlist with a non-empty footprint field (see issue #3017).
     create_bootstrap_capacitor_array(
         sch,
         x=X_GATE_DRV - 20,
@@ -696,6 +698,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         cap_ref_start=12,
         high_nets=["BST_A", "BST_B", "BST_C"],
         phase_nets=["PHASE_A", "PHASE_B", "PHASE_C"],
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
 
     print("   Gate driver: DRV8301 (GateDriverBlock)")

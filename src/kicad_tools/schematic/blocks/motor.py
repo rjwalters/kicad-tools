@@ -754,6 +754,8 @@ class BootstrapCapacitorArray(CircuitBlock):
         cap_ref_prefix: str = "C",
         cap_symbol: str = "Device:C",
         cap_spacing: float = 10,
+        cap_footprint: str | None = None,
+        auto_footprint: bool = False,
     ):
         """
         Create an N-phase bootstrap capacitor array.
@@ -779,6 +781,17 @@ class BootstrapCapacitorArray(CircuitBlock):
             cap_ref_prefix: Reference prefix (default "C").
             cap_symbol: KiCad symbol for capacitors (default "Device:C").
             cap_spacing: Horizontal spacing between caps (default 10).
+            cap_footprint: Explicit footprint string (e.g.,
+                ``"Capacitor_SMD:C_0805_2012Metric"``) forwarded to each
+                bootstrap cap's ``add_symbol`` call.  When ``None`` (default),
+                no explicit footprint is set, preserving back-compat for
+                existing callers.  Takes precedence over ``auto_footprint``
+                when both are provided.  Mirrors the convention used by
+                :class:`DecouplingCaps` and the regulator blocks.
+            auto_footprint: If ``True``, forwarded as ``auto_footprint=True``
+                to each bootstrap cap's ``add_symbol`` call so the schematic's
+                footprint-selector profile chooses a footprint based on the
+                cap value.  Default ``False`` preserves back-compat.
 
         Raises:
             ValueError: If ``phases`` < 1, or if ``phase_labels``,
@@ -810,10 +823,19 @@ class BootstrapCapacitorArray(CircuitBlock):
         self.components = {}
         self.ports = {}
 
+        # Build add_symbol kwargs once -- mirrors the DecouplingCaps pattern
+        # at blocks/power/passives.py:64-66 so the bootstrap caps inherit a
+        # footprint (explicit or auto-selected) rather than landing in the
+        # schematic with an empty footprint field (sibling fix to PR #3016 /
+        # issue #3009; see issue #3017).
+        add_kwargs: dict = {"auto_footprint": auto_footprint}
+        if cap_footprint is not None:
+            add_kwargs["footprint"] = cap_footprint
+
         for i, label in enumerate(phase_labels):
             cap_x = x + i * cap_spacing
             cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
-            cap = sch.add_symbol(cap_symbol, cap_x, y, cap_ref, value)
+            cap = sch.add_symbol(cap_symbol, cap_x, y, cap_ref, value, **add_kwargs)
             self.caps.append(cap)
             self.components[f"C_BOOT_{label}"] = cap
 
@@ -901,6 +923,7 @@ class GateDriverBlock(CircuitBlock):
         pin_nets: dict[str, str] | None = None,
         bypass_cap_footprint: str | None = None,
         auto_footprint: bool = False,
+        bootstrap_cap_footprint: str | None = None,
     ):
         """
         Create a gate driver block.
@@ -938,9 +961,19 @@ class GateDriverBlock(CircuitBlock):
                 when both are provided.  Mirrors the convention used by
                 :class:`DecouplingCaps` and the regulator blocks.
             auto_footprint: If ``True``, forwarded as ``auto_footprint=True``
-                to each bypass cap's ``add_symbol`` call so the schematic's
+                to each bypass cap's ``add_symbol`` call AND to the internal
+                :class:`BootstrapCapacitorArray` instantiation (when
+                ``bootstrap_caps`` is not ``None``) so the schematic's
                 footprint-selector profile chooses a footprint based on the
                 cap value.  Default ``False`` preserves back-compat.
+            bootstrap_cap_footprint: Explicit footprint string forwarded to
+                the internal :class:`BootstrapCapacitorArray` instantiation
+                so its caps inherit a footprint rather than landing in the
+                schematic with an empty footprint field (see issue #3017).
+                When ``None`` (default), falls back to ``bypass_cap_footprint``
+                if that is provided; otherwise no explicit footprint is set,
+                preserving back-compat.  Only applies when ``bootstrap_caps``
+                is not ``None``.
         """
         super().__init__(sch, x, y)
         self.driver_type = driver_type
@@ -969,6 +1002,16 @@ class GateDriverBlock(CircuitBlock):
         # back-compat with tests that assert len(driver.bootstrap_caps) == N.
         self._bootstrap_block: BootstrapCapacitorArray | None = None
         if bootstrap_caps is not None:
+            # Resolve the bootstrap footprint: explicit ``bootstrap_cap_footprint``
+            # wins; otherwise fall back to ``bypass_cap_footprint`` (matches the
+            # common board-05 reality where bootstrap and bypass caps share the
+            # same 0805 package).  When neither is set the BootstrapCapacitorArray
+            # receives ``None`` and behaves identically to pre-#3017 callers.
+            resolved_bootstrap_footprint = (
+                bootstrap_cap_footprint
+                if bootstrap_cap_footprint is not None
+                else bypass_cap_footprint
+            )
             self._bootstrap_block = BootstrapCapacitorArray(
                 sch,
                 x=x - 20,
@@ -977,6 +1020,8 @@ class GateDriverBlock(CircuitBlock):
                 value=bootstrap_caps,
                 phase_labels=phase_labels,
                 cap_ref_start=cap_ref_start,
+                cap_footprint=resolved_bootstrap_footprint,
+                auto_footprint=auto_footprint,
             )
             self.bootstrap_caps = self._bootstrap_block.caps
             # Merge bootstrap components into our components dict
@@ -1106,6 +1151,8 @@ def create_bootstrap_capacitor_array(
     cap_ref_prefix: str = "C",
     cap_symbol: str = "Device:C",
     cap_spacing: float = 10,
+    cap_footprint: str | None = None,
+    auto_footprint: bool = False,
 ) -> BootstrapCapacitorArray:
     """
     Create an N-phase bootstrap capacitor array (driver-IC topology).
@@ -1132,6 +1179,16 @@ def create_bootstrap_capacitor_array(
         cap_ref_prefix: Reference prefix (default "C").
         cap_symbol: KiCad symbol for capacitors (default "Device:C").
         cap_spacing: Horizontal spacing between caps (default 10).
+        cap_footprint: Explicit footprint string (e.g.,
+            ``"Capacitor_SMD:C_0805_2012Metric"``) forwarded to each
+            bootstrap cap's ``add_symbol`` call.  When ``None`` (default),
+            no explicit footprint is set, preserving back-compat for
+            existing callers.  Takes precedence over ``auto_footprint``
+            when both are provided.  See issue #3017.
+        auto_footprint: If ``True``, forwarded as ``auto_footprint=True``
+            to each bootstrap cap's ``add_symbol`` call so the schematic's
+            footprint-selector profile chooses a footprint based on the
+            cap value.  Default ``False`` preserves back-compat.
 
     Returns:
         :class:`BootstrapCapacitorArray` instance.
@@ -1149,6 +1206,8 @@ def create_bootstrap_capacitor_array(
         cap_ref_prefix=cap_ref_prefix,
         cap_symbol=cap_symbol,
         cap_spacing=cap_spacing,
+        cap_footprint=cap_footprint,
+        auto_footprint=auto_footprint,
     )
 
 
