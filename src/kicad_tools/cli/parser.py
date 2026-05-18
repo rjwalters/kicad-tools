@@ -2660,6 +2660,19 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--strict-in-pad-clearance",
+        action="store_true",
+        dest="route_strict_in_pad_clearance",
+        help=(
+            "Issue #3033 / #3062: refuse to commit in-pad rescue vias that "
+            "would clip a neighbouring foreign-net pad on a fine-pitch "
+            "QFP/SSOP.  Forwarded to the inner 'kct route' command, which "
+            "stamps KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 so EscapeRouter "
+            "inherits the opt-in.  Default off preserves the legacy "
+            "'proceed anyway' behaviour bit-for-bit."
+        ),
+    )
+    route_parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(

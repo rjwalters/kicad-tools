@@ -330,3 +330,90 @@ def test_max_search_iterations_is_on_both_parsers():
         "--max-search-iterations is missing from the outer parser.py route "
         "subparser (this would regress #2610)"
     )
+
+
+def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
+    """Direct regression test for #3033 / #3062.
+
+    ``--strict-in-pad-clearance`` is declared on BOTH the outer and
+    inner parsers and forwarded through the shim verbatim.  When set
+    on the inner parser, ``route_cmd.main`` stamps the
+    ``KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1`` env var so the
+    lazily-constructed ``EscapeRouter`` reads the opt-in without each
+    intermediate call site needing an explicit pass-through.
+
+    This test pins three invariants so the flag never drifts again:
+
+    1. The flag appears on the inner ``route_cmd.py`` parser.
+    2. The flag appears on the outer ``parser.py`` route subparser.
+    3. Running the inner parser with the flag stamps the env var to
+       ``"1"`` and the absence of the flag leaves the env var unset.
+    """
+    inner = _inner_route_parser_flags()
+    outer = _outer_route_parser_flags()
+
+    assert "--strict-in-pad-clearance" in inner, (
+        "--strict-in-pad-clearance is missing from the inner route_cmd.py "
+        "parser (this would regress #3033/#3062 -- the flag must be present "
+        "on the inner parser because that is where the env-var stamp "
+        "happens)"
+    )
+    assert "--strict-in-pad-clearance" in outer, (
+        "--strict-in-pad-clearance is missing from the outer parser.py "
+        "route subparser (this would regress #3033/#3062 -- the outer flag "
+        "is the user-facing 'kct route --strict-in-pad-clearance' surface)"
+    )
+
+    # Verify the inner parser stamps the env var when the flag is set.
+    # We intercept just before any routing work happens by mocking out
+    # the heavyweight downstream functions; the parse-args + env-stamp
+    # block runs first so we can observe it.
+    import os
+    from unittest.mock import patch
+
+    # Stage 1: flag set -> env var becomes "1".
+    saved = os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
+    try:
+        # We invoke the inner parser via the shim's sub_argv construction
+        # rather than executing the full routing pipeline.  Mock the
+        # inner main's exit point so we don't actually route.
+        from kicad_tools.cli import route_cmd
+
+        # Patch the function that runs after env-stamping but well
+        # before any real work.  ``_set_wall_clock_deadline`` is the
+        # very next line after the env-stamp block.
+        with patch.object(
+            route_cmd,
+            "_set_wall_clock_deadline",
+            side_effect=SystemExit(0),
+        ):
+            with pytest.raises(SystemExit):
+                route_cmd.main(["dummy.kicad_pcb", "--strict-in-pad-clearance"])
+        assert os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE") == "1", (
+            "Inner route_cmd.main must stamp "
+            "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 when "
+            "--strict-in-pad-clearance is passed; got "
+            f"{os.environ.get('KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE')!r}"
+        )
+
+        # Stage 2: flag absent -> env var stays unset (we cleared it
+        # above; running without the flag should NOT set it).
+        del os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"]
+        with patch.object(
+            route_cmd,
+            "_set_wall_clock_deadline",
+            side_effect=SystemExit(0),
+        ):
+            with pytest.raises(SystemExit):
+                route_cmd.main(["dummy.kicad_pcb"])
+        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ, (
+            "Inner route_cmd.main must NOT stamp the env var when the "
+            "flag is absent; legacy bit-for-bit behaviour requires the "
+            "env var be cleared in this code path"
+        )
+    finally:
+        # Restore env to original state.
+        if saved is None:
+            os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
+        else:
+            os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"] = saved

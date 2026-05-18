@@ -302,6 +302,16 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--seed", str(args.seed)])
     if getattr(args, "strict", False):
         sub_argv.append("--strict")
+    # Issue #3033 / #3062: Forward --strict-in-pad-clearance opt-in to the
+    # inner route command.  The inner main() sets the
+    # KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE env var so EscapeRouter consumes
+    # it on lazy construction.  Outer parser uses the
+    # ``route_strict_in_pad_clearance`` dest, inner uses
+    # ``strict_in_pad_clearance``; check both for forward-compat.
+    if getattr(args, "route_strict_in_pad_clearance", False) or getattr(
+        args, "strict_in_pad_clearance", False
+    ):
+        sub_argv.append("--strict-in-pad-clearance")
     # Issue #2464: Forward differential pair routing flags
     if getattr(args, "differential_pairs", False):
         sub_argv.append("--differential-pairs")
