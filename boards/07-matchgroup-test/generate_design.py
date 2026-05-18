@@ -456,18 +456,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # (overlapping sibling traces, ~20K ``diffpair_clearance_intra``
     # violations -- the bug this issue documents).
     #
-    # Pass the sidecar through unconditionally so that future recipes
-    # that re-enable ``--differential-pairs`` automatically get the
-    # rich per-pair declarations.  For now the recipe keeps
-    # ``--differential-pairs`` OFF because the projection fix alone is
-    # not sufficient to stay under the 70-error DRC allowlist:
-    # empirically the routed PCB still ends up with ~459 residual
-    # ``diffpair_clearance_intra`` violations (down from ~20K, a 97%
-    # reduction) due to a SEPARATE post-pathfinder serpentine /
-    # length-tune geometry issue.  That issue is filed as a follow-up
-    # (router-side, out of scope per the curator brief's "DO NOT widen
-    # DRC tolerances" hard limit).  Re-enabling ``--differential-pairs``
-    # in this recipe is gated on that follow-up landing.
+    # Issue #3003 (this PR): re-enables ``--differential-pairs`` after
+    # the post-pathfinder serpentine bug landed.  The
+    # ``DiffPairRouter.route_differential_pair_coupled`` inline shim now
+    # (a) gates ``match_pair_lengths(add_serpentines=True)`` on
+    # ``length_critical=True`` (length-critical pairs are routed by the
+    # audited Phase 3I tuner instead of this shim), and (b) when it does
+    # run, threads ``intra_pair_clearance_mm`` + the partner route
+    # through ``create_serpentine`` so the bulge biases away from the
+    # partner and is DRC-rejected if it would violate intra-pair
+    # clearance.  Empirically board 07 now reports zero
+    # ``diffpair_clearance_intra`` violations with this recipe.
     cmd = [
         sys.executable,
         "-m",
@@ -483,6 +482,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--no-auto-layers",
         "--layers",
         "4",
+        "--differential-pairs",
         "--seed",
         "42",
         "--timeout",
