@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Routed-PCB DRC gate for CI (issue #2546).
 
-Runs ``kct check <file> --mfr jlcpcb --errors-only --format json`` against
+Runs ``kct check <file> --mfr <mfr> --errors-only --format json`` against
 each PCB path passed on the command line, and compares the resulting error
 count against a per-board tolerance allowlist (``.github/routed-drc-tolerance.yml``).
+
+By default the gate uses ``--mfr jlcpcb`` (the strictest tier most boards
+target).  A board whose design intentionally requires a different
+manufacturer profile (e.g. board-04 routes with micro-vias under
+``jlcpcb-tier1``'s Capability-Plus process) can override the profile by
+adding an entry under the optional ``manufacturers:`` top-level mapping in
+the same YAML file.  See ``.github/routed-drc-tolerance.yml`` for the schema.
 
 A file fails the gate if its actual error count exceeds the allowed value;
 files not listed in the allowlist must report 0 errors. This implements the
@@ -31,6 +38,7 @@ from typing import Any
 import yaml
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
+DEFAULT_MANUFACTURER = "jlcpcb"
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -84,11 +92,76 @@ def load_allowlist(allowlist_path: Path) -> dict[str, int]:
     return result
 
 
-def count_errors(pcb_path: Path) -> int:
+def load_manufacturers(allowlist_path: Path) -> dict[str, str]:
+    """Load optional per-board manufacturer overrides from the allowlist YAML.
+
+    Some boards intentionally target a non-default manufacturer profile
+    (e.g. board-04 routes with micro-vias that are only legal under
+    ``jlcpcb-tier1`` / Capability-Plus, even though most boards target the
+    stricter ``jlcpcb`` standard tier).  Reading the per-board profile from
+    the same YAML keeps the CI gate aligned with what each board's
+    ``generate_design.py`` actually produces.
+
+    The schema is intentionally a separate top-level ``manufacturers:``
+    mapping (not merged into the ``tolerances:`` entries) so the original
+    ``load_allowlist`` API and its tests stay backward-compatible.
+
+    Args:
+        allowlist_path: Path to the YAML file.  Missing file or absent
+            ``manufacturers:`` key both return an empty mapping (the
+            default profile applies to every board).
+
+    Returns:
+        Mapping of repo-relative PCB path -> manufacturer-profile name to
+        pass via ``--mfr``.  Boards not listed fall back to
+        ``DEFAULT_MANUFACTURER``.
+
+    Raises:
+        ValueError: If the file exists but is malformed at the
+            ``manufacturers:`` key.
+    """
+    if not allowlist_path.exists():
+        return {}
+
+    try:
+        data = yaml.safe_load(allowlist_path.read_text())
+    except yaml.YAMLError as e:
+        raise ValueError(f"Malformed allowlist YAML at {allowlist_path}: {e}") from e
+
+    if data is None or not isinstance(data, dict):
+        return {}
+
+    manufacturers = data.get("manufacturers", {})
+    if not isinstance(manufacturers, dict):
+        raise ValueError(
+            f"Allowlist {allowlist_path} 'manufacturers' field must be a mapping, "
+            f"got {type(manufacturers).__name__}"
+        )
+
+    result: dict[str, str] = {}
+    for key, value in manufacturers.items():
+        if not isinstance(key, str):
+            raise ValueError(
+                f"Allowlist {allowlist_path}: manufacturers key {key!r} must be a string path"
+            )
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"Allowlist {allowlist_path}: manufacturers value for {key!r} "
+                f"must be a non-empty string profile name, got {value!r}"
+            )
+        result[key] = value
+
+    return result
+
+
+def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> int:
     """Run ``kct check`` and return the error count.
 
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
+        mfr: Manufacturer-profile name to pass via ``--mfr`` (defaults to
+            ``DEFAULT_MANUFACTURER`` = "jlcpcb").  Per-board overrides
+            come from ``load_manufacturers``.
 
     Returns:
         Number of errors reported (0 if the gate passes natively).
@@ -104,7 +177,7 @@ def count_errors(pcb_path: Path) -> int:
         "check",
         str(pcb_path),
         "--mfr",
-        "jlcpcb",
+        mfr,
         "--errors-only",
         "--format",
         "json",
@@ -180,8 +253,15 @@ def annotate_drift_warning(file: str, errors: int, allowed: int) -> None:
     )
 
 
-def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str, int]:
+def check_file(
+    pcb_path: Path, allowed: int, mfr: str = DEFAULT_MANUFACTURER
+) -> tuple[bool, str, int]:
     """Check a single PCB against its allowed error count.
+
+    Args:
+        pcb_path: Path to a ``.kicad_pcb`` file.
+        allowed: Maximum error count this PCB may report before failing.
+        mfr: Manufacturer-profile name to pass via ``--mfr``.
 
     Returns:
         ``(passed, message, errors)`` tuple. ``passed`` is True if
@@ -190,30 +270,30 @@ def check_file(pcb_path: Path, allowed: int) -> tuple[bool, str, int]:
         actual count returned by ``kct check`` so callers can compute drift
         slack without re-running the (expensive) DRC check.
     """
-    errors = count_errors(pcb_path)
+    errors = count_errors(pcb_path, mfr=mfr)
     if errors <= allowed:
         if allowed == 0:
-            msg = f"OK: {pcb_path} -- 0 errors (strict gate)."
+            msg = f"OK: {pcb_path} -- 0 errors (strict gate, --mfr {mfr})."
         else:
             msg = (
-                f"OK: {pcb_path} -- {errors} errors (allowlist max {allowed}; "
-                f"reduce the allowlist value in .github/routed-drc-tolerance.yml "
-                f"if this count drops further)."
+                f"OK: {pcb_path} -- {errors} errors (--mfr {mfr}, allowlist "
+                f"max {allowed}; reduce the allowlist value in "
+                f".github/routed-drc-tolerance.yml if this count drops further)."
             )
         return True, msg, errors
 
     if allowed == 0:
         msg = (
-            f"DRC errors detected by `kct check --mfr jlcpcb --errors-only`: "
+            f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
             f"{errors} error(s). Boards NOT in .github/routed-drc-tolerance.yml "
             f"must report 0 errors. Either fix the routing or, if grandfathering "
             f"is justified, add an explicit allowlist entry with reviewer sign-off."
         )
     else:
         msg = (
-            f"DRC regression: {errors} error(s) exceeds allowlist value "
-            f"{allowed} in .github/routed-drc-tolerance.yml. Either fix the "
-            f"new violations, or (if intentional) raise the allowlist value "
+            f"DRC regression: {errors} error(s) (--mfr {mfr}) exceeds allowlist "
+            f"value {allowed} in .github/routed-drc-tolerance.yml. Either fix "
+            f"the new violations, or (if intentional) raise the allowlist value "
             f"with reviewer sign-off."
         )
     return False, msg, errors
@@ -244,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         allowlist = load_allowlist(Path(args.allowlist))
+        manufacturers = load_manufacturers(Path(args.allowlist))
     except ValueError as e:
         print(f"::error::{e}", flush=True)
         return 1
@@ -274,9 +355,10 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
         allowed = allowlist.get(lookup_key, 0)
+        mfr = manufacturers.get(lookup_key, DEFAULT_MANUFACTURER)
 
         try:
-            passed, message, errors = check_file(pcb_path, allowed)
+            passed, message, errors = check_file(pcb_path, allowed, mfr=mfr)
         except RuntimeError as e:
             annotate_error(str(pcb_path), f"kct check failed: {e}")
             overall_failed = 1

@@ -2132,6 +2132,33 @@ def _add_stitch_parser(subparsers) -> None:
         help="Place vias on a grid pattern across zone polygons (blanket stitching)",
     )
     stitch_parser.add_argument(
+        "--micro-via",
+        action="store_true",
+        dest="stitch_micro_via",
+        help=(
+            "Retry stitch-failed pads with smaller micro-vias "
+            "(0.3mm pad / 0.15mm drill defaults). Micro-vias span only "
+            "adjacent copper layers per KiCad's stack-up rules and help "
+            "fine-pitch IC corner pads (e.g. LQFP-48 GND pins boxed by "
+            "neighbour signal traces) that the standard 0.6mm via cannot "
+            "fit. See issue #3033 for the board-04 U2.23 use case."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--micro-via-size",
+        type=float,
+        default=0.3,
+        dest="stitch_micro_via_size",
+        help="Micro-via pad diameter in mm (default: 0.3). Only used with --micro-via.",
+    )
+    stitch_parser.add_argument(
+        "--micro-via-drill",
+        type=float,
+        default=0.15,
+        dest="stitch_micro_via_drill",
+        help="Micro-via drill diameter in mm (default: 0.15). Only used with --micro-via.",
+    )
+    stitch_parser.add_argument(
         "--spacing",
         type=float,
         default=3.0,
