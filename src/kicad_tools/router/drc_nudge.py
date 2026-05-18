@@ -41,6 +41,7 @@ from .geometry import (
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
 from .primitives import Route, Segment, Via
+from .via_clearance import segment_clears_foreign_via
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ def _nudge_segment_with_chain(
     amount: float,
     router: Autorouter,
     chain_tol: float | None = None,
+    result: "DRCNudgeResult | None" = None,
 ) -> bool:
     """Translate *seg* and update connecting segments to preserve the chain.
 
@@ -150,16 +152,31 @@ def _nudge_segment_with_chain(
     function returns False and leaves ``seg`` unchanged so the caller
     can record the failure.
 
+    Issue #3028 (Part A): the nudge is also DECLINED when the post-nudge
+    position would introduce a NEW foreign-net via clearance violation.
+    The pre-PR-#3028 nudge had no destination check whatsoever — its only
+    guards were same-net anchor protections — so it could repair one
+    clearance violation by translating a segment into a *different*
+    foreign-net via and silently introduce a worse violation.  The board-
+    04 SWDIO/BOOT0 violation at PCB (143.8, 119.7) on B.Cu was a strong
+    suspect for this failure mode.  The gate uses the same
+    :func:`segment_clears_foreign_via` predicate the 4-quadrant clearance
+    matrix uses (PR #2999 / PR #3006 / PR #3019 / PR #3027), so the
+    geometry is consistent across the routing pipeline.
+
     Args:
         seg: The segment to translate.
         nx, ny: Unit vector for the translation direction.
         amount: Translation distance (mm).
         router: Autorouter providing access to all routes and pads.
         chain_tol: Tolerance for matching adjacent segment endpoints.
+        result: Optional :class:`DRCNudgeResult` used to record structured
+            skip reasons (e.g. ``foreign_via_blocked``).
 
     Returns:
         True if the segment was successfully nudged and the chain repaired;
-        False if the segment was left untouched (e.g. pad-anchored).
+        False if the segment was left untouched (e.g. pad-anchored, or
+        the post-nudge position would clip a foreign-net via).
     """
     if chain_tol is None:
         chain_tol = _ENDPOINT_TOL
@@ -186,7 +203,8 @@ def _nudge_segment_with_chain(
         )
         return False
 
-    # Capture pre-nudge endpoints so we can update neighbour segments.
+    # Capture pre-nudge endpoints so we can update neighbour segments
+    # and revert if the post-nudge position would violate clearance.
     old_x1, old_y1 = seg.x1, seg.y1
     old_x2, old_y2 = seg.x2, seg.y2
 
@@ -195,6 +213,31 @@ def _nudge_segment_with_chain(
 
     new_x1, new_y1 = seg.x1, seg.y1
     new_x2, new_y2 = seg.x2, seg.y2
+
+    # Issue #3028 (Part A): foreign-via destination gate.  Validate the
+    # POST-nudge segment position against every foreign-net via in
+    # ``router.routes`` BEFORE we commit the chain snap.  If the nudge
+    # would introduce a NEW seg-via clearance violation we revert ``seg``
+    # to its pre-nudge position (the chain snap has not run yet so the
+    # neighbours are still consistent) and let the original DRC violation
+    # surface in the post-save report.  The pre-existing violation is the
+    # lesser evil; the alternative is silently swapping it for a worse
+    # foreign-via violation that the existing 4-quadrant clearance matrix
+    # would otherwise have prevented if the segment were committed inside
+    # the negotiated routing loop.
+    if _post_nudge_introduces_foreign_via_violation(seg, router):
+        # Revert ``seg`` to its pre-nudge position.  No chain snap has
+        # been applied yet so the neighbours are still consistent.
+        seg.x1, seg.y1 = old_x1, old_y1
+        seg.x2, seg.y2 = old_x2, old_y2
+        if result is not None:
+            result._bump_skipped("foreign_via_blocked")
+        logger.debug(
+            "Declining nudge for net %s: post-nudge position would clip "
+            "a foreign-net via",
+            seg.net,
+        )
+        return False
 
     # Walk all same-net segments and snap any endpoint that matched the
     # old position of seg's endpoint to the new position.  Skip ``seg``
@@ -238,6 +281,51 @@ def _nudge_segment_with_chain(
                 other.y2 = new_y2
 
     return True
+
+
+def _post_nudge_introduces_foreign_via_violation(
+    seg: Segment,
+    router: Autorouter,
+) -> bool:
+    """Return True if ``seg`` at its current position clips a foreign-net via.
+
+    Issue #3028 (Part A): destination gate for :func:`_nudge_segment_with_chain`.
+    Walk every via in ``router.routes`` and apply
+    :func:`segment_clears_foreign_via` (the same predicate used by the
+    in-loop 4-quadrant matrix at PRs #2999 / #3006 / #3019 / #3027) to the
+    current segment position.  Same-net vias are skipped — moving the
+    segment closer to one of its own vias would be a chain-snap or a
+    layer-transition concern, NOT a clearance violation.
+
+    The trace_clearance defaults to ``router.rules.trace_clearance`` when
+    available; otherwise we fall back to ``DesignRules`` default (0.2 mm)
+    so the test fixtures that omit ``rules`` still exercise a meaningful
+    threshold.
+
+    Args:
+        seg: The candidate segment in its proposed post-nudge position.
+        router: The autorouter providing ``routes`` and ``rules``.
+
+    Returns:
+        True if ANY foreign-net via on ``seg``'s layer would be too close
+        to ``seg`` (i.e. the predicate returns False); False when every
+        foreign via clears.
+    """
+    rules = getattr(router, "rules", None)
+    trace_clearance = getattr(rules, "trace_clearance", 0.2) if rules else 0.2
+
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        # Caller-side own-net filter: a segment moving closer to one of
+        # its own vias is not a DRC violation -- that's a chain
+        # adjacency.  Mirror the same-net filtering convention used by
+        # the in-loop matrix (see ``segment_clears_foreign_via`` docs).
+        if route.net == seg.net:
+            continue
+        for via in route.vias:
+            if not segment_clears_foreign_via(seg, via, trace_clearance):
+                return True
+    return False
 
 
 # Tolerance in mm for considering a segment endpoint anchored to a pad
@@ -599,6 +687,7 @@ def _try_nudge_seg_seg(
     violation: ClearanceViolation,
     router: Autorouter,
     max_displacement: float,
+    result: DRCNudgeResult | None = None,
 ) -> bool:
     """Attempt to nudge a segment to fix a seg-seg violation.
 
@@ -646,13 +735,18 @@ def _try_nudge_seg_seg(
 
     # Issue #2475: Use chain-aware nudge so abutting same-net segments are
     # snapped to the new endpoint and the routed chain stays connected.
-    return _nudge_segment_with_chain(target_seg, perp_x, perp_y, nudge_amount, router)
+    # Issue #3028: pass ``result`` so the foreign-via destination gate
+    # can record a structured skip reason on refusal.
+    return _nudge_segment_with_chain(
+        target_seg, perp_x, perp_y, nudge_amount, router, result=result,
+    )
 
 
 def _try_nudge_seg_via(
     violation: ClearanceViolation,
     router: Autorouter,
     max_displacement: float,
+    result: DRCNudgeResult | None = None,
 ) -> bool:
     """Attempt to nudge a segment away from a via."""
     deficit = violation.required - violation.distance
@@ -693,7 +787,10 @@ def _try_nudge_seg_via(
         ny = away_dy / away_len
 
     # Issue #2475: Use chain-aware nudge.
-    return _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
+    # Issue #3028: pass ``result`` for the foreign-via destination gate.
+    return _nudge_segment_with_chain(
+        target_seg, nx, ny, nudge_amount, router, result=result,
+    )
 
 
 def _find_via_at(
@@ -985,9 +1082,22 @@ def _try_nudge_seg_edge(
         else:
             nx, ny = px, py
 
-    success = _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
+    # Issue #3028: pass ``result`` so the foreign-via destination gate
+    # can record a structured skip reason if it refuses the nudge.
+    # Capture the skip count before the call so we can disambiguate
+    # ``foreign_via_blocked`` (already recorded by the chain-aware nudge
+    # on its own refusal path) from the legacy pad/via-anchor refusal
+    # (which produces no structured reason from the inner helper).
+    _fvb_before = result.skipped.get("foreign_via_blocked", 0) if result else 0
+    success = _nudge_segment_with_chain(
+        target_seg, nx, ny, nudge_amount, router, result=result,
+    )
     if not success and result is not None:
-        result._bump_skipped("edge_seg_anchored")
+        _fvb_after = result.skipped.get("foreign_via_blocked", 0)
+        if _fvb_after == _fvb_before:
+            # The inner helper did NOT bump foreign_via_blocked, so the
+            # refusal was a pad/via anchor (the legacy edge-handler skip).
+            result._bump_skipped("edge_seg_anchored")
     return success
 
 
@@ -995,6 +1105,7 @@ def _try_nudge_seg_pad(
     violation: ClearanceViolation,
     router: Autorouter,
     max_displacement: float,
+    result: DRCNudgeResult | None = None,
 ) -> bool:
     """Attempt to nudge a segment away from a pad."""
     deficit = violation.required - violation.distance
@@ -1034,7 +1145,10 @@ def _try_nudge_seg_pad(
     # Issue #2475: Use chain-aware nudge so we don't break the routed
     # chain by translating a single segment in isolation.  The chain-aware
     # variant also refuses to nudge pad-anchored segments outright.
-    return _nudge_segment_with_chain(target_seg, nx, ny, nudge_amount, router)
+    # Issue #3028: pass ``result`` for the foreign-via destination gate.
+    return _nudge_segment_with_chain(
+        target_seg, nx, ny, nudge_amount, router, result=result,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1136,7 +1250,11 @@ def drc_verify_and_nudge(
         for v in actionable:
             success = False
             if v.obstacle_type == "segment":
-                success = _try_nudge_seg_seg(v, router, max_displacement)
+                # Issue #3028: plumb ``result`` so the foreign-via gate
+                # in ``_nudge_segment_with_chain`` can record the skip.
+                success = _try_nudge_seg_seg(
+                    v, router, max_displacement, result=result,
+                )
             elif v.obstacle_type == "via":
                 # Issue #2743: ``segment_index == -1`` marks a via-vs-via
                 # violation (zero-length "segment" at via_a's centre).
@@ -1148,9 +1266,14 @@ def drc_verify_and_nudge(
                         v, router, max_displacement, result=result
                     )
                 else:
-                    success = _try_nudge_seg_via(v, router, max_displacement)
+                    # Issue #3028: same as seg-seg above.
+                    success = _try_nudge_seg_via(
+                        v, router, max_displacement, result=result,
+                    )
             elif v.obstacle_type == "pad":
-                success = _try_nudge_seg_pad(v, router, max_displacement)
+                success = _try_nudge_seg_pad(
+                    v, router, max_displacement, result=result,
+                )
             elif v.obstacle_type == "edge":
                 # Issue #2743: trace-vs-board-edge violations now flow
                 # through the same dispatch path.
