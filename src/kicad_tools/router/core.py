@@ -843,6 +843,11 @@ class Autorouter:
         # explore alternative routing orders.
         self._perturbation_magnitude: float = 0.0
         self._perturbation_rng: random.Random = random.Random(42)
+        # Issue #3039: When ``route_all_negotiated(seed=...)`` is supplied,
+        # this holds the user-provided seed so ``_activate_perturbation``
+        # can re-seed deterministically per stagnation episode.  ``None``
+        # preserves the original (non-deterministic-trigger-timing) behaviour.
+        self._perturbation_seed: int | None = None
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
@@ -2287,7 +2292,16 @@ class Autorouter:
         self._perturbation_magnitude = 0.1 * stagnation_count
         # Re-seed the RNG each activation so different stagnation
         # episodes explore different orderings.
-        self._perturbation_rng = random.Random(stagnation_count * 7 + 13)
+        # Issue #3039: When the caller supplied ``seed`` to
+        # ``route_all_negotiated``, fold it into the per-episode re-seed so
+        # different ``--seed`` values produce different escape trajectories
+        # while a fixed ``--seed`` remains deterministic across runs.
+        if self._perturbation_seed is not None:
+            self._perturbation_rng = random.Random(
+                self._perturbation_seed + stagnation_count * 7 + 13
+            )
+        else:
+            self._perturbation_rng = random.Random(stagnation_count * 7 + 13)
 
     def _reset_perturbation(self) -> None:
         """Reset perturbation to zero (Issue #2334).
@@ -5830,6 +5844,7 @@ class Autorouter:
         congestion_auto_tune: bool = False,
         hotset_only: bool = False,
         perturbation: bool = True,
+        seed: int | None = None,
         checkpoint_callback: "Callable[[list[Route], IterationMetrics], None] | None" = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
@@ -5906,6 +5921,20 @@ class Autorouter:
             perturbation: If True (default), enable stochastic cost perturbation
                 when oscillation is detected (Issue #2334). Adds random noise to
                 per-net priority scores to break symmetry and escape local minima.
+            seed: Optional integer seed for deterministic routing (Issue #3039).
+                When provided, the perturbation RNG (``self._perturbation_rng``)
+                and the global ``random`` module (used by the MST trial-pad
+                shuffle, ``algorithms/negotiated.py`` escape strategies, etc.)
+                are seeded so that two ``route_all_negotiated`` invocations on
+                the same inputs produce identical
+                ``(nets_routed, total_segments, total_vias, completion_pct)``
+                tuples.  When ``None`` (default), existing non-deterministic
+                behaviour is preserved (the perturbation RNG keeps its
+                construction-time seed of 42 but the global RNG is left at its
+                os.urandom-derived state).  Note: byte-identical .kicad_pcb
+                output is NOT guaranteed -- KiCad UUIDs are independently
+                random per element.  The seed only pins the routing-decision
+                RNGs, not the file-format ones.
             checkpoint_callback: Optional callable invoked whenever the
                 best-so-far snapshot is replaced (Issue #2808). Receives the
                 deep-copied ``best_routes`` list and the matching
@@ -5984,6 +6013,22 @@ class Autorouter:
         perturbation_best_overflow: int | None = None
         # Ensure perturbation is reset at the start of each routing call
         self._reset_perturbation()
+
+        # Issue #3039: Seed the perturbation RNG and global ``random`` module
+        # for deterministic routing when ``seed`` is supplied.  Stash the
+        # provided seed on ``self._perturbation_seed`` so
+        # ``_activate_perturbation`` can derive a deterministic-but-varying
+        # re-seed per stagnation episode instead of using a constant offset.
+        # When ``seed`` is None we leave the global RNG state alone (existing
+        # behaviour) -- we deliberately do NOT clobber any previously stashed
+        # seed so that wrapper methods (``route_with_subgrid``,
+        # ``route_all_multi_resolution``, ``route_with_progressive_clearance``)
+        # which delegate to this method do not accidentally drop a seed set
+        # by an outer caller that pre-seeded the global RNG via CLI ``--seed``.
+        if seed is not None:
+            self._perturbation_seed = seed
+            self._perturbation_rng = random.Random(seed)
+            random.seed(seed)
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         # Issue #1295: Filter out pour nets before negotiated routing
