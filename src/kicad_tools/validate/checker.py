@@ -520,8 +520,11 @@ class DRCChecker:
             grid_resolution: Router grid resolution in mm (default ``0.1``,
                 matching the ``Autorouter`` and ``KCT_ROUTE_GRID`` default).
             threshold: Maximum L2 deviation considered "on-grid", in mm.
-                Defaults to ``grid_resolution / 10`` to match the router-side
-                check.
+                Defaults to
+                :data:`kicad_tools.router.preflight.DEFAULT_PAD_GRID_TOLERANCE_MM`
+                (``0.05`` mm), chosen to clear stock KiCad library footprints
+                whose pads sit 0.03-0.05 mm off the 0.1 mm grid by design.
+                Genuine placement errors at >= 0.06 mm still flag.
 
         Returns:
             :class:`DRCResults` with one ``pad_grid`` violation (severity
