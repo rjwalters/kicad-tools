@@ -625,6 +625,17 @@ class NegotiatedRouter:
         # differentiate "couldn't find path" from "ran out of net budget".
         self._last_timeout_failures: set[int] = set()
 
+        # Issue #3002 (PR #3006 perf): single-slot memo for
+        # :meth:`find_nets_with_segment_via_violations`.  Stores
+        # ``(cache_key, result)``; the hook is called up to 4 times per
+        # negotiated iteration (top-of-iter snapshot, mid-iter
+        # re-validate, end-of-iter capture, restore comparator) and
+        # consecutive calls within the same iteration share the same
+        # ``net_routes`` state -- so cache hits eliminate 3 of every 4
+        # full walks.  Slot is invalidated implicitly by passing a new
+        # cache_key on the next call.
+        self._seg_via_violations_cache: tuple[object, list[int]] | None = None
+
     def route_net_negotiated(
         self,
         pad_objs: list[Pad],
@@ -1017,6 +1028,7 @@ class NegotiatedRouter:
         self,
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
+        cache_key: object | None = None,
     ) -> list[int]:
         """Find nets whose committed segments clip foreign-net vias.
 
@@ -1044,47 +1056,150 @@ class NegotiatedRouter:
         different path; the via's position is constrained by the pad
         it escapes, so ripping up net B usually doesn't help.
 
+        Issue #3002 (PR #3006 perf follow-up): the hook is called up
+        to 4 times per negotiated iteration (top-of-iter, mid-iter
+        re-validate, end-of-iter capture, restore comparator).  The
+        naive O(N x S x V) walk on board-07 (31 multi-pad signal nets
+        with many vias x 15 iterations) was the dominant cost in CI's
+        ``Match-Group Routing Regression`` job -- climbed from 8m41s
+        on main to 10m02s+ on this PR.  Three layers of optimization
+        below bring the same workload back under budget without
+        changing the empirical answer:
+
+        1. **Per-call layer bucketing**: vias are partitioned by their
+           ``[layer_lo, layer_hi]`` span once at the top of the
+           function so the inner loop only consults vias that could
+           ever match the segment's layer.  On a 2-layer board this
+           halves the work; on a 4-layer board it's a 4x reduction.
+
+        2. **Segment-bbox prefilter**: each via's reachability radius
+           is ``via.diameter/2 + max(seg.width)/2 + trace_clearance``;
+           if the via centre is outside the segment's bbox expanded
+           by that radius we can skip the exact distance computation.
+
+        3. **Per-iteration memo** (``cache_key``): callers that hit
+           the hook multiple times per iteration (e.g. top-of-iter
+           snapshot + end-of-iter capture + mid-iter re-validate)
+           pass a ``cache_key`` (any hashable identifier for the
+           iteration's state, typically ``(iteration, id(net_routes),
+           total_route_count)``).  Identical keys reuse the prior
+           result -- if ``net_routes`` has not mutated since the last
+           call the violation set cannot have changed.
+
         Args:
             net_routes: Dictionary of ``net_id -> list of Route``.
             trace_clearance: Manufacturer minimum copper-to-copper
                 clearance in mm (``DesignRules.trace_clearance``).
+            cache_key: Optional hashable identifier for memoization
+                across consecutive same-iteration calls.  Default
+                ``None`` disables the cache.
 
         Returns:
             List of net IDs whose segments violate clearance against
             a foreign-net via.  Duplicates are removed.
         """
+        # Issue #3002 (PR #3006 perf): per-iteration memo.  Callers
+        # in the negotiated loop pass a ``cache_key`` that captures
+        # iteration index + route count; identical keys reuse the
+        # result because ``net_routes`` cannot have mutated.
+        if cache_key is not None:
+            cached = self._seg_via_violations_cache
+            if cached is not None and cached[0] == cache_key:
+                return list(cached[1])
+
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
         from ..via_clearance import segment_clears_foreign_via
 
-        # Build a flat list of (net, via) tuples once -- O(V) -- so the
-        # outer loop over segments is O(S * V).  S and V are both
-        # bounded by the routed-net count for typical boards.
-        all_vias: list[tuple[int, Via]] = []
+        # Issue #3002 (PR #3006 perf): bucket vias by their layer span
+        # so the segment-vs-via inner loop only consults vias whose
+        # ``layers[0]..[1]`` range overlaps the segment's layer.  On a
+        # 2-layer board this halves the work; on a 4-layer board it
+        # is a 4x reduction.
+        #
+        # ``vias_on_layer[L]`` is the list of ``(net, via)`` tuples
+        # whose layer span includes layer L.  Layer values are read
+        # from ``via.layers[0/1].value`` so they're plain ints.
+        vias_on_layer: dict[int, list[tuple[int, "Via"]]] = {}
+        total_vias = 0
         for net_id, routes in net_routes.items():
             for route in routes:
                 for via in route.vias:
-                    all_vias.append((net_id, via))
+                    total_vias += 1
+                    v_lo = min(via.layers[0].value, via.layers[1].value)
+                    v_hi = max(via.layers[0].value, via.layers[1].value)
+                    for layer_val in range(v_lo, v_hi + 1):
+                        vias_on_layer.setdefault(layer_val, []).append(
+                            (net_id, via)
+                        )
+
+        # Fast path: no vias at all -> no violations possible.
+        if total_vias == 0:
+            if cache_key is not None:
+                self._seg_via_violations_cache = (cache_key, [])
+            return []
 
         violators: set[int] = set()
         for net, routes in net_routes.items():
+            net_done = False
             for route in routes:
+                if net_done:
+                    break
                 for seg in route.segments:
-                    for via_net, via in all_vias:
+                    layer_vias = vias_on_layer.get(seg.layer.value)
+                    if not layer_vias:
+                        continue  # No foreign via on this segment's layer.
+
+                    # Issue #3002 (PR #3006 perf): segment bbox
+                    # prefilter.  The exact distance check
+                    # (``point_to_segment_distance``) is the inner
+                    # loop's hot spot; bbox-rejecting vias outside
+                    # the reachability envelope skips the sqrt for
+                    # the common case.  ``required`` upper-bounds the
+                    # threshold for ANY via at this segment because
+                    # vias share the project's via stack and traces
+                    # are typically a single width per segment; we
+                    # over-approximate with the largest plausible via
+                    # diameter in the per-segment loop to keep the
+                    # branch tight.
+                    seg_min_x = min(seg.x1, seg.x2)
+                    seg_max_x = max(seg.x1, seg.x2)
+                    seg_min_y = min(seg.y1, seg.y2)
+                    seg_max_y = max(seg.y1, seg.y2)
+                    half_seg_w = seg.width / 2
+
+                    for via_net, via in layer_vias:
                         if via_net == net:
                             continue  # Same-net via -- skipped by convention.
+
+                        # Bbox prefilter: required clearance envelope
+                        # is at most via_radius + half_seg_w +
+                        # trace_clearance.  If the via centre is
+                        # outside the segment bbox expanded by this
+                        # envelope we can skip the exact predicate.
+                        envelope = via.diameter / 2 + half_seg_w + trace_clearance
+                        if (
+                            via.x < seg_min_x - envelope
+                            or via.x > seg_max_x + envelope
+                            or via.y < seg_min_y - envelope
+                            or via.y > seg_max_y + envelope
+                        ):
+                            continue
+
                         if not segment_clears_foreign_via(
                             seg, via, trace_clearance,
                             hard_intersection_only=False,
                         ):
                             violators.add(net)
-                            break  # One violation per segment is enough.
-                    if net in violators:
+                            net_done = True
+                            break  # One violation per net is enough.
+                    if net_done:
                         break
-                if net in violators:
-                    break
 
-        return list(violators)
+        result = list(violators)
+        if cache_key is not None:
+            self._seg_via_violations_cache = (cache_key, result)
+        return result
 
     def rip_up_nets(
         self,

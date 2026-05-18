@@ -732,6 +732,15 @@ class Autorouter:
         self.nets: dict[int, list[tuple[str, str]]] = {}
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Issue #3002 (PR #3006 perf): single-slot cache for the
+        # ``vias_by_net`` index used by
+        # :meth:`_update_router_segment_foreign_context`.  Stores
+        # ``((routes_obj_id, routes_len), vias_by_net_dict)``.  Cheap
+        # signature -- O(1) check -- so the index rebuild only runs
+        # when ``self.routes`` actually mutates.  See the call site
+        # docstring for the perf motivation (board-07 quadratic growth
+        # in CI's Match-Group Routing Regression job).
+        self._all_vias_by_net_cache: tuple[tuple[int, int], dict[int, list]] | None = None
         # Pre-existing routes loaded as obstacles for DRC/merge but NOT
         # emitted by to_sexp() or subject to rip-up/reroute.
         self.existing_routes: list[Route] = []
@@ -1633,11 +1642,33 @@ class Autorouter:
         if not hasattr(self.router, "set_segment_foreign_context"):
             return  # C++ backend or test stub without the hook -- no-op.
 
-        foreign_vias = []
-        for route in self.routes:
-            if route.net == current_net:
+        # Issue #3002 (PR #3006 perf): build the (net, [vias]) index
+        # once per ``self.routes`` mutation and reuse it across all
+        # four call sites in this iteration.  Without the cache the
+        # full route list is re-walked at every net's
+        # ``route_net()`` / negotiated re-route, climbing to O(R x V)
+        # per call -- board-07 with ~31 multi-pad signal nets x 15
+        # iterations turned this into the dominant cost of the
+        # ``Match-Group Routing Regression`` CI job.  Cache is keyed
+        # by ``len(self.routes)`` so any route append/clear/extend
+        # invalidates implicitly on the next call (cheap O(1) check).
+        cache_signature = (id(self.routes), len(self.routes))
+        if (
+            self._all_vias_by_net_cache is None
+            or self._all_vias_by_net_cache[0] != cache_signature
+        ):
+            vias_by_net: dict[int, list] = {}
+            for route in self.routes:
+                if route.vias:
+                    vias_by_net.setdefault(route.net, []).extend(route.vias)
+            self._all_vias_by_net_cache = (cache_signature, vias_by_net)
+
+        vias_by_net = self._all_vias_by_net_cache[1]
+        foreign_vias: list = []
+        for net_id, vias in vias_by_net.items():
+            if net_id == current_net:
                 continue
-            foreign_vias.extend(route.vias)
+            foreign_vias.extend(vias)
 
         self.router.set_segment_foreign_context(foreign_vias=foreign_vias)
 
@@ -6318,9 +6349,16 @@ class Autorouter:
         # changing overflow MUST survive the post-loop restore; the
         # only way to make that survive is to factor the violation
         # count into the lex tuple.
+        # Issue #3002 (PR #3006 perf): pass a cache_key so the four
+        # find_nets_with_segment_via_violations call sites within a
+        # single negotiated iteration (initial, top-of-iter, mid-iter
+        # recovery, end-of-iter capture) reuse a memoized result when
+        # state has not mutated.  The initial pass uses the dedicated
+        # ``("init",)`` key.
         initial_violations = len(
             neg_router.find_nets_with_segment_via_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("init",),
             )
         )
         best_metrics = IterationMetrics(
@@ -6358,9 +6396,14 @@ class Autorouter:
             # violations so the lex-tuple comparator can preserve a hook-
             # driven re-route that fixes a clearance violation without
             # reducing overflow.
+            # Issue #3002 (PR #3006 perf): cache_key for end-of-iteration
+            # captures.  Distinct phase tag so the post-loop "final"
+            # restore can hit the cache and reuse the last iteration's
+            # post-state walk.
             violations_now = len(
                 neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iter_index),
                 )
             )
             metrics = IterationMetrics(
@@ -6434,9 +6477,14 @@ class Autorouter:
                 # violation count in the lex tuple at the top-of-iteration
                 # snapshot site too -- matches the end-of-iteration capture
                 # below.
+                # Issue #3002 (PR #3006 perf): cache_key for top-of-
+                # iteration snapshot.  State here equals the end-state
+                # of the prior iteration -> reuse the ``("post", K-1)``
+                # cache from the previous _capture_iteration_end call.
                 current_violations = len(
                     neg_router.find_nets_with_segment_via_violations(
                         net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
                     )
                 )
                 current_metrics = IterationMetrics(
@@ -6637,8 +6685,14 @@ class Autorouter:
                 # Concrete failure this catches: board-04 SWDIO/BOOT0
                 # at PCB (143.8, 119.7) on B.Cu -- SWDIO's B.Cu
                 # segment clips BOOT0's via.
+                # Issue #3002 (PR #3006 perf): cache_key matches the
+                # top-of-iter snapshot since no mutations have occurred
+                # between this call site and the iteration boundary.
+                # Hot path: this is the third call within an iteration
+                # that reads the same ``("post", K-1)`` state.
                 seg_via_violators = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
                 )
                 if seg_via_violators:
                     new_violators = [
@@ -7711,9 +7765,22 @@ class Autorouter:
         # count in the final lex-tuple comparison.  A best snapshot with
         # zero clearance violations must NOT be overwritten by a final
         # state with marginally lower overflow but live DRC violations.
+        # Issue #3002 (PR #3006 perf): the final restore comparator
+        # runs once after the iteration loop exits.  Hits the cache if
+        # the last _capture_iteration_end stored a result for the same
+        # state -- we identify "same state" via a content fingerprint
+        # (route count + via count) since the last completed iteration
+        # index isn't readily available here.
+        final_route_count = sum(len(r) for r in net_routes.values())
+        final_via_count = sum(
+            len(route.vias)
+            for routes in net_routes.values()
+            for route in routes
+        )
         final_violations = len(
             neg_router.find_nets_with_segment_via_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("final", final_route_count, final_via_count),
             )
         )
         final_metrics = IterationMetrics(

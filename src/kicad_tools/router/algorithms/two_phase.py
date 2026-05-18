@@ -620,10 +620,14 @@ class TwoPhaseRouter:
         # lexicographically.  A hook-driven re-route that fixes a
         # segment-vs-foreign-via violation without reducing overflow
         # MUST NOT be rolled back.
+        # Issue #3002 (PR #3006 perf): cache_key for the initial
+        # baseline.  Memo enables the mid-iter call below to reuse this
+        # result if no rip-up has happened yet.
         best_overflow = overflow
         best_clearance_violations = len(
             neg_router.find_nets_with_segment_via_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("two_phase_init",),
             )
         )
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
@@ -676,8 +680,13 @@ class TwoPhaseRouter:
                 # loop for the full rationale).  Feeds violators back
                 # into the rip-up cohort so the next iteration retries
                 # them with up-to-date foreign-via context.
+                # Issue #3002 (PR #3006 perf): cache_key tags the
+                # state as "pre-iter K" -- same content as the end of
+                # iteration K-1 from the prior pass's ``post`` capture
+                # (or ``two_phase_init`` for iteration 1).
                 seg_via_violators = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
                 )
                 new_seg_via_violators = [
                     v_net for v_net in seg_via_violators
@@ -751,9 +760,13 @@ class TwoPhaseRouter:
                 # violations every iteration so the best-state comparator
                 # can prefer DRC-clean snapshots over DRC-dirty ones with
                 # marginally lower overflow.
+                # Issue #3002 (PR #3006 perf): cache_key for end-of-
+                # iteration K post-state.  The next iteration's
+                # mid-iter call will pull this from cache.
                 current_clearance_violations = len(
                     neg_router.find_nets_with_segment_via_violations(
                         net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("two_phase_post", iteration),
                     )
                 )
                 flush_print(
@@ -833,10 +846,21 @@ class TwoPhaseRouter:
         # ``(clearance_violations asc, overflow asc)`` -- a final state
         # with marginally lower overflow but live DRC violations must
         # not overwrite a best snapshot with zero violations.
+        # Issue #3002 (PR #3006 perf): final restore comparator.  Use a
+        # content fingerprint (route + via count) so the cache hits if
+        # the loop exited without mutating state since the last
+        # _capture_iteration_end.
         final_overflow = self.grid.get_total_overflow()
+        final_route_count = sum(len(r) for r in net_routes.values())
+        final_via_count = sum(
+            len(route.vias)
+            for routes in net_routes.values()
+            for route in routes
+        )
         final_clearance_violations = len(
             neg_router.find_nets_with_segment_via_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("two_phase_final", final_route_count, final_via_count),
             )
         )
         best_key = (best_clearance_violations, best_overflow)

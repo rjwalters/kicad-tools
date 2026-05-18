@@ -431,3 +431,218 @@ class TestIterationMetricsClearanceViolations:
 
         m = IterationMetrics(iteration=1, routed_count=10, overflow=0)
         assert m.clearance_violations == 0
+
+
+# ---------------------------------------------------------------------------
+# Performance optimization invariants (Issue #3002 PR #3006 perf follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestFindNetsWithSegmentViaViolationsPerformance:
+    """Verify the perf optimizations land in PR #3006 perf follow-up
+    preserve empirical correctness:
+
+    1. Per-iteration cache: identical ``cache_key`` reuses prior result.
+    2. Layer bucketing: vias on layers that don't overlap the segment's
+       layer are skipped.
+    3. Bbox prefilter: vias far from the segment's path are short-
+       circuited before the exact distance computation.
+
+    The CI gate this protects (``Match-Group Routing Regression`` on
+    board-07) was timing out at 10m02s / 10m15s before these fixes;
+    main was passing at 8m41s-9m57s.  Two consecutive timeouts in CI
+    were not flake.  See PR #3006 review thread for the empirical
+    timing tables.
+    """
+
+    def _make_neg_router(self, rules, grid):
+        router = _make_router(grid, rules)
+        return NegotiatedRouter(grid, router, rules, DEFAULT_NET_CLASS_MAP)
+
+    def test_cache_key_returns_same_result_on_hit(self):
+        """Same ``cache_key`` -> same result list.  Cache hit must not
+        re-run the walk (verified by mutating ``net_routes`` after the
+        first call -- if the cache were bypassed the second call would
+        produce a DIFFERENT result, but the memo returns the snapshot).
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = self._make_neg_router(rules, grid)
+        seg = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1,
+        )
+        via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        stub = Segment(
+            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=2,
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
+            2: [Route(net=2, net_name="B", segments=[stub], vias=[via])],
+        }
+        first = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("iter", 5),
+        )
+        # Mutate the routes (drop the violating segment) BUT reuse the
+        # same cache_key.  Memo returns the snapshot from the first
+        # call, proving the cache is being consulted.
+        net_routes[1] = []
+        second = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("iter", 5),
+        )
+        assert first == second
+        # Distinct cache_key bypasses the memo -> recomputes -> returns
+        # the up-to-date empty set.
+        third = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("iter", 6),
+        )
+        assert third == []
+
+    def test_cache_key_none_disables_memo(self):
+        """``cache_key=None`` (default) must compute fresh every call so
+        existing call sites that don't opt into the cache get the
+        correct semantics.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = self._make_neg_router(rules, grid)
+        seg = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1,
+        )
+        via = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        stub = Segment(
+            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=2,
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
+            2: [Route(net=2, net_name="B", segments=[stub], vias=[via])],
+        }
+        first = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15,
+        )
+        assert 1 in first
+        # Mutate routes; cache_key=None -> recompute.
+        net_routes[1] = []
+        second = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15,
+        )
+        assert second == []
+
+    def test_bbox_prefilter_skips_distant_vias(self):
+        """A via far from the segment's bbox (envelope = via_r +
+        half_seg_w + clearance) is bbox-rejected without computing the
+        exact distance.  This test verifies the correctness side: a
+        clearly-distant via must NOT be flagged as a violator.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = self._make_neg_router(rules, grid)
+        # Segment is at y=5; the foreign via is at y=15 (10mm away).
+        # Envelope is at most 0.3 + 0.1 + 0.15 = 0.55mm, so the via
+        # is well outside.
+        seg = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1,
+        )
+        via_far = Via(
+            x=5.0, y=15.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        stub = Segment(
+            x1=5.0, y1=15.0, x2=5.5, y2=15.0,
+            width=0.2, layer=Layer.F_CU, net=2,
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
+            2: [Route(net=2, net_name="B", segments=[stub], vias=[via_far])],
+        }
+        violators = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15,
+        )
+        assert violators == []
+
+    def test_layer_bucket_skips_non_overlapping_via(self):
+        """Layer bucketing only consults vias whose layer span includes
+        the segment's layer.  A blind-via (F.Cu only) cannot violate a
+        B.Cu-only segment; the bucket index should never present it
+        to the inner loop.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = self._make_neg_router(rules, grid)
+        # B.Cu segment.
+        seg = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1,
+        )
+        # F.Cu-only via (blind, same layer twice -- doesn't reach B.Cu).
+        via_blind = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.F_CU), net=2,
+        )
+        stub = Segment(
+            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=2,
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
+            2: [Route(net=2, net_name="B", segments=[stub], vias=[via_blind])],
+        }
+        violators = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15,
+        )
+        assert violators == []
+
+    def test_autorouter_foreign_vias_cache_reuses_across_calls(self):
+        """``Autorouter._update_router_segment_foreign_context`` caches
+        the ``vias_by_net`` index keyed by ``(id(routes), len(routes))``
+        so the four call sites within one iteration share one rebuild.
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        ar = Autorouter(width=20.0, height=20.0, force_python=True)
+        # Cache starts empty.
+        assert ar._all_vias_by_net_cache is None
+
+        # Add a couple of routes to ``self.routes`` and call the
+        # method once -- cache populates.
+        via_a = Via(
+            x=2.0, y=2.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        via_b = Via(
+            x=8.0, y=8.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=2,
+        )
+        ar.routes = [
+            Route(net=1, net_name="A", segments=[], vias=[via_a]),
+            Route(net=2, net_name="B", segments=[], vias=[via_b]),
+        ]
+        ar._update_router_segment_foreign_context(current_net=1)
+        first_cache = ar._all_vias_by_net_cache
+        assert first_cache is not None
+        assert 1 in first_cache[1] and 2 in first_cache[1]
+
+        # Second call with the same ``self.routes`` MUST hit the cache.
+        ar._update_router_segment_foreign_context(current_net=2)
+        assert ar._all_vias_by_net_cache is first_cache, (
+            "Cache must be reused when routes haven't mutated"
+        )
+
+        # Mutate ``self.routes`` -> next call invalidates the cache
+        # (signature changes because ``len(routes)`` differs).
+        ar.routes.append(Route(net=3, net_name="C", segments=[], vias=[]))
+        ar._update_router_segment_foreign_context(current_net=1)
+        assert ar._all_vias_by_net_cache is not first_cache, (
+            "Cache must be rebuilt when routes mutate"
+        )
