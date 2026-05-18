@@ -489,9 +489,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Single-pad nets and pour nets are excluded from the denominator so the
     # success metric mirrors ``kct route``'s reporting.
     multi_pad_net_ids = {
-        net_num
-        for net_num, pads in router.nets.items()
-        if net_num > 0 and len(pads) >= 2
+        net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
     }
 
     # Get statistics before optimization
@@ -561,13 +559,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # net on this board (VIN/GND are power rails pre-placed at footprint
     # generation), so if it has no segments the manufactured board is wrong
     # regardless of what nets_routed reports.
-    vout_net_id = next(
-        (nid for name, nid in net_map.items() if name == "VOUT"), None
-    )
+    vout_net_id = next((nid for name, nid in net_map.items() if name == "VOUT"), None)
     if vout_net_id is not None:
-        vout_segments = sum(
-            len(r.segments) for r in router.routes if r.net == vout_net_id
-        )
+        vout_segments = sum(len(r.segments) for r in router.routes if r.net == vout_net_id)
         print(f"\n   VOUT segments routed: {vout_segments}")
         if vout_segments == 0:
             print(
