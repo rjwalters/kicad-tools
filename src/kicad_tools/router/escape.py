@@ -901,6 +901,29 @@ class EscapeRouter:
             self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
         )
 
+        # Issue #3033 / #3062: When True, the in-pad rescue path
+        # (``_try_in_pad_escape``) returns None instead of placing a
+        # via that would clip a neighbouring foreign-net pad (the
+        # "proceed anyway, defer DRC to the user" branch from PR #2945).
+        # Defaults to False so legacy callers preserve the historical
+        # behaviour exactly; opt-in callers (e.g. the QFP-alternating
+        # dispatcher) flip this to True when they prefer surfacing the
+        # deferral over committing a DRC violation that cascades into
+        # adjacent-pin routing failures (board-04 OSC_OUT clipping
+        # NRST/U2.8 was the original trigger).
+        #
+        # CLI knob: the route command's ``--strict-in-pad-clearance``
+        # flag sets ``KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1`` in the
+        # subprocess env before invoking the router; reading it here
+        # threads the user opt-in through to the lazily-constructed
+        # EscapeRouter without touching every call site between
+        # ``route_cmd`` and ``Autorouter._escape``.
+        import os as _os
+
+        self.strict_in_pad_clearance: bool = (
+            _os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", "0") == "1"
+        )
+
         # Issue #2881: Counter for "would-have-rescued" events -- bumped
         # every time the escape router would have invoked
         # ``_try_in_pad_escape`` for a fine-pitch QFP/SSOP pin but the
@@ -2215,12 +2238,19 @@ class EscapeRouter:
                         extra_pads=self._other_footprint_pads(package, pads),
                     )
                     if violation or pin_boxed:
+                        # Issue #3033 / #3062: forward the EscapeRouter-level
+                        # strict flag so the dispatcher inherits the "defer
+                        # rather than commit a violating via" policy.
+                        # Defaults to False on the EscapeRouter constructor,
+                        # preserving legacy behaviour exactly for every
+                        # existing caller.
                         in_pad_route = self._try_in_pad_escape(
                             pad=pad,
                             direction=direction,
                             effective_clearance=effective_clearance,
                             escape_width=escape_width,
                             package=package,
+                            skip_on_clearance_violation=self.strict_in_pad_clearance,
                         )
                         if in_pad_route is not None:
                             if pin_boxed and not violation:
@@ -2876,12 +2906,16 @@ class EscapeRouter:
                     # before deferring to the main router.  Only enabled
                     # for manufacturers that support via-in-pad processing
                     # (e.g. ``jlcpcb-tier1`` Capability+, PCBWay).
+                    # Issue #3033 / #3062: forward the EscapeRouter strict
+                    # flag so SSOP/TSSOP callers inherit the same defer-vs-
+                    # commit-violation policy as the QFP dispatcher.
                     in_pad_route = self._try_in_pad_escape(
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
                         escape_width=escape_width,
                         package=package,
+                        skip_on_clearance_violation=self.strict_in_pad_clearance,
                     )
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
@@ -2960,12 +2994,17 @@ class EscapeRouter:
                 ):
                     # Issue #2605: Attempt in-pad via escape as a fallback
                     # before deferring to the main router.
+                    # Issue #3033 / #3062: forward the strict flag here too
+                    # so the even-pin branch inherits the same defer-vs-
+                    # commit-violation policy as the odd-pin/QFP branches
+                    # (curator-noted asymmetry from PR #3038 fixed).
                     in_pad_route = self._try_in_pad_escape(
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
                         escape_width=escape_width,
                         package=package,
+                        skip_on_clearance_violation=self.strict_in_pad_clearance,
                     )
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
@@ -4385,6 +4424,7 @@ class EscapeRouter:
         effective_clearance: float,
         escape_width: float,
         package: PackageInfo | None = None,
+        skip_on_clearance_violation: bool = False,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -4456,11 +4496,19 @@ class EscapeRouter:
                 dead-centre fallback.  When ``None`` (legacy call sites),
                 only the original geometry preconditions run and the
                 via is placed dead-centre without the neighbor check.
+            skip_on_clearance_violation: When True (default False),
+                return ``None`` instead of placing a violating via when
+                the long-axis nudge fails AND dead-centre would clip a
+                neighbouring foreign-net pad.  Opt-in flag for callers
+                that prefer surfacing the deferral as an explicit gap
+                over committing a DRC violation that cascades into
+                adjacent-pin routing failures.  Issue #3033 / #3062.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
-            or ``None`` if in-pad escape is unavailable or geometrically
-            infeasible.
+            or ``None`` if in-pad escape is unavailable, geometrically
+            infeasible, or (when ``skip_on_clearance_violation=True``)
+            the rescue would introduce a foreign-pad clearance violation.
         """
         if not self.via_in_pad_supported:
             return None
@@ -4539,6 +4587,24 @@ class EscapeRouter:
                 other_pads=other_pads,
                 same_net=pad.net,
             ):
+                # Issue #3033 / #3062: ``skip_on_clearance_violation``
+                # switches the "proceed anyway" branch to "return None"
+                # so the caller can surface the rescue failure as an
+                # explicit deferral instead of producing downstream DRC
+                # noise that cascades into NRST/GND corner-pad routing
+                # failures (board-04 LQFP-48 OSC_OUT cluster).
+                if skip_on_clearance_violation:
+                    logger.info(
+                        "In-pad rescue DEFERRED for pad %s (ref=%s pin=%s) at "
+                        "(%.3f, %.3f): dead-centre clips neighbour pad on %s "
+                        "and long-axis nudge cannot rescue (short-axis "
+                        "violation).  Returning None per Issue #3033 strict "
+                        "mode so the caller can surface the deferral instead "
+                        "of committing a DRC violation.",
+                        pad.net_name, pad.ref, pad.pin,
+                        via_x, via_y, pad.ref,
+                    )
+                    return None
                 logger.warning(
                     "In-pad rescue for pad %s (ref=%s pin=%s) at (%.3f, %.3f) "
                     "violates clearance to a neighboring foreign-net pad on "

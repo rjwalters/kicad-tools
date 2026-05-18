@@ -5356,6 +5356,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--strict-in-pad-clearance",
+        action="store_true",
+        dest="strict_in_pad_clearance",
+        help=(
+            "Issue #3033 / #3062: refuse to commit an in-pad rescue via that "
+            "would clip a neighbouring foreign-net pad on a fine-pitch "
+            "QFP/SSOP (the 'proceed anyway, defer DRC to the user' branch "
+            "from PR #2945).  Sets KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 so "
+            "the lazily-constructed EscapeRouter inside the negotiated/two-"
+            "phase pipelines picks up the flag without each call site needing "
+            "an explicit pass-through.  Default off preserves the legacy "
+            "bit-for-bit behaviour."
+        ),
+    )
+    parser.add_argument(
         "--show-congestion",
         action="store_true",
         help=(
@@ -5366,6 +5381,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #3033 / #3062: When --strict-in-pad-clearance is set, stamp the
+    # env var so EscapeRouter (lazily constructed several layers below the
+    # CLI) reads the same opt-in state.  See escape.py's __init__ for the
+    # env-var read site.  Defaults to "0" so absence preserves the legacy
+    # "proceed anyway" behaviour bit-for-bit.
+    import os as _os
+
+    if getattr(args, "strict_in_pad_clearance", False):
+        _os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"] = "1"
 
     # Issue #2802: Stamp a single monotonic wall-clock deadline derived from
     # ``--timeout`` onto ``args`` so every orchestration site (layer-escalation
