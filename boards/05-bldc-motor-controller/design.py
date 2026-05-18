@@ -581,10 +581,15 @@ def create_bldc_controller(output_dir: Path) -> Path:
     #      Each top-edge regulator output gets a unique local net to avoid
     #      ``pin_to_pin`` ERC conflicts; ``VM`` ties to the global
     #      ``VMOTOR`` net (driven by the power-input section).
+    # Gate-driver y was 95 (CP2 at y=64.77, exactly on the RAIL_3V3 wire at
+    # y=64.77 -- a silent-net-bridge from DRV_CP2 -> +3.3V).  Bumping y by
+    # 1 grid (y=96) shifts CP2 to y=66.04, clear of the rail.  See issue
+    # #3015 (PR #3014 + #3015's _emit_pin_net_stub now raises ValueError
+    # on label-on-wire collisions instead of silently bridging nets).
     gate_driver = GateDriverBlock(
         sch,
         x=X_GATE_DRV,
-        y=95,
+        y=96,
         driver_type="3-phase",
         ref="U3",
         value="DRV8301",

@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from .._stub_helpers import _emit_pin_net_stub
 from ..base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -209,22 +210,16 @@ class DebugHeader(CircuitBlock):
         # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
         # pattern from PR #2985; see issues #2980 and #2994.
         if pin_nets is not None:
-            STUB = 2.54
             for pin_key, net_name in pin_nets.items():
                 pin_pos = self.header.pin_position(pin_key)
-                # Stub away from the symbol center.  When the pin lies
-                # exactly on the center column we default to stubbing right.
-                if pin_pos[0] < x:
-                    label_x = pin_pos[0] - STUB
-                else:
-                    label_x = pin_pos[0] + STUB
-                sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
-                sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
-                # Expose the pin's real coordinate under the net name so
-                # external wiring can reach it.  Do not overwrite an
-                # existing port by the same name (preserves back-compat).
-                if net_name not in self.ports:
-                    self.ports[net_name] = pin_pos
+                # Delegate to ``_emit_pin_net_stub`` which performs the
+                # stub-direction heuristic + collision-aware auto-shift
+                # (raises ``ValueError`` if both sides collide; see issue
+                # #3015).
+                _emit_pin_net_stub(
+                    sch, pin_pos, x, net_name, self.ports,
+                    block_label="DebugHeader ",
+                )
 
     def _validate_config(self) -> None:
         """Validate interface and pin count combination."""
