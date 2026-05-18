@@ -105,21 +105,44 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # Motor power rail (12-24V)
+    # Motor power rail (12-24V).  Each power-input symbol gets a paired
+    # PWR_FLAG so KiCad ERC sees the net as externally driven (silences
+    # ``power_pin_not_driven`` on VMOTOR/+5V/+3.3V/GND).  Place the flag
+    # one grid (2.54mm) inside the rail along the symbol's column so it
+    # lands on a wire that already touches the rail.
     sch.add_rail(RAIL_VMOTOR, x_start=X_POWER_IN, x_end=X_PHASE_C + 60, net_label="VMOTOR")
     sch.add_power("power:+24V", x=X_POWER_IN, y=RAIL_VMOTOR - 10, rotation=0)
+    sch.add_pwr_flag(X_POWER_IN, RAIL_VMOTOR - 5)
 
     # 5V rail
     sch.add_rail(RAIL_5V, x_start=X_BUCK + 25, x_end=X_GATE_DRV + 30, net_label="+5V")
     sch.add_power("power:+5V", x=X_BUCK + 25, y=RAIL_5V - 10, rotation=0)
+    sch.add_pwr_flag(X_BUCK + 25, RAIL_5V - 5)
 
     # 3.3V rail
     sch.add_rail(RAIL_3V3, x_start=X_LDO + 25, x_end=X_MCU + 80, net_label="+3.3V")
     sch.add_power("power:+3V3", x=X_LDO + 25, y=RAIL_3V3 - 10, rotation=0)
+    sch.add_pwr_flag(X_LDO + 25, RAIL_3V3 - 5)
 
-    # Ground rail (spans full width)
+    # Ground rail (spans full width).  Built as a single ``add_rail`` wire
+    # ending at x=X_CONNECTORS+40 (=300).  The gate-driver bypass-cap
+    # column at x=309.88 (C19 today, created by GateDriverBlock; see the
+    # ``cap_ref_start=15`` note below — that block adds num_phases to the
+    # start, so refs come out as C18/C19) lies past the rail's right
+    # endpoint, so C19's pin-2 vertical wire endpoint at (309.88, 279.4)
+    # has no rail endpoint to meet.  A short extension segment is added
+    # after the rail to bridge from (299.72, 279.4) -> (309.88, 279.4) so
+    # the C19 GND wire meets a real wire endpoint (closes the
+    # ``pin_not_connected`` ERC error on C19's pin 2; see issue #3004).
     sch.add_rail(RAIL_GND, x_start=X_POWER_IN, x_end=X_CONNECTORS + 40, net_label="GND")
     sch.add_power("power:GND", x=X_POWER_IN, y=RAIL_GND + 10, rotation=0)
+    sch.add_pwr_flag(X_POWER_IN, RAIL_GND + 5)
+    # GND-rail right-edge extension covering the gate-driver bypass-cap
+    # column.  Snapped x's are 299.72 (rail end) and 309.88 (C19 pin 2 x).
+    sch.add_wire((299.72, RAIL_GND), (309.88, RAIL_GND), warn_on_collision=False)
+    # Junction marks the 3-way convergence at the existing rail end (rail
+    # wire, C18 pin-2 vertical wire, and the new extension).
+    sch.add_junction(299.72, RAIL_GND)
 
     print("   Added VMOTOR, +5V, +3.3V, and GND rails")
 
@@ -402,7 +425,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
     _connect_mcu_pin_to_label("2", "OSC_IN", dx=-5, dy=0)
     _connect_mcu_pin_to_label("3", "OSC_OUT", dx=-5, dy=0)
 
+    # Unused STM32G431K8 GPIO pins (PA3-PA5, PA11-PA15, PB3-PB5 mapped to
+    # LQFP-32 pins 8, 9, 10, 21, 22, 25, 27, 28).  This demo design does
+    # not consume those signals, so mark each as intentionally unconnected
+    # to silence ``pin_not_connected`` ERC errors.  See issue #3004.
+    for nc_pin in ["8", "9", "10", "21", "22", "25", "27", "28"]:
+        nc_pos = mcu.pin_position(nc_pin)
+        sch.add_no_connect(nc_pos[0], nc_pos[1])
+
     print("   Wired 16 floating nets (6 PWM, 3 HALL, 3 ISENSE-, 4 SWD) to MCU pins")
+    print("   Marked 8 unused GPIO pins as no-connect (PA3-PA5, PA11-PA15, PB3-PB5)")
 
     # Crystal oscillator (8MHz)
     xtal = create_crystal_with_loads(
