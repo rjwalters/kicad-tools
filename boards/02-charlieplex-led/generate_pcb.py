@@ -134,9 +134,26 @@ def generate_board_outline() -> str:
 def generate_mcu() -> str:
     """Generate the 8-pin MCU footprint (DIP-8 style)."""
     x, y = MCU_POS
-    # DIP-8 dimensions: 7.62mm (300mil) row spacing, 2.54mm (100mil) pitch
-    row_spacing = 7.62 / 2  # Distance from center to each row
-    pin_pitch = 2.54
+    # Use 0.1mm-grid-aligned dimensions instead of strict imperial DIP-8
+    # (7.62mm row spacing, 2.54mm pin pitch).  The U1 footprint is a
+    # synthetic stand-in for an MCU here (the schematic symbol is the
+    # generic Conn_01x08), so the small geometric shift has no
+    # manufacturing or schematic-net consequence.
+    #
+    # Geometry: pin row positions are ``MCU.y + (i - 1.5) * pitch``
+    # with i in {0,1,2,3}.  For all four to land on a 0.1mm grid:
+    #   * pitch itself must be a multiple of 0.1mm, AND
+    #   * the half-pitch offset ``1.5 * pitch`` must also land on the
+    #     grid relative to MCU.y.
+    # With pitch=2.5mm we get offsets ±3.75, ±1.25.  Adding y_offset
+    # 0.05mm to each pad py aligns them: 143.30, 145.80, 148.30,
+    # 150.80.  Pad x is 125 ± 3.80 = 121.20, 128.80 (on grid by
+    # construction).
+    #
+    # See Issue #3032.
+    row_spacing = 7.6 / 2  # 3.80 mm (was 3.81)
+    pin_pitch = 2.5  # mm (was 2.54)
+    y_offset = 0.05  # align (i-1.5)*pin_pitch to the 0.1mm grid
 
     # Pin assignments:
     # 1: LINE_A (GPIO)
@@ -164,7 +181,7 @@ def generate_mcu() -> str:
         pin_num, net_name = pin_nets[i]
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-        py = -1.5 * pin_pitch + i * pin_pitch
+        py = -1.5 * pin_pitch + i * pin_pitch + y_offset
         pads.append(
             f"""    (pad "{pin_num}" thru_hole rect (at {-row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})"""
         )
@@ -174,7 +191,7 @@ def generate_mcu() -> str:
         pin_num, net_name = pin_nets[4 + i]
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-        py = 1.5 * pin_pitch - i * pin_pitch
+        py = 1.5 * pin_pitch - i * pin_pitch + y_offset
         pads.append(
             f"""    (pad "{pin_num}" thru_hole oval (at {row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})"""
         )
