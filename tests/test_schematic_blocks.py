@@ -4044,6 +4044,12 @@ class TestGateDriverBlockMocked:
 
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
             comp = Mock()
+            # Reflect the footprint kwarg (if any) onto the mock component
+            # so tests can assert `.footprint` after construction -- mirrors
+            # the real SymbolInstance.footprint attribute populated by
+            # `Schematic.add_symbol`.  Empty string default matches the
+            # production default for back-compat callers.
+            comp.footprint = kwargs.get("footprint", "")
             comp.pin_position.side_effect = lambda name: {
                 "1": (x, y - 5),
                 "2": (x, y + 5),
@@ -4101,6 +4107,76 @@ class TestGateDriverBlockMocked:
 
         # Should wire bypass caps
         assert mock_schematic.wire_decoupling_cap.called
+
+    def test_gate_driver_explicit_bypass_cap_footprint(self, mock_schematic):
+        """Explicit bypass_cap_footprint sets .footprint on every bypass cap."""
+        # Regression for issue #3009 -- bypass caps used to land in the
+        # schematic with footprint="" because GateDriverBlock didn't forward
+        # any footprint kwarg to add_symbol.  Pass ``bootstrap_caps=None`` so
+        # the only ``Device:C`` add_symbol calls come from the bypass loop
+        # (matches board-05's GateDriverBlock invocation).
+        fp = "Capacitor_SMD:C_0805_2012Metric"
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            bootstrap_caps=None,
+            bypass_cap_footprint=fp,
+        )
+
+        assert len(driver.bypass_caps) == 2
+        for cap in driver.bypass_caps:
+            assert cap.footprint == fp
+
+        # Every bypass-cap call to add_symbol must carry footprint=fp.
+        bypass_calls = [
+            call for call in mock_schematic.add_symbol.call_args_list
+            if call.args and call.args[0] == "Device:C"
+        ]
+        assert len(bypass_calls) == 2
+        for call in bypass_calls:
+            assert call.kwargs.get("footprint") == fp
+
+    def test_gate_driver_auto_footprint_forwarded(self, mock_schematic):
+        """auto_footprint=True is forwarded to every bypass-cap add_symbol call."""
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            bootstrap_caps=None,
+            auto_footprint=True,
+        )
+
+        assert len(driver.bypass_caps) == 2
+        bypass_calls = [
+            call for call in mock_schematic.add_symbol.call_args_list
+            if call.args and call.args[0] == "Device:C"
+        ]
+        assert len(bypass_calls) == 2
+        for call in bypass_calls:
+            assert call.kwargs.get("auto_footprint") is True
+
+    def test_gate_driver_default_back_compat(self, mock_schematic):
+        """Default construction (no footprint kwargs) preserves back-compat."""
+        # Should not raise, bypass caps land with footprint="" (matches the
+        # pre-#3009 production behavior so existing callers see no change).
+        driver = GateDriverBlock(
+            mock_schematic, x=100, y=100, bootstrap_caps=None
+        )
+
+        assert len(driver.bypass_caps) == 2
+        for cap in driver.bypass_caps:
+            assert cap.footprint == ""
+
+        bypass_calls = [
+            call for call in mock_schematic.add_symbol.call_args_list
+            if call.args and call.args[0] == "Device:C"
+        ]
+        assert len(bypass_calls) == 2
+        for call in bypass_calls:
+            # Default forwards auto_footprint=False, no explicit footprint kwarg.
+            assert call.kwargs.get("auto_footprint") is False
+            assert "footprint" not in call.kwargs
 
 
 class TestMotorControlFactoryFunctions:

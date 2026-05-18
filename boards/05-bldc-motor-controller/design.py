@@ -591,6 +591,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
         bootstrap_caps=None,  # bootstrap caps created externally below
         bypass_caps=["100nF", "10uF"],
         cap_ref_start=15,  # C15-C16 for bypass (C12-C14 reserved for bootstrap)
+        # Match the rest of the board's 0805 passives so C15/C16 land in the
+        # netlist with a non-empty footprint field (see issue #3009).
+        bypass_cap_footprint="Capacitor_SMD:C_0805_2012Metric",
         pin_nets={
             # --- Category 1: SPI + discrete control (left edge) ---
             # SPI inputs: tied to +3.3V (idle high) since no MCU pin is
