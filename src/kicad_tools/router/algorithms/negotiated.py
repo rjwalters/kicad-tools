@@ -1013,6 +1013,79 @@ class NegotiatedRouter:
 
         return nets_to_reroute
 
+    def find_nets_with_segment_via_violations(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+    ) -> list[int]:
+        """Find nets whose committed segments clip foreign-net vias.
+
+        Issue #3002: After each negotiated iteration, walk every
+        committed segment against every foreign-net via and use the
+        shared :func:`segment_clears_foreign_via` predicate (STANDARD
+        threshold) to flag violations.  This converts the
+        post-commit clearance validator from advisory (post-route DRC
+        report only) to LIVE -- the rip-up loop feeds violators back
+        into ``nets_to_reroute`` so the next iteration re-routes them
+        against the up-to-date foreign-via geometry.
+
+        Concrete failure this catches (board-04, PCB (143.8, 119.7) on
+        B.Cu): net A's SWDIO segment commits in iteration N BEFORE net
+        B's BOOT0 via lands later in the SAME iteration.  The pre-
+        commit validator at the time of SWDIO's commit doesn't see
+        BOOT0's via because it isn't in ``grid.routes`` yet.  Post-
+        iteration this hook walks all committed segments against ALL
+        committed vias (including the new BOOT0) and surfaces SWDIO
+        for re-routing.
+
+        Note: only the SEGMENT's net is added to the reroute list (not
+        the via's net).  A clearance violation between net A's segment
+        and net B's via is generally fixable by rerouting net A on a
+        different path; the via's position is constrained by the pad
+        it escapes, so ripping up net B usually doesn't help.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+
+        Returns:
+            List of net IDs whose segments violate clearance against
+            a foreign-net via.  Duplicates are removed.
+        """
+        # Import here to avoid a top-level circular dependency between
+        # algorithms.negotiated -> via_clearance -> primitives.
+        from ..via_clearance import segment_clears_foreign_via
+
+        # Build a flat list of (net, via) tuples once -- O(V) -- so the
+        # outer loop over segments is O(S * V).  S and V are both
+        # bounded by the routed-net count for typical boards.
+        all_vias: list[tuple[int, "Via"]] = []
+        for net_id, routes in net_routes.items():
+            for route in routes:
+                for via in route.vias:
+                    all_vias.append((net_id, via))
+
+        violators: set[int] = set()
+        for net, routes in net_routes.items():
+            for route in routes:
+                for seg in route.segments:
+                    for via_net, via in all_vias:
+                        if via_net == net:
+                            continue  # Same-net via -- skipped by convention.
+                        if not segment_clears_foreign_via(
+                            seg, via, trace_clearance,
+                            hard_intersection_only=False,
+                        ):
+                            violators.add(net)
+                            break  # One violation per segment is enough.
+                    if net in violators:
+                        break
+                if net in violators:
+                    break
+
+        return list(violators)
+
     def rip_up_nets(
         self,
         nets: list[int],

@@ -6567,6 +6567,41 @@ class Autorouter:
                             f"in recovery: {', '.join(partial_names)}"
                         )
 
+                # Issue #3002: Post-iteration live re-validation of
+                # committed segments against committed foreign-net vias.
+                # The pre-commit clearance gate sees only vias already
+                # in ``grid.routes`` at the moment a segment validates;
+                # cross-net ordering bugs (segment commits before a
+                # later foreign via lands in the same iteration) slip
+                # past the gate.  This hook walks every committed
+                # segment against every foreign-net via using the
+                # shared :func:`segment_clears_foreign_via` predicate
+                # (STANDARD threshold) and feeds violators back into
+                # ``nets_to_reroute`` so the next iteration retries
+                # them with up-to-date foreign-via context.
+                #
+                # Concrete failure this catches: board-04 SWDIO/BOOT0
+                # at PCB (143.8, 119.7) on B.Cu -- SWDIO's B.Cu
+                # segment clips BOOT0's via.
+                seg_via_violators = neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                )
+                if seg_via_violators:
+                    new_violators = [
+                        n for n in seg_via_violators
+                        if n not in nets_to_reroute and n not in off_grid_nets
+                    ]
+                    if new_violators:
+                        for v_net in new_violators:
+                            nets_to_reroute.append(v_net)
+                        violator_names = [
+                            self.net_names.get(n, f"Net_{n}") for n in new_violators
+                        ]
+                        flush_print(
+                            f"  Including {len(new_violators)} segment-vs-foreign-via "
+                            f"violator(s) in recovery: {', '.join(violator_names)}"
+                        )
+
                 # Issue #2295: Per-net rip-up stall filtering.
                 # Track each net's overflow contribution across rip-up
                 # iterations.  If a net has been ripped up N consecutive times

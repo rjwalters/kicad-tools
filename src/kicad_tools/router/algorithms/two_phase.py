@@ -659,6 +659,19 @@ class TwoPhaseRouter:
 
                 overused = self.grid.find_overused_cells()
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+
+                # Issue #3002: Live re-validation hook for segment-vs-
+                # foreign-via clearance violations (see core.py negotiated
+                # loop for the full rationale).  Feeds violators back
+                # into the rip-up cohort so the next iteration retries
+                # them with up-to-date foreign-via context.
+                seg_via_violators = neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                )
+                for v_net in seg_via_violators:
+                    if v_net not in nets_to_reroute:
+                        nets_to_reroute.append(v_net)
+
                 flush_print(
                     f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
                 )
