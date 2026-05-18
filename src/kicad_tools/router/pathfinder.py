@@ -31,7 +31,7 @@ from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
-from .via_clearance import point_clear_of_copper
+from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 
 
 @dataclass(frozen=True)
@@ -203,6 +203,17 @@ class Router:
         # last remaining via-clearance bug pattern for non-square pads).
         self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
+
+        # Issue #3002: Symmetric to ``_foreign_pad_tuples`` /
+        # ``_foreign_track_adapters`` (Issue #2947), but for the OPPOSITE
+        # direction -- a NEW segment vs FOREIGN-net vias.  Populated by
+        # :meth:`set_segment_foreign_context` (sibling of
+        # :meth:`set_via_foreign_context`).  Consumed by callers that
+        # validate a candidate segment against foreign vias via
+        # :func:`segment_clears_foreign_via` before committing the
+        # segment to ``grid.routes``.  Empty by default so behavior
+        # matches pre-#3002 when no caller wires the context up.
+        self._foreign_vias: list[Via] = []
 
         # Issue #1016: Component pitch cache for per-component clearance
         # Computed lazily on first use
@@ -895,6 +906,58 @@ class Router:
         self._foreign_track_adapters = track_adapters
 
         # Foreign context affects via blocking results -- invalidate cache.
+        self.clear_via_cache()
+
+    def set_segment_foreign_context(
+        self,
+        foreign_vias: list[Via] | None = None,
+    ) -> None:
+        """Set foreign-net via context for new-segment clearance gating.
+
+        Issue #3002: Symmetric sibling of
+        :meth:`set_via_foreign_context` (PR #2952 / Issue #2947).  Where
+        ``set_via_foreign_context`` protects a NEW via from foreign
+        segments / pads, this setter protects a NEW segment from
+        foreign-net VIAs.
+
+        Background: the main router commits segments via
+        :meth:`_mark_route` (called from :meth:`route_net` and the
+        negotiated rip-up path).  Pre-commit validation flows through
+        :meth:`_validate_route_clearance`, which already walks
+        ``grid.routes`` vias via :meth:`Grid.validate_segment_clearance`
+        -- but only for vias ALREADY committed when the segment is
+        validated.  Cross-net ordering bugs slip through when net A's
+        segment commits BEFORE net B's via is placed in the same
+        negotiated iteration (the board-04 SWDIO/BOOT0 site at PCB
+        (143.8, 119.7) on B.Cu).  This setter lets the
+        :class:`Autorouter` push a richer foreign-via list -- including
+        vias that the negotiated post-iteration re-validation hook
+        (algorithms/negotiated.py) will surface -- so the predicate is
+        consulted with up-to-date geometry.
+
+        Same-net filtering is the CALLER's responsibility (mirrors the
+        boundary convention of :meth:`set_via_foreign_context`).
+
+        Cache invariant: any cached per-segment validity results would
+        be invalidated by a change in foreign-via geometry.  The router
+        does not currently cache segment-clearance lookups (the via
+        cache is the only one affected by world-coord geometry), so no
+        additional cache clear is required here.  We still invalidate
+        the via cache for symmetry with :meth:`set_via_foreign_context`
+        in case a future patch introduces a per-segment cache that is
+        keyed similarly.
+
+        Args:
+            foreign_vias: List of :class:`Via` objects whose net differs
+                from the segment's own net.  Pass ``None`` to clear the
+                context.
+        """
+        self._foreign_vias = list(foreign_vias) if foreign_vias else []
+
+        # Foreign-via geometry can affect via-cache validity indirectly
+        # (e.g. when a new via is added the via cache for nearby cells
+        # must re-evaluate against the updated geometry).  Mirrors the
+        # invariant in :meth:`set_via_foreign_context`.
         self.clear_via_cache()
 
     def _get_via_impact_cost(self, wx: float, wy: float, current_net: int) -> float:
@@ -3121,6 +3184,28 @@ class Router:
             )
             if not is_valid:
                 return False
+
+            # Issue #3002: Also validate each segment against the
+            # router-level foreign-via context populated by
+            # :meth:`Autorouter._update_router_segment_foreign_context`.
+            # ``grid.validate_segment_clearance`` already walks
+            # ``self.grid.routes`` vias, but the foreign-context list
+            # can include vias the negotiated re-validation hook has
+            # flagged that may not yet be present in ``grid.routes``
+            # (or may have just been added by the current iteration).
+            # The STANDARD threshold (hard_intersection_only=False)
+            # mirrors the main-router commit policy described in
+            # :meth:`set_segment_foreign_context`.
+            if self._foreign_vias:
+                for via in self._foreign_vias:
+                    if via.net == exclude_net:
+                        continue  # Same-net via -- skipped by convention.
+                    if not segment_clears_foreign_via(
+                        seg, via,
+                        trace_clearance=self.rules.trace_clearance,
+                        hard_intersection_only=False,
+                    ):
+                        return False
 
         # Issue #1667: Validate vias against other-net segments
         for via in route.vias:

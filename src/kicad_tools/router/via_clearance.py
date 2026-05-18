@@ -296,9 +296,132 @@ def point_clear_of_copper(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Shared segment-vs-foreign-via predicate (Issue #2998 / #3002)
+# ---------------------------------------------------------------------------
+
+
+class _SegmentLike(Protocol):
+    """Structural type for a routed segment passed to
+    :func:`segment_clears_foreign_via`.
+
+    The router's :class:`Segment` is compatible -- the helper reads the
+    centerline endpoints, the per-layer placement, and the trace width.
+    Layer is exposed via the ``layer`` attribute (an enum-like with a
+    ``value`` int).
+    """
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float
+    # ``layer`` exposes ``.value`` -- intentionally not typed as a
+    # concrete enum so test fixtures can mock with simple objects.
+
+
+class _ViaLike(Protocol):
+    """Structural type for a routed via passed to
+    :func:`segment_clears_foreign_via`.
+
+    Mirrors :class:`kicad_tools.router.primitives.Via` -- reads
+    centre coordinates, diameter, and the two-element ``layers`` range.
+    ``layers[0]`` and ``layers[1]`` each expose ``.value`` (an int).
+    """
+
+    x: float
+    y: float
+    diameter: float
+    # ``layers`` is a 2-tuple whose elements expose ``.value``.
+
+
+def segment_clears_foreign_via(
+    seg: "_SegmentLike",
+    via: "_ViaLike",
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> bool:
+    """Return True iff a segment clears a foreign-net via.
+
+    Issue #2998 / #3002: Shared sibling of :func:`point_clear_of_copper`
+    for the segment-vs-via direction.  Where ``point_clear_of_copper``
+    protects a NEW via from foreign segments/pads, this predicate
+    protects a NEW segment from a foreign-net via.
+
+    Originally introduced as a private static helper inside
+    :class:`kicad_tools.router.escape.EscapeRouter` by PR #2999 (the
+    escape-commit gate for issue #2998).  Lifted to this module by PR
+    for issue #3002 so the main-router commit gate can consume the same
+    predicate without importing :mod:`escape`.
+
+    Layer-awareness: the segment occupies one copper layer; the via
+    spans a contiguous layer range ``via.layers[0]..[1]``.  A segment
+    must clear a via only when the via spans the segment's layer.
+
+    Same-net filtering is the CALLER's responsibility (mirrors the
+    ``point_clear_of_copper`` boundary convention; the caller has more
+    context to enforce diff-pair / split-net policies).
+
+    Two thresholds (parameterised by ``hard_intersection_only``):
+
+    * STANDARD (``hard_intersection_only=False``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2 + trace_clearance
+
+      Full manufacturer clearance.  Rejects both hard intersections
+      AND marginal sub-clearance violations.  This is the predicate
+      the C++ post-route validator uses at
+      ``cpp/src/grid.cpp:510-536`` (block 1c) and the predicate used
+      by :meth:`Autorouter._update_router_segment_foreign_context`
+      (Issue #3002 main-router gate).
+
+    * HARD-INTERSECTION (``hard_intersection_only=True``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2
+
+      Drops the ``trace_clearance`` term: only flags cases where
+      copper physically overlaps copper (negative edge-to-edge
+      clearance).  Used by ``EscapeRouter.apply_escape_routes`` to drop
+      only the unrecoverable-by-routing escapes; preserves the in-pad
+      rescue last-resort policy (PR #2945 / Issue #2944) for marginal
+      sub-clearance escapes whose alternate path would regress net
+      completion (e.g. board-04 NRST cluster).
+
+    Args:
+        seg: The candidate segment.  Reads ``x1/y1/x2/y2/width/layer``.
+        via: A foreign-net via to validate against.  Reads
+            ``x/y/diameter/layers``.
+        trace_clearance: Manufacturer minimum copper-to-copper
+            clearance in mm.
+        hard_intersection_only: When True, ignore ``trace_clearance``
+            in the threshold (see HARD-INTERSECTION mode above).
+
+    Returns:
+        True if the segment clears the via, False on violation.
+    """
+    # Layer overlap check: vias span layers[0]..layers[1] inclusive.
+    v_lo = min(via.layers[0].value, via.layers[1].value)
+    v_hi = max(via.layers[0].value, via.layers[1].value)
+    if not (v_lo <= seg.layer.value <= v_hi):
+        return True  # Via doesn't reach the segment's layer.
+
+    dist = point_to_segment_distance(
+        via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+    )
+    required = via.diameter / 2 + seg.width / 2
+    if not hard_intersection_only:
+        required += trace_clearance
+    # 1e-9 epsilon mirrors ``point_clear_of_copper``'s convention so a
+    # segment exactly at the clearance threshold is admitted.
+    return dist >= required - 1e-9
+
+
 __all__ = [
     "FilledPolygonLike",
     "ForeignPadTuple",
     "TrackSegmentLike",
     "point_clear_of_copper",
+    "segment_clears_foreign_via",
 ]

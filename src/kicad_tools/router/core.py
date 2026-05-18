@@ -185,9 +185,16 @@ class IterationMetrics:
     Lex order (used by :meth:`is_better_than`):
 
     1. ``routed_count`` descending — more routed nets is always better.
-    2. ``overflow`` ascending — with equal route counts, lower overflow is
-       better.  This is the new dimension Issue #2803 needs.
-    3. ``iteration`` descending — on a complete tie, prefer the later
+    2. ``clearance_violations`` ascending — Issue #3002 (PR #3006
+       follow-up): a re-route that fixes a segment-vs-foreign-via
+       clearance violation without reducing overflow must NOT be rolled
+       back to the prior state.  Promoted ABOVE overflow because a
+       DRC-clean board with marginally higher overflow is strictly
+       preferable to a DRC-dirty board with lower overflow.
+    3. ``overflow`` ascending — with equal route counts and equal
+       clearance violations, lower overflow is better (the Issue #2803
+       dimension).
+    4. ``iteration`` descending — on a complete tie, prefer the later
        iteration so perturbation/escape strategies have a chance to bake
        in.
 
@@ -195,20 +202,30 @@ class IterationMetrics:
         iteration: Iteration index (0 = initial pass, 1..N = rip-up iters).
         routed_count: Number of nets with at least one route at iter end.
         overflow: Grid total overflow at iter end (lower is better).
+        clearance_violations: Count of nets with segment-vs-foreign-via
+            clearance violations at iter end (Issue #3002; lower is
+            better).  Defaults to 0 for back-compat with existing call
+            sites that don't compute the count.
     """
 
     iteration: int
     routed_count: int
     overflow: int
+    clearance_violations: int = 0
 
     @property
-    def sort_key(self) -> tuple[int, int, int]:
+    def sort_key(self) -> tuple[int, int, int, int]:
         """Tuple suitable for ``min()`` / sort key.
 
         Negated where descending is desired so the *smallest* tuple is the
         *best* iteration.
         """
-        return (-self.routed_count, self.overflow, -self.iteration)
+        return (
+            -self.routed_count,
+            self.clearance_violations,
+            self.overflow,
+            -self.iteration,
+        )
 
     def is_better_than(self, other: IterationMetrics) -> bool:
         """Return True if ``self`` is strictly better than ``other``.
@@ -715,6 +732,15 @@ class Autorouter:
         self.nets: dict[int, list[tuple[str, str]]] = {}
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Issue #3002 (PR #3006 perf): single-slot cache for the
+        # ``vias_by_net`` index used by
+        # :meth:`_update_router_segment_foreign_context`.  Stores
+        # ``((routes_obj_id, routes_len), vias_by_net_dict)``.  Cheap
+        # signature -- O(1) check -- so the index rebuild only runs
+        # when ``self.routes`` actually mutates.  See the call site
+        # docstring for the perf motivation (board-07 quadratic growth
+        # in CI's Match-Group Routing Regression job).
+        self._all_vias_by_net_cache: tuple[tuple[int, int], dict[int, list]] | None = None
         # Pre-existing routes loaded as obstacles for DRC/merge but NOT
         # emitted by to_sexp() or subject to rip-up/reroute.
         self.existing_routes: list[Route] = []
@@ -1580,6 +1606,72 @@ class Autorouter:
             foreign_tracks=foreign_tracks,
         )
 
+    def _update_router_segment_foreign_context(self, current_net: int) -> None:
+        """Update router foreign-net via context for new-segment clearance.
+
+        Issue #3002: Symmetric sibling of
+        :meth:`_update_router_via_foreign_context` (PR #2952 / Issue
+        #2947).  Where the via-foreign-context push protects a NEW via
+        from foreign segments / pads, this push protects a NEW segment
+        from foreign-net VIAs.
+
+        Background: ``pathfinder.Router._validate_route_clearance`` is
+        called pre-commit at :meth:`pathfinder._reconstruct_route` and
+        :meth:`pathfinder.route_bidirectional`.  It walks
+        ``self.grid.routes`` for foreign vias via
+        :meth:`Grid.validate_segment_clearance` -- but that only sees
+        vias already committed at the moment the segment validates.
+        Cross-net ordering bugs in the negotiated rip-up loop slip
+        through when net A's segment commits BEFORE net B's via lands
+        (board-04 SWDIO/BOOT0, PCB (143.8, 119.7) B.Cu).
+
+        This push gives the router a snapshot of every foreign-net via
+        already in ``self.routes`` at the START of the current net's
+        routing pass, including vias the negotiated post-iteration
+        re-validation hook may have just surfaced.  The router uses
+        :func:`segment_clears_foreign_via` (STANDARD threshold) to
+        reject candidate segments before they enter ``grid.routes``.
+
+        Same-net vias are filtered out here (matches the boundary
+        convention of :meth:`_update_router_via_foreign_context`).
+
+        Args:
+            current_net: The net ID being routed (foreign = vias whose
+                net != current_net).
+        """
+        if not hasattr(self.router, "set_segment_foreign_context"):
+            return  # C++ backend or test stub without the hook -- no-op.
+
+        # Issue #3002 (PR #3006 perf): build the (net, [vias]) index
+        # once per ``self.routes`` mutation and reuse it across all
+        # four call sites in this iteration.  Without the cache the
+        # full route list is re-walked at every net's
+        # ``route_net()`` / negotiated re-route, climbing to O(R x V)
+        # per call -- board-07 with ~31 multi-pad signal nets x 15
+        # iterations turned this into the dominant cost of the
+        # ``Match-Group Routing Regression`` CI job.  Cache is keyed
+        # by ``len(self.routes)`` so any route append/clear/extend
+        # invalidates implicitly on the next call (cheap O(1) check).
+        cache_signature = (id(self.routes), len(self.routes))
+        if (
+            self._all_vias_by_net_cache is None
+            or self._all_vias_by_net_cache[0] != cache_signature
+        ):
+            vias_by_net: dict[int, list] = {}
+            for route in self.routes:
+                if route.vias:
+                    vias_by_net.setdefault(route.net, []).extend(route.vias)
+            self._all_vias_by_net_cache = (cache_signature, vias_by_net)
+
+        vias_by_net = self._all_vias_by_net_cache[1]
+        foreign_vias: list = []
+        for net_id, vias in vias_by_net.items():
+            if net_id == current_net:
+                continue
+            foreign_vias.extend(vias)
+
+        self.router.set_segment_foreign_context(foreign_vias=foreign_vias)
+
     def route_net(
         self,
         net: int,
@@ -1615,6 +1707,9 @@ class Autorouter:
         # ``_check_via_placement_cached`` can apply the same world-coord
         # clearance predicate the escape phase uses (PR #2945).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Push foreign-net via context so segment commit
+        # gating (``_validate_route_clearance``) sees up-to-date vias.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
 
@@ -5379,6 +5474,8 @@ class Autorouter:
         # interleaved path's ``self.router.route()`` calls honor the same
         # world-coord via clearance predicate route_net() does (PR #2952).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: N-port path also needs segment-vs-foreign-via gating.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
 
@@ -6243,10 +6340,32 @@ class Autorouter:
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_routed_count = sum(1 for r in net_routes.values() if r)
         best_iteration = 0  # 0 = initial pass
+
+        # Issue #3002 (PR #3006 follow-up): Compute initial clearance-
+        # violation count so the lex-tuple comparator (see
+        # :class:`IterationMetrics`) can prefer DRC-clean iterations
+        # over DRC-dirty ones even when overflow is identical.  A
+        # hook-driven re-route that fixes a clearance violation without
+        # changing overflow MUST survive the post-loop restore; the
+        # only way to make that survive is to factor the violation
+        # count into the lex tuple.
+        # Issue #3002 (PR #3006 perf): pass a cache_key so the four
+        # find_nets_with_segment_via_violations call sites within a
+        # single negotiated iteration (initial, top-of-iter, mid-iter
+        # recovery, end-of-iter capture) reuse a memoized result when
+        # state has not mutated.  The initial pass uses the dedicated
+        # ``("init",)`` key.
+        initial_violations = len(
+            neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("init",),
+            )
+        )
         best_metrics = IterationMetrics(
             iteration=0,
             routed_count=best_routed_count,
             overflow=overflow,
+            clearance_violations=initial_violations,
         )
 
         # Issue #2803: Lightweight trajectory log (three ints per iteration,
@@ -6273,10 +6392,25 @@ class Autorouter:
             nonlocal best_routed_count, best_iteration
 
             routed_now = sum(1 for r in net_routes.values() if r)
+            # Issue #3002 (PR #3006 follow-up): Count segment-vs-foreign-via
+            # violations so the lex-tuple comparator can preserve a hook-
+            # driven re-route that fixes a clearance violation without
+            # reducing overflow.
+            # Issue #3002 (PR #3006 perf): cache_key for end-of-iteration
+            # captures.  Distinct phase tag so the post-loop "final"
+            # restore can hit the cache and reuse the last iteration's
+            # post-state walk.
+            violations_now = len(
+                neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iter_index),
+                )
+            )
             metrics = IterationMetrics(
                 iteration=iter_index,
                 routed_count=routed_now,
                 overflow=overflow_val,
+                clearance_violations=violations_now,
             )
             iteration_trajectory.append(metrics)
 
@@ -6310,10 +6444,12 @@ class Autorouter:
                 suffix = (
                     f" | best-so-far=iter-{best_metrics.iteration} "
                     f"(routed={best_metrics.routed_count}, "
+                    f"clearance_viol={best_metrics.clearance_violations}, "
                     f"overflow={best_metrics.overflow})"
                 )
             flush_print(
                 f"  iter {iter_index} | routed={routed_now}/{total_nets} | "
+                f"clearance_viol={violations_now} | "
                 f"overflow={overflow_val}{suffix}"
             )
 
@@ -6337,10 +6473,25 @@ class Autorouter:
                 # produced equal route count with lower overflow is still
                 # preserved.
                 current_routed = sum(1 for r in net_routes.values() if r)
+                # Issue #3002 (PR #3006 follow-up): include clearance-
+                # violation count in the lex tuple at the top-of-iteration
+                # snapshot site too -- matches the end-of-iteration capture
+                # below.
+                # Issue #3002 (PR #3006 perf): cache_key for top-of-
+                # iteration snapshot.  State here equals the end-state
+                # of the prior iteration -> reuse the ``("post", K-1)``
+                # cache from the previous _capture_iteration_end call.
+                current_violations = len(
+                    neg_router.find_nets_with_segment_via_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                    )
+                )
                 current_metrics = IterationMetrics(
                     iteration=iteration - 1,  # captured state is end of prior iter
                     routed_count=current_routed,
                     overflow=overflow,
+                    clearance_violations=current_violations,
                 )
                 if current_metrics.is_better_than(best_metrics):
                     best_metrics = current_metrics
@@ -6516,6 +6667,47 @@ class Autorouter:
                         flush_print(
                             f"  Including {len(new_partial)} partially routed net(s) "
                             f"in recovery: {', '.join(partial_names)}"
+                        )
+
+                # Issue #3002: Post-iteration live re-validation of
+                # committed segments against committed foreign-net vias.
+                # The pre-commit clearance gate sees only vias already
+                # in ``grid.routes`` at the moment a segment validates;
+                # cross-net ordering bugs (segment commits before a
+                # later foreign via lands in the same iteration) slip
+                # past the gate.  This hook walks every committed
+                # segment against every foreign-net via using the
+                # shared :func:`segment_clears_foreign_via` predicate
+                # (STANDARD threshold) and feeds violators back into
+                # ``nets_to_reroute`` so the next iteration retries
+                # them with up-to-date foreign-via context.
+                #
+                # Concrete failure this catches: board-04 SWDIO/BOOT0
+                # at PCB (143.8, 119.7) on B.Cu -- SWDIO's B.Cu
+                # segment clips BOOT0's via.
+                # Issue #3002 (PR #3006 perf): cache_key matches the
+                # top-of-iter snapshot since no mutations have occurred
+                # between this call site and the iteration boundary.
+                # Hot path: this is the third call within an iteration
+                # that reads the same ``("post", K-1)`` state.
+                seg_via_violators = neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
+                )
+                if seg_via_violators:
+                    new_violators = [
+                        n for n in seg_via_violators
+                        if n not in nets_to_reroute and n not in off_grid_nets
+                    ]
+                    if new_violators:
+                        for v_net in new_violators:
+                            nets_to_reroute.append(v_net)
+                        violator_names = [
+                            self.net_names.get(n, f"Net_{n}") for n in new_violators
+                        ]
+                        flush_print(
+                            f"  Including {len(new_violators)} segment-vs-foreign-via "
+                            f"violator(s) in recovery: {', '.join(violator_names)}"
                         )
 
                 # Issue #2295: Per-net rip-up stall filtering.
@@ -7569,17 +7761,42 @@ class Autorouter:
         # the final iteration produced — which can be strictly worse than a
         # prior iteration on either dimension.
         current_routed = sum(1 for r in net_routes.values() if r)
+        # Issue #3002 (PR #3006 follow-up): include clearance-violation
+        # count in the final lex-tuple comparison.  A best snapshot with
+        # zero clearance violations must NOT be overwritten by a final
+        # state with marginally lower overflow but live DRC violations.
+        # Issue #3002 (PR #3006 perf): the final restore comparator
+        # runs once after the iteration loop exits.  Hits the cache if
+        # the last _capture_iteration_end stored a result for the same
+        # state -- we identify "same state" via a content fingerprint
+        # (route count + via count) since the last completed iteration
+        # index isn't readily available here.
+        final_route_count = sum(len(r) for r in net_routes.values())
+        final_via_count = sum(
+            len(route.vias)
+            for routes in net_routes.values()
+            for route in routes
+        )
+        final_violations = len(
+            neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("final", final_route_count, final_via_count),
+            )
+        )
         final_metrics = IterationMetrics(
             iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
             routed_count=current_routed,
             overflow=overflow,
+            clearance_violations=final_violations,
         )
         if best_metrics.is_better_than(final_metrics):
             flush_print(
                 f"  Restoring iteration {best_iteration} state "
                 f"(routed={best_metrics.routed_count}, "
+                f"clearance_viol={best_metrics.clearance_violations}, "
                 f"overflow={best_metrics.overflow}) instead of final "
                 f"(routed={final_metrics.routed_count}, "
+                f"clearance_viol={final_metrics.clearance_violations}, "
                 f"overflow={final_metrics.overflow})"
             )
             # Unmark all current routes from the grid
@@ -7694,6 +7911,10 @@ class Autorouter:
         # ``route_net()`` calls this on its own path; the negotiated
         # strategy bypasses ``route_net()`` so we wire it here.
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Negotiated path also needs segment-vs-foreign-via
+        # gating -- this is the very path where SWDIO/BOOT0 ordering
+        # bug at PCB (143.8, 119.7) B.Cu was observed.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -8028,6 +8249,9 @@ class Autorouter:
         # aware A* honors the world-coord via clearance predicate the
         # negotiated / route_net paths already invoke (PR #2952).
         self._update_router_via_foreign_context(net)
+        # Issue #3002: Corridor-aware A* also needs segment-vs-foreign-
+        # via gating.
+        self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
