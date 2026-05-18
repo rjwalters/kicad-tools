@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
+from .rules.connectivity import ConnectivityRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
@@ -111,6 +112,7 @@ class DRCChecker:
     # ``tests/test_check_cmd_coverage.py`` enforces the second half.
     CHECK_ALL_METHODS: tuple[str, ...] = (
         "check_clearances",
+        "check_connectivity",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -171,6 +173,28 @@ class DRCChecker:
             DRCResults containing clearance violations
         """
         rule = ClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_connectivity(self) -> DRCResults:
+        """Check that every multi-pad net is fully connected.
+
+        Loads the netlist via
+        :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` and
+        emits one error per net whose pads are not all connected through
+        traces, vias, or filled copper zones.  Single-pad nets are out
+        of scope (handled by :meth:`check_single_pad_nets`).
+
+        See Issue #3041: previously ``kct check`` reported ``DRC PASS``
+        on PCBs with unrouted nets because no rule cross-referenced the
+        netlist against actual copper connectivity.  This rule closes
+        that gap so partial-route boards fail DRC with a clear, per-net
+        diagnostic.
+
+        Returns:
+            DRCResults containing one error per incomplete or unrouted
+            multi-pad net (severity error).
+        """
+        rule = ConnectivityRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
