@@ -363,6 +363,214 @@ class SchematicElementsMixin:
         _log_info(f"Added power symbol {lib_id.split(':')[1]} at ({x}, {y})")
         return pwr
 
+    # Private lib prefix for synthesized power symbols.  Distinguishing
+    # these from KiCad's stock ``power:`` library makes round-trips
+    # unambiguous and prevents accidental collisions if a future KiCad
+    # release ships a ``power:VMOTOR`` symbol.
+    _PWR_SYNTH_LIB_PREFIX = "kicad_tools_pwr"
+
+    def add_pwr_symbol(
+        self,
+        net_name: str,
+        x: float,
+        y: float,
+        rotation: float = 0,
+        snap: bool = True,
+    ) -> PowerSymbol:
+        """Add a power symbol whose net name is set by the caller.
+
+        Unlike :meth:`add_power`, which reaches into KiCad's stock
+        ``power:`` library (where the symbol name and the published net
+        name are baked in together — ``power:+24V`` always publishes
+        ``+24V``), this helper **synthesizes** a one-pin power-input
+        symbol on the fly with ``net_name`` as the published global net.
+
+        The synthesized lib_symbol is cached per net name and registered
+        for emission via :meth:`_build_lib_symbols_node`, so the symbol
+        round-trips through save/load cycles (the next reader sees a
+        normal ``lib_symbols`` entry in the schematic file, identical in
+        structure to a stock ``power:+5V`` entry).
+
+        This is the right call site whenever a rail label uses a name
+        that doesn't match any stock ``power:`` symbol — most commonly
+        domain-specific rails like ``VMOTOR`` (no KiCad analogue) or
+        project-convention names like ``+3.3V`` (KiCad uses ``+3V3``).
+
+        Args:
+            net_name: The global net name to publish (e.g., ``"VMOTOR"``,
+                ``"+3.3V"``, ``"+5V"``).  Becomes the symbol's ``Value``
+                property AND its power-input pin name; KiCad uses the
+                ``Value`` property to determine the global power net.
+            x, y: Position (snapped to grid unless ``snap=False``).
+            rotation: Rotation in degrees (0 = arrow up, 180 = arrow
+                down, typical for GND).
+            snap: Whether to apply grid snapping (default: True).
+
+        Returns:
+            The :class:`PowerSymbol` instance placed in the schematic.
+
+        Example:
+            # VMOTOR rail has no stock analogue — synthesize one.
+            sch.add_rail(y=80, x_start=20, x_end=200, net_label="VMOTOR")
+            sch.add_pwr_symbol("VMOTOR", x=30, y=70)
+            sch.add_wire((30, 70), (30, 80))  # tie symbol pin to rail
+
+            # +3.3V (with the dot) matches project convention; KiCad's
+            # stock symbol is +3V3 which would publish a mismatched net.
+            sch.add_pwr_symbol("+3.3V", x=100, y=70)
+
+        See Also:
+            - add_power(): for stock ``power:`` symbols (when the symbol
+              name already matches the rail label).
+            - add_pwr_flag(): to mark a power net as externally driven.
+        """
+        ref = f"#PWR{self._pwr_counter:02d}"
+        self._pwr_counter += 1
+
+        if snap:
+            x = self._snap_coord(x, f"pwr_symbol {net_name}")
+            y = self._snap_coord(y, f"pwr_symbol {net_name}")
+        else:
+            x = round(x, 2)
+            y = round(y, 2)
+
+        lib_id = f"{self._PWR_SYNTH_LIB_PREFIX}:{net_name}"
+
+        # Build (or fetch from cache) the synthesized lib_symbol entry.
+        if net_name not in self._synthesized_pwr_defs:
+            sym_node = self._build_synth_pwr_lib_symbol(net_name)
+            self._synthesized_pwr_defs[net_name] = sym_node
+            # Register in _embedded_lib_symbols so _build_lib_symbols_node
+            # emits the entry on save.  Keyed by lib_id (full prefixed
+            # name), matching how loaded schematics key stock entries
+            # like ``power:+5V``.
+            self._embedded_lib_symbols[lib_id] = sym_node
+
+        pwr = PowerSymbol(
+            lib_id=lib_id,
+            x=x,
+            y=y,
+            rotation=rotation,
+            reference=ref,
+        )
+        self.power_symbols.append(pwr)
+        _log_info(f"Added synthesized power symbol '{net_name}' at ({x}, {y})")
+        return pwr
+
+    def _build_synth_pwr_lib_symbol(self, net_name: str):
+        """Construct a synthesized power-symbol lib_symbol S-expression.
+
+        The structure mirrors KiCad's stock ``power:+5V`` entry exactly,
+        differing only in:
+
+        * The outer symbol name (``"kicad_tools_pwr:{net_name}"``).
+        * The ``Value`` property (``"{net_name}"`` — this is what KiCad
+          uses to determine the published global net).
+        * The ``Description`` property (mentions ``net_name`` for
+          discoverability).
+        * The power_in pin's ``name`` field (set to ``net_name`` as a
+          belt-and-suspenders match; KiCad's stock symbols leave it
+          empty but the issue body specifies the pin name should match
+          for net unification on older KiCad readers).
+        * The graphical unit symbols are renamed to
+          ``"{net_name}_0_1"`` / ``"{net_name}_1_1"`` per KiCad's
+          parent/unit naming convention.
+
+        Args:
+            net_name: The net name to bake in.
+
+        Returns:
+            An :class:`SExp` node ready to insert into ``lib_symbols``.
+        """
+        from kicad_tools.sexp import parse_string
+
+        # Escape any embedded quotes in net_name for the Description
+        # property's quoted-string substitution (e.g., a hypothetical
+        # net name containing a double quote).  S-expression strings
+        # use backslash-escapes.
+        desc_net = net_name.replace("\\", "\\\\").replace('"', '\\"')
+
+        # Use a triple-quoted template so the structure is reviewable
+        # at a glance.  All five substitutions of ``net_name`` are
+        # explicit and use ``{nn}`` for legibility.
+        template = """
+        (symbol "{lib_id}"
+            (power)
+            (pin_numbers (hide yes))
+            (pin_names (offset 0) (hide yes))
+            (exclude_from_sim no)
+            (in_bom yes)
+            (on_board yes)
+            (duplicate_pin_numbers_are_jumpers no)
+            (property "Reference" "#PWR"
+                (at 0 -3.81 0)
+                (effects (font (size 1.27 1.27)) (hide yes))
+            )
+            (property "Value" "{nn}"
+                (at 0 3.556 0)
+                (effects (font (size 1.27 1.27)))
+            )
+            (property "Footprint" ""
+                (at 0 0 0)
+                (effects (font (size 1.27 1.27)) (hide yes))
+            )
+            (property "Datasheet" ""
+                (at 0 0 0)
+                (effects (font (size 1.27 1.27)) (hide yes))
+            )
+            (property "Description" "Synthesized power symbol for net \\"{desc_nn}\\""
+                (at 0 0 0)
+                (effects (font (size 1.27 1.27)) (hide yes))
+            )
+            (symbol "{nn}_0_1"
+                (polyline
+                    (pts (xy -0.762 1.27) (xy 0 2.54))
+                    (stroke (width 0) (type default))
+                    (fill (type none))
+                )
+                (polyline
+                    (pts (xy 0 2.54) (xy 0.762 1.27))
+                    (stroke (width 0) (type default))
+                    (fill (type none))
+                )
+                (polyline
+                    (pts (xy 0 0) (xy 0 2.54))
+                    (stroke (width 0) (type default))
+                    (fill (type none))
+                )
+            )
+            (symbol "{nn}_1_1"
+                (pin power_in line
+                    (at 0 0 90)
+                    (length 0)
+                    (name "{nn}" (effects (font (size 1.27 1.27))))
+                    (number "1" (effects (font (size 1.27 1.27))))
+                )
+            )
+            (embedded_fonts no)
+        )
+        """.format(
+            lib_id=f"{self._PWR_SYNTH_LIB_PREFIX}:{net_name}",
+            nn=net_name,
+            desc_nn=desc_net,
+        )
+
+        # parse_string returns a single top-level node when the input
+        # has one expression.  In some implementations the root may be
+        # the symbol node directly, in others wrapped in an anonymous
+        # container; handle both defensively.
+        parsed = parse_string(template.strip())
+        if parsed.name == "symbol":
+            return parsed
+        # Wrapped form: pick out the inner symbol child.
+        for child in parsed.children:
+            if not child.is_atom and child.name == "symbol":
+                return child
+        raise RuntimeError(
+            f"Failed to synthesize power lib_symbol for net '{net_name}': "
+            f"unexpected parse tree shape (root={parsed.name!r})"
+        )
+
     def add_pwr_flag(self, x: float, y: float) -> PowerSymbol:
         """Add a PWR_FLAG symbol to mark a power net as intentionally driven.
 
@@ -494,7 +702,9 @@ class SchematicElementsMixin:
         wires = []
         for i in range(len(points) - 1):
             wires.append(
-                self.add_wire(points[i], points[i + 1], snap=snap, warn_on_collision=warn_on_collision)
+                self.add_wire(
+                    points[i], points[i + 1], snap=snap, warn_on_collision=warn_on_collision
+                )
             )
         return wires
 
