@@ -87,7 +87,7 @@ class OffGridReport:
     Attributes:
         grid_resolution: Router grid resolution that was checked, in mm.
         threshold: Maximum L2 deviation considered "on-grid", in mm
-            (defaults to ``grid_resolution / 10``).
+            (defaults to :data:`DEFAULT_PAD_GRID_TOLERANCE_MM` = 0.05 mm).
         grid_origin: ``(x_offset, y_offset)`` in mm; grid points are at
             ``offset + k * resolution`` for integer ``k``.
         off_grid_pads: List of :class:`PreflightOffGridPad` records, one per pad
@@ -196,6 +196,18 @@ def _suggest_finer_grid(
     return None
 
 
+#: Default L2 tolerance for the pad-grid preflight rule, in millimeters.
+#:
+#: Set to ``0.05`` mm to accommodate stock KiCad library footprints whose
+#: pads sit 0.03-0.05 mm off the 0.1 mm router grid by design (metric
+#: rounding of imperial parts such as ``Connector_PinHeader_2.54mm`` and
+#: ``USB_C_Receptacle``).  Genuine placement errors at >= 0.06 mm still
+#: flag.  See issue #3042 for the fleet audit (341 false-positive warnings
+#: across 9 boards) that motivated raising the default from the original
+#: ``grid_resolution / 10`` = 0.01 mm.
+DEFAULT_PAD_GRID_TOLERANCE_MM: float = 0.05
+
+
 def check_pad_grid_alignment(
     pcb_path: str | Path,
     grid_resolution: float = 0.1,
@@ -214,8 +226,11 @@ def check_pad_grid_alignment(
         grid_resolution: Router grid resolution in mm (default ``0.1``,
             matching ``Autorouter`` defaults and ``KCT_ROUTE_GRID``).
         threshold: Maximum L2 deviation considered on-grid, in mm.
-            Defaults to ``grid_resolution / 10`` to match the router-side
-            check in :mod:`kicad_tools.router.core`.
+            Defaults to :data:`DEFAULT_PAD_GRID_TOLERANCE_MM` (``0.05`` mm)
+            to clear stock KiCad library footprints whose pads sit
+            0.03-0.05 mm off the 0.1 mm grid by design.  Pass an explicit
+            value (e.g. ``grid_resolution / 10``) to enforce the
+            stricter router-side check.
         grid_origin: Optional grid origin offset ``(x, y)`` in mm.
             Grid points are at ``offset + k * resolution``.  Defaults to
             ``(0.0, 0.0)``.
@@ -234,7 +249,7 @@ def check_pad_grid_alignment(
         ...     print(report.summary())
     """
     if threshold is None:
-        threshold = grid_resolution / 10
+        threshold = DEFAULT_PAD_GRID_TOLERANCE_MM
 
     pads = load_pads_for_analysis(pcb_path)
 
@@ -278,6 +293,7 @@ def check_pad_grid_alignment(
 
 
 __all__ = [
+    "DEFAULT_PAD_GRID_TOLERANCE_MM",
     "PreflightOffGridPad",
     "OffGridReport",
     "check_pad_grid_alignment",
