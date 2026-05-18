@@ -279,6 +279,28 @@ tolerances:
   # exit-clause convention (cf. board-03's 4 -> 9 bump in PR #2924
   # with #2943 + #2919 as exit clauses; same shape).
   #
+  # Issue #3020 (PR scaffolding): The 4-quadrant clearance matrix's
+  # missing entry (main-router via-vs-foreign-segment post-iteration
+  # hook) is now implemented as the symmetric mirror of PR #3006.
+  # The hook plumbing matches PR #3006 at all 6 negotiated rip-up
+  # sites + the 4 two_phase sites, with the combined seg-via +
+  # via-seg violator count promoted into the lex-tuple comparator.
+  #
+  # EMPIRICAL CAVEAT: 3 fresh re-routes of board-04 (2026-05-17)
+  # confirm the SWDIO/BOOT0 violation at PCB (143.8, 119.7) on
+  # B.Cu persists post-hook.  Investigation shows the offending
+  # SWDIO B.Cu segment (y=120.0246) does NOT exist in net_routes
+  # at the time the negotiated post-iteration hook fires; the
+  # closest committed SWDIO B.Cu segment is at y=120.4 (0.7mm
+  # clear of BOOT0 via at y=119.7).  The y=120.0246 segment is
+  # introduced by the trace optimizer's pull-tight pass (or the
+  # subsequent DRC nudge pass), which runs AFTER
+  # ``route_all_negotiated`` returns.  The hook cannot close the
+  # gap until the same predicate is wired into the post-route
+  # optimizer / nudge pipeline -- out of scope for #3020.
+  # Floor stays at 5 pending a follow-up issue that addresses the
+  # trace-optimizer side of the matrix.
+  #
   # Exit clause: drop back to 4 once #2998 is resolved (SWDIO/B.Cu
   # vs BOOT0 via clearance fix), or to 0 if combined with the
   # OSC_OUT pin-edge fanout fix above.

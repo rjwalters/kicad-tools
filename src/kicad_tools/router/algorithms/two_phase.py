@@ -624,12 +624,18 @@ class TwoPhaseRouter:
         # baseline.  Memo enables the mid-iter call below to reuse this
         # result if no rip-up has happened yet.
         best_overflow = overflow
-        best_clearance_violations = len(
-            neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
-                cache_key=("two_phase_init",),
-            )
+        # Issue #3020: combine seg-via and via-seg violator counts so
+        # both directions of the clearance matrix participate in the
+        # best-state comparator.
+        _init_seg_via = neg_router.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_init",),
         )
+        _init_via_seg = neg_router.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_init",),
+        )
+        best_clearance_violations = len(_init_seg_via) + len(_init_via_seg)
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_iteration = 0  # 0 = initial pass
@@ -709,6 +715,31 @@ class TwoPhaseRouter:
                         f"violator(s) in recovery: {', '.join(violator_names)}"
                     )
 
+                # Issue #3020: Symmetric via-vs-foreign-segment hook
+                # mirroring core.py's negotiated loop.  See the
+                # rationale in
+                # :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+                # for the board-04 SWDIO/BOOT0 case this catches.
+                via_seg_violators = neg_router.find_nets_with_via_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                )
+                new_via_seg_violators = [
+                    v_net for v_net in via_seg_violators
+                    if v_net not in nets_to_reroute
+                ]
+                for v_net in new_via_seg_violators:
+                    nets_to_reroute.append(v_net)
+                if new_via_seg_violators:
+                    violator_names = [
+                        self.net_names.get(n, f"Net_{n}")
+                        for n in new_via_seg_violators
+                    ]
+                    flush_print(
+                        f"  Including {len(new_via_seg_violators)} via-vs-foreign-segment "
+                        f"violator(s) in recovery: {', '.join(violator_names)}"
+                    )
+
                 flush_print(
                     f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
                 )
@@ -763,11 +794,18 @@ class TwoPhaseRouter:
                 # Issue #3002 (PR #3006 perf): cache_key for end-of-
                 # iteration K post-state.  The next iteration's
                 # mid-iter call will pull this from cache.
-                current_clearance_violations = len(
-                    neg_router.find_nets_with_segment_via_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
-                        cache_key=("two_phase_post", iteration),
-                    )
+                # Issue #3020: combine both directions of the
+                # clearance matrix into the best-state comparator.
+                _post_seg_via = neg_router.find_nets_with_segment_via_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration),
+                )
+                _post_via_seg = neg_router.find_nets_with_via_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration),
+                )
+                current_clearance_violations = (
+                    len(_post_seg_via) + len(_post_via_seg)
                 )
                 flush_print(
                     f"  Iteration {iteration} complete: "
@@ -857,11 +895,18 @@ class TwoPhaseRouter:
             for routes in net_routes.values()
             for route in routes
         )
-        final_clearance_violations = len(
-            neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
-                cache_key=("two_phase_final", final_route_count, final_via_count),
-            )
+        # Issue #3020: final comparator sums both directions of the
+        # clearance matrix.
+        _final_seg_via = neg_router.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_final", final_route_count, final_via_count),
+        )
+        _final_via_seg = neg_router.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_final", final_route_count, final_via_count),
+        )
+        final_clearance_violations = (
+            len(_final_seg_via) + len(_final_via_seg)
         )
         best_key = (best_clearance_violations, best_overflow)
         final_key = (final_clearance_violations, final_overflow)

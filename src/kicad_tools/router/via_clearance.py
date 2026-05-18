@@ -418,10 +418,95 @@ def segment_clears_foreign_via(
     return dist >= required - 1e-9
 
 
+def via_clears_foreign_segment(
+    via: "_ViaLike",
+    seg: "_SegmentLike",
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> bool:
+    """Return True iff a via clears a foreign-net segment.
+
+    Issue #3020: Symmetric sibling of :func:`segment_clears_foreign_via`
+    for the via-vs-segment direction.  Where
+    :func:`segment_clears_foreign_via` protects a NEW segment from a
+    foreign-net via, this predicate protects a NEW via from a
+    foreign-net segment.
+
+    The geometry is symmetric -- the point-to-segment distance does not
+    care which of the two objects is "new" -- so this function uses the
+    exact same math as :func:`segment_clears_foreign_via` and is kept
+    as a thin alias for API symmetry with PR #3006.  Callers consume
+    the predicate-named-for-the-direction, which keeps the call site
+    self-documenting (the named arguments match the parties as named in
+    the call).
+
+    Concrete failure this predicate catches (board-04, PCB
+    (143.8, 119.7) on B.Cu): the BOOT0 net's main-router layer-
+    transition via lands within ``via_radius + half_seg_w +
+    trace_clearance`` of an already-committed SWDIO escape segment on
+    B.Cu.  The escape segment is permanent infrastructure (the
+    ``_escape_pad_overrides`` policy makes it non-rippable), so the
+    fix MUST be on the via side -- the VIA's net is the one returned
+    to the rip-up loop, NOT the segment's net.
+
+    Layer-awareness: the via spans a contiguous layer range
+    ``via.layers[0]..[1]``; the segment occupies one copper layer.  A
+    via must clear a segment only when the via spans the segment's
+    layer.
+
+    Same-net filtering is the CALLER's responsibility (mirrors the
+    boundary convention of :func:`segment_clears_foreign_via`).
+
+    Two thresholds (parameterised by ``hard_intersection_only``):
+
+    * STANDARD (``hard_intersection_only=False``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2 + trace_clearance
+
+      Full manufacturer clearance.  Rejects both hard intersections
+      AND marginal sub-clearance violations.  This is the predicate
+      used by :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+      and the Autorouter's main-router re-validation hook.
+
+    * HARD-INTERSECTION (``hard_intersection_only=True``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2
+
+      Drops the ``trace_clearance`` term: only flags cases where
+      copper physically overlaps copper (negative edge-to-edge
+      clearance).  Mirrors the STANDARD/HARD switch in
+      :func:`segment_clears_foreign_via`.
+
+    Args:
+        via: The candidate via.  Reads ``x/y/diameter/layers``.
+        seg: A foreign-net segment to validate against.  Reads
+            ``x1/y1/x2/y2/width/layer``.
+        trace_clearance: Manufacturer minimum copper-to-copper
+            clearance in mm.
+        hard_intersection_only: When True, ignore ``trace_clearance``
+            in the threshold (see HARD-INTERSECTION mode above).
+
+    Returns:
+        True if the via clears the segment, False on violation.
+    """
+    # The math is identical to ``segment_clears_foreign_via`` -- both
+    # operations reduce to "point-to-segment distance must exceed
+    # via_radius + half_seg_width + clearance with layer-span
+    # overlap".  Aliasing keeps the implementations bit-identical and
+    # mathematically symmetric.
+    return segment_clears_foreign_via(
+        seg, via, trace_clearance,
+        hard_intersection_only=hard_intersection_only,
+    )
+
+
 __all__ = [
     "FilledPolygonLike",
     "ForeignPadTuple",
     "TrackSegmentLike",
     "point_clear_of_copper",
     "segment_clears_foreign_via",
+    "via_clears_foreign_segment",
 ]
