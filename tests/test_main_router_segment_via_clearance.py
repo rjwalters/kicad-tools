@@ -33,8 +33,6 @@ The fix has two parts:
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack

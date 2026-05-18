@@ -1060,7 +1060,7 @@ class NegotiatedRouter:
         # Build a flat list of (net, via) tuples once -- O(V) -- so the
         # outer loop over segments is O(S * V).  S and V are both
         # bounded by the routed-net count for typical boards.
-        all_vias: list[tuple[int, "Via"]] = []
+        all_vias: list[tuple[int, Via]] = []
         for net_id, routes in net_routes.items():
             for route in routes:
                 for via in route.vias:
