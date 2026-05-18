@@ -2342,6 +2342,8 @@ def route_with_layer_escalation(
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    # Issue #3039: forward --seed for deterministic routing.
+                    seed=getattr(args, "seed", None),
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
@@ -3058,6 +3060,8 @@ def route_with_rule_relaxation(
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    # Issue #3039: forward --seed for deterministic routing.
+                    seed=getattr(args, "seed", None),
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
@@ -4136,6 +4140,8 @@ def route_with_combined_escalation(
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
+                        # Issue #3039: forward --seed for deterministic routing.
+                        seed=getattr(args, "seed", None),
                         # Issue #3051: forward checkpoint callback so kills
                         # mid-loop persist the best-so-far snapshot.
                         checkpoint_callback=_checkpoint_cb,
@@ -6281,6 +6287,8 @@ def main(argv: list[str] | None = None) -> int:
                                     or getattr(args, "high_performance", False),
                                     hierarchical=getattr(args, "hierarchical", False),
                                     perturbation=getattr(args, "perturbation", True),
+                                    # Issue #3039: forward --seed for deterministic routing.
+                                    seed=getattr(args, "seed", None),
                                     checkpoint_callback=_checkpoint_cb,
                                 )
                             return router.route_all()
@@ -6327,6 +6335,8 @@ def main(argv: list[str] | None = None) -> int:
                             or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
                             perturbation=getattr(args, "perturbation", True),
+                            # Issue #3039: forward --seed for deterministic routing.
+                            seed=getattr(args, "seed", None),
                             checkpoint_callback=_checkpoint_cb,
                         )
                     else:
@@ -6388,6 +6398,8 @@ def main(argv: list[str] | None = None) -> int:
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
+                        # Issue #3039: forward --seed for deterministic routing.
+                        seed=getattr(args, "seed", None),
                         checkpoint_callback=_checkpoint_cb,
                     )
 
@@ -6407,6 +6419,8 @@ def main(argv: list[str] | None = None) -> int:
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
+                    # Issue #3039: forward --seed for deterministic routing.
+                    seed=getattr(args, "seed", None),
                     checkpoint_callback=_checkpoint_cb,
                 )
             elif args.differential_pairs and args.strategy == "basic":

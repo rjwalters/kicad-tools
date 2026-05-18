@@ -211,3 +211,219 @@ def test_route_cmd_does_not_call_random_seed_when_seed_omitted():
         f"every route run deterministic, masking future regressions in "
         f"the unseeded code path."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #3039: route_all_negotiated(seed=...) API
+# ---------------------------------------------------------------------------
+#
+# Issue #2589 (above) seeded only the GLOBAL random module from the CLI layer.
+# That fix did not cover the per-Autorouter perturbation RNG
+# (``self._perturbation_rng``, used by the stochastic-perturbation escape from
+# Issue #2334) -- so even with ``--seed 42``, the negotiated routing path
+# remained non-deterministic in the perturbation-activated branch.  PR #3034
+# and PR #3036 shipped boards whose verification numbers did not survive a
+# re-run; the curator's investigation traced this to the missing seed plumb
+# on the ``route_all_negotiated`` public API.
+#
+# The tests below verify the Issue #3039 fix: ``route_all_negotiated`` now
+# accepts a ``seed`` parameter that flows into both the perturbation RNG and
+# the global module, producing identical outcome tuples across runs.
+
+
+from kicad_tools.router.core import Autorouter  # noqa: E402  (test-section import)
+
+
+def _make_seed_test_router() -> Autorouter:
+    """Build a small router with overlapping nets that exercise the
+    negotiated rip-up loop.  Three two-pad nets whose obvious routes cross
+    -- forces the loop to iterate at least once.
+    """
+    router = Autorouter(width=40.0, height=30.0)
+
+    # Net 1: horizontal across the board.
+    router.add_component(
+        "R1",
+        [{"number": "1", "x": 5.0, "y": 15.0, "net": 1, "net_name": "NET1"}],
+    )
+    router.add_component(
+        "R2",
+        [{"number": "1", "x": 35.0, "y": 15.0, "net": 1, "net_name": "NET1"}],
+    )
+
+    # Net 2: vertical across the board (crosses net 1).
+    router.add_component(
+        "R3",
+        [{"number": "1", "x": 20.0, "y": 5.0, "net": 2, "net_name": "NET2"}],
+    )
+    router.add_component(
+        "R4",
+        [{"number": "1", "x": 20.0, "y": 25.0, "net": 2, "net_name": "NET2"}],
+    )
+
+    # Net 3: diagonal, adds congestion.
+    router.add_component(
+        "R5",
+        [{"number": "1", "x": 10.0, "y": 10.0, "net": 3, "net_name": "NET3"}],
+    )
+    router.add_component(
+        "R6",
+        [{"number": "1", "x": 30.0, "y": 20.0, "net": 3, "net_name": "NET3"}],
+    )
+
+    return router
+
+
+def _outcome_tuple(router: Autorouter) -> tuple[int, int, int]:
+    """Reduce a router's post-route state to the AC tuple from Issue #3039:
+    ``(nets_routed, total_segments, total_vias)``.  We deliberately drop
+    ``completion_pct`` because it is a derived ratio of ``nets_routed`` and
+    ``nets_to_route`` and adds no independent information.
+    """
+    stats = router.get_statistics()
+    return (
+        int(stats.get("nets_routed", 0)),
+        int(stats.get("segments", 0)),
+        int(stats.get("vias", 0)),
+    )
+
+
+class TestRouteAllNegotiatedSeedParameter:
+    """Issue #3039: ``route_all_negotiated`` exposes ``seed`` kwarg."""
+
+    def test_route_all_negotiated_accepts_seed_kwarg(self):
+        """Signature change: ``seed`` is now a keyword arg, not TypeError."""
+        router = _make_seed_test_router()
+        routes = router.route_all_negotiated(max_iterations=2, seed=42)
+        assert isinstance(routes, list)
+
+    def test_seed_is_stashed_on_router_instance(self):
+        """``seed`` flows into ``self._perturbation_seed`` so
+        ``_activate_perturbation`` can derive per-episode RNG seeds from it.
+        """
+        router = _make_seed_test_router()
+        assert router._perturbation_seed is None  # __init__ default
+        router.route_all_negotiated(max_iterations=1, seed=12345)
+        assert router._perturbation_seed == 12345
+
+    def test_seed_none_preserves_legacy_behaviour(self):
+        """``seed=None`` (default) leaves ``_perturbation_seed`` cleared.
+        Non-regression guard from Issue #3039: callers that do NOT opt in
+        must keep today's non-deterministic-trigger-timing behaviour.
+        """
+        router = _make_seed_test_router()
+        router.route_all_negotiated(max_iterations=1)
+        assert router._perturbation_seed is None
+
+
+class TestRouteAllNegotiatedDeterminism:
+    """Issue #3039 AC: identical outcome tuple across 3 seeded runs."""
+
+    def test_same_seed_produces_same_outcome_tuple(self):
+        """Three consecutive ``route_all_negotiated(seed=42)`` runs on the
+        same fixture must produce the same ``(nets_routed, segments, vias)``
+        tuple.  This is the acceptance criterion from Issue #3039.
+        """
+        outcomes: list[tuple[int, int, int]] = []
+        for _ in range(3):
+            router = _make_seed_test_router()
+            router.route_all_negotiated(max_iterations=3, seed=42)
+            outcomes.append(_outcome_tuple(router))
+
+        assert outcomes[0] == outcomes[1] == outcomes[2], (
+            f"Three runs with seed=42 produced different outcomes: {outcomes}. "
+            "route_all_negotiated must be deterministic when seeded."
+        )
+
+    def test_different_seeds_produce_distinct_perturbation_rng_state(self):
+        """Sanity check that the seed actually has an effect.
+
+        We do not assert outcome tuples *must* differ for distinct seeds
+        (this fixture may converge regardless of perturbation ordering),
+        but the underlying perturbation RNG state must differ -- otherwise
+        the seed parameter is a no-op.
+        """
+        router_a = _make_seed_test_router()
+        router_a.route_all_negotiated(max_iterations=1, seed=42)
+
+        router_b = _make_seed_test_router()
+        router_b.route_all_negotiated(max_iterations=1, seed=99)
+
+        assert router_a._perturbation_seed != router_b._perturbation_seed
+        sample_a = router_a._perturbation_rng.random()
+        sample_b = router_b._perturbation_rng.random()
+        assert sample_a != sample_b, (
+            "Different seeds (42 vs 99) produced identical perturbation RNG "
+            "samples -- the seed is not propagating to self._perturbation_rng."
+        )
+
+    def test_seed_kwarg_re_seeds_global_random_for_mst_shuffle(self):
+        """``seed`` re-seeds the global ``random`` module so the MST
+        trial-pad shuffle (``core.py:~11475``, used by the multi-resolution
+        path) becomes deterministic.  Verified indirectly: post-route
+        ``random.random()`` samples match across two seeded runs.
+        """
+        router1 = _make_seed_test_router()
+        router1.route_all_negotiated(max_iterations=1, seed=7)
+        sample1 = random.random()
+
+        router2 = _make_seed_test_router()
+        router2.route_all_negotiated(max_iterations=1, seed=7)
+        sample2 = random.random()
+
+        assert sample1 == sample2, (
+            "random.random() draw after route_all_negotiated(seed=7) "
+            "must be identical across two invocations -- otherwise the "
+            "seed did not propagate to the global RNG that drives the "
+            "MST trial shuffle and negotiated escape strategies."
+        )
+
+
+class TestActivatePerturbationSeed:
+    """``_activate_perturbation`` honors the stashed seed when present."""
+
+    def test_activate_perturbation_seed_none_uses_legacy_derivation(self):
+        """Without a stashed seed, ``_activate_perturbation(n)`` re-seeds
+        the RNG with ``Random(n * 7 + 13)`` -- the pre-Issue-#3039 formula.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+        assert router._perturbation_seed is None
+
+        router._activate_perturbation(stagnation_count=5)
+        sample = router._perturbation_rng.random()
+
+        ref = random.Random(5 * 7 + 13)
+        assert sample == ref.random()
+
+    def test_activate_perturbation_seed_set_folds_seed_into_derivation(self):
+        """With a stashed seed S, ``_activate_perturbation(n)`` re-seeds
+        the RNG with ``Random(S + n * 7 + 13)`` -- distinct per stagnation
+        episode but deterministic across runs.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+        router._perturbation_seed = 1000
+
+        router._activate_perturbation(stagnation_count=5)
+        sample = router._perturbation_rng.random()
+
+        ref = random.Random(1000 + 5 * 7 + 13)
+        assert sample == ref.random()
+
+    def test_activate_perturbation_distinct_episodes_use_distinct_rngs(self):
+        """Two stagnation episodes (different ``stagnation_count`` values)
+        produce different RNG streams even when seed is fixed -- the
+        escape-strategy variety guarantee from Issue #2334.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+        router._perturbation_seed = 42
+
+        router._activate_perturbation(stagnation_count=2)
+        sample_episode_a = router._perturbation_rng.random()
+
+        router._activate_perturbation(stagnation_count=3)
+        sample_episode_b = router._perturbation_rng.random()
+
+        assert sample_episode_a != sample_episode_b, (
+            "Distinct stagnation_count values must seed distinct RNG streams "
+            "so successive perturbation episodes explore different orderings."
+        )
