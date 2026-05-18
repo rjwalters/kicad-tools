@@ -626,6 +626,19 @@ class BuckConverter(CircuitBlock):
         # for pins on the symbol's left edge, right otherwise), and place
         # the label on the stub endpoint.  Mirrors the ``GateDriverBlock``
         # pattern from PR #2985; see issues #2980 and #2994.
+        #
+        # FB-pin special case (issue #3011): on fixed-output buck variants
+        # the FB pin is electrically the VOUT net (the regulator senses its
+        # own output through FB).  A label-on-stub at the FB pin can land
+        # on top of an unrelated wire elsewhere on the sheet, silently
+        # bridging two nets.  This was observed on board-05 where the FB
+        # stub endpoint (95.25, 97.79) landed exactly on the C2 bulk-cap
+        # vertical VMOTOR wire, fusing VMOTOR <-> +5V into a single net.
+        # When the FB stub endpoint would collide with an existing foreign
+        # wire, divert FB to a real L-shaped wire joining it to the
+        # output-cap node (``self._vout_node``).  This mirrors the textbook
+        # fixed-output buck reference design and removes the dependency on
+        # label-on-wire coordinate luck.
         if pin_nets is not None:
             STUB = 2.54
             for pin_key, net_name in pin_nets.items():
@@ -636,6 +649,28 @@ class BuckConverter(CircuitBlock):
                     label_x = pin_pos[0] - STUB
                 else:
                     label_x = pin_pos[0] + STUB
+
+                # Detect FB-stub-on-foreign-wire collision and divert FB to
+                # a direct wire to the output-cap node.  Limited to the FB
+                # pin (and pin number "4" on LM2596 variants) so the
+                # generic stub-and-label behavior for other pins is
+                # preserved.  See issue #3011.
+                if pin_key in ("FB", "4") and self._fb_stub_would_collide(
+                    sch, label_x, pin_pos[1]
+                ):
+                    # L-shaped wire FB -> (vout_x, fb_y) -> vout_node.
+                    vx, vy = self._vout_node
+                    sch.add_wire(
+                        pin_pos, (vx, pin_pos[1]), warn_on_collision=False
+                    )
+                    sch.add_wire(
+                        (vx, pin_pos[1]), self._vout_node, warn_on_collision=False
+                    )
+                    sch.add_junction(vx, vy)
+                    if net_name not in self.ports:
+                        self.ports[net_name] = pin_pos
+                    continue
+
                 sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
                 sch.add_label(net_name, label_x, pin_pos[1], rotation=0)
                 # Expose the pin's real coordinate under the net name so
@@ -643,6 +678,29 @@ class BuckConverter(CircuitBlock):
                 # existing port by the same name (preserves back-compat).
                 if net_name not in self.ports:
                     self.ports[net_name] = pin_pos
+
+    @staticmethod
+    def _fb_stub_would_collide(sch, x: float, y: float) -> bool:
+        """Check whether a label placed at ``(x, y)`` would land on an existing wire.
+
+        Used by the FB-pin path in ``__init__`` to decide between the
+        default stub-and-label emission and the direct-wire-to-VOUT fallback
+        (issue #3011).  Robust against mock ``Schematic`` objects used in
+        unit tests: returns ``False`` if ``sch.wires`` is missing or not a
+        real list, or if ``_find_wire_collisions_for_point`` is unavailable.
+        """
+        wires = getattr(sch, "wires", None)
+        if not isinstance(wires, list) or not wires:
+            return False
+        finder = getattr(sch, "_find_wire_collisions_for_point", None)
+        if not callable(finder):
+            return False
+        try:
+            collisions = finder(x, y)
+        except Exception:  # noqa: BLE001 - defensive: mocks can raise
+            return False
+        # Be defensive: a real call returns a list of Wire objects.
+        return isinstance(collisions, list) and len(collisions) > 0
 
     def connect_to_rails(
         self,
