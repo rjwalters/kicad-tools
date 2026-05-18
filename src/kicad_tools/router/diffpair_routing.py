@@ -40,6 +40,164 @@ from .primitives import Pad, Route, Segment, Via
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Issue #3023 Phase A: intra-pair clearance violation detection
+# ---------------------------------------------------------------------------
+#
+# Phase A is observability-only.  After ``CoupledPathfinder`` produces a
+# (p_route, n_route) for a diff pair, we re-check every same-layer
+# segment-pair using ``segment_clearance`` against the per-pair
+# ``NetClassRouting.effective_intra_pair_clearance()`` and emit a
+# structured record (and a ``logger.info`` line) for any pair whose
+# routed clearance is below the threshold.
+#
+# This is the SAME idiom ``match_pair_lengths`` already uses at
+# diffpair_routing.py:1033-1053 to reject a serpentine bulge that would
+# violate the partner; here we apply it to the post-coupling route as a
+# diagnostic so Phase B (the fine-grid repair pass, separate PR) has a
+# reproducible target list.
+#
+# Phase A explicitly does NOT modify any route.  All it does is:
+#   1. compute per-segment-pair clearance,
+#   2. report violations,
+#   3. expose a public accessor for Phase B to consume.
+
+
+@dataclass
+class IntraPairClearanceViolation:
+    """A routed intra-pair clearance violation on a differential pair.
+
+    Phase A diagnostic record (Issue #3023): emitted when the routed
+    edge-to-edge clearance between a P-segment and an N-segment on the
+    same layer falls below the per-pair
+    :meth:`NetClassRouting.effective_intra_pair_clearance`.
+
+    Attributes:
+        pair_name: Base name of the violating diff pair (e.g. ``"DQS0"``).
+        positive_net_name: Net name of the P trace (for log grep-ability).
+        negative_net_name: Net name of the N trace.
+        expected_clearance_mm: The per-pair threshold (from
+            ``NetClassRouting.effective_intra_pair_clearance()``).
+        actual_clearance_mm: The minimum edge-to-edge clearance found
+            across all same-layer segment pairs.  ``< expected_clearance_mm``.
+        violation_magnitude_mm: ``expected_clearance_mm - actual_clearance_mm``
+            (always positive when a violation is recorded).
+        layer: KiCad layer name where the worst violation occurred.
+        p_segment: The P-side segment involved in the worst violation.
+        n_segment: The N-side segment involved in the worst violation.
+        segment_violations: All same-layer (p_seg, n_seg, clearance) triples
+            that fell below ``expected_clearance_mm``.  Phase B (repair
+            pass) consumes this list to scope the corridor for the
+            fine-grid sub-search.
+    """
+
+    pair_name: str
+    positive_net_name: str
+    negative_net_name: str
+    expected_clearance_mm: float
+    actual_clearance_mm: float
+    violation_magnitude_mm: float
+    layer: str
+    p_segment: Segment
+    n_segment: Segment
+    segment_violations: list[tuple[Segment, Segment, float]] = field(default_factory=list)
+
+
+def find_intra_pair_clearance_violations(
+    p_route: Route,
+    n_route: Route,
+    threshold_mm: float,
+    pair_name: str = "",
+) -> IntraPairClearanceViolation | None:
+    """Detect intra-pair clearance violations on a routed differential pair.
+
+    Walks every same-layer (p-segment, n-segment) pair and computes the
+    edge-to-edge clearance via :func:`core.geometry.segment_clearance`.
+    Returns ``None`` when no violation is found, otherwise a single
+    :class:`IntraPairClearanceViolation` summarising the worst case and
+    listing every offending segment pair for downstream consumption.
+
+    This is the SAME segment-clearance idiom ``match_pair_lengths`` uses
+    at ``diffpair_routing.py:1033-1053`` to reject would-be serpentine
+    bulges, lifted into a reusable detector so the route-time check in
+    ``route_differential_pair_coupled`` and the post-route audit in
+    :meth:`DiffPairRouter.intra_clearance_violations` share one
+    implementation.
+
+    Args:
+        p_route: The positive trace route.
+        n_route: The negative trace route.
+        threshold_mm: The per-pair clearance floor.  Pass
+            ``NetClassRouting.effective_intra_pair_clearance()`` from
+            the route's net class -- NOT the global
+            ``DifferentialPairRules.spacing``, which is a heuristic
+            default that does not reflect the per-pair override.
+        pair_name: Base pair name for the returned record (e.g.
+            ``"DQS0"``).  Defaults to the empty string when the caller
+            doesn't have a structured pair handy.
+
+    Returns:
+        ``None`` when every same-layer segment-pair meets the threshold;
+        otherwise an :class:`IntraPairClearanceViolation` whose
+        ``segment_violations`` list contains every offending pair and
+        whose top-level fields summarise the worst case.
+    """
+    from kicad_tools.core.geometry import segment_clearance
+
+    if p_route is None or n_route is None:
+        return None
+    if not p_route.segments or not n_route.segments:
+        return None
+
+    offenders: list[tuple[Segment, Segment, float]] = []
+    worst_clearance = float("inf")
+    worst_pair: tuple[Segment, Segment] | None = None
+
+    for pseg in p_route.segments:
+        for nseg in n_route.segments:
+            if pseg.layer != nseg.layer:
+                continue
+            clearance = segment_clearance(
+                pseg.x1,
+                pseg.y1,
+                pseg.x2,
+                pseg.y2,
+                pseg.width,
+                nseg.x1,
+                nseg.y1,
+                nseg.x2,
+                nseg.y2,
+                nseg.width,
+            )
+            # 1e-9 tolerance matches the serpentine self-check at
+            # diffpair_routing.py:1052 -- floating-point equality at the
+            # threshold counts as compliant.
+            if clearance + 1e-9 < threshold_mm:
+                offenders.append((pseg, nseg, clearance))
+                if clearance < worst_clearance:
+                    worst_clearance = clearance
+                    worst_pair = (pseg, nseg)
+
+    if not offenders or worst_pair is None:
+        return None
+
+    worst_p, worst_n = worst_pair
+    return IntraPairClearanceViolation(
+        pair_name=pair_name,
+        positive_net_name=p_route.net_name,
+        negative_net_name=n_route.net_name,
+        expected_clearance_mm=threshold_mm,
+        actual_clearance_mm=worst_clearance,
+        violation_magnitude_mm=threshold_mm - worst_clearance,
+        layer=worst_p.layer.kicad_name
+        if hasattr(worst_p.layer, "kicad_name")
+        else str(worst_p.layer),
+        p_segment=worst_p,
+        n_segment=worst_n,
+        segment_violations=offenders,
+    )
+
+
 class PairOrientation(Enum):
     """Orientation of the differential pair traces."""
 
@@ -433,9 +591,9 @@ class CoupledPathfinder:
                         # board 07 diff pairs.  Endpoint cells (P at
                         # its pad AND N at its pad) bypass the floor
                         # since the pads themselves define the spacing.
-                        n_is_endpoint = self._is_at_goal(
-                            cand_n, n_goal
-                        ) or self._is_at_goal(cand_n, n_start)
+                        n_is_endpoint = self._is_at_goal(cand_n, n_goal) or self._is_at_goal(
+                            cand_n, n_start
+                        )
                         bypass_floor = p_is_endpoint and n_is_endpoint
                         if (
                             self.min_spacing_cells > 0
@@ -474,9 +632,9 @@ class CoupledPathfinder:
                 # here; the floor is bypassed only when P happens to
                 # already be at its pad AND the candidate N is at its
                 # pad.
-                p_is_endpoint_held = self._is_at_goal(
-                    cand_p2, p_goal
-                ) or self._is_at_goal(cand_p2, p_start)
+                p_is_endpoint_held = self._is_at_goal(cand_p2, p_goal) or self._is_at_goal(
+                    cand_p2, p_start
+                )
                 bypass_floor = p_is_endpoint_held and n_is_endpoint
                 if (
                     self.min_spacing_cells > 0
@@ -1136,6 +1294,12 @@ class DiffPairRouter:
             autorouter: Parent autorouter instance
         """
         self.autorouter = autorouter
+        # Issue #3023 Phase A: rolling buffer of routed intra-pair
+        # clearance violations detected during
+        # ``route_differential_pair_coupled``.  Phase A is
+        # observability-only; Phase B (separate PR) will consume this
+        # list to drive a fine-grid repair sub-pass.
+        self._intra_clearance_violations: list[IntraPairClearanceViolation] = []
 
     def _resolve_detection_inputs(
         self,
@@ -1729,6 +1893,39 @@ class DiffPairRouter:
             n_routes.append(n_route)
             routes.extend([p_route, n_route])
 
+            # Issue #3023 Phase A: per-spec intra-pair clearance audit.
+            # The CoupledPathfinder's ``min_spacing_cells`` floor is a
+            # center-to-center grid-cell count -- it does NOT guarantee
+            # edge-to-edge clearance once the route is quantised back to
+            # world coordinates (the 434-violation residual on board 07
+            # is this quantisation gap).  Re-check the actual routed
+            # segments against the per-pair threshold and emit a
+            # diagnostic so Phase B (fine-grid repair, separate PR) can
+            # rip-and-replace just the offenders.  No behavioural change
+            # here -- detection only.
+            violation = find_intra_pair_clearance_violations(
+                p_route,
+                n_route,
+                threshold_mm=pair_intra_clearance,
+                pair_name=pair.name,
+            )
+            if violation is not None:
+                logger.info(
+                    "diffpair intra-clearance violation: pair=%r "
+                    "p_net=%r n_net=%r threshold=%.4fmm "
+                    "worst_actual=%.4fmm magnitude=%.4fmm "
+                    "layer=%r offending_segments=%d",
+                    violation.pair_name,
+                    violation.positive_net_name,
+                    violation.negative_net_name,
+                    violation.expected_clearance_mm,
+                    violation.actual_clearance_mm,
+                    violation.violation_magnitude_mm,
+                    violation.layer,
+                    len(violation.segment_violations),
+                )
+                self._intra_clearance_violations.append(violation)
+
         # Issue #2473: Route stub edges (intra-net hops within a
         # cluster, e.g., USB-C A6 -> B6) using the independent router.
         # These are short, no coupling required, and the autorouter has
@@ -1880,6 +2077,43 @@ class DiffPairRouter:
             print(f"    Length matched: delta={delta:.3f}mm (within tolerance)")
 
         return routes, warning
+
+    def intra_clearance_violations(self) -> list[IntraPairClearanceViolation]:
+        """Return routed intra-pair clearance violations (Issue #3023 Phase A).
+
+        Returns the rolling buffer of violations recorded by
+        :meth:`route_differential_pair_coupled` since this
+        :class:`DiffPairRouter` was constructed.  Each entry corresponds
+        to one ``CoupledPathfinder``-routed (P, N) pair whose post-route
+        edge-to-edge clearance dropped below the per-pair
+        ``NetClassRouting.effective_intra_pair_clearance()``.
+
+        Phase A is detection-only -- this method exists so Phase B (the
+        fine-grid sub-pass, separate PR) and external tooling (DRC
+        reports, e2e tests on board 07) can audit how many violations
+        the coupled router emitted without re-running the geometry
+        check.
+
+        Returns:
+            A shallow copy of the violation buffer.  Empty when no
+            coupled diff-pair routes have been laid down or when every
+            pair satisfied its per-pair clearance threshold.  Callers
+            MUST NOT mutate the returned list to clear state; use
+            :meth:`reset_intra_clearance_violations` instead.
+        """
+        return list(self._intra_clearance_violations)
+
+    def reset_intra_clearance_violations(self) -> None:
+        """Discard the buffered Phase A clearance-violation records.
+
+        Used by tests that exercise multiple
+        ``route_differential_pair_coupled`` calls on a single
+        :class:`DiffPairRouter` instance and want a clean baseline
+        between cases.  Not intended for production callers; the buffer
+        is intentionally additive over a single Autorouter session so
+        the post-routing audit sees every coupled pair.
+        """
+        self._intra_clearance_violations.clear()
 
     def route_differential_pair(
         self,

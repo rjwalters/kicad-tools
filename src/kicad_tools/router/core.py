@@ -51,7 +51,7 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
-from .diffpair_routing import DiffPairRouter
+from .diffpair_routing import DiffPairRouter, IntraPairClearanceViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
@@ -9932,6 +9932,36 @@ class Autorouter:
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair together."""
         return self._diffpair.route_differential_pair(pair, spacing)
+
+    def diffpair_intra_clearance_violations(self) -> list[IntraPairClearanceViolation]:
+        """Return routed intra-pair clearance violations (Issue #3023 Phase A).
+
+        Phase A detection accessor: surfaces every diff-pair whose
+        ``CoupledPathfinder``-produced route violated the per-pair
+        ``NetClassRouting.effective_intra_pair_clearance()`` threshold,
+        as detected during ``route_differential_pair_coupled``.
+
+        Phase A is observability-only; the routes are NOT modified.
+        Phase B (the fine-grid sub-pass, separate PR) will consume this
+        list to drive a targeted rip-and-replace repair pass.
+
+        The per-pair threshold is read from
+        ``NetClassRouting.effective_intra_pair_clearance()``, NOT the
+        legacy ``DifferentialPairRules.spacing`` heuristic, so callers
+        whose pairs declare an intra-pair clearance override see the
+        override honoured.
+
+        Returns:
+            A shallow copy of the rolling violation buffer.  Empty when
+            no diff-pair routing has happened yet, when
+            ``--differential-pairs`` was not enabled for this Autorouter
+            session, or when every coupled pair satisfied its threshold.
+        """
+        # Avoid auto-initialising the lazy DiffPairRouter if nothing
+        # ever routed a diff pair -- the buffer is empty in that case.
+        if self._diffpair_router is None:
+            return []
+        return self._diffpair_router.intra_clearance_violations()
 
     def route_all_with_diffpairs(
         self,
