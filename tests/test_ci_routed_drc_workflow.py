@@ -347,7 +347,10 @@ class TestHelperCheckFile:
         self.helper = _load_helper_module()
 
     def test_zero_errors_zero_allowed_passes(self) -> None:
-        with patch.object(self.helper, "count_errors", return_value=0):
+        # Issue #3074: count_errors now returns (blocking_errors,
+        # advisory_by_rule).  Stub with the no-advisory tuple to keep
+        # the historical semantics of "0 blocking + 0 advisory".
+        with patch.object(self.helper, "count_errors", return_value=(0, {})):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
         assert passed
         assert "0 errors" in msg
@@ -356,7 +359,7 @@ class TestHelperCheckFile:
     def test_under_allowed_passes(self) -> None:
         """A board grandfathered at 17 errors that drops to 5 must pass --
         the gate is "allowed minus epsilon", not "exact match"."""
-        with patch.object(self.helper, "count_errors", return_value=5):
+        with patch.object(self.helper, "count_errors", return_value=(5, {})):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
         assert "5 errors" in msg
@@ -367,14 +370,14 @@ class TestHelperCheckFile:
 
     def test_at_allowed_passes(self) -> None:
         """Equal-to-allowed is the steady state for a grandfathered board."""
-        with patch.object(self.helper, "count_errors", return_value=17):
+        with patch.object(self.helper, "count_errors", return_value=(17, {})):
             passed, _, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
         assert errors == 17
 
     def test_over_allowed_fails_grandfathered(self) -> None:
         """Regression on a grandfathered board: 17 -> 22. Must fail."""
-        with patch.object(self.helper, "count_errors", return_value=22):
+        with patch.object(self.helper, "count_errors", return_value=(22, {})):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert not passed
         assert "regression" in msg.lower()
@@ -387,7 +390,7 @@ class TestHelperCheckFile:
         report 0 errors. Any errors mean the gate fails. This is the
         critical assertion that PR #2538's merge state would have
         triggered (board 04 with 5 errors)."""
-        with patch.object(self.helper, "count_errors", return_value=5):
+        with patch.object(self.helper, "count_errors", return_value=(5, {})):
             passed, msg, errors = self.helper.check_file(
                 Path("boards/04-x/output/x_routed.kicad_pcb"), allowed=0
             )
@@ -395,7 +398,7 @@ class TestHelperCheckFile:
         # Message must point the contributor at the allowlist for the
         # grandfathering escape hatch.
         assert "routed-drc-tolerance.yml" in msg
-        assert "5 error" in msg
+        assert "5 " in msg and "error" in msg
         assert errors == 5
 
     def test_mfr_override_forwards_to_count_errors(self) -> None:
@@ -403,7 +406,7 @@ class TestHelperCheckFile:
         must reach ``count_errors`` as the ``mfr`` keyword (not be silently
         dropped).  Pin this so a future refactor of the call chain doesn't
         regress board-04's tier-aware measurement."""
-        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
             passed, msg, errors = self.helper.check_file(
                 Path("foo.kicad_pcb"), allowed=4, mfr="jlcpcb-tier1"
             )
@@ -420,7 +423,7 @@ class TestHelperCheckFile:
     def test_mfr_default_is_jlcpcb(self) -> None:
         """When no override is supplied, ``check_file`` must fall back to
         the strict ``jlcpcb`` profile (the historical default)."""
-        with patch.object(self.helper, "count_errors", return_value=0) as mock:
+        with patch.object(self.helper, "count_errors", return_value=(0, {})) as mock:
             self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
         call_kwargs = mock.call_args.kwargs
         # Default may be passed explicitly or omitted; both routes resolve
@@ -576,7 +579,8 @@ class TestMainDriftWarningEmission:
         but a ``::warning file=...::`` MUST be emitted so the reviewer
         sees the stale entry. This is the regression test for #2590."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        with patch.object(self.helper, "count_errors", return_value=15):
+        # Issue #3074: count_errors returns (blocking, advisory_by_rule).
+        with patch.object(self.helper, "count_errors", return_value=(15, {})):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0  # gate still passes
         captured = capsys.readouterr()
@@ -591,7 +595,7 @@ class TestMainDriftWarningEmission:
         """Steady state: actual=17, allowlist=17. No warning -- the
         floor matches reality. (The OK message still goes to stdout.)"""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        with patch.object(self.helper, "count_errors", return_value=17):
+        with patch.object(self.helper, "count_errors", return_value=(17, {})):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0
         captured = capsys.readouterr()
@@ -607,7 +611,7 @@ class TestMainDriftWarningEmission:
         ::error::, and we must NOT also emit a drift warning -- the
         problem here is too many errors, not a stale floor."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        with patch.object(self.helper, "count_errors", return_value=22):
+        with patch.object(self.helper, "count_errors", return_value=(22, {})):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 2  # gate fails (regression)
         captured = capsys.readouterr()
@@ -622,7 +626,7 @@ class TestMainDriftWarningEmission:
         importantly the ``allowed > 0`` guard suppresses the warning so
         every clean PR doesn't get nagged."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
-        with patch.object(self.helper, "count_errors", return_value=0):
+        with patch.object(self.helper, "count_errors", return_value=(0, {})):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0
         captured = capsys.readouterr()
@@ -636,7 +640,7 @@ class TestMainDriftWarningEmission:
         that triggers the drift warning must still exit 0 so the gate
         doesn't become accidentally blocking."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=10)
-        with patch.object(self.helper, "count_errors", return_value=3):
+        with patch.object(self.helper, "count_errors", return_value=(3, {})):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0  # warning emitted, but gate still passes
         captured = capsys.readouterr()
@@ -682,7 +686,8 @@ class TestMainDriftWarningEmission:
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
 
-                with patch.object(module, "count_errors", return_value=15):
+                # Issue #3074: count_errors returns (blocking, advisory_by_rule).
+                with patch.object(module, "count_errors", return_value=(15, {{}})):
                     sys.exit(module.main([
                         "--allowlist", {str(allowlist)!r},
                         {rel_pcb!r},
@@ -745,7 +750,8 @@ class TestMainManufacturerOverride:
         rel = "boards/04-test/output/test_routed.kicad_pcb"
         allowlist = tmp_path / "tolerance.yml"
         allowlist.write_text(f"tolerances:\n  {rel}: 4\nmanufacturers:\n  {rel}: jlcpcb-tier1\n")
-        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+        # Issue #3074: count_errors returns (blocking, advisory_by_rule).
+        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
             rc = self.helper.main(["--allowlist", str(allowlist), rel])
         assert rc == 0
         mock.assert_called_once()
@@ -762,7 +768,7 @@ class TestMainManufacturerOverride:
         allowlist = tmp_path / "tolerance.yml"
         # tolerances entry only; no manufacturers section at all.
         allowlist.write_text(f"tolerances:\n  {rel}: 4\n")
-        with patch.object(self.helper, "count_errors", return_value=4) as mock:
+        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
             rc = self.helper.main(["--allowlist", str(allowlist), rel])
         assert rc == 0
         mock.assert_called_once()
