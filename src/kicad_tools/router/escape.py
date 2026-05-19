@@ -2267,11 +2267,11 @@ class EscapeRouter:
                             escapes.append(in_pad_route)
                             continue
 
-                        # Issue #3063 (sub-B of #3048): when strict mode
-                        # caused the in-pad rescue to defer (return None
-                        # because the dead-centre via would clip a foreign
-                        # neighbour and the long-axis nudge cannot rescue),
-                        # try the lateral re-attempt before giving up.
+                        # Issue #3063 (sub-B of #3048): when the in-pad
+                        # rescue deferred (returned None because the dead-
+                        # centre via would clip a foreign neighbour and the
+                        # long-axis nudge cannot rescue), try the lateral
+                        # re-attempt before giving up.
                         # The lateral helper probes off-pad via candidates
                         # along ``primary_dir`` (perpendicular outward from
                         # the chip body) -- NOT ``direction``, which for
@@ -2281,21 +2281,34 @@ class EscapeRouter:
                         # consistent room for an off-pad via because the
                         # row's pin pitch is geometrically fixed and the
                         # outward half-plane is open by construction.
-                        # This is the in-tree customer that lets board 04
-                        # ship with --strict-in-pad-clearance without
-                        # dropping completion vs the legacy "commit-anyway"
-                        # branch.
-                        if self.strict_in_pad_clearance:
-                            lateral_route = self._try_lateral_via_escape(
-                                pad=pad,
-                                direction=primary_dir,
-                                effective_clearance=effective_clearance,
-                                escape_width=escape_width,
-                                package=package,
-                            )
-                            if lateral_route is not None:
-                                escapes.append(lateral_route)
-                                continue
+                        # Issue #3080: gate removed -- the lateral helper
+                        # is invoked on BOTH the strict and non-strict
+                        # paths now.  Board 04's stranded U2.8 GND stitch
+                        # window (#3075) needed the PR #3079 surface-stub
+                        # necking to fit through the 0.2mm channel between
+                        # neighbour pads, but the necking only ran when
+                        # the strict-mode branch invoked the lateral
+                        # helper.  Removing the gate is strictly additive:
+                        # if the in-pad rescue already succeeded (route is
+                        # not None), the `continue` above means we never
+                        # reach this point, so non-strict callers whose
+                        # in-pad rescue currently succeeds are unaffected.
+                        # If the in-pad rescue returned None (the only way
+                        # to reach this branch), the lateral helper is
+                        # the same "off-pad via plus possibly-necked stub"
+                        # the strict-mode path was already using -- still
+                        # falls back to "defer to main router" when it
+                        # returns None.
+                        lateral_route = self._try_lateral_via_escape(
+                            pad=pad,
+                            direction=primary_dir,
+                            effective_clearance=effective_clearance,
+                            escape_width=escape_width,
+                            package=package,
+                        )
+                        if lateral_route is not None:
+                            escapes.append(lateral_route)
+                            continue
 
                 # Issue #2881: Missed-rescue detection.  When the package is
                 # fine-pitch enough to need via-in-pad rescue but the
@@ -2951,19 +2964,22 @@ class EscapeRouter:
                         escapes.append(in_pad_route)
                         continue
                     # Issue #3063 (sub-B of #3048): lateral re-attempt
-                    # when the strict in-pad rescue deferred.  See the
-                    # QFP-alternating dispatcher comment for rationale.
-                    if self.strict_in_pad_clearance:
-                        lateral_route = self._try_lateral_via_escape(
-                            pad=pad,
-                            direction=direction,
-                            effective_clearance=effective_clearance,
-                            escape_width=escape_width,
-                            package=package,
-                        )
-                        if lateral_route is not None:
-                            escapes.append(lateral_route)
-                            continue
+                    # when the in-pad rescue deferred.  See the QFP-
+                    # alternating dispatcher comment for rationale.
+                    # Issue #3080: gate removed -- the lateral helper is
+                    # invoked on BOTH the strict and non-strict paths so
+                    # the surface-stub necking from PR #3079 reaches
+                    # default callers (board 04 stitching depends on this).
+                    lateral_route = self._try_lateral_via_escape(
+                        pad=pad,
+                        direction=direction,
+                        effective_clearance=effective_clearance,
+                        escape_width=escape_width,
+                        package=package,
+                    )
+                    if lateral_route is not None:
+                        escapes.append(lateral_route)
+                        continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
@@ -3054,19 +3070,22 @@ class EscapeRouter:
                         escapes.append(in_pad_route)
                         continue
                     # Issue #3063 (sub-B of #3048): lateral re-attempt
-                    # when the strict in-pad rescue deferred.  See the
-                    # QFP-alternating dispatcher comment for rationale.
-                    if self.strict_in_pad_clearance:
-                        lateral_route = self._try_lateral_via_escape(
-                            pad=pad,
-                            direction=direction,
-                            effective_clearance=effective_clearance,
-                            escape_width=escape_width,
-                            package=package,
-                        )
-                        if lateral_route is not None:
-                            escapes.append(lateral_route)
-                            continue
+                    # when the in-pad rescue deferred.  See the QFP-
+                    # alternating dispatcher comment for rationale.
+                    # Issue #3080: gate removed -- the lateral helper is
+                    # invoked on BOTH the strict and non-strict paths so
+                    # the surface-stub necking from PR #3079 reaches
+                    # default callers (board 04 stitching depends on this).
+                    lateral_route = self._try_lateral_via_escape(
+                        pad=pad,
+                        direction=direction,
+                        effective_clearance=effective_clearance,
+                        escape_width=escape_width,
+                        package=package,
+                    )
+                    if lateral_route is not None:
+                        escapes.append(lateral_route)
+                        continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "

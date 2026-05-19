@@ -310,11 +310,21 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
     candidate is rejected and the next offset is tried.
     """
 
-    def test_lateral_stub_necks_to_min_trace_when_full_width_collides(self):
+    @pytest.mark.parametrize("strict", [True, False])
+    def test_lateral_stub_necks_to_min_trace_when_full_width_collides(
+        self, strict: bool,
+    ):
         """When the dispatcher passes a wide ``escape_width`` (0.5mm
         net trace) that does NOT fit the channel between same-row
         neighbour pads, the helper must neck the stub down to the
         manufacturer-minimum trace width and emit a valid route.
+
+        Issue #3080: parameterised over ``strict_in_pad_clearance``
+        because the gate at the three dispatcher invocation sites has
+        been removed.  The helper itself is identical between modes;
+        we exercise both to pin the contract that the necking is
+        available on the default (non-strict) path -- this is what
+        board 04 stitching depends on.
 
         Geometry: with the standard violating pair at PITCH=0.50mm
         and PAD_SHORT=0.30mm, a SOUTH stub from the primary at width
@@ -327,7 +337,7 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
         clearance -- so the helper should neck down rather than
         rejecting the candidate.
         """
-        router = _build_router(strict=True)
+        router = _build_router(strict=strict)
         package = _make_translated_package()
         primary = package.pads[0]
 
@@ -340,7 +350,7 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
         )
         assert route is not None, (
             "Helper must still return a route by necking the stub "
-            "down to manufacturer-minimum width."
+            f"down to manufacturer-minimum width (strict={strict})."
         )
         stub = route.segments[0]
         # The jlcpcb-tier1 manufacturer profile has min_trace=0.127mm.
@@ -348,14 +358,16 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
         # 0.5mm dispatcher width that would violate channel clearance).
         assert stub.width == pytest.approx(0.127, abs=1e-6), (
             f"Stub width must be necked to manufacturer min_trace "
-            f"(0.127mm for jlcpcb-tier1); got {stub.width}mm"
+            f"(0.127mm for jlcpcb-tier1); got {stub.width}mm "
+            f"(strict={strict})"
         )
         # The inner-layer segment can stay at the dispatcher width
         # (inner layers have no fine-pitch pad congestion).
         inner = route.segments[1]
         assert inner.width == pytest.approx(0.5, abs=1e-6), (
             f"Inner segment should keep the dispatcher width "
-            f"(no SMT pads on the inner layer); got {inner.width}mm"
+            f"(no SMT pads on the inner layer); got {inner.width}mm "
+            f"(strict={strict})"
         )
 
     def test_lateral_stub_keeps_dispatcher_width_when_channel_is_clear(self):
@@ -468,25 +480,29 @@ class TestLateralRecoveryFailsGracefully:
 
 
 # ----------------------------------------------------------------------------
-# Regression case: with strict mode OFF, no behaviour change
+# Regression case: in-pad commit-anyway still fires when strict mode is off
 # ----------------------------------------------------------------------------
 
 
-class TestLateralRecoveryIsStrictGated:
-    """With ``strict_in_pad_clearance=False`` (default), the dispatcher
-    never invokes the lateral helper -- the legacy commit-anyway branch
-    fires inside ``_try_in_pad_escape`` and returns a violating route.
+class TestLateralRecoveryWithStrictDisabled:
+    """With ``strict_in_pad_clearance=False`` (default), the in-pad
+    helper itself still commits a violating route via its legacy
+    "commit-anyway" branch -- the lateral helper is only reached when
+    that branch returns None (which it doesn't in this fixture's
+    geometry).  We pin the in-pad helper's behaviour here.
 
-    This pins the regression contract: enabling the lateral helper
-    must not change behaviour for legacy callers that have NOT opted
-    into strict mode.
+    Issue #3080: the dispatcher-level gate that previously suppressed
+    the lateral helper in non-strict mode has been REMOVED.  The
+    lateral helper still functions identically in both modes when
+    reached; see the parameterized success-case tests at the top of
+    this module.
     """
 
-    def test_legacy_path_unchanged_when_strict_disabled(self, caplog):
+    def test_inpad_commit_anyway_still_fires_when_strict_disabled(self, caplog):
         """In legacy mode, ``_try_in_pad_escape`` commits the violating
         via with a WARNING log -- no INFO line about lateral rescue
-        should appear (the helper is gated behind strict-mode in the
-        dispatcher).
+        should appear because the in-pad helper returns a non-None route
+        and the dispatcher's lateral fallback is therefore never reached.
         """
         router = _build_router(strict=False)
         assert router.strict_in_pad_clearance is False
@@ -508,19 +524,15 @@ class TestLateralRecoveryIsStrictGated:
         assert route is not None, (
             "Legacy (strict=False) path must commit the violating via"
         )
-        # The lateral helper's INFO log line must NOT appear when the
-        # legacy commit-anyway branch fires.  The dispatcher gates the
-        # lateral call on strict mode, so even though _try_in_pad_escape
-        # returned a value (no defer), no lateral path runs.  We assert
-        # this by inspecting the in-pad helper output directly: it
-        # should produce the warning, not the lateral info line.
+        # We did not invoke the lateral helper directly here -- we called
+        # ``_try_in_pad_escape`` in isolation, so it can't have logged.
         lateral_logs = [
             r for r in caplog.records
             if "Lateral via-escape rescue" in r.message
         ]
         assert not lateral_logs, (
-            "Lateral rescue must NOT log when strict mode is off and "
-            "the in-pad helper commits the violating via; got: "
+            "Direct _try_in_pad_escape call must not log the lateral "
+            "rescue line; got: "
             + str([r.message for r in lateral_logs])
         )
 
@@ -724,18 +736,29 @@ class TestQfpDispatcherWiring:
             "broken at the QFP-alternating site (escape.py ~2247)."
         )
 
-    def test_dispatcher_does_not_invoke_lateral_in_non_strict_mode(self):
-        """With strict mode OFF, the dispatcher must NOT invoke the
-        lateral helper -- it relies on the in-pad helper's
-        commit-anyway branch instead.  This pins the strict-gating
-        contract so a future refactor doesn't accidentally enable the
-        lateral path for legacy callers.
+    def test_dispatcher_invokes_lateral_in_non_strict_mode_after_inpad_defers(self):
+        """Issue #3080: the lateral helper must be invoked in BOTH
+        strict and non-strict mode when the in-pad helper returns None.
+
+        Before #3080, the dispatcher gated the lateral fallback on
+        ``self.strict_in_pad_clearance`` so non-strict callers (e.g.
+        board 04, whose ``generate_design.py:route_pcb`` does NOT enable
+        strict mode) could not benefit from PR #3079's surface-stub
+        necking.  Board 04's U2.8 GND stitch window required the necked
+        stub; the gate removal closes that gap.
+
+        We force ``_try_in_pad_escape`` to defer (returning None) and
+        assert the dispatcher reaches the lateral helper even though
+        ``strict_in_pad_clearance`` is False.  This is strictly
+        additive: when the in-pad helper succeeds (returns a non-None
+        route), the `continue` short-circuits before this branch and
+        non-strict callers whose in-pad rescue succeeds today are
+        unaffected.
         """
         router = _build_router(strict=False)
-        # In-pad helper returns None to simulate the violation case
-        # (it would normally commit a violating route here; we force
-        # None to make the dispatcher's lateral-gate the ONLY remaining
-        # action).
+        assert router.strict_in_pad_clearance is False
+        # Force the in-pad helper to defer unconditionally so the
+        # dispatcher's lateral fallback is the only remaining action.
         router._try_in_pad_escape = lambda **kwargs: None  # type: ignore[method-assign]
 
         calls: list[dict] = []
@@ -756,8 +779,10 @@ class TestQfpDispatcherWiring:
         except Exception:  # noqa: BLE001
             pass
 
-        assert not calls, (
-            "Non-strict mode must NOT invoke the lateral helper -- the "
-            "lateral path is the strict-mode-only escape valve.  Got "
-            f"{len(calls)} call(s)."
+        assert calls, (
+            "Issue #3080: non-strict mode MUST invoke the lateral helper "
+            "after the in-pad helper defers.  The previous strict-only "
+            "gate has been removed so PR #3079's surface-stub necking "
+            "reaches default callers (board 04 stitching depends on it). "
+            "Got zero calls."
         )
