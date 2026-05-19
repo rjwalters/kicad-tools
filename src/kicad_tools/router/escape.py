@@ -2267,6 +2267,36 @@ class EscapeRouter:
                             escapes.append(in_pad_route)
                             continue
 
+                        # Issue #3063 (sub-B of #3048): when strict mode
+                        # caused the in-pad rescue to defer (return None
+                        # because the dead-centre via would clip a foreign
+                        # neighbour and the long-axis nudge cannot rescue),
+                        # try the lateral re-attempt before giving up.
+                        # The lateral helper probes off-pad via candidates
+                        # along ``primary_dir`` (perpendicular outward from
+                        # the chip body) -- NOT ``direction``, which for
+                        # odd-index pins is the along-edge alt_dir_cw/ccw
+                        # and would search into the next pin in the row.
+                        # The outward direction is the only one with
+                        # consistent room for an off-pad via because the
+                        # row's pin pitch is geometrically fixed and the
+                        # outward half-plane is open by construction.
+                        # This is the in-tree customer that lets board 04
+                        # ship with --strict-in-pad-clearance without
+                        # dropping completion vs the legacy "commit-anyway"
+                        # branch.
+                        if self.strict_in_pad_clearance:
+                            lateral_route = self._try_lateral_via_escape(
+                                pad=pad,
+                                direction=primary_dir,
+                                effective_clearance=effective_clearance,
+                                escape_width=escape_width,
+                                package=package,
+                            )
+                            if lateral_route is not None:
+                                escapes.append(lateral_route)
+                                continue
+
                 # Issue #2881: Missed-rescue detection.  When the package is
                 # fine-pitch enough to need via-in-pad rescue but the
                 # manufacturer doesn't support it, AND the unclipped surface
@@ -2920,6 +2950,20 @@ class EscapeRouter:
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
                         continue
+                    # Issue #3063 (sub-B of #3048): lateral re-attempt
+                    # when the strict in-pad rescue deferred.  See the
+                    # QFP-alternating dispatcher comment for rationale.
+                    if self.strict_in_pad_clearance:
+                        lateral_route = self._try_lateral_via_escape(
+                            pad=pad,
+                            direction=direction,
+                            effective_clearance=effective_clearance,
+                            escape_width=escape_width,
+                            package=package,
+                        )
+                        if lateral_route is not None:
+                            escapes.append(lateral_route)
+                            continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
@@ -3009,6 +3053,20 @@ class EscapeRouter:
                     if in_pad_route is not None:
                         escapes.append(in_pad_route)
                         continue
+                    # Issue #3063 (sub-B of #3048): lateral re-attempt
+                    # when the strict in-pad rescue deferred.  See the
+                    # QFP-alternating dispatcher comment for rationale.
+                    if self.strict_in_pad_clearance:
+                        lateral_route = self._try_lateral_via_escape(
+                            pad=pad,
+                            direction=direction,
+                            effective_clearance=effective_clearance,
+                            escape_width=escape_width,
+                            package=package,
+                        )
+                        if lateral_route is not None:
+                            escapes.append(lateral_route)
+                            continue
                     skipped_count += 1
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
@@ -4057,8 +4115,20 @@ class EscapeRouter:
         Returns:
             True if the position is clear; False if blocked.
         """
-        # Check grid bounds
-        if not (0 <= x <= self.grid.width and 0 <= y <= self.grid.height):
+        # Check grid bounds.  Issue #3063: use origin-aware bounds so
+        # boards whose world coordinates don't start at (0, 0) (e.g.
+        # the board-04 STM32 PCB, whose origin sits around (95, 90))
+        # have their candidates correctly validated.  The pre-#3063
+        # form (``0 <= x <= grid.width``) was implicitly correct only
+        # for grids constructed with ``origin_x=origin_y=0``; on other
+        # boards every world-coord candidate fell out-of-bounds and
+        # the predicate defaulted to False, which masked the lateral
+        # re-attempt path (every off-pad candidate was rejected on
+        # bounds and the rescue never fired).
+        origin_x = getattr(self.grid, "origin_x", 0.0)
+        origin_y = getattr(self.grid, "origin_y", 0.0)
+        if not (origin_x <= x <= origin_x + self.grid.width
+                and origin_y <= y <= origin_y + self.grid.height):
             return False
 
         # Check for obstacles in grid
@@ -4670,6 +4740,254 @@ class EscapeRouter:
             via=in_pad_via,
             ring_index=0,
         )
+
+    def _try_lateral_via_escape(
+        self,
+        pad: Pad,
+        direction: EscapeDirection,
+        effective_clearance: float,
+        escape_width: float,
+        package: PackageInfo | None = None,
+        max_offset_mm: float | None = None,
+        step_mm: float = 0.05,
+    ) -> EscapeRoute | None:
+        """Probe off-pad via candidates along the pin's escape direction.
+
+        Issue #3063 (sub-B of #3048): when ``_try_in_pad_escape`` returns
+        ``None`` in strict mode (``skip_on_clearance_violation=True``),
+        the caller has no rescue path -- the in-pad via would clip a
+        foreign neighbour and the strict policy refuses to commit it.
+        This helper provides the lateral re-attempt: starting from the
+        pad center, step outward along ``direction`` at ``step_mm``
+        increments up to ``max_offset_mm``, looking for the first
+        position where :meth:`_can_place_via` accepts a candidate via
+        against the same foreign-pad context the in-pad rescue used.
+
+        The returned route is geometrically equivalent to an in-pad
+        rescue except the via has been pushed off the pad by a small
+        lateral offset: an L-shaped surface stub from the pad to the
+        via location, then an inner-layer escape segment continuing
+        the same outward direction so the main router picks up the net
+        cleanly.
+
+        Search strategy:
+        1. Skip offset 0 (that's what ``_try_in_pad_escape`` already
+           tried -- pointless to re-test the dead-centre position).
+        2. Step ``i = 1, 2, ...`` with ``offset = i * step_mm``.  At each
+           step, try the position ``(pad.x + dx * offset, pad.y + dy * offset)``
+           where ``(dx, dy)`` is the direction's unit vector.
+        3. Validate the candidate against the same foreign-pad set the
+           in-pad rescue uses (other pads on the same footprint that
+           belong to a different net).
+        4. The first candidate that passes is returned.  If none pass
+           up to ``max_offset_mm``, return ``None``.
+
+        This mirrors the surface-stub-then-via pattern from
+        :meth:`_create_alternating_escape` plus an inner-layer
+        continuation, but the via is placed AT the candidate position
+        rather than dead-centre on the pad.
+
+        Args:
+            pad: The pad whose in-pad rescue was just rejected.
+            direction: Escape direction inherited from the dispatcher;
+                the via search walks along this vector.
+            effective_clearance: Clearance value used by the dispatcher;
+                forwarded to ``_can_place_via`` for the foreign-copper
+                check.
+            escape_width: Trace width to use for both the surface stub
+                and the inner-layer escape segment.
+            package: Optional package context.  When supplied, the
+                foreign-pad set is restricted to other pads on the
+                same footprint with different nets (the same context
+                :meth:`_select_in_pad_via_position` uses).  When
+                ``None``, no neighbour-pad validation is performed
+                (the grid-cell check still runs inside ``_can_place_via``).
+            max_offset_mm: Maximum lateral travel distance in mm.
+                When ``None`` (default), the budget is auto-derived
+                from the pad geometry so the search reaches AT LEAST
+                ``pad_long_dim/2 + via_radius + clearance`` along
+                ``direction`` -- this is the minimum distance needed
+                to clear the own pad copper plus a neighbour's
+                clearance halo when the escape direction is along
+                the pad's long axis (the common LQFP-48 / fine-pitch
+                QFP case where the long axis points outward from the
+                chip body).  A 0.5 mm floor mirrors the issue spec
+                for small / square pads.  Pass an explicit value to
+                override for unit-test geometry where the auto-budget
+                would be unnecessarily large.
+            step_mm: Step granularity in mm.  Default 0.05 mm matches
+                the grid resolution and the existing in-pad nudge step.
+
+        Returns:
+            An ``EscapeRoute`` with the laterally-offset via and the
+            inner-layer escape segment when a valid candidate is found,
+            or ``None`` when every candidate inside the search budget
+            is rejected.
+        """
+        if not self.via_in_pad_supported:
+            # Mirror ``_try_in_pad_escape`` -- without a via-in-pad-capable
+            # manufacturer the lateral re-attempt cannot ship either
+            # (the resulting via would land on a fine-pitch pad neighbour
+            # without filled/plated processing).  Returning None here
+            # preserves the existing "defer to main router" behaviour
+            # for manufacturers that never supported the in-pad path
+            # to begin with.
+            return None
+
+        # Pull manufacturer-effective via geometry, mirroring the
+        # in-pad helper above so the lateral and in-pad rescues use
+        # geometrically-consistent vias.
+        if self._mfr_limits is not None:
+            via_drill = self._mfr_limits.min_via_drill
+            via_diameter = self._mfr_limits.min_via_diameter
+        else:
+            via_drill = self.rules.via_drill
+            via_diameter = self.rules.via_diameter
+
+        dx, dy = self._direction_to_vector(direction)
+        if dx == 0.0 and dy == 0.0:
+            # VIA_DOWN or unknown direction -- no axis to walk along.
+            return None
+
+        # Auto-derive search budget when caller didn't specify.  The
+        # binding constraint for fine-pitch QFP/SSOP pads is the OWN
+        # pad's long-axis extent: a via at offset ``L`` along the
+        # escape direction is only clear of the pad's own copper plus
+        # a neighbour pad's clearance halo when L is greater than the
+        # pad's half-extent in that direction PLUS the via radius PLUS
+        # clearance.  We compute the half-extent in the SPECIFIC
+        # direction by projecting the pad's half-width / half-height
+        # onto the unit vector ``(dx, dy)`` -- the same projection the
+        # in-pad rescue uses for its long-axis nudge.  Floors at 0.5
+        # mm so square pads (where the calculation gives a tiny value)
+        # still get the spec-mandated minimum search budget.
+        if max_offset_mm is None:
+            half_x = pad.width / 2
+            half_y = pad.height / 2
+            # Projected half-extent of the pad rectangle along (dx, dy).
+            # For axis-aligned escape directions this is exactly
+            # ``half_x`` (E/W) or ``half_y`` (N/S); for diagonals it
+            # blends both extents proportionally.
+            proj_half = abs(dx) * half_x + abs(dy) * half_y
+            auto_budget = proj_half + via_diameter / 2 + effective_clearance + step_mm
+            max_offset_mm = max(0.5, auto_budget)
+
+        # Foreign-net pads on the same footprint, mirroring the
+        # ``_select_in_pad_via_position`` filter so the lateral probe
+        # validates against the SAME neighbour set the in-pad rescue
+        # was rejected by.  This keeps the strict-mode contract
+        # symmetric: a lateral candidate "accepted" here would also
+        # have been accepted by the in-pad rescue's clearance check
+        # if it had landed at the same coordinates.
+        foreign_pads: list[Pad] | None = None
+        if package is not None:
+            foreign_pads = [
+                p for p in package.pads
+                if p is not pad and p.net != pad.net
+            ]
+
+        # Iterate offsets [step, 2*step, ..., max_offset]; skip 0 because
+        # the in-pad rescue already tested that position.
+        n_steps = int(round(max_offset_mm / step_mm))
+        for i in range(1, n_steps + 1):
+            offset = i * step_mm
+            cand_x = pad.x + dx * offset
+            cand_y = pad.y + dy * offset
+
+            if self._can_place_via(
+                x=cand_x,
+                y=cand_y,
+                net=pad.net,
+                foreign_pads=foreign_pads,
+                clearance=effective_clearance,
+                via_diameter=via_diameter,
+            ):
+                # Found a passing candidate -- build the EscapeRoute.
+                escape_layer = self._select_inner_escape_layer(pad.layer)
+
+                # Surface stub: pad → via location.  Width matches the
+                # dispatcher's ``escape_width`` (typically min_trace_width
+                # for fine-pitch packages, see _create_fine_pitch_row_escapes).
+                surface_seg = Segment(
+                    x1=pad.x,
+                    y1=pad.y,
+                    x2=cand_x,
+                    y2=cand_y,
+                    width=escape_width,
+                    layer=pad.layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+
+                # Via from surface to inner escape layer.  ``in_pad=False``
+                # because the via is geometrically OFF the pad copper
+                # (that's the whole point of the lateral offset).
+                lateral_via = Via(
+                    x=cand_x,
+                    y=cand_y,
+                    drill=via_drill,
+                    diameter=via_diameter,
+                    layers=(pad.layer, escape_layer),
+                    net=pad.net,
+                    net_name=pad.net_name,
+                    in_pad=False,
+                )
+
+                # Inner-layer escape point: continue the same direction
+                # past the via so the main router has a clean landing
+                # to pick up from, mirroring ``_try_in_pad_escape``.
+                inner_offset = (
+                    via_diameter / 2
+                    + effective_clearance
+                    + self.rules.trace_width
+                )
+                escape_x = cand_x + dx * inner_offset
+                escape_y = cand_y + dy * inner_offset
+
+                inner_seg = Segment(
+                    x1=cand_x,
+                    y1=cand_y,
+                    x2=escape_x,
+                    y2=escape_y,
+                    width=escape_width,
+                    layer=escape_layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+
+                logger.info(
+                    "Lateral via-escape rescue for pad %s (ref=%s pin=%s): "
+                    "in-pad deferred; off-pad via at (%.3f, %.3f) "
+                    "accepted at lateral offset=%.3fmm along %s. "
+                    "L-stub on %s -> via -> %s (Issue #3063).",
+                    pad.net_name, pad.ref, pad.pin,
+                    cand_x, cand_y, offset, direction.name,
+                    pad.layer.kicad_name, escape_layer.kicad_name,
+                )
+
+                return EscapeRoute(
+                    pad=pad,
+                    direction=direction,
+                    escape_point=(escape_x, escape_y),
+                    escape_layer=escape_layer,
+                    via_pos=(cand_x, cand_y),
+                    segments=[surface_seg, inner_seg],
+                    via=lateral_via,
+                    ring_index=0,
+                )
+
+        # No candidate in the budget passed.  Caller (dispatcher) will
+        # treat this as "defer to main router" -- the same outcome the
+        # strict branch had before this helper existed, but now we've
+        # at least attempted the local rescue first.
+        logger.debug(
+            "Lateral via-escape rescue for pad %s (ref=%s pin=%s) failed: "
+            "no candidate in [%.3fmm, %.3fmm] along %s passes clearance "
+            "(Issue #3063).",
+            pad.net_name, pad.ref, pad.pin,
+            step_mm, max_offset_mm, direction.name,
+        )
+        return None
 
     def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
         """Select the best inner layer for via escape routing.
