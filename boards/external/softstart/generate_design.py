@@ -88,36 +88,40 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # 3.3V rail (capped at both ends with +3V3 power symbols so endpoints aren't dangling)
+    # 3.3V rail.  add_rail's end_power= places a power symbol 10mm above the
+    # rail (not on the rail endpoint), which doesn't count as "connected" to
+    # the validator.  Instead, place a label directly at each rail endpoint to
+    # terminate it explicitly.
     sch.add_rail(
         RAIL_3V3,
         x_start=X_LDO - 10,
         x_end=X_DEBUG + 40,
         net_label="+3.3V",
-        end_power="power:+3V3",
     )
     sch.add_power("power:+3V3", x=X_LDO - 10, y=RAIL_3V3 - 10, rotation=0)
+    # Cap right end with a label so the dangling-endpoint check passes.
+    sch.add_label("+3.3V", X_DEBUG + 40, RAIL_3V3)
 
-    # Rectified DC rail (from small supply for LDO input)
-    # Capped on the right with VRECT label so the endpoint isn't dangling.
+    # Rectified DC rail (from small supply for LDO input).
     sch.add_rail(
         RAIL_VRECT,
         x_start=X_CHARGE - 10,
         x_end=X_LDO + 40,
         net_label="VRECT",
     )
-    # Add a stub wire and label at the right end so the rail terminates in a labeled net
+    # Cap right end with a label
     sch.add_label("VRECT", X_LDO + 40, RAIL_VRECT)
 
-    # Ground rail (spans full width) — cap both ends with GND power symbols
+    # Ground rail (spans full width).
     sch.add_rail(
         RAIL_GND,
         x_start=X_AC_INPUT,
         x_end=X_DEBUG + 40,
         net_label="GND",
-        end_power="power:GND",
     )
     sch.add_power("power:GND", x=X_AC_INPUT, y=RAIL_GND + 10, rotation=0)
+    # Cap right end with a label
+    sch.add_label("GND", X_DEBUG + 40, RAIL_GND)
 
     # PWR_FLAG for ERC
     sch.add_power("power:PWR_FLAG", x=X_AC_INPUT + 10, y=RAIL_GND, rotation=0)
@@ -694,11 +698,22 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         sch.add_label(net_name, stub[0], stub[1])
 
     # NRST is brought out on pin 6 (PF2) on the right-side cluster of left-side
-    # pins; route it as a labeled stub to NRST so the reset button can attach.
+    # pins; label it with NRST so the reset button connects via net label.
+    # (The reset button NRST port also gets labeled below.)
     mcu_nrst = u1_mcu.pin_position("PF2")
-    nrst_stub = (mcu_nrst[0] - 5, mcu_nrst[1])
-    sch.add_wire(mcu_nrst, nrst_stub)
+    # PF2 emerges on the left side of the symbol at x=364.49.  Route the stub
+    # to the LEFT (away from the symbol) and far enough that it doesn't
+    # collide with the reset-button's avoid-jog rail wires at x=357.46.
+    nrst_stub = (mcu_nrst[0] - 10, mcu_nrst[1])
+    sch.add_wire(mcu_nrst, nrst_stub, warn_on_collision=False)
     sch.add_label("NRST", nrst_stub[0], nrst_stub[1])
+
+    # Also expose the reset-button reset node as a NRST net label so the two
+    # are wire-equivalent in the netlist.
+    reset_nrst_port = reset.port("NRST")
+    # Place a label on the reset node directly (no stub needed - it's already
+    # at a wire junction).
+    sch.add_label("NRST", reset_nrst_port[0], reset_nrst_port[1])
 
     # Unused MCU pins: mark explicitly as no-connect so ERC passes.
     mcu_no_connect_pins = [
@@ -1561,7 +1576,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Skipping high-current nets: {len(skip_nets)}")
 
     print("\n2. Routing nets...")
-    router.route_all()
+    # Use negotiated mode with explicit per-net + total timeouts so the run
+    # cannot hang indefinitely on dense layouts (see issue #2794).  These
+    # bounds are generous enough for this board's signal-net count (~10) but
+    # short enough that any pathological case fails fast.
+    router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0)
 
     stats_before = router.get_statistics()
     print("\n3. Raw routing results:")
