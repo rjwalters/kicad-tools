@@ -2062,6 +2062,53 @@ def validate_routes(
                             )
                         )
 
+    # --- Differential-pair intra-clearance residual safety net (Issue #3040) ---
+    # Phase B repair pass runs after route_all_with_diffpairs() but can
+    # fail to fix a violation when the path is too constrained (no
+    # alternative spacing exists).  Surface residual violations from
+    # the DiffPairRouter's intra_clearance_violations() buffer as
+    # ``obstacle_type="segment"`` ClearanceViolation records so the
+    # standard CLI seg-seg-violation accounting picks them up and the
+    # routed PCB cannot silently ship with intra-pair clearance
+    # defects.
+    #
+    # We emit one ClearanceViolation per ``segment_violations`` triple
+    # to preserve segment-level location data for downstream consumers
+    # (drc_nudge, format_clearance_violations).  The ``component_inherent``
+    # flag is left False so the standard accounting in route_cmd.py
+    # counts these violations toward the non-zero exit code.
+    diffpair_violations_buffer = []
+    try:
+        diffpair_violations_buffer = router.diffpair_intra_clearance_violations()
+    except AttributeError:  # pragma: no cover - tests may stub router
+        diffpair_violations_buffer = []
+
+    for ipv in diffpair_violations_buffer:
+        for p_seg, n_seg, clearance in ipv.segment_violations:
+            # Midpoint of the closest-approach between the two segments,
+            # for location reporting.
+            mid_x = (p_seg.x1 + p_seg.x2 + n_seg.x1 + n_seg.x2) / 4.0
+            mid_y = (p_seg.y1 + p_seg.y2 + n_seg.y1 + n_seg.y2) / 4.0
+            violations.append(
+                ClearanceViolation(
+                    segment_index=-1,
+                    x1=p_seg.x1,
+                    y1=p_seg.y1,
+                    x2=p_seg.x2,
+                    y2=p_seg.y2,
+                    net=p_seg.net,
+                    obstacle_type="segment",
+                    obstacle_net=n_seg.net,
+                    distance=clearance,
+                    required=ipv.expected_clearance_mm,
+                    net_name=ipv.positive_net_name,
+                    obstacle_net_name=ipv.negative_net_name,
+                    location=(mid_x, mid_y),
+                    component_inherent=False,
+                    layer=p_seg.layer,
+                )
+            )
+
     # --- Segment-to-board-edge checks (Issue #2743) ---
     # Edge keepout violations are otherwise invisible to the post-route
     # nudge pass because they are produced by a separate validator
