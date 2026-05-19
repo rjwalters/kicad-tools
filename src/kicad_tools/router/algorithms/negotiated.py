@@ -1036,6 +1036,7 @@ class NegotiatedRouter:
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
         cache_key: object | None = None,
+        extra_routes: list["Route"] | None = None,
     ) -> list[int]:
         """Find nets whose committed segments clip foreign-net vias.
 
@@ -1047,6 +1048,27 @@ class NegotiatedRouter:
         report only) to LIVE -- the rip-up loop feeds violators back
         into ``nets_to_reroute`` so the next iteration re-routes them
         against the up-to-date foreign-via geometry.
+
+        Issue #3077 (``extra_routes``): the negotiated rip-up loop in
+        ``core.py`` and ``two_phase.py`` only tracks main-router
+        committed routes in ``net_routes``; escape-phase routes
+        (added to ``self.routes`` by :meth:`Autorouter.generate_escape_routes`
+        and :meth:`Autorouter._run_subgrid_prepass`) are not present
+        in ``net_routes`` and therefore their vias were invisible to
+        this hook.  Concretely, the lateral via-escape helper added
+        in PR #3070 places off-pad vias for boxed-in fine-pitch pads
+        (e.g. board-04 OSC_OUT lateral via at ``(125.7875, 121.75)``)
+        whose halos extend into the escape corridors of adjacent
+        pins.  The main router subsequently committed BOOT0 / SWDIO
+        / SWCLK / SWO segments that overlap those halos because the
+        post-iteration re-validation hook never saw the escape vias.
+
+        ``extra_routes`` accepts a list of Route objects whose vias
+        contribute to the foreign-via universe but whose nets are
+        NOT walked as segment owners (they are non-rippable
+        infrastructure).  The segment owners surfaced for re-route
+        remain restricted to ``net_routes`` so the existing rip-up
+        semantics are preserved.
 
         Concrete failure this catches (board-04, PCB (143.8, 119.7) on
         B.Cu): net A's SWDIO segment commits in iteration N BEFORE net
@@ -1100,6 +1122,14 @@ class NegotiatedRouter:
             cache_key: Optional hashable identifier for memoization
                 across consecutive same-iteration calls.  Default
                 ``None`` disables the cache.
+            extra_routes: Optional list of Route objects whose vias
+                contribute to the foreign-via universe but whose
+                nets are NOT eligible for inclusion in the violator
+                set (Issue #3077).  Use this to inject escape-phase
+                routes (whose vias live in ``self.routes`` but not in
+                ``net_routes``) so the post-iteration hook sees the
+                complete foreign-via context.  Same-net filtering
+                still applies (segment net == via net is skipped).
 
         Returns:
             List of net IDs whose segments violate clearance against
@@ -1109,10 +1139,29 @@ class NegotiatedRouter:
         # in the negotiated loop pass a ``cache_key`` that captures
         # iteration index + route count; identical keys reuse the
         # result because ``net_routes`` cannot have mutated.
+        # Issue #3077: incorporate an ``extra_routes`` discriminator
+        # into the effective cache key so a prior call WITHOUT
+        # ``extra_routes`` (cache_key="X") does not return a stale
+        # result for a subsequent call WITH ``extra_routes`` under
+        # the same nominal key.  We fingerprint by the tuple of
+        # ``id(r)`` values for each member -- ``id()`` is stable
+        # within a process so two callers that pass the same Route
+        # objects (typical case: both compute ``extra_routes`` from
+        # the same ``self.routes``) hit the cache.  A caller that
+        # mutates ``self.routes`` between calls produces a different
+        # fingerprint and gets a fresh walk.
+        effective_cache_key: object | None
         if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
             cached = self._seg_via_violations_cache
-            if cached is not None and cached[0] == cache_key:
+            if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
+        else:
+            effective_cache_key = None
 
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
@@ -1140,10 +1189,29 @@ class NegotiatedRouter:
                             (net_id, via)
                         )
 
+        # Issue #3077: Fold in vias from ``extra_routes`` (typically
+        # escape-phase routes) so segment-vs-foreign-via detection
+        # accounts for off-pad lateral / in-pad rescue vias whose
+        # halos can collide with main-router segments.  The via's
+        # owner net (``route.net``) is still used for same-net
+        # filtering downstream, so a main-router segment that
+        # happens to belong to the escape route's owner net is
+        # correctly skipped.
+        if extra_routes:
+            for route in extra_routes:
+                for via in route.vias:
+                    total_vias += 1
+                    v_lo = min(via.layers[0].value, via.layers[1].value)
+                    v_hi = max(via.layers[0].value, via.layers[1].value)
+                    for layer_val in range(v_lo, v_hi + 1):
+                        vias_on_layer.setdefault(layer_val, []).append(
+                            (route.net, via)
+                        )
+
         # Fast path: no vias at all -> no violations possible.
         if total_vias == 0:
-            if cache_key is not None:
-                self._seg_via_violations_cache = (cache_key, [])
+            if effective_cache_key is not None:
+                self._seg_via_violations_cache = (effective_cache_key, [])
             return []
 
         violators: set[int] = set()
@@ -1204,8 +1272,8 @@ class NegotiatedRouter:
                         break
 
         result = list(violators)
-        if cache_key is not None:
-            self._seg_via_violations_cache = (cache_key, result)
+        if effective_cache_key is not None:
+            self._seg_via_violations_cache = (effective_cache_key, result)
         return result
 
     def find_nets_with_via_segment_violations(
@@ -1213,6 +1281,7 @@ class NegotiatedRouter:
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
         cache_key: object | None = None,
+        extra_routes: list["Route"] | None = None,
     ) -> list[int]:
         """Find nets whose committed vias clip foreign-net segments.
 
@@ -1226,6 +1295,14 @@ class NegotiatedRouter:
         (STANDARD threshold) and feeds violators back into
         ``nets_to_reroute`` so the next iteration retries the via's
         parent net against the up-to-date foreign-segment universe.
+
+        Issue #3077 (``extra_routes``): mirrors the segment-vs-via
+        hook's extra-routes parameter.  Escape-phase routes live in
+        ``self.routes`` but not in ``net_routes``; supplying them as
+        ``extra_routes`` extends the foreign-segment universe so a
+        main-router via that clips an escape-phase stub is correctly
+        surfaced.  Vias INSIDE ``extra_routes`` are not walked as
+        violators (escape vias are non-rippable infrastructure).
 
         Concrete failure this catches (board-04, PCB (143.8, 119.7) on
         B.Cu): SWDIO's F.Cu/B.Cu escape segment is committed by the
@@ -1279,6 +1356,12 @@ class NegotiatedRouter:
             cache_key: Optional hashable identifier for memoization
                 across consecutive same-iteration calls.  Default
                 ``None`` disables the cache.
+            extra_routes: Optional list of Route objects whose
+                segments contribute to the foreign-segment universe
+                but whose nets are NOT eligible for the violator set
+                (Issue #3077).  Use for escape-phase routes that live
+                outside ``net_routes`` (typically the lateral-via /
+                in-pad rescue helpers in ``escape.py``).
 
         Returns:
             List of net IDs whose vias violate clearance against a
@@ -1286,10 +1369,23 @@ class NegotiatedRouter:
         """
         # Issue #3020: per-iteration memo (cache_key parity with the
         # segment-vs-via hook above).
+        # Issue #3077: incorporate ``extra_routes`` into the effective
+        # cache key via a per-route ``id()`` fingerprint.  See the
+        # matching block in :meth:`find_nets_with_segment_via_violations`
+        # for the rationale (cache hits when the same Route objects are
+        # supplied across consecutive calls).
+        effective_cache_key: object | None
         if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
             cached = self._via_seg_violations_cache
-            if cached is not None and cached[0] == cache_key:
+            if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
+        else:
+            effective_cache_key = None
 
 
         # Import here to avoid a top-level circular dependency between
@@ -1310,10 +1406,23 @@ class NegotiatedRouter:
                         (net_id, seg)
                     )
 
+        # Issue #3077: extend the foreign-segment universe with
+        # ``extra_routes`` (typically escape-phase routes).  Their
+        # segments participate in the universe but their nets are
+        # not walked for vias (escape vias are non-rippable; see
+        # ``_escape_pad_overrides`` policy at ``core.py:10123-10145``).
+        if extra_routes:
+            for route in extra_routes:
+                for seg in route.segments:
+                    total_segs += 1
+                    segs_on_layer.setdefault(seg.layer.value, []).append(
+                        (route.net, seg)
+                    )
+
         # Fast path: no segments at all -> no violations possible.
         if total_segs == 0:
-            if cache_key is not None:
-                self._via_seg_violations_cache = (cache_key, [])
+            if effective_cache_key is not None:
+                self._via_seg_violations_cache = (effective_cache_key, [])
             return []
 
         violators: set[int] = set()
@@ -1375,8 +1484,8 @@ class NegotiatedRouter:
                         break
 
         result = list(violators)
-        if cache_key is not None:
-            self._via_seg_violations_cache = (cache_key, result)
+        if effective_cache_key is not None:
+            self._via_seg_violations_cache = (effective_cache_key, result)
         return result
 
     def rip_up_nets(

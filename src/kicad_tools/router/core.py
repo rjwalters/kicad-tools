@@ -1677,6 +1677,56 @@ class Autorouter:
 
         self.router.set_segment_foreign_context(foreign_vias=foreign_vias)
 
+    def _collect_extra_routes_for_revalidation(
+        self,
+        net_routes: dict[int, list[Route]],
+    ) -> list[Route]:
+        """Return routes in ``self.routes`` not tracked in ``net_routes``.
+
+        Issue #3077: The negotiated post-iteration re-validation hooks
+        (:meth:`NegotiatedRouter.find_nets_with_segment_via_violations`
+        and the symmetric via-vs-segment sibling) iterate
+        ``net_routes`` only.  Escape-phase routes -- added to
+        ``self.routes`` by :meth:`generate_escape_routes` and
+        :meth:`_run_subgrid_prepass` -- are never folded into
+        ``net_routes`` because they are non-rippable infrastructure
+        (the main router pivots on ``_escape_pad_overrides`` so the
+        escape stub stays in place across rip-up iterations).
+
+        Without this helper, escape vias produced by the lateral via
+        helper (PR #3070's ``_try_lateral_via_escape``) and the
+        in-pad rescue (``_try_in_pad_escape``) are invisible to the
+        re-validation hooks.  Board-04 OSC_OUT's lateral via at
+        ``(125.7875, 121.75)`` sits in the escape corridor for the
+        adjacent NRST pin; subsequent main-router segments for BOOT0
+        / SWDIO / SWCLK / SWO commit on top of the via halo because
+        the hook never surfaces them as violators.
+
+        This helper materialises the delta as a list of Route
+        objects the caller passes to the hooks via the
+        ``extra_routes`` kwarg.  Membership is tested by ``id()``
+        rather than equality so identical-looking escape stubs (e.g.
+        two pins escaped to the same grid coordinate) are not
+        deduplicated by accident.
+
+        Args:
+            net_routes: The dict of ``net_id -> [Route]`` that the
+                re-validation hooks consume.
+
+        Returns:
+            List of Route objects that appear in ``self.routes`` but
+            are NOT referenced by any ``net_routes[net]`` list.
+            Empty list when no escape pass has run or the caller has
+            no escape routes to inject.
+        """
+        if not self.routes:
+            return []
+        tracked_ids: set[int] = set()
+        for routes in net_routes.values():
+            for r in routes:
+                tracked_ids.add(id(r))
+        return [r for r in self.routes if id(r) not in tracked_ids]
+
     def route_net(
         self,
         net: int,
@@ -6405,13 +6455,22 @@ class Autorouter:
         # of the clearance matrix.  A best-iteration restore must
         # prefer a state with fewer total violations regardless of
         # which side of the matrix improved.
+        # Issue #3077: Include escape-phase routes in the foreign-
+        # via universe so the post-iteration re-validation hooks see
+        # vias produced by the lateral / in-pad escape helpers
+        # (PR #3070).  Without this, the hooks operate against an
+        # incomplete via universe and main-router segments commit on
+        # top of escape via halos.
+        _extra_init = self._collect_extra_routes_for_revalidation(net_routes)
         initial_seg_via = neg_router.find_nets_with_segment_via_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("init",),
+            extra_routes=_extra_init,
         )
         initial_via_seg = neg_router.find_nets_with_via_segment_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("init",),
+            extra_routes=_extra_init,
         )
         initial_violations = len(initial_seg_via) + len(initial_via_seg)
         best_metrics = IterationMetrics(
@@ -6456,13 +6515,18 @@ class Autorouter:
             # Issue #3020: combine seg-via and via-seg violator counts
             # so both directions of the 4-quadrant clearance matrix
             # survive the lex-tuple restore comparator.
+            # Issue #3077: extend the via/segment universe with
+            # escape-phase routes; see _collect_extra_routes_for_revalidation.
+            _extra_post = self._collect_extra_routes_for_revalidation(net_routes)
             post_seg_via = neg_router.find_nets_with_segment_via_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
                 cache_key=("post", iter_index),
+                extra_routes=_extra_post,
             )
             post_via_seg = neg_router.find_nets_with_via_segment_violations(
                 net_routes, trace_clearance=self.rules.trace_clearance,
                 cache_key=("post", iter_index),
+                extra_routes=_extra_post,
             )
             violations_now = len(post_seg_via) + len(post_via_seg)
             metrics = IterationMetrics(
@@ -6542,13 +6606,18 @@ class Autorouter:
                 # cache from the previous _capture_iteration_end call.
                 # Issue #3020: combine both directions of the
                 # clearance matrix in the lex tuple comparator.
+                # Issue #3077: extend the via/segment universe with
+                # escape-phase routes.
+                _extra_top = self._collect_extra_routes_for_revalidation(net_routes)
                 current_seg_via = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("post", iteration - 1),
+                    extra_routes=_extra_top,
                 )
                 current_via_seg = neg_router.find_nets_with_via_segment_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("post", iteration - 1),
+                    extra_routes=_extra_top,
                 )
                 current_violations = len(current_seg_via) + len(current_via_seg)
                 current_metrics = IterationMetrics(
@@ -6754,9 +6823,13 @@ class Autorouter:
                 # between this call site and the iteration boundary.
                 # Hot path: this is the third call within an iteration
                 # that reads the same ``("post", K-1)`` state.
+                # Issue #3077: extend the via universe with escape-phase
+                # routes (lateral / in-pad helpers from PR #3070 etc).
+                _extra_mid = self._collect_extra_routes_for_revalidation(net_routes)
                 seg_via_violators = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("post", iteration - 1),
+                    extra_routes=_extra_mid,
                 )
                 if seg_via_violators:
                     new_violators = [
@@ -6796,6 +6869,7 @@ class Autorouter:
                 via_seg_violators = neg_router.find_nets_with_via_segment_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("post", iteration - 1),
+                    extra_routes=_extra_mid,
                 )
                 if via_seg_violators:
                     new_via_violators = [
@@ -7884,13 +7958,18 @@ class Autorouter:
         # matrix in the final lex-tuple comparator so a best snapshot
         # with fewer total violations (in either direction) survives
         # the post-loop restore.
+        # Issue #3077: extend the via/segment universe with
+        # escape-phase routes for the post-loop best-vs-final compare.
+        _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
         final_seg_via = neg_router.find_nets_with_segment_via_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
         )
         final_via_seg = neg_router.find_nets_with_via_segment_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
         )
         final_violations = len(final_seg_via) + len(final_via_seg)
         final_metrics = IterationMetrics(
