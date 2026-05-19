@@ -379,6 +379,19 @@ tolerances:
   #   `manufacturers:` mapping below (see the schema at the top of
   #   the file).  The floor of 4 continues to track ONLY real OSC_OUT
   #   geometry violations under the profile this board ships against.
+  #
+  # Issue #3074: PR #3060 introduced the `connectivity` rule.  Re-routes
+  # of this board on `main` produce 4 blocking errors (2
+  # `clearance_segment_via` + 2 `clearance_pad_via` at the OSC_OUT
+  # cluster above) PLUS 1 advisory `connectivity` finding for a
+  # GND-stitch pad the router could not reach.  The CI gate now mirrors
+  # the audit pipeline's classification (`DRCChecker.is_advisory_rule`)
+  # and excludes advisory rules from the verdict, so the 1
+  # `connectivity` finding does NOT count toward the 4-error allowlist
+  # here.  The advisory still surfaces in the gate's diagnostic output
+  # (an `[advisory (excluded from gate): connectivity=N]` suffix on the
+  # OK message).  Underlying GND stitch follow-up rides with #2834
+  # (manufacturing-ready cluster).
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 4
 
 # Per-board manufacturer overrides for the CI gate (optional).

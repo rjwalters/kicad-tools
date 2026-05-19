@@ -17,6 +17,16 @@ files not listed in the allowlist must report 0 errors. This implements the
 "allowed minus epsilon" semantic: regressions (count going UP) are caught,
 even on boards that are grandfathered in with non-zero counts.
 
+Advisory-rule classification (issue #3074):
+    The gate's verdict mirrors the audit pipeline's classification
+    (``src/kicad_tools/audit/auditor.py``).  Rules registered in
+    ``DRCChecker.ADVISORY_RULE_IDS`` (currently just ``connectivity``) are
+    surfaced in the printed report but excluded from the count that gates
+    the build.  This keeps the gate's verdict aligned with what blocks
+    manufacturability per ``ManufacturingAudit._check_drc`` -- the
+    standalone ``kct check`` CLI still reports the unfiltered count, so a
+    PR may see ``kct check`` report N+1 errors while CI counts N.
+
 Exit codes:
     0 -- All inputs within tolerance (job passes).
     1 -- Tool failure (allowlist parse error, kct check crash, etc.).
@@ -36,6 +46,18 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+# The CI gate mirrors the audit pipeline's advisory-rule classification
+# (``src/kicad_tools/audit/auditor.py:768``) so any rule classified as
+# advisory by :class:`DRCChecker.ADVISORY_RULE_IDS` does NOT block the gate.
+# Today that is just ``connectivity`` (partial-route reports surface in the
+# diagnostic output but do not gate manufacturability).
+#
+# The import lives here at module scope so a missing/renamed classifier
+# surfaces immediately at script start, not deep inside ``count_errors``.
+# The helper script runs under ``uv run`` (see ``main()`` call to
+# ``uv run kct check``) so ``kicad_tools`` is always importable.
+from kicad_tools.validate.checker import DRCChecker  # noqa: E402
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 DEFAULT_MANUFACTURER = "jlcpcb"
@@ -154,8 +176,80 @@ def load_manufacturers(allowlist_path: Path) -> dict[str, str]:
     return result
 
 
-def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> int:
-    """Run ``kct check`` and return the error count.
+def _count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    """Filter advisory rules out of a ``kct check --format json`` payload.
+
+    The gating verdict mirrors the audit pipeline's classifier
+    (``DRCChecker.is_advisory_rule``): rules in
+    :attr:`DRCChecker.ADVISORY_RULE_IDS` (currently just ``connectivity``)
+    surface to consumers but do not block manufacturability.  PR #3060 added
+    the ``connectivity`` rule and PR #3064 introduced the central classifier;
+    this helper makes the CI gate honour the same severity model as
+    ``ManufacturingAudit._check_drc``.
+
+    Args:
+        data: Parsed JSON object emitted by ``kct check --format json``.
+            Expected to contain ``violations`` (a list with per-violation
+            ``rule_id`` and ``severity`` fields) and a ``summary.errors``
+            integer (the unfiltered count, used as a fall-back when no
+            ``violations`` array is present).
+
+    Returns:
+        Tuple of ``(blocking_errors, advisory_by_rule)``:
+
+        * ``blocking_errors`` -- number of error-severity violations whose
+          ``rule_id`` is NOT in ``ADVISORY_RULE_IDS``.  This is what the
+          gate compares to the allowlist.
+        * ``advisory_by_rule`` -- mapping of advisory ``rule_id`` to count
+          of error-severity violations of that rule, so callers can still
+          print the connectivity findings for diagnostic visibility per
+          the issue #3074 AC ("connectivity rule still appears in
+          violation reports").
+
+    Raises:
+        RuntimeError: If the JSON lacks both a ``violations`` array and a
+            ``summary.errors`` integer (the payload is malformed).
+    """
+    violations = data.get("violations")
+    if isinstance(violations, list):
+        blocking = 0
+        advisory_by_rule: dict[str, int] = {}
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+            # Only error-severity violations count toward the gate; warnings
+            # are filtered upstream by ``--errors-only`` but we re-check
+            # defensively in case a future flag change loosens that.
+            severity = v.get("severity", "error")
+            if severity != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if not isinstance(rule_id, str):
+                continue
+            if DRCChecker.is_advisory_rule(rule_id):
+                advisory_by_rule[rule_id] = advisory_by_rule.get(rule_id, 0) + 1
+            else:
+                blocking += 1
+        return blocking, advisory_by_rule
+
+    # Fall-back: no per-violation array (legacy format).  Trust
+    # ``summary.errors``.  Advisory awareness degrades gracefully -- the
+    # gate behaves exactly as it did before this change in that path.
+    summary = data.get("summary", {})
+    errors = summary.get("errors")
+    if not isinstance(errors, int):
+        raise RuntimeError(f"kct check JSON missing both violations and summary.errors: {data!r}")
+    return errors, {}
+
+
+def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, dict[str, int]]:
+    """Run ``kct check`` and return the (blocking) error count.
+
+    Advisory-rule violations (per :attr:`DRCChecker.ADVISORY_RULE_IDS`,
+    currently ``connectivity``) are excluded from the returned count so the
+    gate's verdict matches the audit pipeline's blocking-vs-advisory
+    classification.  Advisory findings are returned separately so the gate
+    can still surface them in diagnostic output without gating on them.
 
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
@@ -164,7 +258,10 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> int:
             come from ``load_manufacturers``.
 
     Returns:
-        Number of errors reported (0 if the gate passes natively).
+        Tuple ``(blocking_errors, advisory_by_rule)``.  ``blocking_errors``
+        is what the gate compares to the per-board allowlist;
+        ``advisory_by_rule`` maps each advisory ``rule_id`` to its
+        error-severity count for diagnostic surfacing.
 
     Raises:
         RuntimeError: If kct check fails to run (exit code 1) or emits
@@ -205,11 +302,10 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> int:
             f"stdout (first 500 chars):\n{proc.stdout[:500]}"
         ) from e
 
-    summary = data.get("summary", {})
-    errors = summary.get("errors")
-    if not isinstance(errors, int):
-        raise RuntimeError(f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}")
-    return errors
+    try:
+        return _count_blocking_errors(data)
+    except RuntimeError as e:
+        raise RuntimeError(f"{e} (source: {pcb_path})") from e
 
 
 def annotate_error(file: str, message: str) -> None:
@@ -253,48 +349,78 @@ def annotate_drift_warning(file: str, errors: int, allowed: int) -> None:
     )
 
 
+def _format_advisory_suffix(advisory_by_rule: dict[str, int]) -> str:
+    """Render an advisory-rule summary for log messages.
+
+    Per issue #3074: the gate excludes advisory rules from its verdict but
+    must still surface them in the printed report so reviewers can see the
+    connectivity findings.  Returns an empty string when no advisory
+    violations are present so the common case (no advisories) leaves the
+    OK/FAIL message unchanged.
+    """
+    if not advisory_by_rule:
+        return ""
+    parts = ", ".join(f"{rule_id}={count}" for rule_id, count in sorted(advisory_by_rule.items()))
+    return f" [advisory (excluded from gate): {parts}]"
+
+
 def check_file(
     pcb_path: Path, allowed: int, mfr: str = DEFAULT_MANUFACTURER
 ) -> tuple[bool, str, int]:
     """Check a single PCB against its allowed error count.
 
+    The gate's verdict excludes advisory rules (see
+    :attr:`DRCChecker.ADVISORY_RULE_IDS`, currently ``connectivity``) so
+    advisory findings do not block CI even when they appear in the per-
+    violation list emitted by ``kct check --format json``.  This mirrors
+    the audit pipeline's blocking-vs-advisory classification.
+
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
-        allowed: Maximum error count this PCB may report before failing.
+        allowed: Maximum (blocking) error count this PCB may report before
+            failing.  Advisory-rule errors are excluded from the count
+            being compared, so a board listed at ``allowed=4`` with
+            ``4 blocking + N connectivity`` passes regardless of ``N``.
         mfr: Manufacturer-profile name to pass via ``--mfr``.
 
     Returns:
         ``(passed, message, errors)`` tuple. ``passed`` is True if
-        ``errors <= allowed``. ``message`` is a human-readable summary
-        suitable for both stdout and GitHub annotation. ``errors`` is the
-        actual count returned by ``kct check`` so callers can compute drift
-        slack without re-running the (expensive) DRC check.
+        ``errors <= allowed`` (advisory-filtered count).  ``message`` is a
+        human-readable summary suitable for both stdout and GitHub
+        annotation; when advisory violations are present it includes a
+        ``[advisory (excluded from gate): ...]`` suffix so reviewers see
+        them.  ``errors`` is the blocking-only count so callers compute
+        drift slack against the gate's actual floor.
     """
-    errors = count_errors(pcb_path, mfr=mfr)
+    errors, advisory_by_rule = count_errors(pcb_path, mfr=mfr)
+    advisory_suffix = _format_advisory_suffix(advisory_by_rule)
     if errors <= allowed:
         if allowed == 0:
-            msg = f"OK: {pcb_path} -- 0 errors (strict gate, --mfr {mfr})."
+            msg = f"OK: {pcb_path} -- 0 errors (strict gate, --mfr {mfr}).{advisory_suffix}"
         else:
             msg = (
                 f"OK: {pcb_path} -- {errors} errors (--mfr {mfr}, allowlist "
                 f"max {allowed}; reduce the allowlist value in "
                 f".github/routed-drc-tolerance.yml if this count drops further)."
+                f"{advisory_suffix}"
             )
         return True, msg, errors
 
     if allowed == 0:
         msg = (
             f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
-            f"{errors} error(s). Boards NOT in .github/routed-drc-tolerance.yml "
-            f"must report 0 errors. Either fix the routing or, if grandfathering "
-            f"is justified, add an explicit allowlist entry with reviewer sign-off."
+            f"{errors} blocking error(s) (advisory rules excluded). Boards NOT "
+            f"in .github/routed-drc-tolerance.yml must report 0 errors. Either "
+            f"fix the routing or, if grandfathering is justified, add an "
+            f"explicit allowlist entry with reviewer sign-off.{advisory_suffix}"
         )
     else:
         msg = (
-            f"DRC regression: {errors} error(s) (--mfr {mfr}) exceeds allowlist "
-            f"value {allowed} in .github/routed-drc-tolerance.yml. Either fix "
-            f"the new violations, or (if intentional) raise the allowlist value "
-            f"with reviewer sign-off."
+            f"DRC regression: {errors} blocking error(s) (--mfr {mfr}, "
+            f"advisory rules excluded) exceeds allowlist value {allowed} in "
+            f".github/routed-drc-tolerance.yml. Either fix the new violations, "
+            f"or (if intentional) raise the allowlist value with reviewer "
+            f"sign-off.{advisory_suffix}"
         )
     return False, msg, errors
 
