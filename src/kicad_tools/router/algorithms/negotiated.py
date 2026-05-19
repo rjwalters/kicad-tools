@@ -1139,15 +1139,27 @@ class NegotiatedRouter:
         # in the negotiated loop pass a ``cache_key`` that captures
         # iteration index + route count; identical keys reuse the
         # result because ``net_routes`` cannot have mutated.
-        # Issue #3077: cache invalidation also reacts implicitly to
-        # ``extra_routes`` because every caller that supplies it
-        # passes a distinct ``cache_key`` (or None).  The cache
-        # contract -- "identical key implies identical state" -- is
-        # the caller's responsibility.
+        # Issue #3077: incorporate an ``extra_routes`` discriminator
+        # into the effective cache key so a prior call WITHOUT
+        # ``extra_routes`` (cache_key="X") does not return a stale
+        # result for a subsequent call WITH ``extra_routes`` under
+        # the same nominal key.  We use ``(cache_key, id(extra),
+        # len(extra))`` -- the ``id`` rejects two distinct-but-equal
+        # caller lists from colliding, ``len`` provides a cheap
+        # change detector when the same list is mutated in place.
+        effective_cache_key: object | None
         if cache_key is not None:
+            if extra_routes is None:
+                effective_cache_key = (cache_key, None, 0)
+            else:
+                effective_cache_key = (
+                    cache_key, id(extra_routes), len(extra_routes),
+                )
             cached = self._seg_via_violations_cache
-            if cached is not None and cached[0] == cache_key:
+            if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
+        else:
+            effective_cache_key = None
 
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
@@ -1196,8 +1208,8 @@ class NegotiatedRouter:
 
         # Fast path: no vias at all -> no violations possible.
         if total_vias == 0:
-            if cache_key is not None:
-                self._seg_via_violations_cache = (cache_key, [])
+            if effective_cache_key is not None:
+                self._seg_via_violations_cache = (effective_cache_key, [])
             return []
 
         violators: set[int] = set()
@@ -1258,8 +1270,8 @@ class NegotiatedRouter:
                         break
 
         result = list(violators)
-        if cache_key is not None:
-            self._seg_via_violations_cache = (cache_key, result)
+        if effective_cache_key is not None:
+            self._seg_via_violations_cache = (effective_cache_key, result)
         return result
 
     def find_nets_with_via_segment_violations(
@@ -1355,10 +1367,24 @@ class NegotiatedRouter:
         """
         # Issue #3020: per-iteration memo (cache_key parity with the
         # segment-vs-via hook above).
+        # Issue #3077: incorporate ``extra_routes`` into the effective
+        # cache key so a prior call WITHOUT ``extra_routes`` does not
+        # leak its result into a subsequent call WITH ``extra_routes``
+        # under the same nominal key.  See the matching block in
+        # :meth:`find_nets_with_segment_via_violations` for the rationale.
+        effective_cache_key: object | None
         if cache_key is not None:
+            if extra_routes is None:
+                effective_cache_key = (cache_key, None, 0)
+            else:
+                effective_cache_key = (
+                    cache_key, id(extra_routes), len(extra_routes),
+                )
             cached = self._via_seg_violations_cache
-            if cached is not None and cached[0] == cache_key:
+            if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
+        else:
+            effective_cache_key = None
 
 
         # Import here to avoid a top-level circular dependency between
@@ -1394,8 +1420,8 @@ class NegotiatedRouter:
 
         # Fast path: no segments at all -> no violations possible.
         if total_segs == 0:
-            if cache_key is not None:
-                self._via_seg_violations_cache = (cache_key, [])
+            if effective_cache_key is not None:
+                self._via_seg_violations_cache = (effective_cache_key, [])
             return []
 
         violators: set[int] = set()
@@ -1457,8 +1483,8 @@ class NegotiatedRouter:
                         break
 
         result = list(violators)
-        if cache_key is not None:
-            self._via_seg_violations_cache = (cache_key, result)
+        if effective_cache_key is not None:
+            self._via_seg_violations_cache = (effective_cache_key, result)
         return result
 
     def rip_up_nets(

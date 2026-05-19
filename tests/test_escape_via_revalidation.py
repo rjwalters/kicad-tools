@@ -203,6 +203,100 @@ class TestSegmentVsExtraEscapeVia:
         )
         assert set(baseline) == set(with_empty)
 
+    def test_cache_invalidates_when_extra_routes_added(self):
+        """Regression: a prior call WITHOUT ``extra_routes`` must NOT
+        leak its result to a subsequent call WITH ``extra_routes`` under
+        the same nominal ``cache_key``.
+
+        This is the bug surfaced by board-04's two-phase end-of-iteration
+        capture: the initial call (``cache_key=("two_phase_init",)``)
+        ran before extra_routes was wired, was cached with the same key,
+        then the mid-iter call (also ``("two_phase_init",)`` on
+        iteration 1) hit the cache and returned a stale empty list even
+        though escape vias were now in the universe.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = _make_neg_router(grid, rules)
+
+        seg_a = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1, net_name="BOOT0",
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="BOOT0", segments=[seg_a], vias=[])],
+        }
+        via_b = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="OSC_OUT",
+        )
+        extra_routes = [
+            Route(net=2, net_name="OSC_OUT", segments=[], vias=[via_b]),
+        ]
+
+        # First call: no extra_routes -- no violations seen, cache stores [].
+        empty = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("k",),
+        )
+        assert empty == []
+
+        # Second call: SAME cache_key but extra_routes provided -- the
+        # cache MUST be invalidated by the extra_routes discriminator so
+        # the violator surfaces.
+        violators = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("k",),
+            extra_routes=extra_routes,
+        )
+        assert 1 in violators, (
+            "Cache must not leak the no-extra-routes empty result into "
+            "a with-extra-routes call under the same nominal key."
+        )
+
+        # Third call: same extra_routes -- cache should hit and return the
+        # same answer.
+        violators2 = neg.find_nets_with_segment_via_violations(
+            net_routes, trace_clearance=0.15, cache_key=("k",),
+            extra_routes=extra_routes,
+        )
+        assert set(violators) == set(violators2)
+
+    def test_cache_invalidates_via_seg_too(self):
+        """Mirror of :meth:`test_cache_invalidates_when_extra_routes_added`
+        for the symmetric :meth:`find_nets_with_via_segment_violations`
+        hook.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        neg = _make_neg_router(grid, rules)
+
+        via_a = Via(
+            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="BOOT0",
+        )
+        stub_a = Segment(
+            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="BOOT0",
+        )
+        net_routes = {
+            1: [Route(net=1, net_name="BOOT0", segments=[stub_a], vias=[via_a])],
+        }
+        seg_b = Segment(
+            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=2, net_name="SWDIO",
+        )
+        extra_routes = [
+            Route(net=2, net_name="SWDIO", segments=[seg_b], vias=[]),
+        ]
+        empty = neg.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=0.15, cache_key=("k",),
+        )
+        assert empty == []
+        violators = neg.find_nets_with_via_segment_violations(
+            net_routes, trace_clearance=0.15, cache_key=("k",),
+            extra_routes=extra_routes,
+        )
+        assert 1 in violators
+
     def test_extra_route_vias_do_not_self_violate(self):
         """A via in ``extra_routes`` whose net only appears in
         ``extra_routes`` (not in ``net_routes``) is NEVER surfaced as a
