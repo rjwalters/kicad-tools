@@ -428,6 +428,8 @@ class CoupledPathfinder:
         n_start: GridPos | None = None,
         target_spacing_cells: int | None = None,
         approach_radius_override: int | None = None,
+        p_visited: frozenset[tuple[int, int, int]] | None = None,
+        n_visited: frozenset[tuple[int, int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -455,11 +457,71 @@ class CoupledPathfinder:
                 differ so the search has room to converge from the
                 wider start spacing to the narrower goal spacing
                 (USB-C vs MCU).
+            p_visited: Issue #3078: optional set of grid cells the
+                positive trace has already occupied along the current
+                A* parent chain.  Cells are encoded as
+                ``(x, y, layer)`` tuples.  Used as a path-history
+                self-intersection guard so the asymmetric
+                P-advance/N-advance moves cannot let one trace loop
+                around and re-cross either its own trail or the
+                partner trace's trail at full spacing -- the failure
+                mode behind the 36k ``diffpair_clearance_intra``
+                regression on board 06 (Issue #3078).  When ``None``
+                or empty, no path-history check fires (legacy
+                permissive behaviour).
+            n_visited: Issue #3078: companion to ``p_visited`` for the
+                negative trace.  Same encoding and semantics.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
         if target_spacing_cells is None:
             target_spacing_cells = self.target_spacing_cells
+
+        # Issue #3078: path-history check helpers.  Cells are encoded
+        # as ``(x, y, layer)`` tuples (matching the parent-chain
+        # bookkeeping in ``route_coupled``).  An empty/None set means
+        # "no history to check" -- legacy permissive behaviour for
+        # callers that did not opt in.
+        p_visited_set = p_visited if p_visited else frozenset()
+        n_visited_set = n_visited if n_visited else frozenset()
+
+        def _self_intersects(
+            new_p_pos: GridPos,
+            new_n_pos: GridPos,
+            p_advances: bool,
+            n_advances: bool,
+            p_is_endpoint_cell: bool,
+            n_is_endpoint_cell: bool,
+        ) -> bool:
+            """Reject moves that put one trace onto a cell the other
+            (or it itself) has already occupied.
+
+            Endpoint cells (start/goal pads) are exempt from the
+            cross-trail check because the pad footprint legitimately
+            sits on those cells regardless of routing history.  The
+            self-loop check still fires at non-endpoint cells.
+            """
+            if not p_visited_set and not n_visited_set:
+                return False
+            p_key = (new_p_pos.x, new_p_pos.y, new_p_pos.layer)
+            n_key = (new_n_pos.x, new_n_pos.y, new_n_pos.layer)
+            # Cross-trail: the advancing trace lands on the partner's
+            # accumulated path.  Skip when the landing cell is an
+            # endpoint (pad cells are shared geometry, not a routing
+            # collision).
+            if p_advances and not p_is_endpoint_cell and p_key in n_visited_set:
+                return True
+            if n_advances and not n_is_endpoint_cell and n_key in p_visited_set:
+                return True
+            # Self-loop: the advancing trace re-enters a cell it has
+            # already occupied on its own trail.  This is the
+            # mechanism behind the 7-vs-1061 segment asymmetry on
+            # USB3_RX1 (Issue #3078).
+            if p_advances and not p_is_endpoint_cell and p_key in p_visited_set:
+                return True
+            if n_advances and not n_is_endpoint_cell and n_key in n_visited_set:
+                return True
+            return False
 
         neighbors: list[tuple[CoupledState, float, bool]] = []
 
@@ -544,6 +606,18 @@ class CoupledPathfinder:
                 if new_spacing + 1e-9 < self.min_spacing_cells:
                     continue
 
+            # Issue #3078: path-history self-intersection guard.  Both
+            # traces advance in a symmetric move, so both are checked.
+            if _self_intersects(
+                new_p,
+                new_n,
+                p_advances=True,
+                n_advances=True,
+                p_is_endpoint_cell=p_is_endpoint,
+                n_is_endpoint_cell=n_is_endpoint,
+            ):
+                continue
+
             # Calculate cost
             new_direction = (dx, dy)
             cost = self.rules.cost_straight
@@ -601,6 +675,23 @@ class CoupledPathfinder:
                             and new_spacing + 1e-9 < self.min_spacing_cells
                         ):
                             pass  # reject this candidate
+                        elif _self_intersects(
+                            cand_p,
+                            cand_n,
+                            p_advances=True,
+                            n_advances=False,
+                            p_is_endpoint_cell=p_is_endpoint,
+                            n_is_endpoint_cell=n_is_endpoint,
+                        ):
+                            # Issue #3078: P-advance must not land on
+                            # N's accumulated trail or on its own
+                            # accumulated trail.  Without this gate the
+                            # asymmetric move lets P loop around N and
+                            # re-converge from the opposite side,
+                            # producing the centerline-coincident
+                            # routes that DRC reports as -0.2mm
+                            # intra-pair clearance.
+                            pass  # reject this candidate
                         else:
                             # Direction tracking only reflects P's motion;
                             # tag with the new direction so the cost-of-turn
@@ -640,6 +731,20 @@ class CoupledPathfinder:
                     self.min_spacing_cells > 0
                     and not bypass_floor
                     and new_spacing + 1e-9 < self.min_spacing_cells
+                ):
+                    continue
+                # Issue #3078: N-advance must not land on P's
+                # accumulated trail or on its own accumulated trail.
+                # See the P-advance branch above for the failure mode
+                # this prevents (board 06 USB3_TX1+ 1063-segment
+                # loop-around).
+                if _self_intersects(
+                    cand_p2,
+                    cand_n2,
+                    p_advances=False,
+                    n_advances=True,
+                    p_is_endpoint_cell=p_is_endpoint_held,
+                    n_is_endpoint_cell=n_is_endpoint,
                 ):
                     continue
                 cost = self.rules.cost_straight
@@ -862,6 +967,43 @@ class CoupledPathfinder:
             if p_at_goal and n_at_goal:
                 return self._reconstruct_coupled_routes(current, p_start, p_end, n_start, n_end)
 
+            # Issue #3078: build path-history sets for the current
+            # node by walking its parent chain.  These let
+            # ``_get_coupled_neighbors`` reject moves that would put
+            # one trace onto a cell the other (or it itself) has
+            # already occupied -- the failure mode behind the
+            # 36k-violation board 06 regression where asymmetric
+            # moves let one trace loop around its partner.
+            p_visited_cells: set[tuple[int, int, int]] = set()
+            n_visited_cells: set[tuple[int, int, int]] = set()
+            walker: CoupledNode | None = current
+            while walker is not None:
+                p_visited_cells.add(
+                    (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
+                )
+                n_visited_cells.add(
+                    (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
+                )
+                walker = walker.parent
+            # Endpoint pads are legitimate landing cells regardless of
+            # history -- strip them so the check doesn't disqualify a
+            # via at the source pad or a same-cell re-entry into the
+            # goal pad.  (The neighbor-check helper also has an
+            # endpoint exemption, but pre-filtering keeps the set
+            # smaller and the intent more explicit.)
+            for ep in (
+                (p_start_pos.x, p_start_pos.y, p_start_pos.layer),
+                (p_goal_pos.x, p_goal_pos.y, p_goal_pos.layer),
+            ):
+                p_visited_cells.discard(ep)
+            for ep in (
+                (n_start_pos.x, n_start_pos.y, n_start_pos.layer),
+                (n_goal_pos.x, n_goal_pos.y, n_goal_pos.layer),
+            ):
+                n_visited_cells.discard(ep)
+            p_visited_frozen = frozenset(p_visited_cells)
+            n_visited_frozen = frozenset(n_visited_cells)
+
             # Explore neighbors
             for new_state, cost, is_via in self._get_coupled_neighbors(
                 current.state,
@@ -873,6 +1015,8 @@ class CoupledPathfinder:
                 n_start_pos,
                 target_spacing_cells=effective_target_spacing,
                 approach_radius_override=effective_approach_radius,
+                p_visited=p_visited_frozen,
+                n_visited=n_visited_frozen,
             ):
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
                 if neighbor_key in closed_set:
@@ -925,6 +1069,35 @@ class CoupledPathfinder:
 
         # Convert to segments and vias for N trace
         self._build_route_from_path(n_route, n_path, n_start, n_end)
+
+        # Issue #3078: order-of-magnitude segment-count asymmetry
+        # invariant.  When the A* asymmetric P/N-advance moves let one
+        # trace loop around the other (the failure mode behind the 36k
+        # ``diffpair_clearance_intra`` regression on board 06), the
+        # reconstructed routes show segment counts that differ by
+        # 100x or more (USB3_RX1: 7 vs 1061 in the bug report).  The
+        # path-history guard added in this issue is supposed to make
+        # that impossible -- this log line is a runtime canary that
+        # surfaces a regression in the guard itself.  We log at WARN
+        # (not raise) so a defect in the guard during production
+        # routing does NOT crash the whole pipeline; the post-route
+        # Phase A audit will still detect the resulting clearance
+        # violations.
+        p_seg_count = len(p_route.segments)
+        n_seg_count = len(n_route.segments)
+        if p_seg_count > 0 and n_seg_count > 0:
+            ratio = max(p_seg_count, n_seg_count) / min(p_seg_count, n_seg_count)
+            if ratio > 10.0:
+                logger.warning(
+                    "coupled-route segment-count asymmetry "
+                    "(possible self-intersection bug): "
+                    "p_net=%r segs=%d, n_net=%r segs=%d, ratio=%.1fx",
+                    p_start.net_name,
+                    p_seg_count,
+                    n_start.net_name,
+                    n_seg_count,
+                    ratio,
+                )
 
         return p_route, n_route
 
