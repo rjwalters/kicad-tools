@@ -1008,6 +1008,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     edge (OSC_IN/OSC_OUT/NRST). The --auto-mfr-tier flag is required to
     close the NRST gap on the default recipe (issue #2988).
 
+    Issue #3039: pins ``--seed 42`` so the routed PCB is byte-identical
+    across runs.  The board's ``--seed 42`` reference run is the
+    regression baseline (9/9 signal nets, ~6 DRC errors).
+
+    Note on ``--strict-in-pad-clearance``: PR #3063 added the lateral
+    via-escape recovery (see ``_try_lateral_via_escape`` in
+    ``src/kicad_tools/router/escape.py``) plus an ``_can_place_via``
+    grid-origin bug fix.  An earlier revision of this recipe enabled
+    ``--strict-in-pad-clearance`` here, but it regressed completion on
+    this board from 9/9 to 8/9 nets and added segment/segment overlaps,
+    so the flag was reverted.  A follow-up will investigate WHY the
+    lateral helper does not find a clean off-pad via for the dropped
+    net on this board.  The helper itself is exercised by the
+    synthetic-fixture tests in ``tests/test_escape_lateral_recovery.py``.
+
     Returns True if `kct route` exits successfully (>= --min-completion).
     """
     print("\n" + "=" * 60)
@@ -1028,6 +1043,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--auto-layers",
         "--auto-mfr-tier",
         "--placement-feedback",
+        # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
+        # across runs and PR #3063 measurements are reproducible.
+        "--seed",
+        "42",
         "--timeout",
         "600",
     ]
