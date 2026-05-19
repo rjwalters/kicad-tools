@@ -828,7 +828,14 @@ def run_erc(sch_path: Path) -> bool:
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB using the autorouter."""
-    from kicad_tools.router import DesignRules, create_net_class_map, load_pcb_for_routing
+    import random
+
+    from kicad_tools.router import (
+        DesignRules,
+        DifferentialPairConfig,
+        create_net_class_map,
+        load_pcb_for_routing,
+    )
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -880,7 +887,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
 
-    skip_nets = ["VCC", "GND", "VBUS"]
+    # Skip power planes (routed as pours) AND USB_CC1/USB_CC2 (Issue #2744 /
+    # #3040): the diff-pair-aware routing path is restricted to 2 layers and
+    # cannot route the USB-C CC channels on top of the dense connector pad
+    # cluster.  Without skipping them, the diff-pair detection mis-pairs
+    # ``USB_CC1/USB_CC2`` with ``USB_D-`` and routes the USB pair through a
+    # path that quantises to 13 intra-pair clearance violations.  Mirrors
+    # the skip list ``route_demo.py`` already uses for the same script.
+    skip_nets = ["VCC", "GND", "VBUS", "USB_CC1", "USB_CC2"]
 
     print(f"\n1. Loading PCB: {input_path}")
     print(f"   Grid resolution: {rules.grid_resolution}mm")
@@ -900,7 +914,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Nets loaded: {len(net_map)}")
 
     print("\n2. Routing nets...")
-    router.route_all()
+    # Issue #3040: route the USB_D+/USB_D- pair through the diff-pair-aware
+    # entry point so Phase A (CoupledPathfinder) populates the intra-pair
+    # clearance buffer and Phase B (repair_intra_clearance_violations) can
+    # widen ``min_spacing_cells`` on any pair whose coupled route quantises
+    # to a clearance violation.  Previously this board called the per-net
+    # ``router.route_all()`` directly which left ``CoupledPathfinder``
+    # unrun -- so the entire Phase B repair pass was unreachable on this
+    # in-tree board even though the underlying mechanism was sound.
+    #
+    # Seed=42 makes the resulting routed PCB deterministic so the per-board
+    # DRC floor in ``.github/routed-drc-tolerance.yml`` reflects an
+    # actually-reproducible artifact rather than a lucky one-shot.  This
+    # mirrors the seed plumbing PR #3065 added to ``route_all_negotiated``;
+    # ``route_all_with_diffpairs`` does not (yet) accept a seed kwarg
+    # directly, so we pre-seed the global RNG which is what the diff-pair
+    # pre-pass and the inner per-net A* loop both consult.
+    random.seed(42)
+    diffpair_config = DifferentialPairConfig(enabled=True)
+    router.route_all_with_diffpairs(diffpair_config=diffpair_config)
 
     stats_before = router.get_statistics()
 
