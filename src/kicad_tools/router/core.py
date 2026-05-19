@@ -10099,6 +10099,41 @@ class Autorouter:
             non_diffpair_strategy=non_diffpair_strategy,
             coupled_only=coupled_only,
         )
+
+        # Issue #3040 Phase B: rip-up and retry any pairs whose coupled
+        # route violates the per-pair intra clearance threshold.  The
+        # detector (Phase A, PRs #3022 + #3025) records every violation
+        # into ``self._diffpair._intra_clearance_violations`` during the
+        # inner ``route_all_with_diffpairs`` call; we consume that
+        # buffer here and re-attempt the offenders with a wider
+        # ``min_spacing_cells`` floor so the routed traces gain enough
+        # additional center-to-center spacing to clear the per-pair
+        # edge-to-edge threshold post-quantisation.  Bounded to two
+        # retries per pair; residual violations after that are surfaced
+        # by ``validate_routes()`` as a hard failure so they cannot
+        # silently persist to disk.
+        if (
+            diffpair_config is not None
+            and diffpair_config.enabled
+            and self._diffpair_router is not None
+            and self._diffpair_router.intra_clearance_violations()
+        ):
+            try:
+                self._diffpair.repair_intra_clearance_violations(
+                    diffpair_config=diffpair_config,
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                # The repair pass is a best-effort optimization; never
+                # let an unexpected failure break the routing call.
+                # The safety net in validate_routes() will still flag
+                # any residual violations.
+                logger.warning(
+                    "Phase B intra-clearance repair raised an "
+                    "unexpected exception: %s; leaving residual "
+                    "violations for validate_routes() safety net.",
+                    e,
+                )
+
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping.  Idempotent w.r.t. the inner route_all call.
         self._finalize_routing()

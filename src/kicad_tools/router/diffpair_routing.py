@@ -1732,6 +1732,7 @@ class DiffPairRouter:
         pair: DifferentialPair,
         spacing: float | None = None,
         coupled_only: bool = False,
+        extra_spacing_cells: int = 0,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair using coupled pathfinding.
 
@@ -1747,6 +1748,17 @@ class DiffPairRouter:
                 Returns ``([], None)`` instead.  Used by the diff-pair
                 pre-pass so that pairs that cannot be coupled are left
                 for the main strategy to route normally.
+            extra_spacing_cells: Issue #3040 Phase B: additional grid
+                cells to add to both the target ``spacing_cells`` and
+                ``min_spacing_cells`` floor passed to the
+                :class:`CoupledPathfinder`.  Used by the Phase B repair
+                pass to widen the search's spacing target on retry when
+                the first attempt produced an intra-pair clearance
+                violation due to grid quantisation.  Each additional
+                cell adds one ``grid.resolution`` of edge-to-edge
+                separation, which is normally enough to push the
+                routed clearance above the per-pair threshold.
+                Default ``0`` preserves legacy behaviour.
         """
         if pair.rules is None:
             return [], None
@@ -1847,6 +1859,16 @@ class DiffPairRouter:
         # set, and the floor never under-counts.
         legacy_spacing_cells = math.ceil(spacing / self.autorouter.grid.resolution)
         spacing_cells = max(legacy_spacing_cells, min_spacing_cells)
+
+        # Issue #3040 Phase B: widen both the floor and the target by
+        # the caller-supplied ``extra_spacing_cells`` on retry attempts.
+        # Each additional cell maps to one ``grid.resolution`` of
+        # additional center-to-center spacing, which directly translates
+        # to that much extra edge-to-edge clearance once the route is
+        # quantised back to world coordinates.
+        if extra_spacing_cells > 0:
+            min_spacing_cells += extra_spacing_cells
+            spacing_cells += extra_spacing_cells
 
         # If any segment requires polarity-swap, enable swap-via moves.
         any_polarity_swap = any(s.polarity_swap for s in coupled_specs)
@@ -2114,6 +2136,232 @@ class DiffPairRouter:
         the post-routing audit sees every coupled pair.
         """
         self._intra_clearance_violations.clear()
+
+    def repair_intra_clearance_violations(
+        self,
+        diffpair_config: DifferentialPairConfig | None = None,
+        max_retries_per_pair: int = 2,
+    ) -> int:
+        """Issue #3040 Phase B: rip-up and retry pairs with intra-clearance violations.
+
+        For each pair recorded in ``self._intra_clearance_violations``
+        (Phase A detection), this method:
+
+          1. Removes the offending P/N routes from the autorouter's
+             route list and unmarks them from the grid.
+          2. Re-invokes :meth:`route_differential_pair_coupled` with a
+             progressively wider ``extra_spacing_cells`` (1 cell on
+             attempt 1, 2 cells on attempt 2) so the
+             :class:`CoupledPathfinder` lays the centerlines further
+             apart -- enough additional spacing to recover the
+             edge-to-edge clearance lost to grid quantisation in the
+             first attempt.
+          3. Re-checks the new pair via
+             ``find_intra_pair_clearance_violations`` and accepts the
+             retry only if the violation is resolved.  If the retry
+             still violates (or the pathfinder finds no path with the
+             wider spacing), the original routes are restored and the
+             pair remains flagged for the
+             :func:`~kicad_tools.router.io.validate_routes` safety net.
+
+        Args:
+            diffpair_config: The same configuration used by the original
+                ``route_all_with_diffpairs`` call (so per-pair rules and
+                spacing carry over).  May be ``None`` if no special
+                configuration is in effect.
+            max_retries_per_pair: Hard cap on retry attempts per pair
+                to prevent infinite loops on pathologically tight
+                escapes.  Default ``2``; each attempt widens spacing
+                by one additional grid cell over the prior attempt.
+
+        Returns:
+            The number of pairs whose violation was resolved by the
+            repair pass.  ``0`` means either no violations were
+            present, or every retry failed to find a compliant route.
+        """
+        violations = list(self._intra_clearance_violations)
+        if not violations:
+            return 0
+
+        # Build a lookup from net names back to the DifferentialPair
+        # objects so we can re-invoke routing.  Filter to engaged pairs
+        # so we don't accidentally re-route a pair that the engagement
+        # gate refused.
+        diff_pairs_with_source = self.detect_differential_pairs_with_source()
+        all_pairs = [p for p, _ in diff_pairs_with_source]
+
+        # Apply diffpair_config rules so the retry uses the same rules
+        # as the original pass.
+        if diffpair_config is not None and diffpair_config.enabled:
+            for pair in all_pairs:
+                if pair.rules is not None:
+                    pair.rules = diffpair_config.get_rules(pair.pair_type)
+
+        pair_by_net: dict[str, DifferentialPair] = {}
+        for pair in all_pairs:
+            pair_by_net[pair.positive.net_name] = pair
+            pair_by_net[pair.negative.net_name] = pair
+
+        # Group violations by pair (same pair may appear multiple times
+        # if there were multiple coupled specs).  Use the pair's positive
+        # net name as the stable key.
+        violations_by_pair: dict[str, list[IntraPairClearanceViolation]] = {}
+        for v in violations:
+            key = v.positive_net_name
+            violations_by_pair.setdefault(key, []).append(v)
+
+        resolved_pairs = 0
+
+        for p_net_name, pair_violations in violations_by_pair.items():
+            pair = pair_by_net.get(p_net_name)
+            if pair is None:
+                logger.warning(
+                    "Phase B repair: cannot find DifferentialPair for net %r; "
+                    "leaving violation in place for validate_routes() safety net.",
+                    p_net_name,
+                )
+                continue
+
+            p_id, n_id = pair.get_net_ids()
+            n_net_name = pair_violations[0].negative_net_name
+
+            # Snapshot current routes for this pair so we can either
+            # rip them up cleanly or restore them on failure.
+            current_p_routes = [r for r in self.autorouter.routes if r.net == p_id]
+            current_n_routes = [r for r in self.autorouter.routes if r.net == n_id]
+
+            if not current_p_routes and not current_n_routes:
+                # Nothing to repair (pair must have been ripped up
+                # already by some other repair pass).
+                continue
+
+            print(
+                f"\n  Phase B repair: {p_net_name}/{n_net_name} "
+                f"({len(pair_violations)} violation(s), retrying with wider spacing)"
+            )
+
+            # Rip up the original routes.
+            for route in list(current_p_routes):
+                self.autorouter.grid.unmark_route(route)
+                if route in self.autorouter.routes:
+                    self.autorouter.routes.remove(route)
+            for route in list(current_n_routes):
+                self.autorouter.grid.unmark_route(route)
+                if route in self.autorouter.routes:
+                    self.autorouter.routes.remove(route)
+
+            # Remember which violations correspond to this pair so we
+            # can prune them from the buffer on success.
+            ids_to_remove = {id(v) for v in pair_violations}
+
+            # Bounded retry loop with progressively wider spacing.
+            retry_succeeded = False
+            spacing_override = (
+                diffpair_config.spacing
+                if diffpair_config is not None and diffpair_config.enabled
+                else None
+            )
+
+            # Snapshot the violation count BEFORE the retry so we can
+            # detect new violations introduced by this attempt.
+            pre_retry_count = len(self._intra_clearance_violations)
+
+            for attempt in range(1, max_retries_per_pair + 1):
+                # Clear violations from prior retry on this pair so the
+                # new attempt's audit is the only entry we examine.
+                # We restore unrelated entries below.
+                snapshot = list(self._intra_clearance_violations)
+                # Keep all violations that are NOT from this pair.
+                self._intra_clearance_violations = [
+                    v for v in snapshot
+                    if v.positive_net_name != p_net_name
+                ]
+
+                print(
+                    f"    Phase B attempt {attempt}/{max_retries_per_pair}: "
+                    f"extra_spacing_cells={attempt}"
+                )
+                retry_routes, _retry_warning = self.route_differential_pair_coupled(
+                    pair,
+                    spacing=spacing_override,
+                    coupled_only=True,
+                    extra_spacing_cells=attempt,
+                )
+
+                # Capture any new violations the audit recorded for this
+                # pair during the retry.
+                new_violations_for_pair = [
+                    v for v in self._intra_clearance_violations
+                    if v.positive_net_name == p_net_name
+                ]
+
+                if retry_routes and not new_violations_for_pair:
+                    # Retry succeeded and no new violations.
+                    print(
+                        f"    Phase B succeeded: {p_net_name}/{n_net_name} "
+                        f"clean after {attempt} attempt(s)."
+                    )
+                    retry_succeeded = True
+                    # Mark the resolved violations for removal.
+                    for v in pair_violations:
+                        ids_to_remove.add(id(v))
+                    break
+
+                # Retry produced no path or still violates -- rip the
+                # retry routes up and try again (or fall through).
+                retry_p_routes = [r for r in self.autorouter.routes if r.net == p_id]
+                retry_n_routes = [r for r in self.autorouter.routes if r.net == n_id]
+                for route in retry_p_routes:
+                    self.autorouter.grid.unmark_route(route)
+                    if route in self.autorouter.routes:
+                        self.autorouter.routes.remove(route)
+                for route in retry_n_routes:
+                    self.autorouter.grid.unmark_route(route)
+                    if route in self.autorouter.routes:
+                        self.autorouter.routes.remove(route)
+
+            if retry_succeeded:
+                resolved_pairs += 1
+                # Remove all original (and replaced) violations for
+                # this pair from the buffer.  The retry's audit will
+                # have already inserted the new (clean) state.
+                self._intra_clearance_violations = [
+                    v for v in self._intra_clearance_violations
+                    if id(v) not in ids_to_remove
+                ]
+            else:
+                # Restore the original routes so the board is no worse
+                # off than before (and the violation remains in the
+                # buffer for the validate_routes() safety net).
+                logger.warning(
+                    "Phase B repair: %s/%s still violates after %d attempt(s); "
+                    "restoring original routes and leaving violation for "
+                    "validate_routes() safety net.",
+                    p_net_name, n_net_name, max_retries_per_pair,
+                )
+                print(
+                    f"    Phase B failed: {p_net_name}/{n_net_name} still violates "
+                    f"after {max_retries_per_pair} attempt(s); restoring original routes."
+                )
+                for route in current_p_routes:
+                    self.autorouter._mark_route(route)
+                    self.autorouter.routes.append(route)
+                for route in current_n_routes:
+                    self.autorouter._mark_route(route)
+                    self.autorouter.routes.append(route)
+                # Restore the original violation records for this pair
+                # if the retry attempts removed them.
+                for v in pair_violations:
+                    if v not in self._intra_clearance_violations:
+                        self._intra_clearance_violations.append(v)
+
+        if resolved_pairs:
+            print(
+                f"\n  Phase B repair complete: {resolved_pairs}/"
+                f"{len(violations_by_pair)} pair(s) repaired."
+            )
+
+        return resolved_pairs
 
     def route_differential_pair(
         self,
