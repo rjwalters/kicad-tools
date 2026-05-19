@@ -1143,18 +1143,20 @@ class NegotiatedRouter:
         # into the effective cache key so a prior call WITHOUT
         # ``extra_routes`` (cache_key="X") does not return a stale
         # result for a subsequent call WITH ``extra_routes`` under
-        # the same nominal key.  We use ``(cache_key, id(extra),
-        # len(extra))`` -- the ``id`` rejects two distinct-but-equal
-        # caller lists from colliding, ``len`` provides a cheap
-        # change detector when the same list is mutated in place.
+        # the same nominal key.  We fingerprint by the tuple of
+        # ``id(r)`` values for each member -- ``id()`` is stable
+        # within a process so two callers that pass the same Route
+        # objects (typical case: both compute ``extra_routes`` from
+        # the same ``self.routes``) hit the cache.  A caller that
+        # mutates ``self.routes`` between calls produces a different
+        # fingerprint and gets a fresh walk.
         effective_cache_key: object | None
         if cache_key is not None:
-            if extra_routes is None:
-                effective_cache_key = (cache_key, None, 0)
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
             else:
-                effective_cache_key = (
-                    cache_key, id(extra_routes), len(extra_routes),
-                )
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
             cached = self._seg_via_violations_cache
             if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
@@ -1368,18 +1370,17 @@ class NegotiatedRouter:
         # Issue #3020: per-iteration memo (cache_key parity with the
         # segment-vs-via hook above).
         # Issue #3077: incorporate ``extra_routes`` into the effective
-        # cache key so a prior call WITHOUT ``extra_routes`` does not
-        # leak its result into a subsequent call WITH ``extra_routes``
-        # under the same nominal key.  See the matching block in
-        # :meth:`find_nets_with_segment_via_violations` for the rationale.
+        # cache key via a per-route ``id()`` fingerprint.  See the
+        # matching block in :meth:`find_nets_with_segment_via_violations`
+        # for the rationale (cache hits when the same Route objects are
+        # supplied across consecutive calls).
         effective_cache_key: object | None
         if cache_key is not None:
-            if extra_routes is None:
-                effective_cache_key = (cache_key, None, 0)
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
             else:
-                effective_cache_key = (
-                    cache_key, id(extra_routes), len(extra_routes),
-                )
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
             cached = self._via_seg_violations_cache
             if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
