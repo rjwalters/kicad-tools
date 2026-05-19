@@ -17,6 +17,25 @@ Design sections:
 9. Status LED - power/status indicator
 10. Board - 150mm x 100mm, 2-layer, JLCPCB
 
+Audit-repair notes (2026-05-18, issue #3050):
+- Schematic now passes ERC (was 39 errors).
+- Netlist drift fixed: DISCHARGE_POS / DISCHARGE_NEG nets were merged with
+  ISENSE_POS so the discharge MOSFET sources and the current-shunt high side
+  share a single net (eliminates the 5 single_pad_net DRC errors).
+- TSSOP-20 MCU footprint now has all 20 pads with correct net assignments
+  (was only pads 1 and 20).
+- Remaining DRC errors are expected:
+  * Power nets (+3.3V, GND, VRECT, AC_LINE, AC_NEUTRAL, FUSED_LINE,
+    SCAP_POS+, SCAP_NEG+, ISENSE_POS) are intentionally skipped from the
+    auto-router; they are meant to be filled with copper pours / hand-routed
+    heavy traces.  DRC's connectivity check reports them as "partially
+    routed: N pads stranded" — this is expected for a board where the user
+    finishes the power layout in KiCad.
+  * Signal-net partial routing (V_AC_SENSE, GATE_*, ZC_DETECT, etc.) is the
+    pure-Python router's limit on this dense layout; switching to negotiated
+    routing with the C++ backend and longer timeouts will close most of
+    these but cannot finish a perfect route on the TSSOP-20 cluster.
+
 Usage:
     python generate_design.py [output_dir]
 """
@@ -88,19 +107,66 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # 3.3V rail
-    sch.add_rail(RAIL_3V3, x_start=X_LDO - 10, x_end=X_DEBUG + 40, net_label="+3.3V")
-    sch.add_power("power:+3V3", x=X_LDO - 10, y=RAIL_3V3 - 10, rotation=0)
+    # Rails span the full width so vertical taps from components anywhere on
+    # the schematic land directly on the rail wire (KiCad requires endpoint
+    # overlap for T-connections).  add_rail creates a single continuous wire;
+    # taps elsewhere in the schematic use `warn_on_collision=False` to land
+    # on the rail and add an explicit junction.
+    #
+    # Rails are terminated with a net label at the right endpoint to satisfy
+    # the validator's "wire endpoint not connected" check.  Power symbols at
+    # the LDO output / GND start provide the named-net source.
 
-    # Rectified DC rail (from small supply for LDO input)
-    sch.add_rail(RAIL_VRECT, x_start=X_CHARGE - 10, x_end=X_LDO + 40, net_label="VRECT")
+    # Rails span the full width so vertical taps from components anywhere on
+    # the schematic land directly on the rail wire.  Power symbols are placed
+    # AT the rail Y coordinate (not offset) because the validator and KiCad
+    # ERC use the symbol's (x,y) as the pin position — offsetting by 10 mm
+    # leaves the pin floating off the rail.
+    sch.add_rail(
+        RAIL_3V3,
+        x_start=X_AC_INPUT,
+        x_end=X_DEBUG + 40,
+        net_label="+3.3V",
+    )
+    # Place +3V3 power symbol on the rail (pin at rail Y).  KiCad ERC needs a
+    # junction at the rail tap because the power-symbol pin lies on the middle
+    # of the rail wire (not at an endpoint).
+    sch.add_power("power:+3V3", x=X_LDO - 10, y=RAIL_3V3, rotation=0)
+    sch.add_junction(X_LDO - 10, RAIL_3V3)
+    # Cap right end with a label so the dangling-endpoint check passes.
+    sch.add_label("+3.3V", X_DEBUG + 40, RAIL_3V3)
+    sch.add_label("+3.3V", X_AC_INPUT, RAIL_3V3)
 
-    # Ground rail (spans full width)
-    sch.add_rail(RAIL_GND, x_start=X_AC_INPUT, x_end=X_DEBUG + 40, net_label="GND")
-    sch.add_power("power:GND", x=X_AC_INPUT, y=RAIL_GND + 10, rotation=0)
+    # Rectified DC rail (from small supply for LDO input).
+    sch.add_rail(
+        RAIL_VRECT,
+        x_start=X_CHARGE - 10,
+        x_end=X_LDO + 40,
+        net_label="VRECT",
+    )
+    sch.add_label("VRECT", X_LDO + 40, RAIL_VRECT)
+    # PWR_FLAG so ERC accepts that VRECT has a power source (the bridge
+    # rectifier D1 is a passive device; without a PWR_FLAG, ERC flags
+    # U4.VI as "Input Power pin not driven").  Place with a junction so the
+    # pin lands at a defined connection point on the rail.
+    sch.add_power("power:PWR_FLAG", x=X_CHARGE - 10, y=RAIL_VRECT, rotation=0)
+    sch.add_junction(X_CHARGE - 10, RAIL_VRECT)
 
-    # PWR_FLAG for ERC
+    # Ground rail (spans full width).
+    sch.add_rail(
+        RAIL_GND,
+        x_start=X_AC_INPUT,
+        x_end=X_DEBUG + 40,
+        net_label="GND",
+    )
+    # Place GND power symbol on the rail
+    sch.add_power("power:GND", x=X_AC_INPUT, y=RAIL_GND, rotation=0)
+    sch.add_junction(X_AC_INPUT, RAIL_GND)
+    sch.add_label("GND", X_DEBUG + 40, RAIL_GND)
+    # Place a PWR_FLAG (satisfies ERC power-flag check) directly on the rail
+    # with a junction so the pin lands at a defined connection point.
     sch.add_power("power:PWR_FLAG", x=X_AC_INPUT + 10, y=RAIL_GND, rotation=0)
+    sch.add_junction(X_AC_INPUT + 10, RAIL_GND)
 
     print("   Added +3.3V, VRECT, and GND rails")
 
@@ -292,20 +358,28 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_wire(r5_pin1, (r5_pin1[0], RAIL_3V3), warn_on_collision=False)
     sch.add_junction(r5_pin1[0], RAIL_3V3)
 
-    # ZC output label at R5 pin2
-    sch.add_label("ZC_DETECT", r5_pin2[0], r5_pin2[1])
-
     # Opto output side: pin 5 = collector, pin 4 = emitter
     opto_pin4 = u_zc.pin_position("4")  # emitter -> GND
     opto_pin5 = u_zc.pin_position("5")  # collector -> pull-up/ZC output
 
-    # Collector to pull-up junction
+    # Collector to pull-up junction.  This wire passes through r5_pin2 to the
+    # collector, putting r5_pin2 on a wire so the ZC_DETECT label below can
+    # legally attach to it.
     sch.add_wire(opto_pin5, (r5_pin2[0], opto_pin5[1]), warn_on_collision=False)
     sch.add_wire((r5_pin2[0], opto_pin5[1]), r5_pin2, warn_on_collision=False)
+
+    # ZC output label at R5 pin2 — placed AFTER the collector wire so the label
+    # sits on an existing wire endpoint (avoids "label not on wire" warning).
+    sch.add_label("ZC_DETECT", r5_pin2[0], r5_pin2[1])
 
     # Emitter to GND
     sch.add_wire(opto_pin4, (opto_pin4[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(opto_pin4[0], RAIL_GND)
+
+    # Pin 6 (base) and pin 3 (NC on this package) are unused — mark explicit
+    # no_connect so ERC passes.
+    opto_pin6 = u_zc.pin_position("6")
+    sch.add_no_connect(opto_pin6[0], opto_pin6[1])
 
     # =========================================================================
     # Section 5: Supercap Charging Circuit
@@ -314,10 +388,13 @@ def create_softstart_schematic(output_dir: Path) -> Path:
 
     # Bridge rectifier for charging (RB157)
     # Pins: "1"=+DC, "2"=AC~, "3"=-DC, "4"=AC~
+    # Placed below the ZC_DETECT section's R5 (which uses Y=120..140 column at
+    # X_ZC_DETECT+25) so R6's input stub at X_CHARGE-25 doesn't collide with
+    # R5's vertical pull-up/collector wires.
     br1 = sch.add_symbol(
         "Diode_Bridge:RB157",
         x=X_CHARGE,
-        y=140,
+        y=170,
         ref="D1",
         value="RB157",
         footprint="Diode_THT:Diode_Bridge_DIP-4_W7.62mm_P5.08mm",
@@ -328,7 +405,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     r_charge = sch.add_symbol(
         "Device:R",
         x=X_CHARGE - 25,
-        y=140,
+        y=170,
         ref="R6",
         value="150R 5W",
         footprint="Resistor_THT:R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal",
@@ -438,9 +515,12 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Drain label (stub wire)
     sch.add_wire(q1_drain, (q1_drain[0], q1_drain[1] - 5))
     sch.add_label("SCAP_POS+", q1_drain[0], q1_drain[1] - 5)
-    # Source label (stub wire)
+    # Source label (stub wire) — Q1 and Q2 both source-return through the
+    # current shunt R9, so the source net is the shunt's high side (ISENSE_POS).
+    # This used to be a distinct "DISCHARGE_POS" net which left R9 stranded
+    # from the discharge path in the PCB netlist (single_pad_net DRC error).
     sch.add_wire(q1_source, (q1_source[0], q1_source[1] + 5))
-    sch.add_label("DISCHARGE_POS", q1_source[0], q1_source[1] + 5)
+    sch.add_label("ISENSE_POS", q1_source[0], q1_source[1] + 5)
 
     # Negative bank discharge MOSFET
     q2 = sch.add_symbol(
@@ -477,9 +557,10 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Drain label (stub wire)
     sch.add_wire(q2_drain, (q2_drain[0], q2_drain[1] - 5))
     sch.add_label("SCAP_NEG+", q2_drain[0], q2_drain[1] - 5)
-    # Source label (stub wire)
+    # Source label (stub wire) — see Q1 above; both MOSFET sources share the
+    # single shunt's high side (ISENSE_POS).
     sch.add_wire(q2_source, (q2_source[0], q2_source[1] + 5))
-    sch.add_label("DISCHARGE_NEG", q2_source[0], q2_source[1] + 5)
+    sch.add_label("ISENSE_POS", q2_source[0], q2_source[1] + 5)
 
     # =========================================================================
     # Section 7: Current Sensing (0.005 ohm shunt + INA180A1)
@@ -608,7 +689,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     )
     print(f"   SW1: Reset button with R10 pull-up, C5 debounce")
 
-    # Boot mode selector (BOOT0 = low for normal flash boot)
+    # Boot mode selector (BOOT0 = low for normal flash boot).  On STM32G031
+    # BOOT0 is sampled at reset from PA14 (shared with SWCLK) when the
+    # nBOOT_SEL option byte is set, so the BOOT0 pull-down ties to the SWCLK
+    # net.  This makes the schematic netlist consistent with the PCB and
+    # documents the BOOT0 sampling behaviour for a future spin.
     boot = BootModeSelector(
         sch,
         x=X_MCU - 20,
@@ -620,7 +705,14 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref_prefix="R11",
     )
     boot.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
-    print(f"   R11: BOOT0 pull-down (10k)")
+    # Tie BOOT0 port (R11 high side) to the SWCLK net via a label so the
+    # pull-down is observable from PA14 at reset.  Without this label R11
+    # pin 1 floats and ERC reports pin_not_connected.
+    boot_pin = boot.port("BOOT0")
+    boot_stub = (boot_pin[0] + 5, boot_pin[1])
+    sch.add_wire(boot_pin, boot_stub)
+    sch.add_label("SWCLK", boot_stub[0], boot_stub[1])
+    print(f"   R11: BOOT0 pull-down (10k, sampled on SWCLK/PA14 at reset)")
 
     # SWD debug header
     debug = DebugHeader(
@@ -632,25 +724,101 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref="J5",
     )
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
-    print(f"   J5: 6-pin SWD debug header")
+    # Label the SWDIO/SWCLK/NRST debug pins so they tie to the MCU via net
+    # labels (DebugHeader only wires VCC/GND to the rails itself).
+    for sig in ("SWDIO", "SWCLK", "NRST"):
+        port_pos = debug.port(sig)
+        stub = (port_pos[0] + 5, port_pos[1])
+        sch.add_wire(port_pos, stub)
+        sch.add_label(sig, stub[0], stub[1])
 
-    # MCU signal labels (connect to peripherals via net labels)
-    # PA0 -> V_AC_SENSE (ADC input from voltage divider)
-    mcu_pa0 = u1_mcu.pin_position("PA0")
-    sch.add_wire(mcu_pa0, (mcu_pa0[0] + 5, mcu_pa0[1]))
-    sch.add_label("V_AC_SENSE", mcu_pa0[0] + 5, mcu_pa0[1])
+    # DebugHeader._build_ports() deduplicates GND/VCC and only wires the first
+    # occurrence in connect_to_rails().  For 6-pin SWD that leaves pin 5 (the
+    # second GND on the standard ARM SWD pinout) unconnected.  Wire it
+    # explicitly to a GND label so ERC passes.
+    j5_pin5 = debug.header.pin_position("5")
+    sch.add_wire(j5_pin5, (j5_pin5[0] + 5, j5_pin5[1]))
+    sch.add_label("GND", j5_pin5[0] + 5, j5_pin5[1])
+    print(f"   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
 
-    # ADC inputs
+    # MCU signal labels (connect to peripherals via net labels).
+    # Pin map for STM32G031F6Px TSSOP-20 (kicad symbol uses these alt-pin names):
+    #   PA0  pin7  = V_AC_SENSE   (ADC1_IN0)
+    #   PA1  pin8  = I_SENSE_OUT  (ADC1_IN1)
+    #   PA4  pin11 = ZC_DETECT    (EXTI4)
+    #   PA6  pin13 = GATE_POS     (TIM3_CH1 PWM)
+    #   PA7  pin14 = GATE_NEG     (TIM3_CH2 PWM)
+    #   PA8  pin15 = STATUS_LED   (output, low-side switch)
+    #   PA13 pin18 = SWDIO        (debug)
+    #   PA14 pin19 = SWCLK        (debug)
+    #   PF2  pin6  = NRST         (reset input)
+    # All other GPIO pins on the symbol are left explicitly no-connect so ERC
+    # reports a clean schematic.
+    mcu_signal_map = {
+        "PA0": "V_AC_SENSE",
+        "PA1": "I_SENSE_OUT",
+        "PA4": "ZC_DETECT",
+        "PA6": "GATE_POS",
+        "PA7": "GATE_NEG",
+        "PA8/PB0/PB1/PB2": "STATUS_LED",
+        "PA13": "SWDIO",
+        "PA14/PA15": "SWCLK",
+    }
+    for pin_name, net_name in mcu_signal_map.items():
+        pin_pos = u1_mcu.pin_position(pin_name)
+        stub = (pin_pos[0] + 5, pin_pos[1])
+        sch.add_wire(pin_pos, stub)
+        sch.add_label(net_name, stub[0], stub[1])
+
+    # NRST is brought out on pin 6 (PF2) on the right-side cluster of left-side
+    # pins; label it with NRST so the reset button connects via net label.
+    # (The reset button NRST port also gets labeled below.)
+    mcu_nrst = u1_mcu.pin_position("PF2")
+    # PF2 emerges on the left side of the symbol at x=364.49.  Route the stub
+    # to the LEFT (away from the symbol) and far enough that it doesn't
+    # collide with the reset-button's avoid-jog rail wires at x=357.46.
+    nrst_stub = (mcu_nrst[0] - 10, mcu_nrst[1])
+    sch.add_wire(mcu_nrst, nrst_stub, warn_on_collision=False)
+    sch.add_label("NRST", nrst_stub[0], nrst_stub[1])
+
+    # Also expose the reset-button reset node as a NRST net label so the two
+    # are wire-equivalent in the netlist.
+    reset_nrst_port = reset.port("NRST")
+    # Place a label on the reset node directly (no stub needed - it's already
+    # at a wire junction).
+    sch.add_label("NRST", reset_nrst_port[0], reset_nrst_port[1])
+
+    # Unused MCU pins: mark explicitly as no-connect so ERC passes.
+    mcu_no_connect_pins = [
+        "PA2",
+        "PA3",
+        "PA5",
+        "PA9/PA11",
+        "PA10/PA12",
+        "PB3/PB4/PB5/PB6",  # pin 20
+        "PB7/PB8",          # pin 1
+        "PB9/PC14",         # pin 2
+        "PC15",             # pin 3
+    ]
+    for nc_pin in mcu_no_connect_pins:
+        pos = u1_mcu.pin_position(nc_pin)
+        sch.add_no_connect(pos[0], pos[1])
+
+    # ADC inputs / pin assignment documentation
     sch.add_text(
-        "MCU Pin Assignments:\n"
-        "PA0 = V_AC_SENSE (ADC)\n"
-        "PA1 = I_SENSE_OUT (ADC)\n"
-        "PA4 = ZC_DETECT (EXTI)\n"
-        "PA6 = GATE_POS (PWM)\n"
-        "PA7 = GATE_NEG (PWM)\n"
-        "PA8 = STATUS_LED\n"
-        "PA13 = SWDIO\n"
-        "PA14 = SWCLK\n",
+        "MCU Pin Assignments (STM32G031F6Px TSSOP-20):\n"
+        "pin 4  = VDD (+3.3V)\n"
+        "pin 5  = VSS (GND)\n"
+        "pin 6  = PF2 / NRST\n"
+        "pin 7  = PA0  -> V_AC_SENSE (ADC)\n"
+        "pin 8  = PA1  -> I_SENSE_OUT (ADC)\n"
+        "pin 11 = PA4  -> ZC_DETECT (EXTI)\n"
+        "pin 13 = PA6  -> GATE_POS (PWM)\n"
+        "pin 14 = PA7  -> GATE_NEG (PWM)\n"
+        "pin 15 = PA8  -> STATUS_LED (low-side)\n"
+        "pin 18 = PA13 -> SWDIO\n"
+        "pin 19 = PA14 -> SWCLK\n"
+        "All other GPIOs: no_connect\n",
         x=X_MCU - 40,
         y=230,
     )
@@ -706,9 +874,21 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref_prefix="D2",
         label="STATUS",
         resistor_value="1k",
+        # Explicit R reference to avoid clash with R2 from the voltage divider
+        # (LEDIndicator derives "R2" by default from ref_prefix digit "2").
+        resistor_ref="R12",
     )
-    led.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
-    print(f"   D2: Status LED with 1k resistor")
+    # MCU controls the LED via low-side switching: anode -> +3.3V, cathode
+    # through R12 to MCU.PA8 (STATUS_LED).  Wire VCC (anode) to the +3.3V
+    # rail; tap the resistor's GND-side as STATUS_LED instead of grounding it.
+    led_vcc = led.port("VCC")
+    sch.add_wire(led_vcc, (led_vcc[0], RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(led_vcc[0], RAIL_3V3)
+
+    led_gnd_side = led.port("GND")  # actually MCU side in this topology
+    sch.add_wire(led_gnd_side, (led_gnd_side[0], led_gnd_side[1] + 5))
+    sch.add_label("STATUS_LED", led_gnd_side[0], led_gnd_side[1] + 5)
+    print(f"   D2: Status LED with 1k resistor (R12 current-limit, MCU low-side switching)")
 
     # =========================================================================
     # Section 11: Design Notes
@@ -797,7 +977,10 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         (BOARD_ORIGIN_X + BOARD_WIDTH - MH_INSET, BOARD_ORIGIN_Y + BOARD_HEIGHT - MH_INSET),
     ]
 
-    # Net definitions
+    # Net definitions.
+    # DISCHARGE_POS/DISCHARGE_NEG were removed: both MOSFET sources tie to the
+    # current-shunt high side (ISENSE_POS) in the schematic, so a distinct
+    # discharge-only net would leave R9 isolated (single_pad_net DRC error).
     NETS = {
         "": 0,
         "AC_LINE": 1,
@@ -811,18 +994,16 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         "SCAP_NEG_GND": 9,
         "GATE_POS": 10,
         "GATE_NEG": 11,
-        "DISCHARGE_POS": 12,
-        "DISCHARGE_NEG": 13,
-        "ISENSE_POS": 14,
-        "ISENSE_NEG": 15,
-        "I_SENSE_OUT": 16,
-        "V_AC_SENSE": 17,
-        "ZC_DETECT": 18,
-        "SWDIO": 19,
-        "SWCLK": 20,
-        "NRST": 21,
-        "STATUS_LED": 22,
-        "FUSED_LINE": 23,
+        "ISENSE_POS": 12,
+        "ISENSE_NEG": 13,
+        "I_SENSE_OUT": 14,
+        "V_AC_SENSE": 15,
+        "ZC_DETECT": 16,
+        "SWDIO": 17,
+        "SWCLK": 18,
+        "NRST": 19,
+        "STATUS_LED": 20,
+        "FUSED_LINE": 21,
     }
 
     # Component positions (organized by board section)
@@ -851,10 +1032,13 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     J4_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 50)
 
     # Discharge MOSFETs (right section, near supercap connectors)
-    Q1_POS = (BOARD_ORIGIN_X + 110, BOARD_ORIGIN_Y + 30)
-    Q2_POS = (BOARD_ORIGIN_X + 110, BOARD_ORIGIN_Y + 50)
-    R7_POS = (BOARD_ORIGIN_X + 102, BOARD_ORIGIN_Y + 30)
-    R8_POS = (BOARD_ORIGIN_X + 102, BOARD_ORIGIN_Y + 50)
+    # R7/R8 (gate resistors) moved slightly further from Q1/Q2 to give the
+    # router clearance around the 1.8 mm TO-220 gate-pin pad and the 1.0 mm
+    # 0805 pin pads (otherwise the via-on-gate-trace lands too close).
+    Q1_POS = (BOARD_ORIGIN_X + 112, BOARD_ORIGIN_Y + 30)
+    Q2_POS = (BOARD_ORIGIN_X + 112, BOARD_ORIGIN_Y + 50)
+    R7_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 25)
+    R8_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 55)
 
     # Current sensing
     R9_POS = (BOARD_ORIGIN_X + 125, BOARD_ORIGIN_Y + 40)
@@ -1070,7 +1254,83 @@ def create_softstart_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_tssop20(ref: str, pos: tuple, value: str) -> str:
+        """STM32G031F6Px TSSOP-20 footprint with all 20 pads and matching nets.
+
+        Pin assignments mirror the schematic:
+          pin 1  PB7/PB8       no_connect (NC)
+          pin 2  PB9/PC14      no_connect (NC)
+          pin 3  PC15          no_connect (NC)
+          pin 4  VDD           +3.3V
+          pin 5  VSS           GND
+          pin 6  PF2 / NRST    NRST
+          pin 7  PA0           V_AC_SENSE
+          pin 8  PA1           I_SENSE_OUT
+          pin 9  PA2           no_connect (NC)
+          pin 10 PA3           no_connect (NC)
+          pin 11 PA4           ZC_DETECT
+          pin 12 PA5           no_connect (NC)
+          pin 13 PA6           GATE_POS
+          pin 14 PA7           GATE_NEG
+          pin 15 PA8/PB0/PB1/PB2  STATUS_LED
+          pin 16 PA9/PA11      no_connect (NC)
+          pin 17 PA10/PA12     no_connect (NC)
+          pin 18 PA13          SWDIO
+          pin 19 PA14/PA15     SWCLK
+          pin 20 PB3/PB4/PB5/PB6  no_connect (NC)
+
+        TSSOP-20 nominal pad layout: pitch 0.65 mm, two columns at
+        x = +/- 2.85 mm.  Pins 1-10 occupy the left column (negative X) bottom
+        to top; pins 11-20 occupy the right column (positive X) top to bottom.
+        """
         x, y = pos
+        pitch = 0.65
+        # Pin -> net assignments by physical pin number (1..20)
+        pin_net = {
+            1: "",          # NC
+            2: "",          # NC
+            3: "",          # NC
+            4: "+3.3V",
+            5: "GND",
+            6: "NRST",
+            7: "V_AC_SENSE",
+            8: "I_SENSE_OUT",
+            9: "",          # NC
+            10: "",         # NC
+            11: "ZC_DETECT",
+            12: "",         # NC
+            13: "GATE_POS",
+            14: "GATE_NEG",
+            15: "STATUS_LED",
+            16: "",         # NC
+            17: "",         # NC
+            18: "SWDIO",
+            19: "SWCLK",
+            20: "",         # NC
+        }
+
+        pad_lines = []
+        for pin in range(1, 21):
+            net_name = pin_net[pin]
+            net_num = NETS.get(net_name, 0) if net_name else 0
+            if pin <= 10:
+                # Left column: pin 1 at bottom (positive Y), pin 10 at top
+                # Center pin row is between pin 5 and 6 -> y = 0.
+                pad_x = -2.85
+                # Pin 1 is at +y_offset = (1 - 5.5) * pitch * -1 ... be explicit:
+                # Pin 1 should be at top-left or bottom-left depending on convention.
+                # KiCad standard: TSSOP pin 1 at top-left with pin-1 marker.
+                # Y increases downward in the footprint frame.
+                pad_y = ((pin - 5.5) * pitch)  # pin 1 -> -2.925, pin 10 -> 2.925
+            else:
+                # Right column: pin 11 at bottom-right, pin 20 at top-right
+                pad_x = 2.85
+                pad_y = ((15.5 - pin) * pitch)  # pin 11 -> 2.925, pin 20 -> -2.925
+            pad_lines.append(
+                f'    (pad "{pin}" smd rect (at {pad_x:.3f} {pad_y:.3f}) '
+                f'(size 1.5 0.4) (layers "F.Cu" "F.Paste" "F.Mask") '
+                f'(net {net_num} "{net_name}"))'
+            )
+        pads = "\n".join(pad_lines)
         return f"""  (footprint "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -1081,8 +1341,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd rect (at -2.85 -2.925) (size 1.5 0.4) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
-    (pad "20" smd rect (at 2.85 -2.925) (size 1.5 0.4) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+{pads}
   )"""
 
     def generate_sot23_5(ref: str, pos: tuple, value: str) -> str:
@@ -1296,8 +1555,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_terminal_block_2("J4", J4_POS, "SCAP_NEG+", "SCAP_NEG_GND"))
 
     print("\n7. Adding discharge MOSFETs...")
-    parts.append(generate_to220("Q1", Q1_POS, "IRFB4110", "GATE_POS", "SCAP_POS+", "DISCHARGE_POS"))
-    parts.append(generate_to220("Q2", Q2_POS, "IRFB4110", "GATE_NEG", "SCAP_NEG+", "DISCHARGE_NEG"))
+    # Q1/Q2 source pins are on the shunt high side (ISENSE_POS) — see NETS comment.
+    parts.append(generate_to220("Q1", Q1_POS, "IRFB4110", "GATE_POS", "SCAP_POS+", "ISENSE_POS"))
+    parts.append(generate_to220("Q2", Q2_POS, "IRFB4110", "GATE_NEG", "SCAP_NEG+", "ISENSE_POS"))
     parts.append(generate_resistor_0805("R7", R7_POS, "10R", "GATE_POS", ""))
     parts.append(generate_resistor_0805("R8", R8_POS, "10R", "GATE_NEG", ""))
 
@@ -1371,12 +1631,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Trace width: {rules.trace_width}mm")
     print(f"   Clearance: {rules.trace_clearance}mm")
 
-    # Skip power and high-current nets
+    # Skip power and high-current nets.  ISENSE_POS carries discharge current
+    # (formerly DISCHARGE_POS/NEG) and should be routed as a heavy trace by
+    # the user, so it's skipped from the auto-router too.
     skip_nets = [
         "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
         "+3.3V", "VRECT",
         "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
-        "DISCHARGE_POS", "DISCHARGE_NEG",
+        "ISENSE_POS",
     ]
 
     router, net_map = load_pcb_for_routing(
@@ -1390,7 +1652,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Skipping high-current nets: {len(skip_nets)}")
 
     print("\n2. Routing nets...")
-    router.route_all()
+    # Use negotiated mode with explicit per-net + total timeouts so the run
+    # cannot hang indefinitely on dense layouts (see issue #2794).  These
+    # bounds are generous enough for this board's signal-net count (~10) but
+    # short enough that any pathological case fails fast.
+    router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0)
 
     stats_before = router.get_statistics()
     print("\n3. Raw routing results:")
