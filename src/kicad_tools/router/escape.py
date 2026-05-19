@@ -4886,6 +4886,22 @@ class EscapeRouter:
                 if p is not pad and p.net != pad.net
             ]
 
+        # Issue #3073: The surface stub from the pad to the lateral via
+        # must fit through the channel between same-row neighbour pads
+        # without violating ``effective_clearance``.  On 0.5mm-pitch LQFP
+        # the inter-pad copper gap is only ~0.2mm, so a full-width
+        # net trace (commonly 0.5mm for power-derived nets) cannot fit.
+        # We neck the stub down to the manufacturer-minimum trace width
+        # when the dispatcher-supplied ``escape_width`` would violate
+        # neighbour-pad clearance; if even the necked width fails, this
+        # candidate is rejected and the next offset is tried.  When all
+        # candidates fail, the helper returns None (the caller falls
+        # back to "defer to main router", matching pre-#3063 behaviour).
+        mfr_min_trace = (
+            self._mfr_limits.min_trace if self._mfr_limits is not None else None
+        )
+        narrow_width = mfr_min_trace if mfr_min_trace is not None else escape_width
+
         # Iterate offsets [step, 2*step, ..., max_offset]; skip 0 because
         # the in-pad rescue already tested that position.
         n_steps = int(round(max_offset_mm / step_mm))
@@ -4902,18 +4918,66 @@ class EscapeRouter:
                 clearance=effective_clearance,
                 via_diameter=via_diameter,
             ):
+                # Found a via location that satisfies foreign-pad
+                # clearance.  Before committing, validate that the
+                # surface stub from the pad center to this via location
+                # ALSO clears neighbour pads.  Issue #3073: without
+                # this check the stub at the dispatcher-supplied
+                # ``escape_width`` (which may be the full net trace
+                # width on packages where ``rules.min_trace_width`` is
+                # None) overshoots the channel between same-row neighbour
+                # pads and creates pad-segment DRC violations.  Try the
+                # dispatcher width first; if it fails, try necking down
+                # to the manufacturer minimum.  Reject only if BOTH fail.
+                chosen_stub_width: float | None = None
+                if foreign_pads is None:
+                    # No neighbour context to validate against; fall back
+                    # to the dispatcher width (legacy behaviour preserved
+                    # for unit-test fixtures without package context).
+                    chosen_stub_width = escape_width
+                else:
+                    for try_width in (escape_width, narrow_width):
+                        trial = Segment(
+                            x1=pad.x,
+                            y1=pad.y,
+                            x2=cand_x,
+                            y2=cand_y,
+                            width=try_width,
+                            layer=pad.layer,
+                            net=pad.net,
+                            net_name=pad.net_name,
+                        )
+                        stub_ok = True
+                        for neighbour in foreign_pads:
+                            if neighbour.layer != trial.layer:
+                                continue
+                            gap = self._segment_to_pad_edge_gap(trial, neighbour)
+                            if gap < effective_clearance - 1e-6:
+                                stub_ok = False
+                                break
+                        if stub_ok:
+                            chosen_stub_width = try_width
+                            break
+
+                if chosen_stub_width is None:
+                    # Stub at this candidate position would violate
+                    # neighbour clearance even at the manufacturer
+                    # minimum trace width.  Skip to the next offset.
+                    continue
+
                 # Found a passing candidate -- build the EscapeRoute.
                 escape_layer = self._select_inner_escape_layer(pad.layer)
 
-                # Surface stub: pad → via location.  Width matches the
-                # dispatcher's ``escape_width`` (typically min_trace_width
-                # for fine-pitch packages, see _create_fine_pitch_row_escapes).
+                # Surface stub: pad → via location.  Width is the value
+                # chosen above (dispatcher-supplied when it fits the
+                # channel, otherwise necked to the manufacturer minimum
+                # to satisfy fine-pitch inter-pad clearance).
                 surface_seg = Segment(
                     x1=pad.x,
                     y1=pad.y,
                     x2=cand_x,
                     y2=cand_y,
-                    width=escape_width,
+                    width=chosen_stub_width,
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -4959,9 +5023,11 @@ class EscapeRouter:
                     "Lateral via-escape rescue for pad %s (ref=%s pin=%s): "
                     "in-pad deferred; off-pad via at (%.3f, %.3f) "
                     "accepted at lateral offset=%.3fmm along %s. "
-                    "L-stub on %s -> via -> %s (Issue #3063).",
+                    "L-stub width=%.3fmm on %s -> via -> %s "
+                    "(Issue #3063, #3073).",
                     pad.net_name, pad.ref, pad.pin,
                     cand_x, cand_y, offset, direction.name,
+                    chosen_stub_width,
                     pad.layer.kicad_name, escape_layer.kicad_name,
                 )
 

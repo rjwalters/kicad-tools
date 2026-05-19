@@ -1015,13 +1015,23 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     Note on ``--strict-in-pad-clearance``: PR #3063 added the lateral
     via-escape recovery (see ``_try_lateral_via_escape`` in
     ``src/kicad_tools/router/escape.py``) plus an ``_can_place_via``
-    grid-origin bug fix.  An earlier revision of this recipe enabled
-    ``--strict-in-pad-clearance`` here, but it regressed completion on
-    this board from 9/9 to 8/9 nets and added segment/segment overlaps,
-    so the flag was reverted.  A follow-up will investigate WHY the
-    lateral helper does not find a clean off-pad via for the dropped
-    net on this board.  The helper itself is exercised by the
-    synthetic-fixture tests in ``tests/test_escape_lateral_recovery.py``.
+    grid-origin bug fix.  Issue #3073 confirmed that this board is
+    geometrically the wrong customer for strict mode: at LQFP-48 0.5 mm
+    pitch with 0.6 mm vias, the SMALLEST lateral offset that satisfies
+    same-row neighbour-pad clearance is ~1.05 mm -- past the adjacent
+    pin row's escape lane.  The lateral via inevitably blocks the
+    neighbour pin's escape path, dropping NRST in negotiated rip-up.
+    PR for #3073 narrows the helper's surface-stub width to the
+    manufacturer-minimum trace when the dispatcher-supplied width
+    would violate inter-pad channel clearance (fixes the pad-segment
+    DRC errors), but does not enable strict mode on this board:
+    converging the post-lateral routing requires negotiated-loop
+    re-validation against foreign vias (tracked as issue #3077, a
+    #3002 analogue at the main-router commit-time gate).  A different
+    in-tree customer (e.g. a board with QFN-32 0.65 mm or LQFP-32
+    0.8 mm pitch) is the right next step once #3077 lands.  The
+    helper itself is exercised by the synthetic-fixture tests in
+    ``tests/test_escape_lateral_recovery.py``.
 
     Returns True if `kct route` exits successfully (>= --min-completion).
     """
