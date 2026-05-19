@@ -2344,6 +2344,13 @@ def route_with_layer_escalation(
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
                     seed=getattr(args, "seed", None),
+                    # Issue #3054 (Phase 2 of #3045): forward region-based
+                    # parallelism opt-in.  Defaults preserve single-threaded
+                    # behaviour bit-for-bit.
+                    region_parallel=getattr(args, "region_parallel", False),
+                    partition_rows=getattr(args, "partition_rows", 2),
+                    partition_cols=getattr(args, "partition_cols", 2),
+                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
@@ -3062,6 +3069,13 @@ def route_with_rule_relaxation(
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
                     seed=getattr(args, "seed", None),
+                    # Issue #3054 (Phase 2 of #3045): forward region-based
+                    # parallelism opt-in.  Defaults preserve single-threaded
+                    # behaviour bit-for-bit.
+                    region_parallel=getattr(args, "region_parallel", False),
+                    partition_rows=getattr(args, "partition_rows", 2),
+                    partition_cols=getattr(args, "partition_cols", 2),
+                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
@@ -4142,6 +4156,13 @@ def route_with_combined_escalation(
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
                         seed=getattr(args, "seed", None),
+                        # Issue #3054 (Phase 2 of #3045): forward region-based
+                        # parallelism opt-in.  Defaults preserve single-threaded
+                        # behaviour bit-for-bit.
+                        region_parallel=getattr(args, "region_parallel", False),
+                        partition_rows=getattr(args, "partition_rows", 2),
+                        partition_cols=getattr(args, "partition_cols", 2),
+                        max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                         # Issue #3051: forward checkpoint callback so kills
                         # mid-loop persist the best-so-far snapshot.
                         checkpoint_callback=_checkpoint_cb,
@@ -5301,6 +5322,44 @@ def main(argv: list[str] | None = None) -> int:
             "Enabled automatically in high-performance mode."
         ),
     )
+    # Issue #3054 (Phase 2 of #3045): expose region-based parallelism on the
+    # inner parser so the outer ``kct route --region-parallel`` flag has a
+    # forwarding target.  ``route_all_negotiated`` already implements the
+    # partitioning logic; this is wiring only.
+    parser.add_argument(
+        "--region-parallel",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable region-based parallel routing (Issue #965). Partitions "
+            "the routing grid into regions and routes non-adjacent regions "
+            "in parallel during each negotiated iteration. Default off."
+        ),
+    )
+    parser.add_argument(
+        "--partition-rows",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Number of region rows for --region-parallel (default: 2).",
+    )
+    parser.add_argument(
+        "--partition-cols",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Number of region columns for --region-parallel (default: 2).",
+    )
+    parser.add_argument(
+        "--max-parallel-workers",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Maximum parallel workers per region group for --region-parallel "
+            "(default: 4)."
+        ),
+    )
 
     # Power plane stitching
     parser.add_argument(
@@ -6314,6 +6373,14 @@ def main(argv: list[str] | None = None) -> int:
                                     perturbation=getattr(args, "perturbation", True),
                                     # Issue #3039: forward --seed for deterministic routing.
                                     seed=getattr(args, "seed", None),
+                                    # Issue #3054 (Phase 2 of #3045): forward
+                                    # region-based parallelism opt-in.
+                                    region_parallel=getattr(args, "region_parallel", False),
+                                    partition_rows=getattr(args, "partition_rows", 2),
+                                    partition_cols=getattr(args, "partition_cols", 2),
+                                    max_parallel_workers=getattr(
+                                        args, "max_parallel_workers", 4
+                                    ),
                                     checkpoint_callback=_checkpoint_cb,
                                 )
                             return router.route_all()
@@ -6362,6 +6429,12 @@ def main(argv: list[str] | None = None) -> int:
                             perturbation=getattr(args, "perturbation", True),
                             # Issue #3039: forward --seed for deterministic routing.
                             seed=getattr(args, "seed", None),
+                            # Issue #3054 (Phase 2 of #3045): forward
+                            # region-based parallelism opt-in.
+                            region_parallel=getattr(args, "region_parallel", False),
+                            partition_rows=getattr(args, "partition_rows", 2),
+                            partition_cols=getattr(args, "partition_cols", 2),
+                            max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                             checkpoint_callback=_checkpoint_cb,
                         )
                     else:
@@ -6425,6 +6498,12 @@ def main(argv: list[str] | None = None) -> int:
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
                         seed=getattr(args, "seed", None),
+                        # Issue #3054 (Phase 2 of #3045): forward
+                        # region-based parallelism opt-in.
+                        region_parallel=getattr(args, "region_parallel", False),
+                        partition_rows=getattr(args, "partition_rows", 2),
+                        partition_cols=getattr(args, "partition_cols", 2),
+                        max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                         checkpoint_callback=_checkpoint_cb,
                     )
 
@@ -6446,6 +6525,12 @@ def main(argv: list[str] | None = None) -> int:
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
                     seed=getattr(args, "seed", None),
+                    # Issue #3054 (Phase 2 of #3045): forward region-based
+                    # parallelism opt-in.
+                    region_parallel=getattr(args, "region_parallel", False),
+                    partition_rows=getattr(args, "partition_rows", 2),
+                    partition_cols=getattr(args, "partition_cols", 2),
+                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                     checkpoint_callback=_checkpoint_cb,
                 )
             elif args.differential_pairs and args.strategy == "basic":
