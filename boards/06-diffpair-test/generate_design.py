@@ -427,10 +427,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # call passed.  The diff-pair pre-pass uses its own internal
     # budgeting (``DifferentialPairConfig`` controls
     # ``max_retries_per_pair``); the per-net follow-up reuses
-    # ``Autorouter.route_all``'s configured defaults.  If the CI
-    # wall-clock budget becomes a problem this is the next place to
-    # tighten (board 03's PR #3069 left the same call unbudgeted and
-    # has not yet timed out in CI).
+    # ``Autorouter.route_all``'s configured defaults.  Two seed=42
+    # attempts (96 min and 25 min wall-clock) stalled inside
+    # ``CoupledPathfinder`` on the USB3_RX2+/USB3_RX2- BGA-49 escape
+    # at J3 / J4 -- 6 of 9 pairs route in the first ~5 min, then the
+    # 7th pair consumes the entire remaining budget without
+    # converging.  ``.github/routed-drc-tolerance.yml`` documents
+    # the AC-clause-C exit for issue #3071, and #3089 tracks the
+    # underlying latency.  When #3089 lands, regenerate this PCB
+    # and tighten the YAML floor in the same PR.
     random.seed(42)
     diffpair_config = DifferentialPairConfig(enabled=True)
     router.route_all_with_diffpairs(diffpair_config=diffpair_config)
