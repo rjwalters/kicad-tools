@@ -113,6 +113,28 @@ class TwoPhaseRouter:
         #   - ``"max_iterations"`` — outer loop ran to ``max_iterations``.
         self.last_termination_reason: str | None = None
 
+    def _collect_extra_routes_for_revalidation(
+        self,
+        net_routes: dict[int, list[Route]],
+    ) -> list[Route]:
+        """Mirror of :meth:`Autorouter._collect_extra_routes_for_revalidation`.
+
+        Issue #3077: Return routes in ``self.routes`` that are not
+        referenced by any entry in ``net_routes``.  These are
+        typically escape-phase routes (lateral / in-pad rescue vias
+        from PR #3070) whose halos must participate in the
+        post-iteration re-validation hooks' foreign-via universe.
+        See the helper of the same name on :class:`Autorouter` for
+        the full rationale.
+        """
+        if not self.routes:
+            return []
+        tracked_ids: set[int] = set()
+        for routes in net_routes.values():
+            for r in routes:
+                tracked_ids.add(id(r))
+        return [r for r in self.routes if id(r) not in tracked_ids]
+
     def route_all(
         self,
         use_negotiated: bool = True,
@@ -627,13 +649,18 @@ class TwoPhaseRouter:
         # Issue #3020: combine seg-via and via-seg violator counts so
         # both directions of the clearance matrix participate in the
         # best-state comparator.
+        # Issue #3077: extend the via/segment universe with
+        # escape-phase routes (lateral / in-pad helpers from PR #3070).
+        _extra_init = self._collect_extra_routes_for_revalidation(net_routes)
         _init_seg_via = neg_router.find_nets_with_segment_via_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_init",),
+            extra_routes=_extra_init,
         )
         _init_via_seg = neg_router.find_nets_with_via_segment_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_init",),
+            extra_routes=_extra_init,
         )
         best_clearance_violations = len(_init_seg_via) + len(_init_via_seg)
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
@@ -690,9 +717,13 @@ class TwoPhaseRouter:
                 # state as "pre-iter K" -- same content as the end of
                 # iteration K-1 from the prior pass's ``post`` capture
                 # (or ``two_phase_init`` for iteration 1).
+                # Issue #3077: extend the via universe with escape-phase
+                # routes.
+                _extra_iter = self._collect_extra_routes_for_revalidation(net_routes)
                 seg_via_violators = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    extra_routes=_extra_iter,
                 )
                 new_seg_via_violators = [
                     v_net for v_net in seg_via_violators
@@ -723,6 +754,7 @@ class TwoPhaseRouter:
                 via_seg_violators = neg_router.find_nets_with_via_segment_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    extra_routes=_extra_iter,
                 )
                 new_via_seg_violators = [
                     v_net for v_net in via_seg_violators
@@ -796,13 +828,18 @@ class TwoPhaseRouter:
                 # mid-iter call will pull this from cache.
                 # Issue #3020: combine both directions of the
                 # clearance matrix into the best-state comparator.
+                # Issue #3077: extend the via/segment universe with
+                # escape-phase routes for the end-of-iteration capture.
+                _extra_post = self._collect_extra_routes_for_revalidation(net_routes)
                 _post_seg_via = neg_router.find_nets_with_segment_via_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration),
+                    extra_routes=_extra_post,
                 )
                 _post_via_seg = neg_router.find_nets_with_via_segment_violations(
                     net_routes, trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration),
+                    extra_routes=_extra_post,
                 )
                 current_clearance_violations = (
                     len(_post_seg_via) + len(_post_via_seg)
@@ -897,13 +934,18 @@ class TwoPhaseRouter:
         )
         # Issue #3020: final comparator sums both directions of the
         # clearance matrix.
+        # Issue #3077: extend the via/segment universe with
+        # escape-phase routes for the post-loop best-vs-final compare.
+        _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
         _final_seg_via = neg_router.find_nets_with_segment_via_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
         )
         _final_via_seg = neg_router.find_nets_with_via_segment_violations(
             net_routes, trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
         )
         final_clearance_violations = (
             len(_final_seg_via) + len(_final_via_seg)
