@@ -291,6 +291,101 @@ class TestLateralRecoverySucceeds:
 
 
 # ----------------------------------------------------------------------------
+# Surface-stub channel-clearance regression case (Issue #3073)
+# ----------------------------------------------------------------------------
+
+
+class TestLateralRecoveryNecksStubWidthForChannelClearance:
+    """Issue #3073 regression: the lateral helper's surface stub from
+    the pad center to the off-pad via must fit through the channel
+    between same-row neighbour pads.  At LQFP-48 0.5mm pitch with a
+    full-width (0.5mm) net trace, the stub overshoots the ~0.2mm
+    inter-pad copper gap and produces pad-segment DRC errors at the
+    manufacturer's 0.127mm minimum.
+
+    The helper must validate the surface stub against neighbour pads
+    BEFORE committing the candidate via, and neck the stub down to the
+    manufacturer-minimum trace width when the dispatcher-supplied
+    width would violate.  If even the necked width fails, the
+    candidate is rejected and the next offset is tried.
+    """
+
+    def test_lateral_stub_necks_to_min_trace_when_full_width_collides(self):
+        """When the dispatcher passes a wide ``escape_width`` (0.5mm
+        net trace) that does NOT fit the channel between same-row
+        neighbour pads, the helper must neck the stub down to the
+        manufacturer-minimum trace width and emit a valid route.
+
+        Geometry: with the standard violating pair at PITCH=0.50mm
+        and PAD_SHORT=0.30mm, a SOUTH stub from the primary at width
+        0.5mm has half-width 0.25mm.  Its closest approach to the
+        NORTH neighbour pad's south edge sits at edge-to-edge gap
+        ``rect_dist - stub_half_w = 0.35 - 0.25 = 0.10mm``, which is
+        below the 0.15mm effective clearance and would DRC-fail.  At
+        the jlcpcb-tier1 min_trace of 0.127mm (half-width 0.0635mm),
+        the gap rises to ``0.35 - 0.0635 = 0.2865mm`` -- well above
+        clearance -- so the helper should neck down rather than
+        rejecting the candidate.
+        """
+        router = _build_router(strict=True)
+        package = _make_translated_package()
+        primary = package.pads[0]
+
+        route = router._try_lateral_via_escape(
+            pad=primary,
+            direction=EscapeDirection.SOUTH,
+            effective_clearance=CLEARANCE,
+            escape_width=0.5,  # too wide for 0.5mm-pitch channel
+            package=package,
+        )
+        assert route is not None, (
+            "Helper must still return a route by necking the stub "
+            "down to manufacturer-minimum width."
+        )
+        stub = route.segments[0]
+        # The jlcpcb-tier1 manufacturer profile has min_trace=0.127mm.
+        # The helper should neck the stub down to that value (not the
+        # 0.5mm dispatcher width that would violate channel clearance).
+        assert stub.width == pytest.approx(0.127, abs=1e-6), (
+            f"Stub width must be necked to manufacturer min_trace "
+            f"(0.127mm for jlcpcb-tier1); got {stub.width}mm"
+        )
+        # The inner-layer segment can stay at the dispatcher width
+        # (inner layers have no fine-pitch pad congestion).
+        inner = route.segments[1]
+        assert inner.width == pytest.approx(0.5, abs=1e-6), (
+            f"Inner segment should keep the dispatcher width "
+            f"(no SMT pads on the inner layer); got {inner.width}mm"
+        )
+
+    def test_lateral_stub_keeps_dispatcher_width_when_channel_is_clear(self):
+        """When the dispatcher-supplied ``escape_width`` already fits
+        the channel (e.g. caller passed a fine-pitch min_trace value),
+        the helper must NOT down-neck it -- preserving the dispatcher's
+        intent for callers that already accounted for the channel.
+        """
+        router = _build_router(strict=True)
+        package = _make_translated_package()
+        primary = package.pads[0]
+
+        # 0.2mm-wide stub fits the channel (gap = 0.35 - 0.10 = 0.25mm
+        # > 0.15mm clearance).  Helper should keep this width.
+        route = router._try_lateral_via_escape(
+            pad=primary,
+            direction=EscapeDirection.SOUTH,
+            effective_clearance=CLEARANCE,
+            escape_width=0.2,
+            package=package,
+        )
+        assert route is not None
+        stub = route.segments[0]
+        assert stub.width == pytest.approx(0.2, abs=1e-6), (
+            f"Dispatcher width that already fits the channel must be "
+            f"preserved; got {stub.width}mm"
+        )
+
+
+# ----------------------------------------------------------------------------
 # Negative case: no lane open within the search budget
 # ----------------------------------------------------------------------------
 
