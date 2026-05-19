@@ -268,7 +268,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     ``build_net_class_map()`` into the autorouter so each Phase 1-3
     feature is exercised on the appropriate pair set.
     """
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
+    import random
+
+    from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -387,13 +389,51 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Nets loaded: {len(net_map)}")
 
     print("\n4. Routing nets...")
-    # Issue #2835: pass per-net + outer wall-clock budgets so dense
-    # diff-pair pin-access on the BGA-49 sink cannot hang in A*
-    # heap-key churn.  These values mirror the recommendation in the
-    # Router.route_all() #2794 warning message and the documented
-    # default in route_all_negotiated.  See PR #2779 / #2775 for the
-    # bracket semantics that make this enforceable.
-    router.route_all(per_net_timeout=30.0, timeout=240.0)
+    # Issue #3071 (follow-up to #3040 / PR #3069 board-03 migration):
+    # route the 9 declared pairs through the diff-pair-aware entry
+    # point so Phase A (``CoupledPathfinder``) populates the intra-pair
+    # clearance buffer and Phase B
+    # (``repair_intra_clearance_violations``) can widen
+    # ``min_spacing_cells`` on any pair whose coupled route quantises
+    # to a clearance violation.  Previously this board called the
+    # per-net ``router.route_all()`` directly, leaving
+    # ``CoupledPathfinder`` unrun -- so the entire Phase B repair pass
+    # was unreachable on this in-tree board even though the underlying
+    # mechanism was sound.
+    #
+    # An earlier attempt at this migration (see the closed comment on
+    # #3071) regressed catastrophically (32 -> 36,236 DRC errors) because
+    # ``CoupledPathfinder``'s A* state was keyed only on the endpoint
+    # ``(p_pos, n_pos)`` pair; the asymmetric P-advance / N-advance
+    # moves added in #2490 let one trace loop around its partner and
+    # re-converge from the opposite side at full spacing.  That
+    # underlying defect is fixed by PR #3083 / issue #3078, which
+    # threads ``p_visited`` / ``n_visited`` path-history sets through
+    # all three coupled-move branches and rejects cross-trail and
+    # self-loop landings.  With that guard in place this migration is
+    # safe to land.
+    #
+    # Seed=42 makes the resulting routed PCB deterministic so the
+    # per-board DRC floor in ``.github/routed-drc-tolerance.yml``
+    # reflects a reproducible artifact rather than a lucky one-shot.
+    # This mirrors the seed plumbing PR #3065 added to
+    # ``route_all_negotiated``; ``route_all_with_diffpairs`` does not
+    # (yet) accept a seed kwarg directly, so we pre-seed the global RNG
+    # which is what the diff-pair pre-pass and the inner per-net A*
+    # loop both consult.
+    #
+    # Note: ``route_all_with_diffpairs`` does not accept the
+    # ``per_net_timeout`` / ``timeout`` kwargs the prior ``route_all``
+    # call passed.  The diff-pair pre-pass uses its own internal
+    # budgeting (``DifferentialPairConfig`` controls
+    # ``max_retries_per_pair``); the per-net follow-up reuses
+    # ``Autorouter.route_all``'s configured defaults.  If the CI
+    # wall-clock budget becomes a problem this is the next place to
+    # tighten (board 03's PR #3069 left the same call unbudgeted and
+    # has not yet timed out in CI).
+    random.seed(42)
+    diffpair_config = DifferentialPairConfig(enabled=True)
+    router.route_all_with_diffpairs(diffpair_config=diffpair_config)
 
     stats_raw = router.get_statistics()
     print(
