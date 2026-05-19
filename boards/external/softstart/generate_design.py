@@ -1589,7 +1589,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_switch("SW1", SW1_POS))
     parts.append(generate_resistor_0805("R10", R10_POS, "10k", "+3.3V", "NRST"))
     parts.append(generate_cap_0805("C5", C5_POS, "100nF", "NRST", "GND"))
-    parts.append(generate_resistor_0805("R11", R11_POS, "10k", "GND", ""))  # BOOT0 pull-down
+    parts.append(generate_resistor_0805("R11", R11_POS, "10k", "GND", "SWCLK"))  # BOOT0 pull-down; pad2 ties to SWCLK to match schematic (issue #3087)
 
     parts.append(")")  # Close kicad_pcb
 
