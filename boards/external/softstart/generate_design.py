@@ -88,19 +88,35 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # 3.3V rail.  add_rail's end_power= places a power symbol 10mm above the
-    # rail (not on the rail endpoint), which doesn't count as "connected" to
-    # the validator.  Instead, place a label directly at each rail endpoint to
-    # terminate it explicitly.
+    # Rails span the full width so vertical taps from components anywhere on
+    # the schematic land directly on the rail wire (KiCad requires endpoint
+    # overlap for T-connections).  add_rail creates a single continuous wire;
+    # taps elsewhere in the schematic use `warn_on_collision=False` to land
+    # on the rail and add an explicit junction.
+    #
+    # Rails are terminated with a net label at the right endpoint to satisfy
+    # the validator's "wire endpoint not connected" check.  Power symbols at
+    # the LDO output / GND start provide the named-net source.
+
+    # Rails span the full width so vertical taps from components anywhere on
+    # the schematic land directly on the rail wire.  Power symbols are placed
+    # AT the rail Y coordinate (not offset) because the validator and KiCad
+    # ERC use the symbol's (x,y) as the pin position — offsetting by 10 mm
+    # leaves the pin floating off the rail.
     sch.add_rail(
         RAIL_3V3,
-        x_start=X_LDO - 10,
+        x_start=X_AC_INPUT,
         x_end=X_DEBUG + 40,
         net_label="+3.3V",
     )
-    sch.add_power("power:+3V3", x=X_LDO - 10, y=RAIL_3V3 - 10, rotation=0)
+    # Place +3V3 power symbol on the rail (pin at rail Y).  KiCad ERC needs a
+    # junction at the rail tap because the power-symbol pin lies on the middle
+    # of the rail wire (not at an endpoint).
+    sch.add_power("power:+3V3", x=X_LDO - 10, y=RAIL_3V3, rotation=0)
+    sch.add_junction(X_LDO - 10, RAIL_3V3)
     # Cap right end with a label so the dangling-endpoint check passes.
     sch.add_label("+3.3V", X_DEBUG + 40, RAIL_3V3)
+    sch.add_label("+3.3V", X_AC_INPUT, RAIL_3V3)
 
     # Rectified DC rail (from small supply for LDO input).
     sch.add_rail(
@@ -109,8 +125,13 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x_end=X_LDO + 40,
         net_label="VRECT",
     )
-    # Cap right end with a label
     sch.add_label("VRECT", X_LDO + 40, RAIL_VRECT)
+    # PWR_FLAG so ERC accepts that VRECT has a power source (the bridge
+    # rectifier D1 is a passive device; without a PWR_FLAG, ERC flags
+    # U4.VI as "Input Power pin not driven").  Place with a junction so the
+    # pin lands at a defined connection point on the rail.
+    sch.add_power("power:PWR_FLAG", x=X_CHARGE - 10, y=RAIL_VRECT, rotation=0)
+    sch.add_junction(X_CHARGE - 10, RAIL_VRECT)
 
     # Ground rail (spans full width).
     sch.add_rail(
@@ -119,12 +140,14 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x_end=X_DEBUG + 40,
         net_label="GND",
     )
-    sch.add_power("power:GND", x=X_AC_INPUT, y=RAIL_GND + 10, rotation=0)
-    # Cap right end with a label
+    # Place GND power symbol on the rail
+    sch.add_power("power:GND", x=X_AC_INPUT, y=RAIL_GND, rotation=0)
+    sch.add_junction(X_AC_INPUT, RAIL_GND)
     sch.add_label("GND", X_DEBUG + 40, RAIL_GND)
-
-    # PWR_FLAG for ERC
+    # Place a PWR_FLAG (satisfies ERC power-flag check) directly on the rail
+    # with a junction so the pin lands at a defined connection point.
     sch.add_power("power:PWR_FLAG", x=X_AC_INPUT + 10, y=RAIL_GND, rotation=0)
+    sch.add_junction(X_AC_INPUT + 10, RAIL_GND)
 
     print("   Added +3.3V, VRECT, and GND rails")
 
@@ -333,6 +356,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Emitter to GND
     sch.add_wire(opto_pin4, (opto_pin4[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(opto_pin4[0], RAIL_GND)
+
+    # Pin 6 (base) and pin 3 (NC on this package) are unused — mark explicit
+    # no_connect so ERC passes.
+    opto_pin6 = u_zc.pin_position("6")
+    sch.add_no_connect(opto_pin6[0], opto_pin6[1])
 
     # =========================================================================
     # Section 5: Supercap Charging Circuit
@@ -642,7 +670,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     )
     print(f"   SW1: Reset button with R10 pull-up, C5 debounce")
 
-    # Boot mode selector (BOOT0 = low for normal flash boot)
+    # Boot mode selector (BOOT0 = low for normal flash boot).  On STM32G031
+    # BOOT0 is sampled at reset from PA14 (shared with SWCLK) when the
+    # nBOOT_SEL option byte is set, so the BOOT0 pull-down ties to the SWCLK
+    # net.  This makes the schematic netlist consistent with the PCB and
+    # documents the BOOT0 sampling behaviour for a future spin.
     boot = BootModeSelector(
         sch,
         x=X_MCU - 20,
@@ -654,7 +686,14 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref_prefix="R11",
     )
     boot.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
-    print(f"   R11: BOOT0 pull-down (10k)")
+    # Tie BOOT0 port (R11 high side) to the SWCLK net via a label so the
+    # pull-down is observable from PA14 at reset.  Without this label R11
+    # pin 1 floats and ERC reports pin_not_connected.
+    boot_pin = boot.port("BOOT0")
+    boot_stub = (boot_pin[0] + 5, boot_pin[1])
+    sch.add_wire(boot_pin, boot_stub)
+    sch.add_label("SWCLK", boot_stub[0], boot_stub[1])
+    print(f"   R11: BOOT0 pull-down (10k, sampled on SWCLK/PA14 at reset)")
 
     # SWD debug header
     debug = DebugHeader(
@@ -666,7 +705,22 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref="J5",
     )
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
-    print(f"   J5: 6-pin SWD debug header")
+    # Label the SWDIO/SWCLK/NRST debug pins so they tie to the MCU via net
+    # labels (DebugHeader only wires VCC/GND to the rails itself).
+    for sig in ("SWDIO", "SWCLK", "NRST"):
+        port_pos = debug.port(sig)
+        stub = (port_pos[0] + 5, port_pos[1])
+        sch.add_wire(port_pos, stub)
+        sch.add_label(sig, stub[0], stub[1])
+
+    # DebugHeader._build_ports() deduplicates GND/VCC and only wires the first
+    # occurrence in connect_to_rails().  For 6-pin SWD that leaves pin 5 (the
+    # second GND on the standard ARM SWD pinout) unconnected.  Wire it
+    # explicitly to a GND label so ERC passes.
+    j5_pin5 = debug.header.pin_position("5")
+    sch.add_wire(j5_pin5, (j5_pin5[0] + 5, j5_pin5[1]))
+    sch.add_label("GND", j5_pin5[0] + 5, j5_pin5[1])
+    print(f"   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
 
     # MCU signal labels (connect to peripherals via net labels).
     # Pin map for STM32G031F6Px TSSOP-20 (kicad symbol uses these alt-pin names):
