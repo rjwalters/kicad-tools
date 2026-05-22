@@ -193,7 +193,46 @@ tolerances:
   # The USB-C connector clearance_pad_segment cluster (8 errors)
   # is the same family #2924 tracked and rides with that
   # placement-nudge follow-up.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 17
+  #
+  # Bumped 17 -> 12 by Issue #3095.  The headline M-D improvements:
+  #   * Added F.Cu + B.Cu GND zones (was B.Cu-only) so all 29 GND pads
+  #     land on copper instead of being stranded -- dropped 7
+  #     connectivity errors to 1.
+  #   * Switched DesignRules to grid_resolution=0.05 + fine_pitch_clearance
+  #     so the off-grid USB-C connector pads (+/-0.25mm) finally route.
+  #   * Disabled the diff-pair pre-pass on USB_D+/USB_D-: the pad-cluster
+  #     geometry (0.25mm pads on 0.5mm pitch) leaves no slack for
+  #     CoupledPathfinder to widen the pair, so coupled routing
+  #     produces 19 ``diffpair_clearance_intra`` overlaps; the
+  #     single-net A* path produces just 1 residual.
+  #   * Dropped board-wide trace_clearance to 0.15mm so the per-net
+  #     router can fit escape segments between the dense MCU/USB-C
+  #     fine-pitch pads.
+  # Net result: 70/71 pads connected (was 27/71), 15/16 nets complete
+  # (was 9/16), 12 DRC errors (was 17), mfg bundle now produced.
+  #
+  # Residual 12 errors are dominated by fine-pitch escape clearances:
+  #   * 9 ``clearance_pad_segment`` -- USB-C connector + MCU pin escape
+  #     near-misses (0.077-0.112mm vs 0.127mm threshold).  These are
+  #     pad-cluster geometry constraints; further reduction requires
+  #     either (a) re-spinning the J1 footprint with wider pad spacing
+  #     or (b) the M-C-tracked router DRC-nudge pass.
+  #   * 1 ``clearance_segment_via`` -- USB_D+/USB_D- via vs trace at
+  #     J1's diff-pair landing area.
+  #   * 1 ``diffpair_clearance_intra`` -- single residual USB-C
+  #     connector-cluster overlap (the AC's "documented USB-C edge
+  #     case" allowlist exit).
+  #   * 1 ``connectivity`` (advisory, excluded from CI gate) --
+  #     USB_D+ A6 pad still stranded; CoupledPathfinder is disabled
+  #     and the single-net A* could not find a path to A6 without
+  #     ripping up USB_D-.  Tracked as a follow-up to the M-C
+  #     DRC-nudge work.
+  #
+  # Exit clause: tighten further once the M-C router-side DRC-nudge
+  # pass lands (drops the 9 fine-pitch clearance_pad_segment cluster)
+  # OR the USB-C diff-pair-aware routing handles the 0.25mm pad
+  # geometry without producing the intra-clearance overlap.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 12
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
