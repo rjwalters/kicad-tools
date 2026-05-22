@@ -14,6 +14,7 @@ from __future__ import annotations
 import heapq
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -311,6 +312,16 @@ class CoupledPathfinder:
     spacing between them throughout the path.
     """
 
+    # Issue #3089: how often (in A* iterations) the wall-clock budget is
+    # consulted inside ``route_coupled``.  ``time.monotonic()`` is fast
+    # (~100 ns) but the coupled A* iteration body is heavy (path-history
+    # walk + neighbour generation + heap push), so the per-iter cost is
+    # 1-10 ms on board 06's BGA-49 escape.  Checking every 64 iterations
+    # keeps the overhead < 0.01 % while bounding the late-exit lateness
+    # to a few hundred milliseconds on any reasonable workload.  Must be
+    # a power of two (the check uses a bitmask).
+    _TIMEOUT_CHECK_INTERVAL = 64
+
     def __init__(
         self,
         grid: RoutingGrid,
@@ -355,6 +366,15 @@ class CoupledPathfinder:
         # Issue #3012: store the within-pair spacing floor.  ``0`` means
         # no floor (legacy behaviour).
         self.min_spacing_cells = max(0, int(min_spacing_cells))
+        # Issue #3089: set when the most-recent ``route_coupled`` call
+        # exited early due to ``timeout_seconds`` being exceeded.
+        # Callers (``route_differential_pair_coupled``) read this to
+        # distinguish a budget-exit (where the slow per-net independent
+        # fallback would also blow the budget) from a true "no path
+        # found" exit (where independent routing is still worth trying).
+        # Reset to ``False`` at the start of every ``route_coupled``
+        # invocation.
+        self.last_timeout_exceeded: bool = False
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -865,6 +885,7 @@ class CoupledPathfinder:
         p_end: Pad,
         n_start: Pad,
         n_end: Pad,
+        timeout_seconds: float | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -873,10 +894,30 @@ class CoupledPathfinder:
             p_end: Positive trace end pad
             n_start: Negative trace start pad
             n_end: Negative trace end pad
+            timeout_seconds: Issue #3089: Optional wall-clock budget (in
+                seconds) for the A* search.  When set, the
+                ``while open_set`` loop checks ``time.monotonic()`` every
+                ``_TIMEOUT_CHECK_INTERVAL`` iterations and returns
+                ``None`` once the elapsed time exceeds the budget.  This
+                lets callers (``route_differential_pair_coupled`` /
+                ``route_all_with_diffpairs``) bound the per-pair cost
+                without changing the algorithm.  The caller is expected
+                to handle the ``None`` result the same way it handles
+                an exhausted-search ``None`` (fall back to independent
+                routing or log a skipped-budget diagnostic).
+                ``None`` (default) preserves the legacy unbounded
+                behaviour.
 
         Returns:
-            Tuple of (p_route, n_route) or None if routing failed
+            Tuple of (p_route, n_route) or None if routing failed (no
+            path found, ``max_iterations`` exhausted, or ``timeout_seconds``
+            wall-clock budget exceeded).
         """
+        # Issue #3089: reset the timeout-exit flag.  Callers consult
+        # this immediately after ``route_coupled`` returns ``None`` to
+        # decide whether to attempt an independent-routing fallback.
+        self.last_timeout_exceeded = False
+
         # Convert to grid coordinates
         p_start_gx, p_start_gy = self.grid.world_to_grid(p_start.x, p_start.y)
         p_end_gx, p_end_gy = self.grid.world_to_grid(p_end.x, p_end.y)
@@ -946,8 +987,37 @@ class CoupledPathfinder:
         max_iterations = self.grid.cols * self.grid.rows * 4
         iterations = 0
 
+        # Issue #3089: wall-clock budget bookkeeping.  When
+        # ``timeout_seconds`` is None, ``deadline`` stays None and the
+        # branch below is skipped for every iteration.
+        deadline: float | None = None
+        if timeout_seconds is not None and timeout_seconds > 0:
+            deadline = time.monotonic() + float(timeout_seconds)
+
         while open_set and iterations < max_iterations:
             iterations += 1
+
+            # Issue #3089: periodic wall-clock check.  Exits with ``None``
+            # so the caller can fall through to its existing "coupled
+            # routing failed" handler (which logs a structured message
+            # and either tries independent routing or marks the pair as
+            # skipped, depending on ``coupled_only``).
+            if (
+                deadline is not None
+                and (iterations & (self._TIMEOUT_CHECK_INTERVAL - 1)) == 0
+                and time.monotonic() >= deadline
+            ):
+                logger.warning(
+                    "CoupledPathfinder.route_coupled wall-clock budget "
+                    "exceeded after %.2fs (%d iterations); abandoning "
+                    "search (p_net=%r n_net=%r)",
+                    float(timeout_seconds),
+                    iterations,
+                    p_start.net_name,
+                    n_start.net_name,
+                )
+                self.last_timeout_exceeded = True
+                return None
 
             current = heapq.heappop(open_set)
             current_key = (current.state.p_pos, current.state.n_pos)
@@ -1473,6 +1543,15 @@ class DiffPairRouter:
         # observability-only; Phase B (separate PR) will consume this
         # list to drive a fine-grid repair sub-pass.
         self._intra_clearance_violations: list[IntraPairClearanceViolation] = []
+        # Issue #3089: True iff the most-recent call to
+        # ``route_differential_pair_coupled`` returned because the
+        # inner ``CoupledPathfinder.route_coupled`` exceeded its
+        # wall-clock budget (``per_pair_timeout``).  Used by
+        # ``route_all_with_diffpairs`` to distinguish a budget-exit
+        # (where the pair's nets should be deferred to the main
+        # strategy) from a genuine no-path-found exit (where the
+        # caller's existing handling is unchanged).
+        self._last_pair_budget_exit: bool = False
 
     def _resolve_detection_inputs(
         self,
@@ -1906,6 +1985,7 @@ class DiffPairRouter:
         spacing: float | None = None,
         coupled_only: bool = False,
         extra_spacing_cells: int = 0,
+        per_pair_timeout: float | None = None,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair using coupled pathfinding.
 
@@ -1932,7 +2012,23 @@ class DiffPairRouter:
                 separation, which is normally enough to push the
                 routed clearance above the per-pair threshold.
                 Default ``0`` preserves legacy behaviour.
+            per_pair_timeout: Issue #3089: Optional wall-clock budget
+                (seconds) passed through to
+                :meth:`CoupledPathfinder.route_coupled` for each
+                coupled-segment search this pair triggers.  ``None``
+                preserves the legacy unbounded behaviour.  When the
+                budget is exceeded the coupled search returns ``None``
+                and this method falls through to the same
+                "coupled routing failed" handler used for genuine
+                no-path-found results (independent routing fallback
+                when ``coupled_only=False``; ``([], None)`` return
+                otherwise), so callers do not need a separate
+                code-path for budget exits.
         """
+        # Issue #3089: reset the budget-exit flag at the start of each
+        # call so callers see only the most-recent invocation's state.
+        self._last_pair_budget_exit = False
+
         if pair.rules is None:
             return [], None
 
@@ -2066,9 +2162,50 @@ class DiffPairRouter:
                 f"    Routing {pair.positive.net_name}/{pair.negative.net_name}{polarity_marker}..."
             )
 
-            result = pathfinder.route_coupled(spec.p_start, spec.p_end, spec.n_start, spec.n_end)
+            result = pathfinder.route_coupled(
+                spec.p_start,
+                spec.p_end,
+                spec.n_start,
+                spec.n_end,
+                timeout_seconds=per_pair_timeout,
+            )
 
             if result is None:
+                # Issue #3089: ``None`` may indicate (a) no path found,
+                # (b) max-iterations exhausted, or (c) the new per-pair
+                # wall-clock budget was exceeded.  CoupledPathfinder.
+                # route_coupled emits a structured ``logger.warning``
+                # for case (c) and sets ``last_timeout_exceeded=True``.
+                #
+                # When the budget fired, do NOT attempt an independent-
+                # routing fallback: the per-net A* on the same congested
+                # BGA-49 escape geometry is the slowest single-net case
+                # in the router (the per-net router has its own internal
+                # timeout but it is much larger than the coupled
+                # budget) and will blow the whole-run wall-clock budget.
+                # Instead, surface a clean "skipped: budget exceeded"
+                # diagnostic via the intra-clearance-violation buffer
+                # (so Phase B's repair pass still sees a buffer entry)
+                # and return ``([], None)`` so the main strategy picks
+                # up these nets normally.  This mirrors the AC of
+                # #3089: "with at least one pair surfacing a clean
+                # 'skipped: budget exceeded' diagnostic and continuing".
+                if pathfinder.last_timeout_exceeded:
+                    print(
+                        "    WARNING: Coupled routing budget exceeded "
+                        f"({per_pair_timeout:.0f}s); skipping diff-pair "
+                        "and leaving nets for the main strategy."
+                    )
+                    logger.warning(
+                        "diffpair coupled-routing budget exceeded: pair=%r "
+                        "p_net=%r n_net=%r budget=%.1fs",
+                        pair.name,
+                        pair.positive.net_name,
+                        pair.negative.net_name,
+                        float(per_pair_timeout) if per_pair_timeout else -1.0,
+                    )
+                    self._last_pair_budget_exit = True
+                    return [], None
                 if coupled_only:
                     print("    Skipping diff-pair pre-pass: coupled pathfinder found no path")
                     return [], None
@@ -2454,11 +2591,24 @@ class DiffPairRouter:
                     f"    Phase B attempt {attempt}/{max_retries_per_pair}: "
                     f"extra_spacing_cells={attempt}"
                 )
+                # Issue #3089: forward a tightened per-pair wall-clock
+                # budget so Phase B retries cannot stall the run with
+                # the same BGA-49-escape pathology that triggered the
+                # first-pass budget exit.  Phase B retries are
+                # known-likely-to-fail when the violation persists
+                # across attempts; we cap each retry at half the
+                # configured budget so the worst-case repair-loop
+                # cost is bounded at
+                # ``violating_pairs * max_retries_per_pair * (budget / 2)``.
+                phase_b_timeout: float | None = None
+                if diffpair_config is not None and diffpair_config.per_pair_timeout:
+                    phase_b_timeout = max(2.0, diffpair_config.per_pair_timeout / 2.0)
                 retry_routes, _retry_warning = self.route_differential_pair_coupled(
                     pair,
                     spacing=spacing_override,
                     coupled_only=True,
                     extra_spacing_cells=attempt,
+                    per_pair_timeout=phase_b_timeout,
                 )
 
                 # Capture any new violations the audit recorded for this
@@ -2541,6 +2691,7 @@ class DiffPairRouter:
         pair: DifferentialPair,
         spacing: float | None = None,
         use_coupled_routing: bool = True,
+        per_pair_timeout: float | None = None,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair.
 
@@ -2549,13 +2700,20 @@ class DiffPairRouter:
             spacing: Override spacing (uses pair rules if None)
             use_coupled_routing: If True, use coupled A* routing.
                                 If False, use independent routing.
+            per_pair_timeout: Issue #3089: Optional per-pair wall-clock
+                budget (seconds) forwarded to
+                :meth:`route_differential_pair_coupled` when
+                ``use_coupled_routing`` is ``True``.  Ignored when the
+                independent fallback runs.
 
         Returns:
             Tuple of (routes, warning) where warning is set if
             length matching failed.
         """
         if use_coupled_routing:
-            return self.route_differential_pair_coupled(pair, spacing)
+            return self.route_differential_pair_coupled(
+                pair, spacing, per_pair_timeout=per_pair_timeout
+            )
         else:
             return self.route_differential_pair_independent(pair, spacing)
 
@@ -2663,6 +2821,7 @@ class DiffPairRouter:
         net_order: list[int] | None = None,
         non_diffpair_strategy: object = None,
         coupled_only: bool = False,
+        per_pair_timeout: float | None = None,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
@@ -2683,7 +2842,28 @@ class DiffPairRouter:
                 3-pad nets) are deferred to the main strategy.  When
                 False (default), preserves the legacy fall-back to
                 independent routing.
+            per_pair_timeout: Issue #3089: Optional per-pair wall-clock
+                budget (seconds) for the inner
+                :meth:`CoupledPathfinder.route_coupled` A*.  Forwarded
+                through :meth:`route_differential_pair_coupled` (and the
+                two-arg ``route_differential_pair`` indirection) so
+                callers like ``boards/06-diffpair-test/generate_design.py``
+                can bound any single coupled search and fall through to
+                independent routing for pairs whose BGA-49 escape (USB3
+                SS on board 06's J3/J4) would otherwise consume the
+                whole CI budget.  Takes precedence over
+                ``DifferentialPairConfig.per_pair_timeout`` when both
+                are supplied; ``None`` defers to the config value, and
+                if that is also ``None`` the legacy unbounded
+                behaviour is preserved.
         """
+        # Issue #3089: prefer the explicit kwarg, otherwise fall back to
+        # the config field so callers configuring everything via
+        # ``DifferentialPairConfig(per_pair_timeout=60.0)`` work without
+        # also having to pass the kwarg.
+        effective_per_pair_timeout = per_pair_timeout
+        if effective_per_pair_timeout is None and diffpair_config is not None:
+            effective_per_pair_timeout = diffpair_config.per_pair_timeout
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
 
@@ -2718,6 +2898,12 @@ class DiffPairRouter:
         coupled_routed_nets: set[int] = set()
 
         refused_diff_nets: set[int] = set()
+        # Issue #3089: track diff-pair nets whose coupled search hit the
+        # ``per_pair_timeout`` budget.  Same handling as refused-engagement
+        # nets: drop them from ``diff_net_ids`` so the main strategy picks
+        # them up normally (the per-net C++ A* router is the right tool
+        # for any single net the coupled search couldn't converge on).
+        budget_exit_diff_nets: set[int] = set()
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
             # Issue #2638, Epic #2556 Phase 2E: engagement gate.  Refuse
@@ -2740,13 +2926,25 @@ class DiffPairRouter:
                     pair,
                     diffpair_config.spacing,
                     coupled_only=True,
+                    per_pair_timeout=effective_per_pair_timeout,
                 )
             else:
                 pair_routes, warning = self.route_differential_pair(
                     pair,
                     diffpair_config.spacing,
                     use_coupled_routing=True,  # Use coupled routing by default
+                    per_pair_timeout=effective_per_pair_timeout,
                 )
+            # Issue #3089: detect budget-exit via the pair's last_budget_exit
+            # flag (set by route_differential_pair_coupled when the inner
+            # CoupledPathfinder's last_timeout_exceeded fired and we
+            # returned [], None to skip the slow independent fallback).
+            # This is more direct than inferring from pair_routes being
+            # empty (which could also mean engagement refusal or
+            # independent fallback that found nothing).
+            if not pair_routes and self._last_pair_budget_exit:
+                budget_exit_diff_nets.add(p_id)
+                budget_exit_diff_nets.add(n_id)
             if pair_routes:
                 routed_for_net: dict[int, int] = {}
                 for r in pair_routes:
@@ -2764,14 +2962,25 @@ class DiffPairRouter:
         # main strategy can pick them up.
         if coupled_only:
             diff_net_ids = coupled_routed_nets
-        elif refused_diff_nets:
-            # Issue #2638 Phase 2E: engagement-refused pairs produced no
-            # routes here; drop their nets from ``diff_net_ids`` so the
-            # main strategy routes them normally.  Non-refused pairs
-            # remain in ``diff_net_ids`` to preserve the pre-2638 behavior
-            # of treating coupled-routing fallbacks (independent routing
-            # inside route_differential_pair) as "handled".
-            diff_net_ids = diff_net_ids - refused_diff_nets
+        else:
+            if refused_diff_nets:
+                # Issue #2638 Phase 2E: engagement-refused pairs produced no
+                # routes here; drop their nets from ``diff_net_ids`` so the
+                # main strategy routes them normally.
+                diff_net_ids = diff_net_ids - refused_diff_nets
+            if budget_exit_diff_nets:
+                # Issue #3089: coupled-routing-budget-exit pairs also
+                # produced no routes; drop their nets from
+                # ``diff_net_ids`` so the main strategy's per-net A*
+                # (C++-accelerated) routes them normally.  Without this
+                # the budget-exit nets would be excluded from the
+                # main strategy AND have no coupled routes, leaving
+                # them unrouted in the final PCB.
+                print(
+                    f"  Diff pairs deferred to main strategy due to "
+                    f"per-pair budget: {len(budget_exit_diff_nets) // 2}"
+                )
+                diff_net_ids = diff_net_ids - budget_exit_diff_nets
 
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:

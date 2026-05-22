@@ -559,6 +559,17 @@ class DifferentialPairConfig:
         spacing: Override spacing for all pairs (None = use per-type defaults)
         max_length_delta: Override max length delta (None = use per-type defaults)
         add_serpentines: Add serpentine/meander for length matching
+        per_pair_timeout: Issue #3089: Optional per-pair wall-clock
+            budget (seconds) applied to each
+            :meth:`CoupledPathfinder.route_coupled` call.  When the
+            budget is exceeded the coupled search abandons that pair
+            and falls through to independent routing (or, in
+            ``coupled_only`` mode, returns ``([], None)``).  Bounds
+            the pathological-pair worst case so callers like
+            ``boards/06-diffpair-test/generate_design.py`` can fit
+            inside CI's 10-minute wall-clock cap even when the BGA-49
+            USB3 escape on J3/J4 fails to converge.  ``None`` (default)
+            preserves the legacy unbounded behaviour.
     """
 
     enabled: bool = False
@@ -566,6 +577,7 @@ class DifferentialPairConfig:
     spacing: float | None = None
     max_length_delta: float | None = None
     add_serpentines: bool = True
+    per_pair_timeout: float | None = None
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""

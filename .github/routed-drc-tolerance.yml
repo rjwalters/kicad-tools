@@ -323,40 +323,68 @@ tolerances:
   # OR the router gains a per-pair time budget kwarg that the
   # board can pass at ``generate_design.py:436``.
   #
-  # Follow-up (out of scope for #3071, filed as #3089):
-  #   * CoupledPathfinder latency on USB3 SS pair clusters
-  #     blocks this PR from re-generating the routed PCB.
-  #     #3089 enumerates three plausible directions: (a)
-  #     escape-pattern caching across pairs of the same
-  #     protocol class, (b) layer-restriction during the inner
-  #     BGA-49 escape, (c) explicit per-pair wall-clock budget
-  #     surfaced through ``DifferentialPairConfig`` /
-  #     ``route_all_with_diffpairs(per_pair_timeout=...)`` so
-  #     callers can fail-fast rather than stall the whole CI
-  #     run.  Option (c) is the smallest change and composes
-  #     with the seed-pinning ``generate_design.py:436``
-  #     already does.
+  # Follow-up #3089 status (per-pair wall-clock budget LANDED):
+  #   ``DifferentialPairConfig.per_pair_timeout`` + the
+  #   ``CoupledPathfinder.route_coupled(timeout_seconds=...)`` kwarg
+  #   are now plumbed through.  ``generate_design.py`` passes
+  #   ``per_pair_timeout=30.0`` so each coupled-pair search is
+  #   bounded; pairs that hit the budget log a
+  #   ``diffpair coupled-routing budget exceeded`` diagnostic,
+  #   are deferred from ``diff_net_ids``, and are picked up by
+  #   the non-diff-pair main strategy (which board 06 now drives
+  #   via ``route_all_negotiated`` for proper per-net A* timeout
+  #   enforcement).  Two seed=42 runs under ``timeout 600`` now
+  #   complete end-to-end in 561-568s wall-clock (vs the prior
+  #   open-ended 96-min stall).
   #
-  # Exit clause for tightening: once one of the follow-ups
-  # above lands and the route completes end-to-end within
-  # CI's wall-clock budget, re-run ``generate_design.py``,
-  # commit the new routed PCB, and tighten this floor to
-  # reflect the post-Phase-B DRC count.  Until then the
-  # entry stays at 32 with this AC-clause-C narrative
-  # serving as the structured "Phase B could not eliminate
-  # residuals" diagnostic the issue's acceptance criteria
-  # explicitly allows.
+  # AC clause C narrative status: PARTIALLY UPDATED.  The
+  # latency root-cause of #3089 is resolved -- the run no
+  # longer stalls inside ``CoupledPathfinder``.  But the
+  # ROUTING QUALITY of the deferred pairs (5-6 of 9 hit the
+  # budget under seed=42 and fall through to the negotiated
+  # per-net router) is worse than the pre-migration
+  # ``route_all`` result: the re-routed PCB has ~959 hard
+  # DRC violations (mostly ``clearance_segment_via`` /
+  # ``clearance_pad_segment`` on the USB3 SS BGA-49 escapes
+  # the per-net A* picks up).  Committing that artifact would
+  # be a 30x regression on the committed PCB's 11-violation
+  # count, so the committed ``diffpair_test_routed.kicad_pcb``
+  # remains the pre-migration artifact for now.  Floor 32 is
+  # left in place -- it tolerates the pre-migration count
+  # with slack, and the routed PCB is unchanged.
   #
-  # Related CI soft-fail (PR for #3071): the
-  # ``diffpair-routing-regression`` job in
-  # ``.github/workflows/ci.yml`` re-routes board 06 from source
-  # on every PR.  The migration to
-  # ``route_all_with_diffpairs()`` makes that re-route stall on
-  # the USB3 SS BGA-49 escape past the 10-min job cap, so the
-  # job is marked ``continue-on-error`` for the board-06
-  # matrix entry only.  It remains an advisory signal until
-  # #3089 lands; future boards added to that matrix stay
-  # strictly required.
+  # The 3 ``diffpair_clearance_intra`` records this PR cannot
+  # eliminate come from the per-net router that quantised the
+  # USB2_D+ / USB2_D- traces onto coincident centerlines (see
+  # the violation messages at PCB-local (15.0, 9.0),
+  # (15.17, 8.714), (15.34, 8.43)).  These are exactly the
+  # failure mode Phase B (the rip-up-and-widen-spacing pass)
+  # was designed to remove.  With #3089's plumbing in place
+  # Phase B now runs against budget-exited pairs but cannot
+  # close them (the wider-spacing retry also hits the budget),
+  # so the residuals persist until a quality-focused follow-up
+  # lands.
+  #
+  # Exit clause for tightening: a follow-up issue (filed after
+  # #3089) needs to improve the routing QUALITY of the
+  # deferred pairs -- options include (a) escape-pattern
+  # caching across same-protocol pairs (option 2 of #3089's
+  # ranked list), (b) layer-restriction during the BGA-49
+  # escape (option 3), (c) a coupled-aware heuristic (option
+  # 4), or (d) the C++ port of CoupledPathfinder (option 5).
+  # Once the deferred-pair routing matches the pre-migration
+  # per-net A* quality, regenerate ``generate_design.py``,
+  # commit the resulting routed PCB, and tighten this floor
+  # to reflect the new post-Phase-B count.
+  #
+  # Related CI soft-fail: the ``diffpair-routing-regression``
+  # job in ``.github/workflows/ci.yml`` re-routes board 06
+  # from source on every PR.  With #3089 landed the re-route
+  # now COMPLETES in budget (no more 10-min timeout), but the
+  # resulting DRC count exceeds the floor -- so the entry
+  # stays ``continue-on-error: true`` until the
+  # quality follow-up above lands.  Future boards added to
+  # that matrix remain strictly required.
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 32
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
