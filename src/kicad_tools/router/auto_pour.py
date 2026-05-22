@@ -455,12 +455,14 @@ def auto_pour_if_missing(
     *,
     quiet: bool = False,
     edge_clearance: float | None = None,
+    force_pour_nets: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> tuple[int, list[str]]:
     """Auto-create copper pours for power-classified nets that lack zones.
 
     Idempotent: skips nets that already have zones.  Skips boards where
     *every* net is power/ground-classified (small designs do not benefit
-    from pours, and skipping all nets removes them from routing entirely).
+    from pours, and skipping all nets removes them from routing entirely)
+    -- but see ``force_pour_nets`` below for the per-net escape hatch.
 
     Args:
         pcb_path: Path to .kicad_pcb file (modified **in place**).
@@ -468,6 +470,16 @@ def auto_pour_if_missing(
         edge_clearance: Optional edge clearance in mm.  When set, zone
             boundaries are inset from the board edge by this distance
             to avoid copper-to-edge DRC violations.
+        force_pour_nets: Optional list of net names the caller has
+            explicitly committed to as zones (e.g., user-supplied
+            ``--skip-nets`` on ``kct route``).  When the all-power-board
+            guard would otherwise suppress all zone creation, names in
+            this set still receive zones.  Other pour candidates remain
+            unzoned so the router can route them as signals.  This
+            resolves the board-01 GND-stranding case (issue #3092):
+            a 3-net board (VIN/VOUT/GND) used to fall through with zero
+            zones AND zero GND traces, leaving 2 of 3 GND pads stranded
+            in manufacturing DRC.
 
     Returns:
         Tuple of ``(zones_created, pour_net_names)`` where
@@ -509,10 +521,34 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 3. Board-level guard: skip if ALL nets are power/ground
     # ------------------------------------------------------------------
+    # Issue #3092: the all-power-board guard is too aggressive when the
+    # caller has explicitly committed specific nets to a pour (e.g., user
+    # passed ``--skip-nets GND`` on ``kct route``).  In that case the
+    # caller has guaranteed those nets must become zones -- otherwise
+    # they have no copper at all (router skipped them, no zone exists).
+    # Restrict pour creation to the forced subset and let the remaining
+    # power nets fall through to the router as signals, which is the
+    # original intent of the guard (issue #2740).
+    forced = {n for n in (force_pour_nets or ()) if n}
     if is_all_power_board:
+        forced_pour_nets = [(name, cls) for name, cls in pour_nets if name in forced]
+        if not forced_pour_nets:
+            if not quiet:
+                print(
+                    "Auto-pour: skipped (all nets are power/ground — "
+                    "routing as signals instead)"
+                )
+            return 0, []
+        # Some pour candidates are forced; restrict to those.  The
+        # remaining power/ground nets stay zone-less so the router
+        # routes them as signals (preserves the #2740 fix).
         if not quiet:
-            print("Auto-pour: skipped (all nets are power/ground — routing as signals instead)")
-        return 0, []
+            forced_names = sorted(n for n, _ in forced_pour_nets)
+            print(
+                f"Auto-pour: all-power board, honoring caller-forced pour "
+                f"net(s) {', '.join(forced_names)} (others route as signals)"
+            )
+        pour_nets = forced_pour_nets
 
     # ------------------------------------------------------------------
     # 4. Idempotency: filter out nets that already have zones
@@ -560,4 +596,121 @@ def auto_pour_if_missing(
     if not quiet and count > 0:
         print(f"Auto-pour: created {count} zone(s) for {', '.join(sorted(names))}")
 
+    # ------------------------------------------------------------------
+    # 6. Issue #3092: dual-side ground for forced pour nets on 2L boards.
+    #
+    # The single-side assignment in `_assign_layers_for_pour_nets` puts
+    # GROUND on B.Cu only for a 2-layer board.  That leaves F.Cu-only SMD
+    # ground pads stranded -- they have no copper at all (router skipped
+    # the net because it's forced-pour, and the zone is on the wrong
+    # layer).  Mirror the canonical-ground zone onto F.Cu whenever:
+    #
+    # * the caller explicitly forced this net (so the router is NOT
+    #   routing it as a signal),
+    # * the net is GROUND-class (the conservative case -- power rails
+    #   are usually narrow plane fills that should not double up),
+    # * the board is 2-layer (4L+ boards use inner planes, where the
+    #   single-side issue does not occur), and
+    # * F.Cu does not already host a zone for some other net (so the
+    #   dual-side GND will not steal copper from an existing power
+    #   plane on F.Cu).
+    #
+    # Without this, board 01 (VIN/VOUT/GND, GND forced via
+    # ``--skip-nets GND``) ends up with one B.Cu GND zone connecting
+    # only its thru-hole pads, leaving the F.Cu SMD GND pad (e.g.
+    # R2.2) stranded in connectivity DRC.
+    # ------------------------------------------------------------------
+    extra_count, extra_names = _add_dual_side_ground_for_forced(
+        pcb_path,
+        new_pour_nets,
+        forced,
+        edge_clearance=edge_clearance,
+        quiet=quiet,
+    )
+    count += extra_count
+    if extra_names:
+        names.extend(extra_names)
+
     return count, names
+
+
+def _add_dual_side_ground_for_forced(
+    pcb_path: Path,
+    new_pour_nets: list,
+    forced: set[str],
+    *,
+    edge_clearance: float | None = None,
+    quiet: bool = False,
+) -> tuple[int, list[str]]:
+    """Mirror forced GROUND-class zones onto F.Cu on a 2-layer board.
+
+    See section 6 of :func:`auto_pour_if_missing` for the rationale.
+    Returns ``(extra_zones_created, mirrored_net_names)``.
+    """
+    from kicad_tools.router.net_class import NetClass
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.zones.generator import ZoneGenerator
+
+    if not forced:
+        return 0, []
+
+    pcb = PCB.load(str(pcb_path))
+    copper_layers = [layer.name for layer in pcb.copper_layers]
+
+    # Only applies on 2-layer boards: 4L+ boards use inner planes
+    # which already cover both sides via the inner layer.
+    if len(copper_layers) != 2:
+        return 0, []
+    if "F.Cu" not in copper_layers or "B.Cu" not in copper_layers:
+        return 0, []
+
+    # Inventory zones already in the file (any net): we must not
+    # mirror onto F.Cu when some other net already owns that layer.
+    fcu_taken_by_other: set[str] = {
+        zone.net_name
+        for zone in pcb.zones
+        if zone.layer == "F.Cu" and zone.net_name
+    }
+
+    extra_zones: list[tuple[str, str, int]] = []
+    mirrored_names: list[str] = []
+    for net_name, cls in new_pour_nets:
+        if cls != NetClass.GROUND:
+            continue
+        if net_name not in forced:
+            continue
+        # If any net (including this same one) already owns F.Cu, we
+        # cannot safely add a mirror zone.  When the just-created
+        # B.Cu zone is for net_name and F.Cu has no zone for any
+        # other net, we are clear to mirror.
+        other_owners = fcu_taken_by_other - {net_name}
+        if other_owners:
+            if not quiet:
+                print(
+                    f"Auto-pour: skipping F.Cu mirror for forced GND net "
+                    f"'{net_name}' -- F.Cu already hosts zone(s) for "
+                    f"{', '.join(sorted(other_owners))}"
+                )
+            continue
+        # Already mirrored on a previous call?  Idempotent skip.
+        if net_name in fcu_taken_by_other:
+            continue
+        extra_zones.append((net_name, "F.Cu", 1))
+        mirrored_names.append(net_name)
+
+    if not extra_zones:
+        return 0, []
+
+    # Re-load the PCB for ZoneGenerator (load gives us a fresh editor).
+    gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
+    for net_name, layer, priority in extra_zones:
+        gen.add_zone(net=net_name, layer=layer, priority=priority)
+    gen.save(pcb_path)
+
+    if not quiet:
+        print(
+            f"Auto-pour: mirrored forced GND zone(s) onto F.Cu for "
+            f"{', '.join(sorted(mirrored_names))} (2-layer dual-side, "
+            f"issue #3092)"
+        )
+    return len(extra_zones), mirrored_names

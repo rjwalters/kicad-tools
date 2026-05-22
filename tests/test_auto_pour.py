@@ -126,6 +126,156 @@ class TestAutoPourIfMissing:
         text = pcb_path.read_text()
         assert "(zone" not in text
 
+    def test_all_power_board_honors_force_pour_nets(self, tmp_path: Path):
+        """Issue #3092: all-power-board guard yields to caller-forced pour nets.
+
+        Reproduces board 01 (VIN/VOUT/GND): the caller (``kct route``) passes
+        ``--skip-nets GND``, declaring GND will be poured.  Without the
+        force escape, the all-power guard suppresses every zone and GND
+        ends up with neither traces (router skipped it) nor a zone
+        (auto-pour skipped it), leaving its pads stranded in DRC.
+
+        With ``force_pour_nets=["GND"]`` on a 2-layer board we expect a
+        B.Cu GND zone PLUS a F.Cu GND mirror zone (so F.Cu-only SMD GND
+        pads aren't stranded), and no VIN/VOUT zones (so the router
+        routes those as signals).
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+            pad_nets=[
+                (1, "VIN"),
+                (1, "VIN"),
+                (2, "VOUT"),
+                (2, "VOUT"),
+                (2, "VOUT"),
+                (3, "GND"),
+                (3, "GND"),
+                (3, "GND"),
+            ],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["GND"])
+
+        # Two GND zones: B.Cu (initial) + F.Cu (mirror).  ``names`` is the
+        # combined list returned by both passes.
+        assert count == 2
+        assert names == ["GND", "GND"]
+        text = pcb_path.read_text()
+        assert text.count("(zone") == 2
+        # Both zones are on the GND net; no VIN/VOUT zones.
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("(zone"):
+                assert "VIN" not in stripped
+                assert "VOUT" not in stripped
+        # Load the PCB and inspect zone layers/net programmatically.
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_obj = PCB.load(str(pcb_path))
+        assert {z.net_name for z in pcb_obj.zones} == {"GND"}
+        assert {z.layer for z in pcb_obj.zones} == {"B.Cu", "F.Cu"}
+
+    def test_all_power_board_force_pour_unknown_net_no_effect(self, tmp_path: Path):
+        """force_pour_nets entries that aren't pour candidates are ignored.
+
+        Belt-and-braces: passing a non-existent or non-power net name
+        through ``force_pour_nets`` must not cause spurious zone creation
+        and must not break the all-power guard for actual power nets.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+            pad_nets=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(
+            pcb_path, force_pour_nets=["DOES_NOT_EXIST"]
+        )
+
+        # No matching pour candidate -> guard still trips, no zones.
+        assert count == 0
+        assert names == []
+
+    def test_dual_side_ground_skipped_when_fcu_taken(self, tmp_path: Path):
+        """Dual-side GND mirror is suppressed when F.Cu is already a power plane.
+
+        Defends against the dual-side mirror stealing F.Cu copper from a
+        legitimate power zone.  Set up: ``VCC`` already has a F.Cu zone,
+        GND is in the force list.  The mirror pass must skip GND on
+        F.Cu, leaving the user's power plane intact.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+        from kicad_tools.schema.pcb import PCB
+
+        zone_vcc_fcu = (
+            "(zone\n"
+            "    (net 2)\n"
+            '    (net_name "VCC")\n'
+            '    (layer "F.Cu")\n'
+            "    (hatch edge 0.5)\n"
+            "    (connect_pads (clearance 0.25)\n"
+            "    )\n"
+            "    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)\n"
+            "    )\n"
+            "    (polygon (pts (xy 0.5 0.5) (xy 49.5 0.5) (xy 49.5 49.5) (xy 0.5 49.5))\n"
+            "    )\n"
+            "  )"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "VCC")],
+            pad_nets=[(1, "GND"), (2, "VCC")],
+            zones=[zone_vcc_fcu],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        # Force GND -- but VCC zone occupies F.Cu, so the mirror must be skipped.
+        # NB: this is a mixed power board (not all-power: only 2 nets, both
+        # power-class), so the all-power guard does NOT trip; new zones get
+        # created for GND but NOT for VCC (which already has one).
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["GND"])
+
+        # Exactly one new zone for GND on B.Cu.  No F.Cu mirror because
+        # VCC owns F.Cu.
+        pcb_obj = PCB.load(str(pcb_path))
+        gnd_zones = [z for z in pcb_obj.zones if z.net_name == "GND"]
+        vcc_zones = [z for z in pcb_obj.zones if z.net_name == "VCC"]
+        assert len(gnd_zones) == 1
+        assert gnd_zones[0].layer == "B.Cu"
+        # VCC zone preserved on F.Cu.
+        assert len(vcc_zones) == 1
+        assert vcc_zones[0].layer == "F.Cu"
+
+    def test_force_pour_nets_no_effect_on_mixed_board(self, tmp_path: Path):
+        """When the board has signal nets, force_pour_nets is redundant.
+
+        The all-power guard does NOT trip on a board with signal nets,
+        so all pour candidates get zones whether or not the caller
+        forces any.  ``force_pour_nets`` must not change behavior in
+        the common case.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")],
+            pad_nets=[(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["GND"])
+
+        # Same result as without force_pour_nets on a mixed board.
+        assert count == 2
+        assert set(names) == {"GND", "VCC"}
+
     def test_idempotent_second_call(self, tmp_path: Path):
         """Calling twice produces the same result -- second call is a no-op."""
         from kicad_tools.router.auto_pour import auto_pour_if_missing

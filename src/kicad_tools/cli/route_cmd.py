@@ -2140,6 +2140,11 @@ def route_with_layer_escalation(
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
     # first so the user's INPUT is left untouched (issue #2548).
+    # Issue #3092: forward the user-supplied skip_nets as force_pour_nets
+    # so an all-power board (e.g. board 01 VIN/VOUT/GND) still emits a
+    # zone for any net the user explicitly committed to pouring -- without
+    # this, the all-power guard suppresses every zone and a --skip-nets
+    # GND target ends up with neither traces nor a zone.
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -2148,6 +2153,7 @@ def route_with_layer_escalation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
+            force_pour_nets=skip_nets,
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -2867,6 +2873,8 @@ def route_with_rule_relaxation(
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
     # first so the user's INPUT is left untouched (issue #2548).
+    # Issue #3092: forward user-supplied skip_nets as force_pour_nets (see
+    # the layer-escalation site above for the rationale).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -2875,6 +2883,7 @@ def route_with_rule_relaxation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
+            force_pour_nets=skip_nets,
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -3932,6 +3941,8 @@ def route_with_combined_escalation(
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
     # first so the user's INPUT is left untouched (issue #2548).
+    # Issue #3092: forward user-supplied skip_nets as force_pour_nets (see
+    # the layer-escalation site above for the rationale).
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -3940,6 +3951,7 @@ def route_with_combined_escalation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
+            force_pour_nets=skip_nets,
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -5765,6 +5777,9 @@ def main(argv: list[str] | None = None) -> int:
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
     # first so the user's INPUT is left untouched (issue #2548).
+    # Issue #3092: forward user-supplied skip_nets as force_pour_nets so
+    # an all-power board (e.g. board 01 VIN/VOUT/GND) still emits a zone
+    # for any net the user explicitly committed to pouring.
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -5773,6 +5788,7 @@ def main(argv: list[str] | None = None) -> int:
             pcb_path,
             quiet=args.quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
+            force_pour_nets=skip_nets,
         )
 
     # Auto-classify pour nets and extend skip_nets

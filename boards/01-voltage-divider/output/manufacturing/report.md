@@ -2,7 +2,7 @@
 title: "voltage_divider_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-18 | jlcpcb"
+date: "Rev 1 | 2026-05-22 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 4 (0 SMD, 0 THT, 4 other) |
 | Nets | 3 |
-| Traces | 29 segments |
-| Vias | 6 |
+| Traces | 21 segments |
+| Vias | 3 |
 | Board Size | 30.0 x 25.0 mm |
 
 ## Design Overview
@@ -65,29 +65,22 @@ Simple 2-resistor voltage divider
 
 | Metric | Count |
 |--------|-------|
-| Errors | 1 |
+| Errors | 0 |
 | Warnings | 0 |
-| Blocking | 1 |
+| Blocking | 0 |
 
-**Status**: FAIL
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| via_in_pad | 1 |
+**Status**: PASS
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: READY
 
 ### Action Items
 
-- **[CRITICAL]** Fix 1 blocking DRC violations (via_in_pad (1))
 - **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
-- **[OPTIONAL]** Add zone for GND on appropriate copper layer
 
 
 \newpage
@@ -96,17 +89,14 @@ Simple 2-resistor voltage divider
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 66.7% (2/3) |
-| Overall Completion | 66.7% |
-| Complete Nets | 2 / 3 |
-| Incomplete Nets | 1 |
-| Unconnected Pads | 2 |
+| Signal Net Completion | 100.0% (2/2) |
+| Overall Completion | 100.0% |
+| Complete Nets | 3 / 3 |
+| Zone-Connected Nets | 1 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
-### Unrouted Signal Nets
-
-- GND
-
-### Unrouted Signal Nets
+### Zone-Connected Nets
 
 - GND
 
