@@ -2348,7 +2348,10 @@ def _add_route_parser(subparsers) -> None:
             "the routing grid into regions and routes non-adjacent regions "
             "in parallel during each negotiated-congestion iteration. "
             "Expected 2-3x speedup on dense multi-net boards. Default off "
-            "preserves single-threaded routing (deterministic with --seed)."
+            "preserves single-threaded routing (deterministic with --seed). "
+            "Auto-disabled on small / dense workloads where nets-per-region "
+            "< 16 (Issue #3100); recommended for >= 64-net boards with a "
+            "2x2 partition."
         ),
     )
     route_parser.add_argument(

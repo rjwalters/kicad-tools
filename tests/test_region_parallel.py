@@ -357,6 +357,10 @@ class TestRouteAllNegotiatedWithRegionParallel:
             partition_rows=2,
             partition_cols=2,
             max_parallel_workers=4,
+            # Issue #3100: the 4-net fixture is below the default auto-gate
+            # threshold (16 nets/region).  Disable the gate so the parallel
+            # path is exercised end-to-end.
+            region_parallel_min_nets_per_region=0,
         )
 
         # Should route all 4 nets
@@ -391,9 +395,14 @@ class TestRouteAllNegotiatedWithRegionParallel:
         # Route with sequential mode
         routes_seq = router1.route_all_negotiated(max_iterations=3, region_parallel=False)
 
-        # Route with region parallel mode
+        # Route with region parallel mode (gate disabled — 2 nets / 4 regions is
+        # well below the default threshold; see Issue #3100).
         routes_par = router2.route_all_negotiated(
-            max_iterations=3, region_parallel=True, partition_rows=2, partition_cols=2
+            max_iterations=3,
+            region_parallel=True,
+            partition_rows=2,
+            partition_cols=2,
+            region_parallel_min_nets_per_region=0,
         )
 
         # Both should route all nets
@@ -407,9 +416,141 @@ class TestRouteAllNegotiatedWithRegionParallel:
         # Initially thread safety should be off
         assert not router_with_nets.grid.thread_safe
 
-        # After routing with region_parallel, grid should have thread safety
+        # After routing with region_parallel, grid should have thread safety.
+        # Disable the Issue #3100 auto-gate so the parallel path actually runs
+        # on the 4-net fixture.
         router_with_nets.route_all_negotiated(
-            max_iterations=1, region_parallel=True, partition_rows=2, partition_cols=2
+            max_iterations=1,
+            region_parallel=True,
+            partition_rows=2,
+            partition_cols=2,
+            region_parallel_min_nets_per_region=0,
         )
 
         assert router_with_nets.grid.thread_safe
+
+
+class TestRegionParallelAutoGate:
+    """Tests for the Issue #3100 nets-per-region auto-gate.
+
+    PR #3068 wired ``--region-parallel`` end-to-end, but the re-benchmark on
+    #3045 showed board 07 (31 nets, 2x2 partition -- 7.75 nets/region) ran
+    +55% slower with the flag enabled than the serial baseline.  The gate
+    auto-disables region-based parallelism on workloads where the nets per
+    region falls below a configurable threshold (default 16).
+    """
+
+    @pytest.fixture
+    def small_workload_router(self):
+        """4 nets in 4 quadrants -- well below the 16 nets/region threshold."""
+        router = Autorouter(width=100.0, height=100.0)
+        for idx, (qx, qy) in enumerate(
+            [(10.0, 10.0), (60.0, 10.0), (10.0, 60.0), (60.0, 60.0)], start=1
+        ):
+            router.add_component(
+                f"R{idx}",
+                [
+                    {"number": "1", "x": qx, "y": qy, "width": 1.0, "height": 1.0, "net": idx},
+                    {
+                        "number": "2",
+                        "x": qx + 15.0,
+                        "y": qy + 15.0,
+                        "width": 1.0,
+                        "height": 1.0,
+                        "net": idx,
+                    },
+                ],
+            )
+        return router
+
+    def test_gate_disables_region_parallel_on_small_workload(
+        self, small_workload_router, capsys
+    ):
+        """Default threshold disables region_parallel when 4 nets / 4 regions."""
+        small_workload_router.route_all_negotiated(
+            max_iterations=1,
+            region_parallel=True,
+            partition_rows=2,
+            partition_cols=2,
+            # Default region_parallel_min_nets_per_region=16 -> gate trips
+            # because 4/4 = 1.0 < 16.
+        )
+
+        captured = capsys.readouterr()
+        # The gate must announce itself so users / log scrapers see why their
+        # opt-in had no effect.
+        assert "Region parallel: auto-disabled" in captured.out
+        assert "Issue #3100" in captured.out
+        # Thread-safe grid conversion is only done inside the
+        # ``if region_parallel:`` branch, so the gate firing implies the
+        # parallel path was not taken.
+        assert not small_workload_router.grid.thread_safe
+
+    def test_gate_bypass_with_zero_threshold(self, small_workload_router, capsys):
+        """region_parallel_min_nets_per_region=0 disables the gate entirely."""
+        small_workload_router.route_all_negotiated(
+            max_iterations=1,
+            region_parallel=True,
+            partition_rows=2,
+            partition_cols=2,
+            region_parallel_min_nets_per_region=0,
+        )
+
+        captured = capsys.readouterr()
+        assert "Region parallel: auto-disabled" not in captured.out
+        # Gate bypass should let the parallel path run, which forces the
+        # thread-safe grid conversion.
+        assert small_workload_router.grid.thread_safe
+
+    def test_gate_allows_region_parallel_above_threshold(
+        self, small_workload_router, capsys
+    ):
+        """A low threshold lets a small workload through unchanged."""
+        # 4 nets / 4 regions = 1.0 nets/region.  Threshold = 1 means
+        # nets_per_region (1.0) is NOT < threshold (1), so gate does not fire.
+        small_workload_router.route_all_negotiated(
+            max_iterations=1,
+            region_parallel=True,
+            partition_rows=2,
+            partition_cols=2,
+            region_parallel_min_nets_per_region=1,
+        )
+
+        captured = capsys.readouterr()
+        assert "Region parallel: auto-disabled" not in captured.out
+        assert small_workload_router.grid.thread_safe
+
+    def test_gate_passthrough_when_region_parallel_false(
+        self, small_workload_router, capsys
+    ):
+        """Gate must not fire when region_parallel is not requested."""
+        small_workload_router.route_all_negotiated(
+            max_iterations=1,
+            region_parallel=False,
+            partition_rows=2,
+            partition_cols=2,
+        )
+
+        captured = capsys.readouterr()
+        # No gate message and no auto-disable noise when the user did not
+        # opt in.
+        assert "auto-disabled" not in captured.out
+        assert "Region parallel:" not in captured.out
+
+    def test_default_threshold_matches_board_07_finding(self):
+        """The default 16 nets/region threshold must trip board-07-shaped workloads.
+
+        Board 07 has 31 nets and a 2x2 partition (7.75 nets/region).  The
+        threshold must be high enough to catch this case but the documented
+        default is also a public-API contract -- spell it out in a test so a
+        future refactor cannot silently lower it back below board-07 density.
+        """
+        import inspect
+
+        sig = inspect.signature(Autorouter.route_all_negotiated)
+        threshold = sig.parameters["region_parallel_min_nets_per_region"].default
+        assert threshold >= 8, (
+            "Default region_parallel_min_nets_per_region must be >= 8 to trip "
+            "the board-07 case (31 nets / 4 regions = 7.75 nets/region).  "
+            "See Issue #3100."
+        )

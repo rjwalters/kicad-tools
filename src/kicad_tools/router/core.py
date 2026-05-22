@@ -5880,6 +5880,7 @@ class Autorouter:
         partition_rows: int = 2,
         partition_cols: int = 2,
         max_parallel_workers: int = 4,
+        region_parallel_min_nets_per_region: int = 16,
         batch_routing: bool = False,
         hierarchical: bool = False,
         neighborhood_stall_threshold: int = 2,
@@ -5928,6 +5929,16 @@ class Autorouter:
             partition_rows: Number of region rows for partitioning (default 2)
             partition_cols: Number of region columns for partitioning (default 2)
             max_parallel_workers: Maximum parallel workers per region group (default 4)
+            region_parallel_min_nets_per_region: Auto-gate threshold for
+                ``region_parallel`` (Issue #3100).  When ``region_parallel=True``
+                but the workload has fewer nets per region than this threshold,
+                region-based parallelism is auto-disabled with a warning because
+                the partitioning + worker overhead exceeds the per-region A*
+                savings (empirically +55% wall-clock on board 07: 31 nets / 4
+                regions = 7.75 nets/region).  Set to ``0`` to disable the gate
+                (advanced users / regression tests).  Default 16, chosen so the
+                board-07 workload trips the gate but boards 04/05 (60+ nets) do
+                not.
             batch_routing: If True, use GPU-accelerated batch routing (Issue #1092).
                 Routes multiple independent nets simultaneously using GPU compute.
                 Best results with 4+ independent nets and Metal/CUDA GPU.
@@ -6172,6 +6183,39 @@ class Autorouter:
         net_order = self._apply_byte_lane_inner_priority(net_order)
 
         total_nets = len(net_order)
+
+        # Issue #3100: Auto-gate ``region_parallel`` on small / dense workloads.
+        # PR #3068 wired ``--region-parallel`` through ``route_all_negotiated``
+        # but the docstring's "2-3x speedup" only materializes when each region
+        # has enough independent nets to amortize the worker startup, grid
+        # thread-safety conversion, and inter-iteration handoff costs.  The
+        # board-07 re-benchmark on #3045 showed +55% wall-clock with 31 nets
+        # split across a 2x2 partition (~7.75 nets/region) because the
+        # negotiated rip-up loop touches ~half the board per iteration
+        # regardless of partitioning, so per-iteration overhead dominates.
+        #
+        # When ``region_parallel_min_nets_per_region == 0`` the gate is fully
+        # disabled (used by ``tests/test_region_parallel.py`` which exercises
+        # the parallel path with a 4-net fixture).
+        if (
+            region_parallel
+            and region_parallel_min_nets_per_region > 0
+            and partition_rows > 0
+            and partition_cols > 0
+        ):
+            num_regions = partition_rows * partition_cols
+            nets_per_region = total_nets / num_regions
+            if nets_per_region < region_parallel_min_nets_per_region:
+                flush_print(
+                    f"  Region parallel: auto-disabled (Issue #3100) -- "
+                    f"{total_nets} nets / {num_regions} regions = "
+                    f"{nets_per_region:.1f} nets/region < threshold "
+                    f"{region_parallel_min_nets_per_region}.  Per-iteration "
+                    f"overhead would exceed per-region A* savings on this "
+                    f"workload (board-07 case: +55% wall-clock).  Pass "
+                    f"``region_parallel_min_nets_per_region=0`` to override."
+                )
+                region_parallel = False
 
         neg_router = NegotiatedRouter(
             self.grid, self.router, self.rules, self.net_class_map,
