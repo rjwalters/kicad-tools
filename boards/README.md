@@ -83,6 +83,70 @@ kct bom output/voltage_divider.kicad_sch --format csv
 
 See individual board READMEs for board-specific details.
 
+## Routing Entry Point Conventions
+
+When writing a new board's `generate_design.py`, pick the routing entry point
+that matches the design's signal characteristics.  The recommended pattern,
+derived from the architectural review in [#3072], is:
+
+| Design has... | Recommended entry | Boards using this pattern |
+|---|---|---|
+| No differential pairs and no length-matching | `subprocess.run(["kct", "route", ...])` *or* in-process `router.route_all()` | 00, 01, 02, 04 |
+| Differential pairs (USB2/USB3/PCIe/MIPI/HDMI/etc.) | `subprocess.run(["kct", "route", ..., "--differential-pairs"])` *or* in-process `router.route_all_with_diffpairs(diffpair_config=...)` | 03, 05, 06 |
+| Match-groups (DDR, address buses) | Same as above; see `boards/07-matchgroup-test/` for the in-development pattern | 07 (work in progress) |
+
+### Why this matters
+
+`router.route_all()` (and `kct route` without `--differential-pairs`) run a
+per-net A* loop that is unaware of `DifferentialPair` metadata.  On a board
+with diff pairs, this path silently bypasses Phase A (`CoupledPathfinder`)
+and Phase B (intra-pair clearance rip-up), producing routes that violate
+the `intra_pair_clearance`, `coupled_continuity_threshold`, and
+`target_diff_impedance` constraints declared in the project.
+
+`router.route_all_with_diffpairs()` (and `kct route --differential-pairs`)
+invoke the Phase A/B pipeline explicitly.  PR #3069 (board 03) and PR #3090
+(board 06) migrated to this entry after the bypass bug was diagnosed.
+
+### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
+
+Both are supported.  The subprocess path (`subprocess.run(["kct", "route", ...])`)
+is preferred for new boards because:
+
+- It is the production routing path; in-process tests can drift from it.
+- CLI flags (`--strategy`, `--iterations`, `--differential-pairs`,
+  `--net-class-map`, `--seed`) are validated end-to-end by CI.
+- Zone-fill, post-route DRC, and routed-PCB artifact emission are handled
+  automatically (see `route_cmd._fill_zones_after_route`).
+
+The in-process path remains the right choice when a board needs to:
+
+- Inject custom logic between routing and post-processing (e.g. board 06's
+  custom diff-pair config plumbing).
+- Exercise router internals that the CLI does not yet expose (e.g. the
+  `diffpair_config` object with non-default `intra_pair_clearance` values
+  that don't survive the JSON-roundtrip the CLI uses).
+
+### Architectural decision: auto-detect was rejected
+
+[#3072] explicitly considered teaching `router.route_all()` (and the CLI's
+default path) to auto-detect diff pairs and short-circuit to the
+Phase-A/B-aware entry.  The decision was to **not** auto-detect, for two
+reasons:
+
+1. The remaining footgun is procedural (new boards forget the right entry),
+   not active --- every existing diff-pair-bearing board is already wired
+   correctly as of PR #3090 (board 06 migration).
+2. An auto-detect change would have to land on both surfaces (in-process
+   and CLI) to be complete, and the `CoupledPathfinder` latency issue
+   tracked in [#3089] makes a CLI-default flip premature.
+
+Re-promote the auto-detect work as a separate issue once [#3089] resolves
+and a regression baseline exists for board 06's escape-time behavior.
+
+[#3072]: https://github.com/rjwalters/kicad-tools/issues/3072
+[#3089]: https://github.com/rjwalters/kicad-tools/issues/3089
+
 ## Known Issues
 
 These are known limitations that may affect your experience:
