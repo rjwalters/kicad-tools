@@ -455,12 +455,14 @@ def auto_pour_if_missing(
     *,
     quiet: bool = False,
     edge_clearance: float | None = None,
+    force_pour_nets: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> tuple[int, list[str]]:
     """Auto-create copper pours for power-classified nets that lack zones.
 
     Idempotent: skips nets that already have zones.  Skips boards where
     *every* net is power/ground-classified (small designs do not benefit
-    from pours, and skipping all nets removes them from routing entirely).
+    from pours, and skipping all nets removes them from routing entirely)
+    -- but see ``force_pour_nets`` below for the per-net escape hatch.
 
     Args:
         pcb_path: Path to .kicad_pcb file (modified **in place**).
@@ -468,6 +470,16 @@ def auto_pour_if_missing(
         edge_clearance: Optional edge clearance in mm.  When set, zone
             boundaries are inset from the board edge by this distance
             to avoid copper-to-edge DRC violations.
+        force_pour_nets: Optional list of net names the caller has
+            explicitly committed to as zones (e.g., user-supplied
+            ``--skip-nets`` on ``kct route``).  When the all-power-board
+            guard would otherwise suppress all zone creation, names in
+            this set still receive zones.  Other pour candidates remain
+            unzoned so the router can route them as signals.  This
+            resolves the board-01 GND-stranding case (issue #3092):
+            a 3-net board (VIN/VOUT/GND) used to fall through with zero
+            zones AND zero GND traces, leaving 2 of 3 GND pads stranded
+            in manufacturing DRC.
 
     Returns:
         Tuple of ``(zones_created, pour_net_names)`` where
@@ -509,10 +521,34 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 3. Board-level guard: skip if ALL nets are power/ground
     # ------------------------------------------------------------------
+    # Issue #3092: the all-power-board guard is too aggressive when the
+    # caller has explicitly committed specific nets to a pour (e.g., user
+    # passed ``--skip-nets GND`` on ``kct route``).  In that case the
+    # caller has guaranteed those nets must become zones -- otherwise
+    # they have no copper at all (router skipped them, no zone exists).
+    # Restrict pour creation to the forced subset and let the remaining
+    # power nets fall through to the router as signals, which is the
+    # original intent of the guard (issue #2740).
+    forced = {n for n in (force_pour_nets or ()) if n}
     if is_all_power_board:
+        forced_pour_nets = [(name, cls) for name, cls in pour_nets if name in forced]
+        if not forced_pour_nets:
+            if not quiet:
+                print(
+                    "Auto-pour: skipped (all nets are power/ground — "
+                    "routing as signals instead)"
+                )
+            return 0, []
+        # Some pour candidates are forced; restrict to those.  The
+        # remaining power/ground nets stay zone-less so the router
+        # routes them as signals (preserves the #2740 fix).
         if not quiet:
-            print("Auto-pour: skipped (all nets are power/ground — routing as signals instead)")
-        return 0, []
+            forced_names = sorted(n for n, _ in forced_pour_nets)
+            print(
+                f"Auto-pour: all-power board, honoring caller-forced pour "
+                f"net(s) {', '.join(forced_names)} (others route as signals)"
+            )
+        pour_nets = forced_pour_nets
 
     # ------------------------------------------------------------------
     # 4. Idempotency: filter out nets that already have zones

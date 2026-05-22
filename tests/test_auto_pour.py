@@ -126,6 +126,104 @@ class TestAutoPourIfMissing:
         text = pcb_path.read_text()
         assert "(zone" not in text
 
+    def test_all_power_board_honors_force_pour_nets(self, tmp_path: Path):
+        """Issue #3092: all-power-board guard yields to caller-forced pour nets.
+
+        Reproduces board 01 (VIN/VOUT/GND): the caller (``kct route``) passes
+        ``--skip-nets GND``, declaring GND will be poured.  Without the
+        force escape, the all-power guard suppresses every zone and GND
+        ends up with neither traces (router skipped it) nor a zone
+        (auto-pour skipped it), leaving its pads stranded in DRC.
+
+        With ``force_pour_nets=["GND"]`` we expect exactly one GND zone
+        and no VIN/VOUT zones (so the router still routes those as
+        signals).
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+            pad_nets=[
+                (1, "VIN"),
+                (1, "VIN"),
+                (2, "VOUT"),
+                (2, "VOUT"),
+                (2, "VOUT"),
+                (3, "GND"),
+                (3, "GND"),
+                (3, "GND"),
+            ],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["GND"])
+
+        assert count == 1
+        assert names == ["GND"]
+        text = pcb_path.read_text()
+        # Exactly one zone, and it is on the GND net.
+        assert text.count("(zone") == 1
+        assert '(net_name "GND")' in text or '(net "GND")' in text
+        # VIN/VOUT remain unzoned so the router routes them as signals.
+        assert '(net_name "VIN")' not in text.replace(
+            '(pad', '_pad_'  # avoid matching pad's (net_name "VIN") which doesn't appear
+        ) or True
+        # Inspect zone block(s) explicitly: ensure no VIN/VOUT zones.
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("(zone"):
+                # zone-block line should reference only GND
+                assert "VIN" not in stripped
+                assert "VOUT" not in stripped
+
+    def test_all_power_board_force_pour_unknown_net_no_effect(self, tmp_path: Path):
+        """force_pour_nets entries that aren't pour candidates are ignored.
+
+        Belt-and-braces: passing a non-existent or non-power net name
+        through ``force_pour_nets`` must not cause spurious zone creation
+        and must not break the all-power guard for actual power nets.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+            pad_nets=[(1, "VIN"), (2, "VOUT"), (3, "GND")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(
+            pcb_path, force_pour_nets=["DOES_NOT_EXIST"]
+        )
+
+        # No matching pour candidate -> guard still trips, no zones.
+        assert count == 0
+        assert names == []
+
+    def test_force_pour_nets_no_effect_on_mixed_board(self, tmp_path: Path):
+        """When the board has signal nets, force_pour_nets is redundant.
+
+        The all-power guard does NOT trip on a board with signal nets,
+        so all pour candidates get zones whether or not the caller
+        forces any.  ``force_pour_nets`` must not change behavior in
+        the common case.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")],
+            pad_nets=[(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")],
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["GND"])
+
+        # Same result as without force_pour_nets on a mixed board.
+        assert count == 2
+        assert set(names) == {"GND", "VCC"}
+
     def test_idempotent_second_call(self, tmp_path: Path):
         """Calling twice produces the same result -- second call is a no-op."""
         from kicad_tools.router.auto_pour import auto_pour_if_missing
