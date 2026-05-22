@@ -373,10 +373,25 @@ jobs:
     # runners; if the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
     timeout-minutes: 10
-    # Board 06 (diffpair-test) re-routes via the migrated route_all_with_diffpairs()
-    # path which stalls on the USB3 SS BGA-49 escape past the 10-minute CI cap.
-    # Soft-fail until #3089 (CoupledPathfinder USB3 escape latency) lands;
-    # remove this line once the regression run completes in budget again.
+    # Board 06 (diffpair-test) status (post-#3089):
+    #
+    #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
+    #     through ``DifferentialPairConfig.per_pair_timeout`` (default
+    #     30.0s for board 06).  The re-route now COMPLETES in ~560s
+    #     wall-clock (vs the prior 10-min+ stall on the USB3 SS BGA-49
+    #     escape at J3/J4).  See ``boards/06-diffpair-test/generate_design.py``.
+    #   * QUALITY: 5-6 of 9 diff pairs still defer to the per-net main
+    #     strategy under seed=42 and the resulting routed PCB has ~959
+    #     hard DRC violations (vs the committed PCB's 11).  The
+    #     committed routed PCB therefore remains the pre-migration
+    #     artifact for now.  The job's DRC-count gate fails against
+    #     the 32-floor in ``.github/routed-drc-tolerance.yml`` so the
+    #     soft-fail stays.
+    #
+    # Remove this line once the quality follow-up to #3089 lands and
+    # the re-routed DRC count drops at or under the (then-tightened)
+    # floor.  See the AC-clause-C narrative in
+    # ``.github/routed-drc-tolerance.yml`` for the exit conditions.
     #
     # Scoped via a matrix expression so any future board added to the matrix
     # (e.g. board 03 per the comment below) remains a STRICT required check;

@@ -325,7 +325,13 @@ def test_repair_pass_resolves_violation_when_retry_succeeds():
     call_count = {"value": 0}
     original_method = dpr.route_differential_pair_coupled
 
-    def _succeeding_route(pair, spacing=None, coupled_only=False, extra_spacing_cells=0):
+    def _succeeding_route(
+        pair,
+        spacing=None,
+        coupled_only=False,
+        extra_spacing_cells=0,
+        per_pair_timeout=None,
+    ):
         # Simulate a clean retry: lay clean routes (wider spacing) and
         # add them to router.routes.  Do NOT append to
         # ``_intra_clearance_violations``.

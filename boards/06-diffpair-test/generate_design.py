@@ -422,23 +422,71 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # which is what the diff-pair pre-pass and the inner per-net A*
     # loop both consult.
     #
-    # Note: ``route_all_with_diffpairs`` does not accept the
-    # ``per_net_timeout`` / ``timeout`` kwargs the prior ``route_all``
-    # call passed.  The diff-pair pre-pass uses its own internal
-    # budgeting (``DifferentialPairConfig`` controls
-    # ``max_retries_per_pair``); the per-net follow-up reuses
-    # ``Autorouter.route_all``'s configured defaults.  Two seed=42
-    # attempts (96 min and 25 min wall-clock) stalled inside
-    # ``CoupledPathfinder`` on the USB3_RX2+/USB3_RX2- BGA-49 escape
-    # at J3 / J4 -- 6 of 9 pairs route in the first ~5 min, then the
-    # 7th pair consumes the entire remaining budget without
-    # converging.  ``.github/routed-drc-tolerance.yml`` documents
-    # the AC-clause-C exit for issue #3071, and #3089 tracks the
-    # underlying latency.  When #3089 lands, regenerate this PCB
-    # and tighten the YAML floor in the same PR.
+    # Issue #3089: per-pair wall-clock budget for the inner
+    # ``CoupledPathfinder.route_coupled`` A*.  Two prior seed=42
+    # attempts (96 min and 25 min wall-clock) stalled inside the
+    # coupled pathfinder on the USB3_RX2+/USB3_RX2- BGA-49 escape
+    # at J3 / J4 -- 6 of 9 pairs routed in the first ~5 min, then the
+    # 7th pair consumed the entire remaining budget without
+    # converging.  With the per-pair budget below, each pair gets at
+    # most ``per_pair_timeout`` seconds of coupled A*; pairs that
+    # exceed the budget fall through to the independent per-net
+    # router (which the per-net A* C++ backend accelerates 10-100x).
+    # The prior open-ended runs reported 6 of 9 pairs converging
+    # in coupled mode in the first ~5 min of wall-clock; the failing
+    # pairs (USB3 SS BGA-49 escapes at J3/J4 and several MIPI nets)
+    # consume the entire remaining budget without converging.  We
+    # set a tight per-pair budget so the diff-pair phase finishes
+    # quickly and the C++-backed per-net A* in the main strategy
+    # picks up the deferred pairs.  Pairs that hit the budget are
+    # surfaced via a logger.warning + ``diffpair coupled-routing
+    # budget exceeded`` diagnostic and their nets are dropped from
+    # ``diff_net_ids`` so the main strategy routes them as ordinary
+    # nets.  Empirical observation: pairs that converge coupled do
+    # so in 0.05 -- 30 s; budget exits run for the full budget then
+    # defer.  A 30s budget bounds the diff-pair phase at 9 x 30 = 270s,
+    # leaving 330s for the per-net pass + optimisation + DRC nudge
+    # under the 600s ``timeout`` AC criterion of #3089.
     random.seed(42)
-    diffpair_config = DifferentialPairConfig(enabled=True)
-    router.route_all_with_diffpairs(diffpair_config=diffpair_config)
+
+    # Issue #3089: per-pair wall-clock budget for the inner
+    # ``CoupledPathfinder.route_coupled`` A*.  Two prior seed=42
+    # attempts (96 min and 25 min wall-clock) stalled inside the
+    # coupled pathfinder on the USB3 SS BGA-49 escape at J3/J4 --
+    # 6 of 9 pairs route in the first ~5 min, then the failing
+    # pairs consume the entire remaining budget without converging.
+    # The 30s per-pair budget bounds the diff-pair phase at
+    # 9 x 30 = 270s.  Pairs that exceed the budget surface a
+    # ``diffpair coupled-routing budget exceeded`` diagnostic, are
+    # excluded from ``diff_net_ids``, and are picked up by the
+    # non-diff-pair main strategy as ordinary nets.  When all 9
+    # converge coupled (the happy path), the diff-pair phase is
+    # observed at well under the budget.
+    diffpair_config = DifferentialPairConfig(
+        enabled=True,
+        per_pair_timeout=30.0,
+    )
+
+    # Issue #3089: route the non-diff-pair tail (including any
+    # budget-exit-deferred pairs) via ``Autorouter.route_all_negotiated``
+    # so the per-net A* honours the wall-clock ``per_net_timeout``
+    # bound.  Bare ``route_all`` only treats ``per_net_timeout`` as
+    # advisory and the BGA-49-escape nets on board 06 can monopolise
+    # the run for 5+ minutes per net (see #2794).  ``route_all_negotiated``
+    # is the strategy ``route_all`` recommends for dense boards and
+    # it composes with the diff-pair pre-pass via the
+    # ``non_diffpair_strategy`` callable hook (Issue #2464).
+    def _negotiated_non_diffpair_strategy() -> list:
+        return router.route_all_negotiated(
+            per_net_timeout=30.0,
+            timeout=240.0,
+            seed=42,
+        )
+
+    router.route_all_with_diffpairs(
+        diffpair_config=diffpair_config,
+        non_diffpair_strategy=_negotiated_non_diffpair_strategy,
+    )
 
     stats_raw = router.get_statistics()
     print(
