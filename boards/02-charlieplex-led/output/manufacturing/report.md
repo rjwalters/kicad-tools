@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-18 | jlcpcb"
+date: "Rev 1 | 2026-05-22 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 14 (0 SMD, 0 THT, 14 other) |
 | Nets | 10 |
-| Traces | 245 segments |
+| Traces | 247 segments |
 | Vias | 28 |
 | Board Size | 50.0 x 55.0 mm |
 
@@ -71,27 +71,21 @@ Charlieplex LED Grid
 
 | Metric | Count |
 |--------|-------|
-| Errors | 1 |
+| Errors | 0 |
 | Warnings | 0 |
-| Blocking | 1 |
+| Blocking | 0 |
 
-**Status**: FAIL
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| via_in_pad | 1 |
+**Status**: PASS
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: READY
 
 ### Action Items
 
-- **[CRITICAL]** Fix 1 blocking DRC violations (via_in_pad (1))
 - **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
 
 

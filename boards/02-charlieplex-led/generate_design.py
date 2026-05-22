@@ -19,6 +19,7 @@ Usage:
 If no output directory is specified, files are written to ./output/
 """
 
+import math
 import subprocess
 import sys
 import uuid
@@ -618,6 +619,173 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
+# =============================================================================
+# Post-route nudge: slide same-net vias off SMD pads
+# =============================================================================
+# The negotiated router (and most A*-based routers) does not check the
+# via_in_pad rule when placing escape vias.  On manufacturer profiles that
+# do NOT support filled/plated-over via-in-pad processing (default ``jlcpcb``,
+# ``oshpark``, ``seeed``, ``flashpcb``), this can leave a via drilled inside
+# an SMD pad of the *same* net -- which the router treats as a no-op (the via
+# is already connected via the pad) but which DRC flags as a manufacturability
+# error.  See ``src/kicad_tools/validate/rules/via_in_pad.py``.
+#
+# This local post-processing pass scans the routed PCB for any via whose
+# drill circle is fully inside the bounding box of a same-net SMD pad, then
+# slides the via just outside the pad bbox (plus a small clearance) along the
+# direction the via originally took out of the pad centre.  Any same-net
+# segment endpoints that coincided with the old via position are snapped to
+# the new position so the trace chain stays electrically connected.
+#
+# Why text-level surgery rather than re-routing: the via-in-pad violation is
+# a hyperlocal artefact (a 0.3-0.4mm displacement of a single via).  Ripping
+# up and re-routing the entire net risks regressing the rest of the board for
+# no benefit; surgical movement is both safer and faster.
+
+
+def nudge_vias_off_same_net_pads(routed_path: Path) -> int:
+    """Move same-net via-in-pad escape vias just outside the pad bbox.
+
+    Returns the number of vias nudged.  Returns 0 (and prints a no-op
+    notice) when the routed PCB already passes the via_in_pad rule.
+
+    The nudge target is the nearest grid point (0.1mm grid) such that the
+    drilled circle of the via lies fully outside the pad bbox, displaced
+    in the direction the via originally took relative to the pad centre.
+    A small DRC margin (0.05mm beyond the bbox edge) is added so the
+    rule's tolerance (DRC_TOLERANCE = 0.001mm) doesn't re-flag the result.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import (
+        _is_smd_pad,
+        _pad_absolute_bbox,
+        _via_inside_pad,
+    )
+
+    print("\n" + "=" * 60)
+    print("Post-route nudge: same-net via-in-pad rescue...")
+    print("=" * 60)
+
+    pcb = PCB.load(routed_path)
+    origin_x, origin_y = pcb._board_origin  # absolute->relative offset
+
+    # Build (footprint, pad, bbox) list for SMD pads grouped by net.
+    pads_by_net: dict[int, list[tuple]] = {}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if not _is_smd_pad(pad):
+                continue
+            if pad.net_number == 0:
+                continue
+            bbox = _pad_absolute_bbox(pad, fp)
+            pads_by_net.setdefault(pad.net_number, []).append((fp, pad, bbox))
+
+    # Find vias inside same-net SMD pad bboxes.  Each entry records the
+    # old absolute position, the new absolute position, and the pad it
+    # was found inside (for diagnostics).
+    nudges: list[tuple[tuple[float, float], tuple[float, float], str]] = []
+    for via in pcb.vias:
+        if via.net_number == 0:
+            continue
+        for fp, pad, bbox in pads_by_net.get(via.net_number, []):
+            if not _via_inside_pad(via, bbox):
+                continue
+            min_x, min_y, max_x, max_y = bbox
+            cx, cy = via.position
+            pad_cx, pad_cy = 0.5 * (min_x + max_x), 0.5 * (min_y + max_y)
+
+            # Direction away from pad centre.  Bias to the larger of dx/dy
+            # so we slide out the closest edge.  Snap to 0.1mm grid.
+            drill_r = via.drill / 2.0
+            margin = 0.05  # extra clearance beyond the bbox
+            # Compute candidate exits through each edge; pick the one
+            # with smallest displacement that doesn't run into pad-2 of
+            # the same footprint (we trust the same-net guarantee for
+            # the source pad itself).
+            dx = cx - pad_cx
+            dy = cy - pad_cy
+
+            # Try a diagonal exit through the corner closest to the via.
+            corner_x = max_x if dx >= 0 else min_x
+            corner_y = max_y if dy >= 0 else min_y
+            # Push the via just outside the corner.  ``+margin`` and ``-margin``
+            # on the appropriate axis grow the displacement so the drill
+            # clears the bbox edge.
+            new_x = corner_x + drill_r + margin if dx >= 0 else corner_x - drill_r - margin
+            new_y = corner_y + drill_r + margin if dy >= 0 else corner_y - drill_r - margin
+            # Snap to 0.1mm grid in the away-from-pad direction.
+            new_x = (
+                math.ceil(new_x * 10) / 10 if dx >= 0 else math.floor(new_x * 10) / 10
+            )
+            new_y = (
+                math.ceil(new_y * 10) / 10 if dy >= 0 else math.floor(new_y * 10) / 10
+            )
+
+            abs_old = (cx + origin_x, cy + origin_y)
+            abs_new = (new_x + origin_x, new_y + origin_y)
+            nudges.append((abs_old, abs_new, f"{fp.reference}-{pad.number}"))
+            print(
+                f"   Nudging via on net {via.net_number} "
+                f"({via.net_name or '?'}) from ({abs_old[0]:.3f}, "
+                f"{abs_old[1]:.3f}) -> ({abs_new[0]:.3f}, {abs_new[1]:.3f}) "
+                f"(was in pad {fp.reference}-{pad.number})"
+            )
+            break  # one pad per via is enough
+
+    if not nudges:
+        print("   No same-net via-in-pad violations found.")
+        return 0
+
+    # Apply nudges via text-level surgery.  We rewrite the via "at X Y" line
+    # and any segment start/end coordinates that coincide with the via's
+    # old position (these are the F.Cu and B.Cu trace tails that connect
+    # to the via).  We rely on KiCad's canonical formatting:
+    #
+    #   (via ... (at 124.3 109.9) ... )
+    #   (segment (start 124.3 109.9) (end ...) ...)
+    #   (segment (start ...) (end 124.3 109.9) ...)
+    #
+    # and on coordinate uniqueness within the file (vias and traces are
+    # placed at distinct points by the router).
+    text = Path(routed_path).read_text()
+    for abs_old, abs_new, _pad_ref in nudges:
+        ox, oy = abs_old
+        nx, ny = abs_new
+        # KiCad emits coords with up to 6 decimal places trimmed; the
+        # router uses 0.1mm grid so 1-decimal format is canonical.
+        # Match both "X Y" forms with the values we observed in the file.
+        old_pair = f"{_fmt_kicad(ox)} {_fmt_kicad(oy)}"
+        new_pair = f"{_fmt_kicad(nx)} {_fmt_kicad(ny)}"
+        # Replace inside "(at OLD)" -- via position
+        text = text.replace(f"(at {old_pair})", f"(at {new_pair})")
+        # Replace inside "(start OLD)" and "(end OLD)" -- segment tails
+        text = text.replace(f"(start {old_pair})", f"(start {new_pair})")
+        text = text.replace(f"(end {old_pair})", f"(end {new_pair})")
+
+    Path(routed_path).write_text(text)
+    print(f"\n   Nudged {len(nudges)} via(s); rewrote {routed_path}")
+    return len(nudges)
+
+
+def _fmt_kicad(v: float) -> str:
+    """Format a coordinate the way KiCad/kicad-tools writes via/segment coords.
+
+    KiCad writes integers without a trailing ``.0`` and floats with the
+    minimum number of decimal places (no trailing zeros).  We use ``repr``
+    on a rounded float to match this formatting on a 0.1mm grid:
+
+        124.0   -> "124"
+        124.3   -> "124.3"
+        109.9   -> "109.9"
+    """
+    rounded = round(v, 6)
+    if rounded == int(rounded):
+        return f"{int(rounded)}"
+    # Strip trailing zeros from a fixed-format string.
+    s = f"{rounded:.6f}".rstrip("0").rstrip(".")
+    return s
+
+
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB."""
     print("\n" + "=" * 60)
@@ -675,6 +843,11 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+
+        # Step 5b: Post-route nudge -- slide any same-net via-in-pad escape
+        # vias off their pads so the JLCPCB profile's via_in_pad rule passes.
+        # See Issue #3093.
+        nudge_vias_off_same_net_pads(routed_path)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
