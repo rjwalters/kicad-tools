@@ -5897,6 +5897,8 @@ class Autorouter:
         perturbation: bool = True,
         seed: int | None = None,
         checkpoint_callback: "Callable[[list[Route], IterationMetrics], None] | None" = None,
+        best_stall_patience: int | None = 2,
+        best_stall_min_iterations: int = 2,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -6005,6 +6007,25 @@ class Autorouter:
                 the callback receives the snapshot (``best_routes``) -- NOT
                 ``self.routes`` (which may be the current, possibly-worse
                 iteration state).
+            best_stall_patience: Issue #3101 -- break out of the negotiated
+                rip-up loop after this many consecutive iterations failed to
+                strictly improve ``best_metrics`` (the lex tuple of
+                ``(routed_count, clearance_violations, overflow)`` tracked
+                by :class:`IterationMetrics`).  Complements
+                :func:`should_terminate_early`, which inspects only the
+                overflow trajectory and cannot see clearance-violation or
+                routed-count regressions.  Crucially, this early-stop
+                fires BEFORE another ~50 s of futile rip-up work on boards
+                where iter 0 already produced the high-water mark (the
+                board-07 pattern: iter 4's best is identical to iter 0's
+                and iters 5-15 only make things worse).  Set to ``None``
+                to disable.  Default: 2 (stop after 2 stall iterations).
+            best_stall_min_iterations: Minimum number of completed rip-up
+                iterations before the ``best_stall_patience`` check can
+                fire (Issue #3101).  Default: 2.  Prevents the patience
+                check from firing in degenerate first-iteration cases
+                where the iter-0 metric is already optimal but at least
+                one rip-up pass is warranted to confirm convergence.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -6480,6 +6501,15 @@ class Autorouter:
         best_routed_count = sum(1 for r in net_routes.values() if r)
         best_iteration = 0  # 0 = initial pass
 
+        # Issue #3101: Track consecutive iterations that failed to strictly
+        # improve ``best_metrics``.  Reset to 0 on every "new best" event
+        # (either inside ``_capture_iteration_end`` or the top-of-iteration
+        # snapshot below).  When the counter exceeds ``best_stall_patience``
+        # the outer loop breaks early so we stop burning ~50 s/iter on
+        # rip-up cycles that are not improving any of the three lex-tuple
+        # dimensions (routed_count, clearance_violations, overflow).
+        best_stall_count = 0
+
         # Issue #3002 (PR #3006 follow-up): Compute initial clearance-
         # violation count so the lex-tuple comparator (see
         # :class:`IterationMetrics`) can prefer DRC-clean iterations
@@ -6543,9 +6573,11 @@ class Autorouter:
                (Strategy B — minimal memory cost).
             3. Emit a single canonical per-iteration log line so the
                trajectory is visible in the user-facing log.
+            4. Issue #3101: maintain the ``best_stall_count`` patience
+               counter -- reset to 0 on improvement, increment otherwise.
             """
             nonlocal best_metrics, best_routes, best_net_routes
-            nonlocal best_routed_count, best_iteration
+            nonlocal best_routed_count, best_iteration, best_stall_count
 
             routed_now = sum(1 for r in net_routes.values() if r)
             # Issue #3002 (PR #3006 follow-up): Count segment-vs-foreign-via
@@ -6588,7 +6620,16 @@ class Autorouter:
                 best_routes = copy.deepcopy(list(self.routes))
                 best_net_routes = copy.deepcopy(net_routes)
                 best_iteration = iter_index
+                # Issue #3101: reset patience counter on strict improvement.
+                best_stall_count = 0
+            else:
+                # Issue #3101: count this iteration as a non-improvement.
+                # The outer loop reads ``best_stall_count`` to decide whether
+                # to break early -- see the patience check at the top of the
+                # iteration body.
+                best_stall_count += 1
 
+            if improved:
                 # Issue #2808: notify the checkpoint hook AFTER the deep-copy
                 # replacement so the callback gets the just-snapshotted
                 # ``best_routes`` (NOT ``self.routes``, which is the live
@@ -6605,6 +6646,9 @@ class Autorouter:
             # Canonical per-iteration log line.  Suffix shows whether this
             # iteration replaced the best snapshot or what the running best
             # still is — makes the regression visible at runtime.
+            # Issue #3101: include ``best_stall_count`` in the non-improved
+            # suffix so operators can correlate wall-clock cost with the
+            # patience counter that drives early termination.
             if improved:
                 suffix = " (new best)"
             else:
@@ -6612,7 +6656,8 @@ class Autorouter:
                     f" | best-so-far=iter-{best_metrics.iteration} "
                     f"(routed={best_metrics.routed_count}, "
                     f"clearance_viol={best_metrics.clearance_violations}, "
-                    f"overflow={best_metrics.overflow})"
+                    f"overflow={best_metrics.overflow}) "
+                    f"| stall={best_stall_count}"
                 )
             flush_print(
                 f"  iter {iter_index} | routed={routed_now}/{total_nets} | "
@@ -6676,6 +6721,14 @@ class Autorouter:
                     best_routes = copy.deepcopy(list(self.routes))
                     best_net_routes = copy.deepcopy(net_routes)
                     best_iteration = iteration - 1
+                    # Issue #3101: a top-of-iteration snapshot that strictly
+                    # improves the best metrics indicates the prior
+                    # iteration's stable state was actually an improvement
+                    # (e.g. a re-route hook fixed a clearance violation
+                    # after _capture_iteration_end recorded the metric).
+                    # Reset the patience counter so the loop gives the
+                    # rip-up phase fresh budget to keep improving.
+                    best_stall_count = 0
 
                     # Issue #2808: fire checkpoint hook from the iteration-top
                     # snapshot site too, not just _capture_iteration_end --
@@ -6737,6 +6790,38 @@ class Autorouter:
                             print(f"    Partially routed nets: {', '.join(partial_names)}")
                         self._reset_perturbation()
                         break
+
+                # Issue #3101: Best-metric patience check.  Complements
+                # ``should_terminate_early`` (which only sees the overflow
+                # trajectory) by tripping when ``best_metrics`` has not
+                # improved across the lex tuple
+                # ``(routed_count, clearance_violations, overflow)`` for
+                # ``best_stall_patience`` consecutive iterations.  Crucial
+                # on dense boards (e.g. board-07 matchgroup-test) where
+                # iter 0 already produced the high-water mark and the
+                # subsequent rip-up iterations either regress or oscillate
+                # for ~50 s/iter without finding a new best.  Iteration-0
+                # persistence is preserved by the post-loop restore --
+                # breaking here returns control to that restore site,
+                # which guarantees ``best_routes``/``best_net_routes``
+                # win over the regressed ``self.routes``.
+                if (
+                    best_stall_patience is not None
+                    and best_stall_patience > 0
+                    and iteration >= best_stall_min_iterations
+                    and best_stall_count >= best_stall_patience
+                ):
+                    flush_print(
+                        f"\n  ⚠ Best-metric early-stop: no improvement "
+                        f"to (routed={best_metrics.routed_count}, "
+                        f"clearance_viol={best_metrics.clearance_violations}, "
+                        f"overflow={best_metrics.overflow}) for "
+                        f"{best_stall_count} consecutive iter(s); "
+                        f"patience={best_stall_patience} "
+                        f"(Issue #3101) ({elapsed_str()})"
+                    )
+                    self._reset_perturbation()
+                    break
 
                 if progress_callback is not None:
                     progress = iteration / (max_iterations + 1)

@@ -186,6 +186,11 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--mc-trials", str(args.mc_trials)])
     if args.iterations != 15:
         sub_argv.extend(["--iterations", str(args.iterations)])
+    # Issue #3101: forward --early-stop-patience.  Both outer and inner
+    # default to 2; only forward when the user passed a non-default value.
+    early_stop_val = getattr(args, "early_stop_patience", 2)
+    if early_stop_val != 2:
+        sub_argv.extend(["--early-stop-patience", str(early_stop_val)])
     timeout_val = getattr(args, "timeout", None)
     if timeout_val is not None:
         sub_argv.extend(["--timeout", str(timeout_val)])
