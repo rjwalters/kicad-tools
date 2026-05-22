@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "kicad_tools_version": "0.13.0",
+  "generated_at": "2026-05-22T05:48:45.826355+00:00",
+  "manufacturer": "jlcpcb",
+  "files": {
+    "bom_jlcpcb.csv": {
+      "sha256": "6c2d2cf98ab8631c8d2429723951cb18d5413626daf7b713ffb44c66f788952a",
+      "size": 1070
+    },
+    "cpl_jlcpcb.csv": {
+      "sha256": "40a22798167fe95b1470428d69ddf542c1671e9c92c3c6e3842c24a4db707daf",
+      "size": 3755
+    },
+    "gerbers.zip": {
+      "sha256": "2447fe98196b682ca69397f0b9d97455bcad654c91724ce0034b395d5884b824",
+      "size": 98752
+    },
+    "report.pdf": {
+      "sha256": "41678778b35e57f02fbd378b25769b1518b91c48e9ba60ecf8d43d3ba6f96470",
+      "size": 33624
+    },
+    "report.md": {
+      "sha256": "15f8e290540bec10eee1c53e345fa7ce918dc63d7f691962be35bcef710eed5e",
+      "size": 4163
+    },
+    "kicad_project.zip": {
+      "sha256": "9740c22747669b79f801474117ba23b5932387eedd615879afbc66b9c8f6bdea",
+      "size": 133597
+    },
+    "README.txt": {
+      "sha256": "f028d29b53dc75970bbd95c26d5812e59eb9d476e875cf825a58f7b4197653ca",
+      "size": 764
+    }
+  },
+  "board": {
+    "name": "bldc_controller_routed",
+    "pcb_file": "bldc_controller_routed.kicad_pcb"
+  }
+}

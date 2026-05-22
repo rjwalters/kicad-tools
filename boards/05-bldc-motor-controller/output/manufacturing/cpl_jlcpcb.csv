@@ -1,0 +1,52 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+C1,470uF,Capacitor_SMD:C_0805_2012Metric,30.0000mm,8.0000mm,0.0,Top
+C10,20pF,Capacitor_SMD:C_0805_2012Metric,60.0000mm,37.0000mm,0.0,Top
+C11,20pF,Capacitor_SMD:C_0805_2012Metric,60.0000mm,43.0000mm,0.0,Top
+C12,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,47.0000mm,0.0,Top
+C13,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,53.0000mm,0.0,Top
+C14,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,59.0000mm,0.0,Top
+C15,100nF,Capacitor_SMD:C_0805_2012Metric,24.0000mm,47.0000mm,0.0,Top
+C16,10uF,Capacitor_SMD:C_0805_2012Metric,24.0000mm,53.0000mm,0.0,Top
+C2,100nF,Capacitor_SMD:C_0805_2012Metric,30.0000mm,14.0000mm,0.0,Top
+C3,220uF,Capacitor_SMD:C_0805_2012Metric,6.0000mm,30.0000mm,0.0,Top
+C30,10nF,Capacitor_SMD:C_0805_2012Metric,49.0000mm,61.0000mm,0.0,Top
+C31,10nF,Capacitor_SMD:C_0805_2012Metric,55.0000mm,61.0000mm,0.0,Top
+C32,10nF,Capacitor_SMD:C_0805_2012Metric,61.0000mm,61.0000mm,0.0,Top
+C4,220uF,Capacitor_SMD:C_0805_2012Metric,30.0000mm,30.0000mm,0.0,Top
+C5,10uF,Capacitor_SMD:C_0805_2012Metric,38.0000mm,30.0000mm,0.0,Top
+C6,10uF,Capacitor_SMD:C_0805_2012Metric,50.0000mm,30.0000mm,0.0,Top
+C7,100nF,Capacitor_SMD:C_0805_2012Metric,34.0000mm,37.0000mm,0.0,Top
+C8,100nF,Capacitor_SMD:C_0805_2012Metric,40.0000mm,37.0000mm,0.0,Top
+C9,4.7uF,Capacitor_SMD:C_0805_2012Metric,46.0000mm,37.0000mm,0.0,Top
+D1,SMBJ24A,Diode_SMD:D_SMA,22.0000mm,8.0000mm,0.0,Top
+D2,SS34,Diode_SMD:D_SMA,19.0000mm,30.0000mm,0.0,Top
+D3,LED,LED_SMD:LED_0805_2012Metric,56.0000mm,8.0000mm,0.0,Top
+D4,LED,LED_SMD:LED_0805_2012Metric,62.0000mm,8.0000mm,0.0,Top
+F1,15A,Fuse:Fuse_1206_3216Metric,14.0000mm,8.0000mm,0.0,Top
+J1,Power Input,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,5.0000mm,8.0000mm,0.0,Top
+J2,Motor Output,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,65.0000mm,76.0000mm,0.0,Top
+J3,Hall Sensors,Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical,65.0000mm,58.0000mm,0.0,Top
+J4,SWD Debug,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,65.0000mm,22.0000mm,0.0,Top
+L1,33uH,Inductor_SMD:L_1210_3225Metric,26.0000mm,22.0000mm,0.0,Top
+Q1,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,8.0000mm,68.0000mm,0.0,Top
+Q2,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,8.0000mm,76.0000mm,0.0,Top
+Q3,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,24.0000mm,68.0000mm,0.0,Top
+Q4,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,24.0000mm,76.0000mm,0.0,Top
+Q5,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,40.0000mm,68.0000mm,0.0,Top
+Q6,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,40.0000mm,76.0000mm,0.0,Top
+R10,5mR,Resistor_SMD:R_2512_6332Metric,8.0000mm,84.0000mm,0.0,Top
+R11,5mR,Resistor_SMD:R_2512_6332Metric,24.0000mm,84.0000mm,0.0,Top
+R12,5mR,Resistor_SMD:R_2512_6332Metric,40.0000mm,84.0000mm,0.0,Top
+R20,22,Resistor_SMD:R_0805_2012Metric,8.0000mm,62.0000mm,0.0,Top
+R21,22,Resistor_SMD:R_0805_2012Metric,24.0000mm,62.0000mm,0.0,Top
+R22,22,Resistor_SMD:R_0805_2012Metric,40.0000mm,62.0000mm,0.0,Top
+R3,1k,Resistor_SMD:R_0805_2012Metric,56.0000mm,13.0000mm,0.0,Top
+R30,10k,Resistor_SMD:R_0805_2012Metric,49.0000mm,57.0000mm,0.0,Top
+R31,10k,Resistor_SMD:R_0805_2012Metric,55.0000mm,57.0000mm,0.0,Top
+R32,10k,Resistor_SMD:R_0805_2012Metric,61.0000mm,57.0000mm,0.0,Top
+R4,1k,Resistor_SMD:R_0805_2012Metric,62.0000mm,13.0000mm,0.0,Top
+U1,LM2596-5.0,Package_TO_SOT_SMD:TO-263-5_TabPin3,12.0000mm,22.0000mm,0.0,Top
+U10,STM32G431K8Tx,Package_QFP:LQFP-32_7x7mm_P0.8mm,40.0000mm,50.0000mm,0.0,Top
+U2,AMS1117-3.3,Package_TO_SOT_SMD:SOT-223-3_TabPin2,44.0000mm,22.0000mm,0.0,Top
+U3,DRV8301,Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm,14.0000mm,50.0000mm,0.0,Top
+Y1,8MHz,Crystal:Crystal_HC49-4H_Vertical,52.0000mm,37.0000mm,0.0,Top
