@@ -2354,6 +2354,11 @@ def route_with_layer_escalation(
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3101: best-metric early-stop patience.  0
+                    # disables (matches pre-#3101 behaviour).
+                    best_stall_patience=(
+                        getattr(args, "early_stop_patience", 2) or None
+                    ),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -3079,6 +3084,11 @@ def route_with_rule_relaxation(
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3101: best-metric early-stop patience.  0
+                    # disables (matches pre-#3101 behaviour).
+                    best_stall_patience=(
+                        getattr(args, "early_stop_patience", 2) or None
+                    ),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -4166,6 +4176,11 @@ def route_with_combined_escalation(
                         # Issue #3051: forward checkpoint callback so kills
                         # mid-loop persist the best-so-far snapshot.
                         checkpoint_callback=_checkpoint_cb,
+                        # Issue #3101: best-metric early-stop patience.  0
+                        # disables (matches pre-#3101 behaviour).
+                        best_stall_patience=(
+                            getattr(args, "early_stop_patience", 2) or None
+                        ),
                     )
                 elif args.strategy == "basic":
                     router.route_all()
@@ -4661,6 +4676,21 @@ def main(argv: list[str] | None = None) -> int:
             "Max iterations for negotiated routing (default: 15). "
             "Also applies to two-phase routing when --two-phase-iterations "
             "is not explicitly set."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=2,
+        help=(
+            "Number of consecutive negotiated-rip-up iterations with no "
+            "improvement to the best-metric lex tuple "
+            "(routed_count, clearance_violations, overflow) before the "
+            "outer loop breaks early (Issue #3101). Default: 2. The "
+            "iteration-0 result is preserved via the existing post-loop "
+            "best-state restore. Use 0 to disable (matches pre-#3101 "
+            "behaviour where the loop ran until --iterations or one of "
+            "the existing should_terminate_early heuristics fired)."
         ),
     )
     parser.add_argument(

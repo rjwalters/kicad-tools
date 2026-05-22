@@ -2331,6 +2331,20 @@ def _add_route_parser(subparsers) -> None:
         "--generations", type=int, default=10, help="Evolutionary optimizer generations"
     )
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    # Issue #3101: Best-metric early-stop patience.  Mirror of the inner
+    # parser flag at route_cmd.py; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=2,
+        help=(
+            "Consecutive non-improving negotiated iterations before the "
+            "outer loop breaks early (Issue #3101). Default: 2. Use 0 to "
+            "disable. Iteration-0 result is preserved by the existing "
+            "best-state restore."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop
