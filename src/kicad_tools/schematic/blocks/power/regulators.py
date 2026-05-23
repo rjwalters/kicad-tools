@@ -566,13 +566,37 @@ class BuckConverter(CircuitBlock):
         # Wire regulator SW/OUT to inductor input
         sch.add_wire(sw_pos, l_in)
 
-        # Wire diode for async topology (cathode to SW node, anode to GND)
+        # Wire diode for async topology (cathode to SW node, anode to GND).
+        #
+        # Topology bug (issue #3096): a naive vertical wire from
+        # d_cathode_y to l_in_y at x = l_in[0] runs THROUGH the inductor
+        # body and crosses the inductor's other-pin coordinate as an
+        # interior point.  KiCad treats endpoint-on-segment T-junctions as
+        # electrical connections, so the vertical wire shorts inductor
+        # pin 1 (SW node) to pin 2 (VOUT side) AND to the C_OUT-pin-y
+        # wire midpoint -- collapsing SW, VOUT, and FB into a single net.
+        # On the LM2596 this turns U1.OUT (output type) into a +5V driver
+        # and triggers an Output<->Power_output pin_to_pin ERC error
+        # whenever a PWR_FLAG is added on +5V.
+        #
+        # Fix: route the cathode-to-SW wire LATERALLY around the inductor
+        # via a jog at x = l_in[0] - 5 mm.  The jog x sits clear of the
+        # inductor body (which is ~2.54 mm wide at l_in[0]) and clear of
+        # any input-cap column to the west.
         if topology == "async":
             d_cathode = self.diode.pin_position("K")
 
-            # Connect diode cathode to switch node
-            sch.add_wire(d_cathode, (l_in[0], d_cathode[1]))
-            sch.add_wire((l_in[0], d_cathode[1]), l_in)
+            # Jog offset west of the inductor column; chosen so the
+            # vertical leg lies outside the inductor's 2.54 mm body radius
+            # but inside the typical SW-node clearance budget.
+            jog_x = l_in[0] - 5.08
+
+            # Horizontal stub from d_cathode west to the jog column.
+            sch.add_wire(d_cathode, (jog_x, d_cathode[1]))
+            # Vertical leg up to l_in's y-level (clear of inductor body).
+            sch.add_wire((jog_x, d_cathode[1]), (jog_x, l_in[1]))
+            # Horizontal stub from the jog column east back to l_in.
+            sch.add_wire((jog_x, l_in[1]), l_in)
             sch.add_junction(l_in[0], l_in[1])
 
         # Get capacitor positions
