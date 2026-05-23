@@ -551,3 +551,261 @@ class TestFixedRefsPositionInvariance:
 
         # Should not error out due to missing fixed_refs handling.
         assert rc in (0, 1)
+
+
+# =============================================================================
+# --use-routing-fitness and --boundary-margin plumbing (issue #3111)
+# =============================================================================
+
+
+class TestUseRoutingFitnessFlag:
+    """Tests for the ``--use-routing-fitness`` flag wiring (issue #3111).
+
+    The underlying lever exists in
+    :class:`~kicad_tools.optim.evolutionary.EvolutionaryConfig`
+    (added by issue #2720) and was exposed in
+    :mod:`kicad_tools.cli.placement_cmd` directly. This issue surfaces it
+    on the main unified CLI parser so callers using
+    ``kct placement optimize`` (the supported user-facing entry point)
+    can engage the C++ A* routing-completion fitness function.
+    """
+
+    def test_flag_present_in_unified_parser(self):
+        """``--use-routing-fitness`` parses successfully on main parser."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--use-routing-fitness",
+            ]
+        )
+
+        assert hasattr(args, "use_routing_fitness")
+        assert args.use_routing_fitness is True
+
+    def test_flag_default_off(self):
+        """``--use-routing-fitness`` defaults to False (opt-in)."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+            ]
+        )
+
+        assert hasattr(args, "use_routing_fitness")
+        assert args.use_routing_fitness is False
+
+    def test_flag_forwarded_to_placement_cmd(self, tmp_path: Path):
+        """``--use-routing-fitness`` is forwarded to placement_cmd."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.commands.placement import run_placement_command
+
+        class MockArgs:
+            placement_command = "optimize"
+            pcb = str(tmp_path / "test.kicad_pcb")
+            output = None
+            strategy = "evolutionary"
+            iterations = 10
+            generations = 5
+            population = 10
+            grid = 0.0
+            fixed = None
+            cluster = False
+            constraints = None
+            edge_detect = False
+            thermal = False
+            keepout = None
+            auto_keepout = False
+            routing_aware = False
+            use_routing_fitness = True  # Key flag being tested
+            check_routability = False
+            boundary_margin = None
+            dry_run = True
+            format = "text"
+            verbose = False
+            quiet = True
+            global_quiet = False
+
+        called_with: list[str] = []
+
+        def mock_main(argv):
+            called_with.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.placement_cmd.main", mock_main):
+            run_placement_command(MockArgs())
+
+        assert "--use-routing-fitness" in called_with
+        # Strategy must also be forwarded so the GA path activates.
+        assert "evolutionary" in called_with
+
+    def test_flag_with_strategy_evolutionary(self):
+        """``--use-routing-fitness`` composes with ``--strategy evolutionary``."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--strategy",
+                "evolutionary",
+                "--use-routing-fitness",
+            ]
+        )
+
+        assert args.strategy == "evolutionary"
+        assert args.use_routing_fitness is True
+
+
+class TestBoundaryMarginFlag:
+    """Tests for the ``--boundary-margin`` flag wiring (issue #3111)."""
+
+    def test_flag_present_in_unified_parser(self):
+        """``--boundary-margin`` parses on main parser."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--boundary-margin",
+                "2.5",
+            ]
+        )
+
+        assert hasattr(args, "boundary_margin")
+        assert args.boundary_margin == pytest.approx(2.5)
+
+    def test_board_margin_alias_present(self):
+        """``--board-margin`` is an accepted alias of ``--boundary-margin``."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+                "--board-margin",
+                "3.0",
+            ]
+        )
+
+        assert args.boundary_margin == pytest.approx(3.0)
+
+    def test_flag_default_none(self):
+        """``--boundary-margin`` defaults to None (use placement_cmd default)."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "placement",
+                "optimize",
+                "test.kicad_pcb",
+            ]
+        )
+
+        assert args.boundary_margin is None
+
+    def test_flag_forwarded_to_placement_cmd(self, tmp_path: Path):
+        """``--boundary-margin`` value is forwarded to placement_cmd."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.commands.placement import run_placement_command
+
+        class MockArgs:
+            placement_command = "optimize"
+            pcb = str(tmp_path / "test.kicad_pcb")
+            output = None
+            strategy = "force-directed"
+            iterations = 10
+            generations = 5
+            population = 10
+            grid = 0.0
+            fixed = None
+            cluster = False
+            constraints = None
+            edge_detect = False
+            thermal = False
+            keepout = None
+            auto_keepout = False
+            routing_aware = False
+            use_routing_fitness = False
+            check_routability = False
+            boundary_margin = 1.5  # Key field
+            dry_run = True
+            format = "text"
+            verbose = False
+            quiet = True
+            global_quiet = False
+
+        called_with: list[str] = []
+
+        def mock_main(argv):
+            called_with.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.placement_cmd.main", mock_main):
+            run_placement_command(MockArgs())
+
+        assert "--boundary-margin" in called_with
+        # Value must follow the flag in argv.
+        idx = called_with.index("--boundary-margin")
+        assert called_with[idx + 1] == "1.5"
+
+    def test_no_forwarding_when_default(self, tmp_path: Path):
+        """When ``boundary_margin`` is None, no ``--boundary-margin`` flag is forwarded."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.commands.placement import run_placement_command
+
+        class MockArgs:
+            placement_command = "optimize"
+            pcb = str(tmp_path / "test.kicad_pcb")
+            output = None
+            strategy = "force-directed"
+            iterations = 10
+            generations = 5
+            population = 10
+            grid = 0.0
+            fixed = None
+            cluster = False
+            constraints = None
+            edge_detect = False
+            thermal = False
+            keepout = None
+            auto_keepout = False
+            routing_aware = False
+            use_routing_fitness = False
+            check_routability = False
+            boundary_margin = None  # Default sentinel
+            dry_run = True
+            format = "text"
+            verbose = False
+            quiet = True
+            global_quiet = False
+
+        called_with: list[str] = []
+
+        def mock_main(argv):
+            called_with.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.placement_cmd.main", mock_main):
+            run_placement_command(MockArgs())
+
+        assert "--boundary-margin" not in called_with

@@ -3632,10 +3632,29 @@ def _add_placement_parser(subparsers) -> None:
         help="Use integrated place-route optimization (iterates between placement and routing)",
     )
     placement_optimize.add_argument(
+        "--use-routing-fitness",
+        action="store_true",
+        dest="use_routing_fitness",
+        help=(
+            "(Issue #2720) Replace the evolutionary GA's average-pairwise-spacing "
+            "routability proxy with actual routing completion rate from the C++ A* "
+            "router (CppAstarRoutingEvaluator). Only effective with --strategy "
+            "evolutionary or hybrid. Default off."
+        ),
+    )
+    placement_optimize.add_argument(
         "--check-routability",
         action="store_true",
         dest="check_routability",
         help="Check routability before and after optimization to show impact",
+    )
+    placement_optimize.add_argument(
+        "--boundary-margin",
+        "--board-margin",
+        type=float,
+        default=None,
+        dest="boundary_margin",
+        help="Extra margin in mm between component courtyards and board edge (default: 1.0)",
     )
     placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
     placement_optimize.add_argument(

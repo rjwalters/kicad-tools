@@ -101,8 +101,12 @@ def run_placement_command(args) -> int:
             sub_argv.append("--auto-keepout")
         if getattr(args, "routing_aware", False):
             sub_argv.append("--routing-aware")
+        if getattr(args, "use_routing_fitness", False):
+            sub_argv.append("--use-routing-fitness")
         if getattr(args, "check_routability", False):
             sub_argv.append("--check-routability")
+        if getattr(args, "boundary_margin", None) is not None:
+            sub_argv.extend(["--boundary-margin", str(args.boundary_margin)])
         if args.dry_run:
             sub_argv.append("--dry-run")
         if getattr(args, "format", "text") != "text":
