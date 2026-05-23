@@ -14,11 +14,24 @@ Usage::
     kct fleet status --include-stale
     kct fleet status --pattern '*_routed.kicad_pcb'
 
+    kct fleet ship-ready                       # warn-only PASS/FAIL summary
+    kct fleet ship-ready --strict              # exit 2 if any board fails
+    kct fleet ship-ready --format json         # machine-readable
+    kct fleet ship-ready --boards-dir boards/  # custom root
+
 Exit Codes:
-    0 - All surveyed boards are ship-ready
+    0 - All surveyed boards are ship-ready (or warn-only mode regardless)
     1 - Argparse / IO error
-    2 - One or more boards are not ship-ready (default semantics, matches
-        ``net-status``)
+    2 - ``status``: one or more boards are not ship-ready (default semantics,
+        matches ``net-status``).
+        ``ship-ready --strict``: one or more boards are not ship-ready.
+        ``ship-ready`` (warn-only default): never returned -- always exit 0.
+
+Warn-only semantics (``ship-ready`` default, per issue #3099 steering
+decision 2026-05-21):
+    The ``ship-ready`` subcommand exits 0 by default even when boards fail,
+    so it can be wired into nightly CI as a non-blocking gate. Pass
+    ``--strict`` to opt into non-zero exit semantics for human users.
 """
 
 from __future__ import annotations
@@ -182,6 +195,76 @@ class BoardStatus:
 
 
 # ---------------------------------------------------------------------------
+# Ship-ready data classes (issue #3099)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ERCStatus:
+    """ERC report presence + violation counts for a single board.
+
+    Mirrors :class:`DRCStatus` shape for symmetry. When ``report_exists``
+    is False the ERC step has not yet run for this board, so it does NOT
+    contribute a blocker (warn-only treats missing as unknown).
+    """
+
+    report_exists: bool = False
+    errors: int = 0
+    warnings: int = 0
+    report_path: str | None = None
+
+    @property
+    def has_errors(self) -> bool:
+        return self.report_exists and self.errors > 0
+
+    def to_dict(self) -> dict:
+        return {
+            "report_exists": self.report_exists,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "report_path": self.report_path,
+            "has_errors": self.has_errors,
+        }
+
+
+@dataclass
+class ShipReadyStatus:
+    """Per-board aggregate for the ``kct fleet ship-ready`` gate.
+
+    Composes :class:`BoardStatus` (which already aggregates routing,
+    manufacturing, and DRC) with an :class:`ERCStatus` field and a
+    PASS/FAIL verdict driven by the union of all blocker sources.
+
+    Designed for warn-only nightly CI: every aspect is surfaced for
+    humans to triage even when the workflow exits 0.
+    """
+
+    board: BoardStatus
+    erc: ERCStatus = field(default_factory=ERCStatus)
+    blockers: list[str] = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        return self.board.name
+
+    @property
+    def passed(self) -> bool:
+        return not self.blockers
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.board.name,
+            "passed": self.passed,
+            "blockers": list(self.blockers),
+            "routed_pcb": (str(self.board.routed_pcb) if self.board.routed_pcb else None),
+            "routing": self.board.routing.to_dict(),
+            "manufacturing": self.board.manufacturing.to_dict(),
+            "drc": self.board.drc.to_dict(),
+            "erc": self.erc.to_dict(),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -189,10 +272,7 @@ class BoardStatus:
 def _iso_or_none(mtime: float | None) -> str | None:
     if mtime is None:
         return None
-    return (
-        _dt.datetime.fromtimestamp(mtime, tz=_dt.timezone.utc)
-        .isoformat(timespec="seconds")
-    )
+    return _dt.datetime.fromtimestamp(mtime, tz=_dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _now_iso() -> str:
@@ -358,6 +438,90 @@ def _detect_drc(
     return drc
 
 
+def _detect_erc(board_dir: Path) -> ERCStatus:
+    """Look for an ERC report under common locations in ``board_dir``.
+
+    Tries (in order):
+      * ``<board>/output/erc_report.json``
+      * ``<board>/output/<sch_stem>-erc.json`` for any sibling ``.kicad_sch``
+      * ``<board>/erc_report.json``
+
+    Returns ``ERCStatus`` with ``report_exists=False`` when nothing is
+    found -- in warn-only mode this surfaces as ``ERC -`` in the table
+    and does not block ship-ready (consistent with the DRC
+    backwards-compat rule from issue #2932).
+    """
+    erc = ERCStatus()
+
+    candidates: list[Path] = [
+        board_dir / "output" / "erc_report.json",
+        board_dir / "erc_report.json",
+    ]
+    # KiCad's own convention: ``<sch_stem>-erc.json`` next to the .kicad_sch.
+    try:
+        for sch in sorted((board_dir).glob("*.kicad_sch")):
+            candidates.append(board_dir / "output" / f"{sch.stem}-erc.json")
+            candidates.append(board_dir / f"{sch.stem}-erc.json")
+    except OSError:
+        pass
+
+    report_path: Path | None = None
+    for candidate in candidates:
+        if candidate.is_file():
+            report_path = candidate
+            break
+    if report_path is None:
+        return erc
+
+    erc.report_path = str(report_path)
+    try:
+        with report_path.open() as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        # Malformed report behaves like missing -- do not block.
+        return erc
+
+    # Two shapes are common:
+    #   1. Our ERCReport.to_dict() with ``violations``/``errors``/``warnings``
+    #   2. KiCad's native dump with ``sheets[].violations[].severity``
+    errors = 0
+    warnings = 0
+    if isinstance(data, dict):
+        summary = data.get("summary")
+        if isinstance(summary, dict):
+            if isinstance(summary.get("errors"), int):
+                errors = summary["errors"]
+            if isinstance(summary.get("warnings"), int):
+                warnings = summary["warnings"]
+
+        if errors == 0 and warnings == 0:
+            # Fall back to walking violations / sheets[].violations.
+            violations: list = []
+            top_violations = data.get("violations")
+            if isinstance(top_violations, list):
+                violations.extend(top_violations)
+            sheets = data.get("sheets")
+            if isinstance(sheets, list):
+                for sheet in sheets:
+                    if isinstance(sheet, dict):
+                        sv = sheet.get("violations")
+                        if isinstance(sv, list):
+                            violations.extend(sv)
+            for v in violations:
+                if not isinstance(v, dict):
+                    continue
+                severity = str(v.get("severity", "")).lower()
+                if severity == "error":
+                    errors += 1
+                elif severity == "warning":
+                    warnings += 1
+
+    erc.report_exists = True
+    erc.errors = errors
+    erc.warnings = warnings
+    return erc
+
+
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     """Run NetStatusAnalyzer on a routed PCB and tally pads/nets."""
     status = RoutingStatus()
@@ -403,9 +567,7 @@ def _compute_blockers(
         return blockers
     if not routing.routing_complete:
         incomplete = routing.incomplete_nets + routing.unrouted_nets
-        blockers.append(
-            f"incomplete routing ({incomplete}/{routing.total_nets} nets)"
-        )
+        blockers.append(f"incomplete routing ({incomplete}/{routing.total_nets} nets)")
     if not mfg.dir_exists:
         blockers.append("no manufacturing/ dir")
         return blockers
@@ -421,9 +583,7 @@ def _compute_blockers(
         blockers.append("artifacts stale")
     if drc is not None and drc.over_tolerance:
         if drc.tolerance > 0:
-            blockers.append(
-                f"DRC errors: {drc.errors} (allowed {drc.tolerance})"
-            )
+            blockers.append(f"DRC errors: {drc.errors} (allowed {drc.tolerance})")
         else:
             blockers.append(f"DRC errors: {drc.errors}")
     return blockers
@@ -505,6 +665,156 @@ def _discover_boards(
 
 
 # ---------------------------------------------------------------------------
+# Ship-ready survey + formatters (issue #3099)
+# ---------------------------------------------------------------------------
+
+
+def _compute_ship_ready_blockers(
+    board: BoardStatus,
+    erc: ERCStatus,
+) -> list[str]:
+    """Aggregate blockers from routing/manufacturing/DRC/ERC.
+
+    Reuses ``board.blockers`` (already filled by ``_compute_blockers``)
+    and appends ERC errors when the report exists and reports any
+    severity-error rows. Missing reports never add a blocker -- they
+    surface as ``-`` in the table per the warn-only philosophy.
+    """
+    blockers: list[str] = list(board.blockers)
+    if erc.has_errors:
+        blockers.append(f"ERC errors: {erc.errors}")
+    return blockers
+
+
+def _survey_board_ship_ready(
+    board_dir: Path,
+    pattern: str,
+    drc_tolerances: dict[str, int] | None = None,
+) -> ShipReadyStatus:
+    """Build a ``ShipReadyStatus`` for a single board directory."""
+    board = _survey_board(board_dir, pattern, drc_tolerances)
+    erc = _detect_erc(board_dir)
+    blockers = _compute_ship_ready_blockers(board, erc)
+    return ShipReadyStatus(board=board, erc=erc, blockers=blockers)
+
+
+def _discover_ship_ready(
+    boards_dir: Path,
+    pattern: str,
+    drc_tolerance_path: Path | None = None,
+) -> list[ShipReadyStatus]:
+    """Survey every board sub-directory for ship-readiness.
+
+    Mirrors :func:`_discover_boards` (same skip rules) but builds the
+    richer :class:`ShipReadyStatus` per board.
+    """
+    if not boards_dir.is_dir():
+        return []
+    tolerances = _load_drc_tolerances(
+        drc_tolerance_path if drc_tolerance_path is not None else _DRC_TOLERANCE_PATH
+    )
+    results: list[ShipReadyStatus] = []
+    for entry in sorted(boards_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith("."):
+            continue
+        output_dir = entry / "output"
+        if not output_dir.is_dir():
+            continue
+        if _discover_routed_pcb(entry, pattern) is None:
+            continue
+        results.append(_survey_board_ship_ready(entry, pattern, tolerances))
+    return results
+
+
+def _erc_label(erc: ERCStatus) -> str:
+    """Render the ERC column cell.
+
+    ``-``       : no ERC report found (no signal yet, do not block).
+    ``N``       : N errors found (any value -- a non-zero count drives the
+                  ship-ready ``FAIL`` blocker).
+    """
+    if not erc.report_exists:
+        return "-"
+    return str(erc.errors)
+
+
+def _format_ship_ready_table(
+    statuses: list[ShipReadyStatus],
+    boards_dir: Path,
+    *,
+    warn_only: bool,
+) -> str:
+    """Plain-ASCII per-board PASS/FAIL table for nightly summaries."""
+    lines: list[str] = []
+    header = f"{'Board':<28} {'Route':>7} {'DRC':>5} {'ERC':>5} {'Mfr':<8} {'Stale':<6} Verdict"
+    sep = "-" * len(header)
+    lines.append(header)
+    lines.append(sep)
+
+    if not statuses:
+        lines.append("No boards found")
+    else:
+        for s in statuses:
+            route_cell = f"{s.board.routing.connected_pads}/{s.board.routing.total_pads}"
+            drc_cell = _drc_label(s.board.drc)
+            erc_cell = _erc_label(s.erc)
+            mfr_cell = _mfr_letters(s.board.manufacturing)
+            stale_cell = _stale_label(s.board.manufacturing)
+            if s.passed:
+                verdict = "PASS"
+            else:
+                verdict = f"FAIL ({s.blockers[0]})"
+            lines.append(
+                f"{s.name[:28]:<28} {route_cell:>7} {drc_cell:>5} "
+                f"{erc_cell:>5} {mfr_cell:<8} {stale_cell:<6} {verdict}"
+            )
+
+    # Footer.
+    if statuses:
+        lines.append("")
+        passing = sum(1 for s in statuses if s.passed)
+        failing = len(statuses) - passing
+        mode = "warn-only" if warn_only else "strict"
+        lines.append(
+            f"{len(statuses)} boards surveyed, {passing} PASS, {failing} FAIL ({mode} mode)"
+        )
+        lines.append(f"boards-dir: {boards_dir}")
+        if warn_only and failing > 0:
+            lines.append(
+                "::warning::ship-ready: "
+                f"{failing}/{len(statuses)} board(s) FAIL "
+                "(warn-only mode -- exit 0)"
+            )
+
+    return "\n".join(lines)
+
+
+def _format_ship_ready_json(
+    statuses: list[ShipReadyStatus],
+    boards_dir: Path,
+    *,
+    warn_only: bool,
+) -> str:
+    summary = {
+        "total": len(statuses),
+        "passed": sum(1 for s in statuses if s.passed),
+        "failed": sum(1 for s in statuses if not s.passed),
+        "warn_only": warn_only,
+    }
+    doc = {
+        "schema_version": SCHEMA_VERSION,
+        "command": "ship-ready",
+        "surveyed_at": _now_iso(),
+        "boards_dir": str(boards_dir),
+        "summary": summary,
+        "boards": [s.to_dict() for s in statuses],
+    }
+    return json.dumps(doc, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Output formatters
 # ---------------------------------------------------------------------------
 
@@ -553,10 +863,7 @@ def _format_table(
 ) -> str:
     """Format a fixed-width plain-ASCII table."""
     lines: list[str] = []
-    header = (
-        f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} "
-        f"{'DRC':>5} Ship?"
-    )
+    header = f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} {'DRC':>5} Ship?"
     sep = "-" * len(header)
     lines.append(header)
     lines.append(sep)
@@ -580,8 +887,7 @@ def _format_table(
             else:
                 ship = f"NO  ({b.blockers[0]})"
             lines.append(
-                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} "
-                f"{drc_cell:>5} {ship}"
+                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {drc_cell:>5} {ship}"
             )
 
     # Footer (always uses full board list, not filtered view).
@@ -589,9 +895,7 @@ def _format_table(
         lines.append("")
         ship_ready = sum(1 for b in boards if b.ship_ready)
         incomplete = sum(
-            1
-            for b in boards
-            if not b.routing.routing_complete and b.routing.error is None
+            1 for b in boards if not b.routing.routing_complete and b.routing.error is None
         )
         stale_count = sum(1 for b in boards if b.manufacturing.stale)
         drc_failing = sum(1 for b in boards if b.drc.over_tolerance)
@@ -610,16 +914,10 @@ def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
         "total": len(boards),
         "ship_ready": sum(1 for b in boards if b.ship_ready),
         "incomplete_routing": sum(
-            1
-            for b in boards
-            if not b.routing.routing_complete and b.routing.error is None
+            1 for b in boards if not b.routing.routing_complete and b.routing.error is None
         ),
         "stale_artifacts": sum(1 for b in boards if b.manufacturing.stale),
-        "missing_artifacts": sum(
-            1
-            for b in boards
-            if not b.manufacturing.has_all
-        ),
+        "missing_artifacts": sum(1 for b in boards if not b.manufacturing.has_all),
         "drc_over_tolerance": sum(1 for b in boards if b.drc.over_tolerance),
     }
     doc = {
@@ -690,6 +988,50 @@ def _build_parser() -> argparse.ArgumentParser:
             "ship-ready."
         ),
     )
+
+    # ------------------------------------------------------------------
+    # fleet ship-ready (issue #3099)
+    # ------------------------------------------------------------------
+    ship_parser = subparsers.add_parser(
+        "ship-ready",
+        help=(
+            "Per-board PASS/FAIL gate (routing + DRC + ERC + manufacturing). "
+            "Warn-only by default; pass --strict for non-zero exit on failure."
+        ),
+    )
+    ship_parser.add_argument(
+        "--boards-dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    ship_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    ship_parser.add_argument(
+        "--pattern",
+        default="*_routed.kicad_pcb",
+        help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
+    )
+    ship_parser.add_argument(
+        "--drc-tolerance-file",
+        default=str(_DRC_TOLERANCE_PATH),
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml)."
+        ),
+    )
+    ship_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Exit non-zero (2) if any board fails. Default is warn-only "
+            "(always exit 0) so the command is safe to wire into a "
+            "non-blocking nightly CI gate."
+        ),
+    )
     return parser
 
 
@@ -711,6 +1053,36 @@ def run_status(args: argparse.Namespace) -> int:
     return 2
 
 
+def run_ship_ready(args: argparse.Namespace) -> int:
+    """Execute the ``fleet ship-ready`` sub-action.
+
+    Warn-only by default: prints PASS/FAIL summary and always returns 0.
+    When ``--strict`` is passed, returns 2 if any board failed (or if no
+    boards were found, mirroring ``status``).
+    """
+    boards_dir = Path(args.boards_dir)
+    tolerance_path = Path(getattr(args, "drc_tolerance_file", _DRC_TOLERANCE_PATH))
+    warn_only = not getattr(args, "strict", False)
+
+    statuses = _discover_ship_ready(boards_dir, args.pattern, tolerance_path)
+
+    if args.format == "json":
+        print(_format_ship_ready_json(statuses, boards_dir, warn_only=warn_only))
+    else:
+        print(_format_ship_ready_table(statuses, boards_dir, warn_only=warn_only))
+
+    if warn_only:
+        # Warn-only: never block. Surface non-zero only via the table's
+        # ::warning:: annotation (parsed by GitHub Actions).
+        return 0
+
+    if not statuses:
+        return 2
+    if all(s.passed for s in statuses):
+        return 0
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the fleet command."""
     parser = _build_parser()
@@ -722,6 +1094,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fleet_command == "status":
         return run_status(args)
+    if args.fleet_command == "ship-ready":
+        return run_ship_ready(args)
 
     parser.print_help()
     return 0

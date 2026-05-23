@@ -4555,6 +4555,58 @@ def _add_fleet_parser(subparsers) -> None:
         ),
     )
 
+    # ------------------------------------------------------------------
+    # fleet ship-ready (issue #3099)
+    # ------------------------------------------------------------------
+    fleet_ship_ready = fleet_subparsers.add_parser(
+        "ship-ready",
+        help=(
+            "Per-board PASS/FAIL gate across routing + DRC + ERC + manufacturing. "
+            "Warn-only by default; pass --strict for non-zero exit on failure."
+        ),
+        description=(
+            "Aggregate ship-readiness gate. Reads the routed PCB, "
+            "drc_report.json, manifest.json, and any erc_report.json under "
+            "each board's output/ directory and emits a PASS/FAIL row per "
+            "board. Designed for nightly CI use in warn-only mode: --strict "
+            "opts into non-zero exits for humans."
+        ),
+    )
+    fleet_ship_ready.add_argument(
+        "--boards-dir",
+        dest="fleet_ship_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    fleet_ship_ready.add_argument(
+        "--format",
+        dest="fleet_ship_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    fleet_ship_ready.add_argument(
+        "--pattern",
+        dest="fleet_ship_pattern",
+        default="*_routed.kicad_pcb",
+        help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
+    )
+    fleet_ship_ready.add_argument(
+        "--drc-tolerance-file",
+        dest="fleet_ship_drc_tolerance_file",
+        default=".github/routed-drc-tolerance.yml",
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml)."
+        ),
+    )
+    fleet_ship_ready.add_argument(
+        "--strict",
+        dest="fleet_ship_strict",
+        action="store_true",
+        help=("Exit non-zero (2) if any board fails. Default is warn-only (always exit 0)."),
+    )
+
 
 def _add_clean_parser(subparsers) -> None:
     """Add clean subcommand parser for project cleanup."""

@@ -45,4 +45,24 @@ def run_fleet_command(args) -> int:
         if drc_tolerance_file:
             sub_argv.extend(["--drc-tolerance-file", drc_tolerance_file])
 
+    elif fleet_command == "ship-ready":
+        boards_dir = getattr(args, "fleet_ship_boards_dir", None)
+        if boards_dir:
+            sub_argv.extend(["--boards-dir", boards_dir])
+
+        fmt = getattr(args, "fleet_ship_format", None)
+        if fmt:
+            sub_argv.extend(["--format", fmt])
+
+        pattern = getattr(args, "fleet_ship_pattern", None)
+        if pattern:
+            sub_argv.extend(["--pattern", pattern])
+
+        drc_tolerance_file = getattr(args, "fleet_ship_drc_tolerance_file", None)
+        if drc_tolerance_file:
+            sub_argv.extend(["--drc-tolerance-file", drc_tolerance_file])
+
+        if getattr(args, "fleet_ship_strict", False):
+            sub_argv.append("--strict")
+
     return fleet_main(sub_argv)
