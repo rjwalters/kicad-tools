@@ -1,0 +1,114 @@
+name: Nightly Ship-Ready Gate
+
+# Issue #3099: nightly fleet-wide ship-readiness gate.
+#
+# Runs `kct fleet ship-ready` across every PCB-bearing board under
+# `boards/` and uploads each board's manufacturing artifacts plus the
+# JSON survey output. WARN-ONLY by design (per the steering decision
+# of 2026-05-21): the job exits 0 even when boards fail, and is NOT
+# wired into the required-status checks on the default branch.
+#
+# Rationale: a hard gate on cross-board manufacturing readiness would
+# stall unrelated PRs whenever one board regresses on a slow follow-up.
+# Warn-only mode keeps the signal visible (job summary, uploaded
+# artifacts, in-output ::warning:: annotation) without ever blocking
+# integration. Can be tightened later via a follow-up issue once all
+# 7 PCB-bearing boards are reliably PASS.
+
+on:
+  schedule:
+    # 06:00 UTC daily -- after slow-tests (03:00) and routing-benchmark
+    # (Sundays 04:00) so we are not contending for free runner capacity.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  ship-ready:
+    name: Fleet ship-ready (warn-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run ship-ready survey (table)
+        id: ship_ready_table
+        # `continue-on-error: true` is belt-and-braces -- the command
+        # itself exits 0 in warn-only mode, but if a future maintainer
+        # accidentally adds --strict here, this stops the failure from
+        # propagating to job-level success.
+        continue-on-error: true
+        run: |
+          mkdir -p ship-ready-output
+          uv run kct fleet ship-ready \
+            --boards-dir boards \
+            --format table \
+            | tee ship-ready-output/ship-ready.txt
+
+      - name: Run ship-ready survey (JSON)
+        id: ship_ready_json
+        continue-on-error: true
+        run: |
+          uv run kct fleet ship-ready \
+            --boards-dir boards \
+            --format json \
+            > ship-ready-output/ship-ready.json
+
+      - name: Collect per-board manufacturing artifacts
+        if: always()
+        run: |
+          mkdir -p ship-ready-output/manufacturing
+          for d in boards/*/output/manufacturing; do
+            if [ -d "$d" ]; then
+              board=$(basename "$(dirname "$(dirname "$d")")")
+              mkdir -p "ship-ready-output/manufacturing/$board"
+              cp -r "$d"/* "ship-ready-output/manufacturing/$board/" || true
+            fi
+          done
+
+      - name: Upload ship-ready artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ship-ready-${{ github.run_id }}
+          path: ship-ready-output/
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Fleet Ship-Ready Summary (warn-only)"
+            echo ""
+            echo "Mode: warn-only (this job NEVER blocks PRs)."
+            echo ""
+            if [ -f ship-ready-output/ship-ready.txt ]; then
+              echo '```'
+              cat ship-ready-output/ship-ready.txt
+              echo '```'
+            else
+              echo "No table output produced -- see job logs."
+            fi
+            echo ""
+            echo "Artifacts (per-board manufacturing bundles + JSON survey)"
+            echo "uploaded under the run's Artifacts tab as"
+            echo "\`ship-ready-${{ github.run_id }}\` (30-day retention)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Force success (warn-only)
+        # Final safeguard: even if the artifact collection or summary
+        # step exits non-zero for I/O reasons, the workflow as a whole
+        # MUST exit 0 so it cannot become a hidden required-check
+        # blocker.
+        run: |
+          echo "Ship-ready workflow finished in warn-only mode -- forcing exit 0."
+          exit 0
