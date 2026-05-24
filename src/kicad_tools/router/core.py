@@ -184,17 +184,31 @@ class IterationMetrics:
 
     Lex order (used by :meth:`is_better_than`):
 
-    1. ``routed_count`` descending — more routed nets is always better.
-    2. ``clearance_violations`` ascending — Issue #3002 (PR #3006
+    1. ``nets_fully_connected`` descending — Issue #3117: the canonical
+       "did the router actually wire up the design" signal.  More nets
+       whose pads are all electrically joined is unconditionally
+       better than a state where the per-net A* dropped fragments but
+       failed to close every pad-to-pad path.  Promoted ABOVE
+       ``routed_count`` because that older field counts nets with ANY
+       route fragment and so cannot distinguish a 4-pad net at 2/4
+       connected from the same net at 4/4 connected (the softstart
+       failure mode for board #3085: iter-0 logged 9/10 ``routed_count``
+       but only 4/10 ``nets_fully_connected``).
+    2. ``routed_count`` descending — kept as the tertiary "incremental
+       progress" signal: with equal fully-connected counts, a state
+       that has more nets with at least some fragment is preferred so
+       the loop still rewards partial progress that the next iteration
+       may finish.
+    3. ``clearance_violations`` ascending — Issue #3002 (PR #3006
        follow-up): a re-route that fixes a segment-vs-foreign-via
        clearance violation without reducing overflow must NOT be rolled
        back to the prior state.  Promoted ABOVE overflow because a
        DRC-clean board with marginally higher overflow is strictly
        preferable to a DRC-dirty board with lower overflow.
-    3. ``overflow`` ascending — with equal route counts and equal
+    4. ``overflow`` ascending — with equal route counts and equal
        clearance violations, lower overflow is better (the Issue #2803
        dimension).
-    4. ``iteration`` descending — on a complete tie, prefer the later
+    5. ``iteration`` descending — on a complete tie, prefer the later
        iteration so perturbation/escape strategies have a chance to bake
        in.
 
@@ -206,21 +220,31 @@ class IterationMetrics:
             clearance violations at iter end (Issue #3002; lower is
             better).  Defaults to 0 for back-compat with existing call
             sites that don't compute the count.
+        nets_fully_connected: Count of nets whose pads are all in a
+            single connected component per
+            :func:`observability.validate_net_connectivity` (Issue
+            #3117; higher is better).  Defaults to 0 for back-compat
+            with existing call sites and tests that don't compute the
+            value -- on a default-zeroed tuple the older
+            ``routed_count``-then-overflow ordering still applies, so
+            existing comparator tests continue to pass.
     """
 
     iteration: int
     routed_count: int
     overflow: int
     clearance_violations: int = 0
+    nets_fully_connected: int = 0
 
     @property
-    def sort_key(self) -> tuple[int, int, int, int]:
+    def sort_key(self) -> tuple[int, int, int, int, int]:
         """Tuple suitable for ``min()`` / sort key.
 
         Negated where descending is desired so the *smallest* tuple is the
         *best* iteration.
         """
         return (
+            -self.nets_fully_connected,
             -self.routed_count,
             self.clearance_violations,
             self.overflow,
@@ -6547,11 +6571,47 @@ class Autorouter:
             extra_routes=_extra_init,
         )
         initial_violations = len(initial_seg_via) + len(initial_via_seg)
+
+        # Issue #3117: compute ``nets_fully_connected`` for the lex tuple.
+        # ``validate_net_connectivity`` is already called once per
+        # iteration inside ``_get_partially_routed_nets`` (line ~6917) so
+        # adding a second call per iteration end and one per top-of-iter
+        # snapshot is the budget for this feature; the cost is amortized
+        # against the partial-route detector that the rip-up loop
+        # already requires.
+        from .observability import validate_net_connectivity as _validate_conn
+
+        def _compute_nets_fully_connected() -> int:
+            """Return the count of nets in ``net_routes`` whose pads
+            are all in one connected component.
+
+            Reads the live closure ``net_routes`` / ``pads_by_net`` so
+            the caller does not need to re-thread the dicts.  Mirrors the
+            net-pads filtering used by ``_get_partially_routed_nets``:
+            only nets with at least 2 pads are eligible (single-pad
+            nets are trivially connected but excluded so the count is
+            comparable to ``routed_count``).
+            """
+            net_pads: dict[int, list[Pad]] = {}
+            for net_id in net_routes:
+                pads = pads_by_net.get(net_id)
+                if pads and len(pads) >= 2:
+                    net_pads[net_id] = pads
+            if not net_pads:
+                return 0
+            all_routes: list[Route] = []
+            for routes_list_local in net_routes.values():
+                all_routes.extend(routes_list_local)
+            conn = _validate_conn(all_routes, net_pads)
+            return sum(1 for info in conn.values() if info.get("connected"))
+
+        initial_connected = _compute_nets_fully_connected()
         best_metrics = IterationMetrics(
             iteration=0,
             routed_count=best_routed_count,
             overflow=overflow,
             clearance_violations=initial_violations,
+            nets_fully_connected=initial_connected,
         )
 
         # Issue #2803: Lightweight trajectory log (three ints per iteration,
@@ -6605,11 +6665,19 @@ class Autorouter:
                 extra_routes=_extra_post,
             )
             violations_now = len(post_seg_via) + len(post_via_seg)
+            # Issue #3117: compute ``nets_fully_connected`` so the lex
+            # tuple primary key can reward iterations that closed more
+            # pad-to-pad paths (not just iterations that produced more
+            # route fragments).  Same cost as the
+            # ``_get_partially_routed_nets`` walk that the rip-up loop
+            # already requires.
+            connected_now = _compute_nets_fully_connected()
             metrics = IterationMetrics(
                 iteration=iter_index,
                 routed_count=routed_now,
                 overflow=overflow_val,
                 clearance_violations=violations_now,
+                nets_fully_connected=connected_now,
             )
             iteration_trajectory.append(metrics)
 
@@ -6652,15 +6720,24 @@ class Autorouter:
             if improved:
                 suffix = " (new best)"
             else:
+                # Issue #3117: include ``connected`` in the best-so-far
+                # suffix so operators can see whether the running best
+                # actually closed pad-to-pad paths or just produced
+                # fragments.
                 suffix = (
                     f" | best-so-far=iter-{best_metrics.iteration} "
-                    f"(routed={best_metrics.routed_count}, "
+                    f"(connected={best_metrics.nets_fully_connected}, "
+                    f"routed={best_metrics.routed_count}, "
                     f"clearance_viol={best_metrics.clearance_violations}, "
                     f"overflow={best_metrics.overflow}) "
                     f"| stall={best_stall_count}"
                 )
+            # Issue #3117: surface ``connected`` ahead of ``routed`` in
+            # the canonical per-iter line so the new lex-tuple primary
+            # key is visible at runtime.
             flush_print(
-                f"  iter {iter_index} | routed={routed_now}/{total_nets} | "
+                f"  iter {iter_index} | connected={connected_now}/{total_nets} | "
+                f"routed={routed_now}/{total_nets} | "
                 f"clearance_viol={violations_now} | "
                 f"overflow={overflow_val}{suffix}"
             )
@@ -6709,11 +6786,18 @@ class Autorouter:
                     extra_routes=_extra_top,
                 )
                 current_violations = len(current_seg_via) + len(current_via_seg)
+                # Issue #3117: mirror the lex-tuple primary key at the
+                # top-of-iteration snapshot site so a prior iteration's
+                # end-state can still be promoted to "best" when it had
+                # more fully-connected nets than what
+                # ``_capture_iteration_end`` last recorded.
+                current_connected = _compute_nets_fully_connected()
                 current_metrics = IterationMetrics(
                     iteration=iteration - 1,  # captured state is end of prior iter
                     routed_count=current_routed,
                     overflow=overflow,
                     clearance_violations=current_violations,
+                    nets_fully_connected=current_connected,
                 )
                 if current_metrics.is_better_than(best_metrics):
                     best_metrics = current_metrics
@@ -8101,19 +8185,28 @@ class Autorouter:
             extra_routes=_extra_final,
         )
         final_violations = len(final_seg_via) + len(final_via_seg)
+        # Issue #3117: include ``nets_fully_connected`` in the final
+        # lex-tuple comparator so the post-loop restore preserves a
+        # best snapshot whose pad-to-pad paths are more thoroughly
+        # closed -- even when the live final state has marginally
+        # higher ``routed_count``.
+        final_connected = _compute_nets_fully_connected()
         final_metrics = IterationMetrics(
             iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
             routed_count=current_routed,
             overflow=overflow,
             clearance_violations=final_violations,
+            nets_fully_connected=final_connected,
         )
         if best_metrics.is_better_than(final_metrics):
             flush_print(
                 f"  Restoring iteration {best_iteration} state "
-                f"(routed={best_metrics.routed_count}, "
+                f"(connected={best_metrics.nets_fully_connected}, "
+                f"routed={best_metrics.routed_count}, "
                 f"clearance_viol={best_metrics.clearance_violations}, "
                 f"overflow={best_metrics.overflow}) instead of final "
-                f"(routed={final_metrics.routed_count}, "
+                f"(connected={final_metrics.nets_fully_connected}, "
+                f"routed={final_metrics.routed_count}, "
                 f"clearance_viol={final_metrics.clearance_violations}, "
                 f"overflow={final_metrics.overflow})"
             )
