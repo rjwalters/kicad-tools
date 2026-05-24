@@ -18,9 +18,13 @@ from kicad_tools.router.drc_nudge import (
     _nudge_segment_with_chain,
     _perpendicular_unit,
     _reconnect_segments,
+    _router_pad_bbox,
+    _scan_and_repair_via_in_pad,
     _segment_endpoints_anchored_to_net_pads,
     _segment_endpoints_anchored_to_net_vias,
     _segment_length,
+    _try_nudge_via_pad,
+    _via_drill_inside_bbox,
     drc_verify_and_nudge,
 )
 from kicad_tools.router.primitives import Pad
@@ -1514,3 +1518,236 @@ def test_dispatch_records_unsupported_obstacle_type():
         reason.startswith("unsupported_obstacle:")
         for reason in result.skipped
     ), f"Expected unsupported_obstacle skip; got {result.skipped!r}"
+
+
+# ---------------------------------------------------------------------------
+# Same-net via-in-pad nudge tests (Issue #3112)
+# ---------------------------------------------------------------------------
+
+
+def _make_smd_pad(
+    *, x: float, y: float, width: float, height: float, net: int, ref: str = "U1",
+    pin: str = "1",
+) -> Pad:
+    """Build a router primitive Pad for the via-in-pad tests."""
+    return Pad(
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        net=net,
+        net_name=f"Net{net}",
+        layer=Layer.F_CU,
+        ref=ref,
+        pin=pin,
+        through_hole=False,
+    )
+
+
+class TestNudgeViaPad:
+    """Tests for the same-net via-in-pad rescue handler (Issue #3112)."""
+
+    def test_via_centered_in_pad_nudged_off(self):
+        """A via placed inside a same-net SMD pad bbox (off-centre, as
+        the router emits) is nudged to the nearest cardinal exit, and
+        both connecting segments snap to the new via centre so the
+        chain stays connected.
+
+        This mirrors the real-world board-02 case from PR #3102: pad
+        D2-1 at (124.0, 110.0) with a via at (124.3, 109.9).  The via
+        is *inside* the pad bbox but NOT at the pad centre -- the
+        centred-via case is preserved by the pad-anchored guard
+        (deliberate in-pad escape via).
+        """
+        # A 1.5x1.5mm pad centred at (10, 10) on net 1.
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
+        # Via inside the pad but OFF-centre.  The router places escape
+        # vias at the routing-grid point closest to the pad's exit,
+        # which is typically inside the pad bbox but offset from
+        # centre (mirrors the real D2-1 case at (124.3, 109.9) vs the
+        # pad centre at (124.0, 110.0)).
+        via = Via(
+            x=10.3, y=10.2, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        seg_a = Segment(
+            x1=5.0, y1=10.2, x2=10.3, y2=10.2,
+            width=0.2, layer=Layer.F_CU, net=1,
+        )
+        seg_b = Segment(
+            x1=10.3, y1=10.2, x2=10.3, y2=5.0,
+            width=0.2, layer=Layer.B_CU, net=1,
+        )
+        route = Route(
+            net=1, net_name="Net1",
+            segments=[seg_a, seg_b],
+            vias=[via],
+        )
+        rules = DesignRules(manufacturer="jlcpcb", trace_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+
+        nudged = _scan_and_repair_via_in_pad(
+            router, max_displacement=2.0, result=DRCNudgeResult(),
+        )
+        assert nudged == 1
+        # Via must no longer be inside the pad bbox.
+        bbox = _router_pad_bbox(pad)
+        assert not _via_drill_inside_bbox(via, bbox)
+        # Both segments should still meet the via centre (chain intact).
+        # seg_a was anchored at (5, 10.2) and ended at (10.3, 10.2) which
+        # was the via centre; the end of seg_a snaps to the new via pos.
+        assert math.isclose(seg_a.x2, via.x)
+        assert math.isclose(seg_a.y2, via.y)
+        # seg_b was anchored at (10.3, 5.0) end; the start (10.3, 10.2)
+        # was the via endpoint and should snap to the new via position.
+        assert math.isclose(seg_b.x1, via.x)
+        assert math.isclose(seg_b.y1, via.y)
+
+    def test_via_edge_within_tolerance_not_nudged(self):
+        """A via whose drill just barely clears the pad edge (within
+        ``_via_inside_pad`` tolerance, i.e. drill edge OUTSIDE the bbox)
+        is not flagged as in-pad and is left alone."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1)
+        # Pad bbox: (9.5, 9.5)-(10.5, 10.5).  Place a via with drill 0.35
+        # such that the drill circle is fully OUTSIDE the bbox (centre at
+        # (11.0, 10.0), drill_r=0.175 -> drill_left = 10.825 > 10.5).
+        via = Via(
+            x=11.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(
+            net=1, net_name="Net1",
+            segments=[],
+            vias=[via],
+        )
+        rules = DesignRules(manufacturer="jlcpcb", trace_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+
+        nudged = _scan_and_repair_via_in_pad(
+            router, max_displacement=2.0, result=DRCNudgeResult(),
+        )
+        # Via outside the pad bbox -- no nudge.
+        assert nudged == 0
+        # Position unchanged.
+        assert math.isclose(via.x, 11.0)
+        assert math.isclose(via.y, 10.0)
+
+    def test_displacement_exceeds_budget_returns_false(self):
+        """When the required cardinal exit displacement exceeds
+        ``max_displacement``, the handler refuses gracefully and records
+        a structured skip reason."""
+        # Very large pad so any cardinal exit requires a big move.
+        pad = _make_smd_pad(x=10.0, y=10.0, width=4.0, height=4.0, net=1)
+        # Via dead-centre.
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(
+            net=1, net_name="Net1",
+            segments=[],
+            vias=[via],
+        )
+        rules = DesignRules(manufacturer="jlcpcb", trace_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+
+        result = DRCNudgeResult()
+        # 0.1 mm budget << 2 mm exit distance.
+        moved = _try_nudge_via_pad(
+            via, _router_pad_bbox(pad), router,
+            max_displacement=0.1, required_clearance=0.2,
+            result=result,
+        )
+        assert moved is False
+        # Via must NOT have been moved.
+        assert math.isclose(via.x, 10.0)
+        assert math.isclose(via.y, 10.0)
+        # Structured skip recorded.
+        assert "via_pad_budget" in result.skipped
+        assert result.skipped["via_pad_budget"] == 1
+
+    def test_centred_via_preserved_as_in_pad_escape(self):
+        """A via sitting dead-centre on a pad of the same net is treated
+        as a deliberate in-pad escape via and is NOT nudged.
+
+        This preserves the chain-protection contract enforced by
+        :func:`_via_is_pad_anchored` / :func:`_nudge_via_with_chain` for
+        the via-via nudge handler: a via at the pad centre is the
+        connection point to that pad, and moving it would break the
+        net.  Only OFF-centre vias inside the pad bbox are surgically
+        moved.
+        """
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(
+            net=1, net_name="Net1",
+            segments=[],
+            vias=[via],
+        )
+        rules = DesignRules(manufacturer="jlcpcb", trace_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(
+            router, max_displacement=2.0, result=result,
+        )
+        assert nudged == 0
+        # Position unchanged -- structured skip recorded.
+        assert math.isclose(via.x, 10.0)
+        assert math.isclose(via.y, 10.0)
+        assert result.skipped.get("via_pad_centred_escape", 0) == 1
+
+    def test_via_in_pad_supported_profile_skipped(self):
+        """When the manufacturer supports via-in-pad (e.g. jlcpcb-tier1
+        or pcbway), the sweep is a no-op even if a via sits inside a
+        same-net pad."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
+        via = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU), net=1,
+        )
+        route = Route(
+            net=1, net_name="Net1",
+            segments=[],
+            vias=[via],
+        )
+        # pcbway supports via-in-pad.
+        rules = DesignRules(manufacturer="pcbway", trace_clearance=0.2)
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+
+        nudged = _scan_and_repair_via_in_pad(
+            router, max_displacement=2.0, result=DRCNudgeResult(),
+        )
+        # Profile supports via-in-pad -- nothing to do.
+        assert nudged == 0
+        # Via untouched.
+        assert math.isclose(via.x, 10.0)
+        assert math.isclose(via.y, 10.0)
