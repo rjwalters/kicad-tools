@@ -5379,7 +5379,7 @@ def main(argv: list[str] | None = None) -> int:
             "NOTE: auto-disabled with a log warning on small / dense boards "
             "where nets-per-region falls below 16 -- the partition + worker "
             "overhead would exceed the per-region A* savings on those "
-            "workloads (Issue #3100; board-07 case showed +55% wall-clock). "
+            "workloads (Issue #3100; board-07 case showed +55%% wall-clock). "
             "Best used on >= 64-net boards with a 2x2 partition."
         ),
     )
