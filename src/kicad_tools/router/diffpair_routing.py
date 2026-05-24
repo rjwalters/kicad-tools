@@ -2447,10 +2447,263 @@ class DiffPairRouter:
         """
         self._intra_clearance_violations.clear()
 
+    def _route_pair_on_fine_grid(
+        self,
+        pair: DifferentialPair,
+        spacing_override: float | None,
+        extra_spacing_cells: int,
+        per_pair_timeout: float | None,
+        resolution_factor: float = 0.5,
+    ) -> tuple[list[Route], object | None]:
+        """Issue #3115 Phase B fine-grid sub-pass: re-route a pair on a finer grid.
+
+        Builds a bbox-scoped routing grid whose resolution is
+        ``resolution_factor x main_grid.resolution`` (default half-pitch),
+        re-marks the obstacles/pads/foreign routes the main grid carries
+        in that bounding box, then runs :class:`CoupledPathfinder` against
+        the fine grid.  The resulting routes are returned in world
+        coordinates so the caller can mark them on the main grid.
+
+        Targets the angle-#1 root cause flagged in Issue #3115: grid
+        quantisation of asymmetric escape stubs prevents the main-grid
+        ``extra_spacing_cells`` retry from producing equal-length P/N
+        landings.  A finer grid resolution gives the coupled search
+        sub-cell-aware moves so the partner-aware exit cell can land on
+        an evenly-clearance position without changing the corridor A*
+        algorithm.
+
+        Args:
+            pair: The differential pair to re-route.
+            spacing_override: Optional spacing override (from
+                ``diffpair_config.spacing``); ``None`` uses the pair's
+                own rules.
+            extra_spacing_cells: Additional grid cells of spacing
+                widening, same semantics as
+                :meth:`route_differential_pair_coupled`.  At the
+                fine-grid resolution one cell is half as wide as at the
+                main-grid resolution, so a value of e.g. ``2`` on a
+                half-pitch fine grid only widens by ``1 x main cell``.
+                The caller should compensate by passing a larger
+                value when re-using the main-grid floor.
+            per_pair_timeout: Wall-clock budget forwarded to
+                :meth:`CoupledPathfinder.route_coupled`.
+            resolution_factor: Fine-grid resolution multiplier.  Default
+                ``0.5`` (half-pitch).
+
+        Returns:
+            ``(routes, warning)`` matching the legacy
+            :meth:`route_differential_pair_coupled` return shape.
+            ``([], None)`` if pads cannot be resolved, the fine-grid
+            bounding box is degenerate, or the coupled search returns
+            no path.  Successful routes are NOT marked on either grid
+            by this helper; the caller is responsible for the
+            ``autorouter._mark_route()`` + ``autorouter.routes.append()``
+            handoff so post-route bookkeeping (intra-clearance audit,
+            length matching) stays consistent with the main-grid path.
+        """
+        from .grid import RoutingGrid
+        from .rules import DesignRules
+
+        if pair.rules is None:
+            return [], None
+
+        # Resolve the pads we need to route between.
+        pad_result = self._get_pair_pads(pair)
+        if pad_result is None:
+            return [], None
+        p_pads, n_pads = pad_result
+        if not p_pads or not n_pads:
+            return [], None
+
+        main_grid = self.autorouter.grid
+        fine_resolution = max(
+            main_grid.resolution * resolution_factor,
+            # Don't go below 0.01mm; below that the pathfinder cost
+            # explodes faster than the resolution helps geometry.
+            0.01,
+        )
+
+        # Compute bounding box covering the pair's pads with a margin
+        # equal to the main-grid spacing target so the search has room
+        # to maneuver around adjacent obstacles.
+        all_xs = [p.x for p in p_pads + n_pads]
+        all_ys = [p.y for p in p_pads + n_pads]
+        margin = max(
+            2.0,  # at least 2mm of breathing room
+            6.0 * main_grid.resolution,  # or six main-grid cells
+        )
+        bbox_min_x = min(all_xs) - margin
+        bbox_min_y = min(all_ys) - margin
+        bbox_max_x = max(all_xs) + margin
+        bbox_max_y = max(all_ys) + margin
+
+        # Clamp to the main grid's footprint so we don't run off the board.
+        bbox_min_x = max(bbox_min_x, main_grid.origin_x)
+        bbox_min_y = max(bbox_min_y, main_grid.origin_y)
+        bbox_max_x = min(bbox_max_x, main_grid.origin_x + main_grid.width)
+        bbox_max_y = min(bbox_max_y, main_grid.origin_y + main_grid.height)
+
+        fine_width = bbox_max_x - bbox_min_x
+        fine_height = bbox_max_y - bbox_min_y
+
+        if fine_width <= 0 or fine_height <= 0:
+            # Degenerate bounding box; nothing to route on.
+            return [], None
+
+        # Safety check on grid size: a half-pitch grid quadruples the
+        # cell count, so cap the fine-grid size to avoid pathological
+        # memory use on large pairs (e.g., edge-to-edge mini-PCIe).
+        # The main-grid fine-grid pass in ``core.py:11652`` uses
+        # 16M cells; we use a tighter 4M cap because this is per-pair
+        # and runs inside a per-pair timeout.
+        num_layers = main_grid.num_layers
+        estimated_cells = (
+            (fine_width / fine_resolution) * (fine_height / fine_resolution) * num_layers
+        )
+        max_fine_cells = 4_000_000
+        if estimated_cells > max_fine_cells:
+            scale = (estimated_cells / max_fine_cells) ** 0.5
+            fine_resolution = fine_resolution * scale
+            logger.info(
+                "Phase B fine-grid: scaling resolution up to %.4fmm "
+                "to fit %d-cell cap (pair=%r)",
+                fine_resolution,
+                max_fine_cells,
+                pair.name,
+            )
+
+        # Build a fresh design rules object that mirrors the main rules
+        # but uses the fine resolution.  Mirrors the pattern at
+        # ``core.py:11673``.
+        main_rules = self.autorouter.rules
+        fine_rules = DesignRules(
+            grid_resolution=fine_resolution,
+            trace_width=main_rules.trace_width,
+            trace_clearance=main_rules.trace_clearance,
+            via_drill=main_rules.via_drill,
+            via_diameter=main_rules.via_diameter,
+            via_clearance=main_rules.via_clearance,
+            manufacturer=main_rules.manufacturer,
+        )
+
+        fine_grid = RoutingGrid(
+            width=fine_width,
+            height=fine_height,
+            rules=fine_rules,
+            origin_x=bbox_min_x,
+            origin_y=bbox_min_y,
+            layer_stack=main_grid.layer_stack,
+            resolution_override=fine_resolution,
+        )
+
+        # Mirror autorouter pads onto the fine grid so the coupled
+        # search sees the same obstacle field.  This includes BOTH the
+        # pair's own pads (their cells must be reachable for the same
+        # net) and other nets' pads in the bounding box (must be
+        # blocked).
+        pitches = self.autorouter.component_pitches
+        pad_refs_in_pair = {
+            (p.ref, p.pin) for p in p_pads + n_pads
+        }
+        # Add the pair's own pads first so net ownership is correct.
+        for pad in p_pads + n_pads:
+            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+        # Add foreign pads that fall in the bounding box.
+        for (ref, pin), pad in self.autorouter.pads.items():
+            if (ref, pin) in pad_refs_in_pair:
+                continue
+            if (
+                bbox_min_x <= pad.x <= bbox_max_x
+                and bbox_min_y <= pad.y <= bbox_max_y
+            ):
+                fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+
+        # Re-mark all currently-committed routes (foreign nets) on the
+        # fine grid so the coupled search avoids them.  The pair's own
+        # routes were already ripped up by the caller before invoking
+        # this helper.
+        pair_p_net, pair_n_net = pair.get_net_ids()
+        for route in self.autorouter.routes:
+            if route.net == pair_p_net or route.net == pair_n_net:
+                continue
+            fine_grid.mark_route(route)
+
+        # Compute the same center-to-center spacing the main path uses
+        # at line 2095-2140, but in fine-grid cells.
+        if spacing_override is None:
+            spacing = pair.rules.spacing
+        else:
+            spacing = spacing_override
+
+        net_class_map = self.autorouter.net_class_map or {}
+        pair_net_class = net_class_map.get(pair.positive.net_name)
+        if pair_net_class is not None:
+            pair_trace_width = float(pair_net_class.trace_width)
+            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+        else:
+            pair_trace_width = float(self.autorouter.rules.trace_width)
+            pair_intra_clearance = float(spacing)
+
+        required_center_spacing = pair_trace_width + pair_intra_clearance
+        min_spacing_cells = max(1, math.ceil(required_center_spacing / fine_resolution))
+        legacy_spacing_cells = math.ceil(spacing / fine_resolution)
+        spacing_cells = max(legacy_spacing_cells, min_spacing_cells)
+
+        if extra_spacing_cells > 0:
+            min_spacing_cells += extra_spacing_cells
+            spacing_cells += extra_spacing_cells
+
+        # Build the fine-grid coupled pathfinder.
+        pathfinder = CoupledPathfinder(
+            fine_grid,
+            fine_rules,
+            spacing_cells,
+            net_class_map=self.autorouter.net_class_map,
+            allow_swap_via=False,  # synthetic asymmetric-pad case rarely needs it
+            min_spacing_cells=min_spacing_cells,
+        )
+
+        # Pair the pads with the same MST/legacy logic as
+        # route_differential_pair_coupled so the spec ordering
+        # matches what the main-grid path would produce.
+        if len(p_pads) == 2 and len(n_pads) == 2:
+            legacy_specs = self._pair_pads_for_coupled_routing(p_pads, n_pads)
+            specs = []
+            for ps, pe, ns, ne in legacy_specs:
+                specs.append((ps, pe, ns, ne))
+        else:
+            coupled_specs, _stub_specs = self._pair_pads_for_coupled_routing_npad(
+                p_pads, n_pads
+            )
+            specs = [
+                (s.p_start, s.p_end, s.n_start, s.n_end)
+                for s in coupled_specs
+            ]
+
+        if not specs:
+            return [], None
+
+        produced_routes: list[Route] = []
+        for ps, pe, ns, ne in specs:
+            result = pathfinder.route_coupled(
+                ps, pe, ns, ne, timeout_seconds=per_pair_timeout
+            )
+            if result is None:
+                # Failed on at least one spec -- abandon the fine-grid
+                # attempt entirely (the caller will try the next angle
+                # or restore the original routes).
+                return [], None
+            p_route, n_route = result
+            produced_routes.append(p_route)
+            produced_routes.append(n_route)
+
+        return produced_routes, None
+
     def repair_intra_clearance_violations(
         self,
         diffpair_config: DifferentialPairConfig | None = None,
         max_retries_per_pair: int = 2,
+        enable_fine_grid_pass: bool = True,
     ) -> int:
         """Issue #3040 Phase B: rip-up and retry pairs with intra-clearance violations.
 
@@ -2466,12 +2719,20 @@ class DiffPairRouter:
              apart -- enough additional spacing to recover the
              edge-to-edge clearance lost to grid quantisation in the
              first attempt.
-          3. Re-checks the new pair via
+          3. Issue #3115: when the main-grid retries fail and
+             ``enable_fine_grid_pass`` is True, runs a fine-grid
+             sub-pass (half the main resolution, scoped to the pair's
+             bounding box) that re-routes the pair against the
+             quantisation-sensitive escape geometry the wider-spacing
+             retries cannot fix.  Targets the angle-#1 root cause of
+             asymmetric pad heights producing unequal escape stubs
+             that the main grid pitch cannot equalise.
+          4. Re-checks the new pair via
              ``find_intra_pair_clearance_violations`` and accepts the
-             retry only if the violation is resolved.  If the retry
-             still violates (or the pathfinder finds no path with the
-             wider spacing), the original routes are restored and the
-             pair remains flagged for the
+             retry only if the violation is resolved.  If every retry
+             (main-grid and fine-grid) still violates (or the
+             pathfinder finds no path), the original routes are
+             restored and the pair remains flagged for the
              :func:`~kicad_tools.router.io.validate_routes` safety net.
 
         Args:
@@ -2479,10 +2740,17 @@ class DiffPairRouter:
                 ``route_all_with_diffpairs`` call (so per-pair rules and
                 spacing carry over).  May be ``None`` if no special
                 configuration is in effect.
-            max_retries_per_pair: Hard cap on retry attempts per pair
-                to prevent infinite loops on pathologically tight
-                escapes.  Default ``2``; each attempt widens spacing
-                by one additional grid cell over the prior attempt.
+            max_retries_per_pair: Hard cap on main-grid retry attempts
+                per pair to prevent infinite loops on pathologically
+                tight escapes.  Default ``2``; each attempt widens
+                spacing by one additional grid cell over the prior
+                attempt.  The optional fine-grid sub-pass is in
+                addition to these main-grid attempts.
+            enable_fine_grid_pass: Issue #3115: when True (default),
+                perform a fine-grid sub-pass after the main-grid retries
+                exhaust.  Set False to retain the legacy Phase B
+                behaviour (main-grid retries only) for tests that pin
+                that contract.
 
         Returns:
             The number of pairs whose violation was resolved by the
@@ -2642,6 +2910,94 @@ class DiffPairRouter:
                     self.autorouter.grid.unmark_route(route)
                     if route in self.autorouter.routes:
                         self.autorouter.routes.remove(route)
+
+            # Issue #3115 Phase B fine-grid sub-pass: when the main-grid
+            # ``extra_spacing_cells`` retries have all failed, give the
+            # pair one last chance on a half-pitch grid.  This targets
+            # the asymmetric-pad-escape pathology where the main-grid
+            # quantisation forces unequal P/N stubs that the
+            # wider-spacing search cannot equalise.
+            if not retry_succeeded and enable_fine_grid_pass:
+                # Clear out this pair's violations from prior attempts
+                # so the new audit is the only signal we look at.
+                self._intra_clearance_violations = [
+                    v for v in self._intra_clearance_violations
+                    if v.positive_net_name != p_net_name
+                ]
+
+                fine_grid_timeout: float | None = None
+                if diffpair_config is not None and diffpair_config.per_pair_timeout:
+                    # Reuse the half-budget cap from the main-grid
+                    # retries; the fine grid is more expensive but
+                    # the bbox is narrowly scoped.
+                    fine_grid_timeout = max(2.0, diffpair_config.per_pair_timeout / 2.0)
+
+                print(
+                    f"    Phase B fine-grid sub-pass: {p_net_name}/{n_net_name} "
+                    f"on half-pitch grid"
+                )
+                try:
+                    fine_routes, _fine_warning = self._route_pair_on_fine_grid(
+                        pair,
+                        spacing_override=spacing_override,
+                        # Modest widening on the fine grid: one main-grid
+                        # cell == two fine-grid cells; carry one fine
+                        # cell of extra spacing.
+                        extra_spacing_cells=1,
+                        per_pair_timeout=fine_grid_timeout,
+                        resolution_factor=0.5,
+                    )
+                except Exception as e:
+                    # The fine-grid sub-pass is best-effort.  If it
+                    # raises (cell-count cap, grid-init failure, etc.)
+                    # we fall through to the original-route restore
+                    # path so the board state stays consistent.
+                    logger.warning(
+                        "Phase B fine-grid sub-pass raised an unexpected "
+                        "exception (pair=%r): %s; falling back to "
+                        "main-grid violation state.",
+                        pair.name,
+                        e,
+                    )
+                    fine_routes = []
+
+                if fine_routes:
+                    # Audit the fine-grid routes against the same
+                    # threshold the original detector used so we don't
+                    # accept routes that are STILL in violation.
+                    fine_p_routes = [
+                        r for r in fine_routes if r.net == p_id
+                    ]
+                    fine_n_routes = [
+                        r for r in fine_routes if r.net == n_id
+                    ]
+                    if fine_p_routes and fine_n_routes:
+                        # Use the first (longest) p/n routes for the
+                        # detector -- matches the 2-pad fast path.
+                        fine_violation = find_intra_pair_clearance_violations(
+                            fine_p_routes[0],
+                            fine_n_routes[0],
+                            threshold_mm=pair_violations[0].expected_clearance_mm,
+                            pair_name=pair.name,
+                        )
+                        if fine_violation is None:
+                            # Clean!  Mark on the main grid and accept.
+                            for route in fine_routes:
+                                self.autorouter._mark_route(route)
+                                self.autorouter.routes.append(route)
+                            print(
+                                f"    Phase B fine-grid sub-pass succeeded: "
+                                f"{p_net_name}/{n_net_name} clean."
+                            )
+                            retry_succeeded = True
+                            for v in pair_violations:
+                                ids_to_remove.add(id(v))
+                        else:
+                            print(
+                                f"    Phase B fine-grid sub-pass still violates: "
+                                f"actual={fine_violation.actual_clearance_mm:.4f}mm "
+                                f"threshold={fine_violation.expected_clearance_mm:.4f}mm"
+                            )
 
             if retry_succeeded:
                 resolved_pairs += 1
