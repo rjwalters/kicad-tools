@@ -2170,15 +2170,43 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     Issue #3096 (M-E):  Extends the timeout from 240 s to 360 s so the
     negotiator's rip-up iteration has room to land additional nets on
     the larger signal-net pool (32 nets after the 2026-05-08 PWM/
-    gate-drive additions).  The route's built-in "Optimizing traces"
-    DRC-nudge pass (always runs regardless of ``--auto-fix``) resolves
-    9/45 clearance violations in-place; an additional out-of-band
-    ``kct fix-drc`` was prototyped and found to repair 5/12 remaining
-    clearance violations at the cost of 2 connectivity regressions
-    (nudging strands previously-routed pads), so the net DRC count
-    stays flat -- the standalone fix-drc step is therefore disabled
-    in ``main()`` until the connectivity-aware nudge in the upstream
-    repair pipeline is hardened.
+    gate-drive additions).
+
+    Issue #3111 (M-E follow-up): builder measurements after PR #3108 and
+    PR #3110 (per-pair budget) merged showed the Python negotiator was
+    consistently producing 21/32 fully-routed nets at iteration 2 (best
+    state with overflow=28) but the 360s wall-clock budget was being
+    consumed by the rip-up loop *and* the post-route DRC-fix pass, so
+    the ``--auto-fix`` step was being skipped with "deadline reached"
+    (issue #2802) and the run ended with stale 26+ connectivity errors.
+    Three changes to recover the headroom:
+
+    1. Bump ``--timeout`` 360 -> 900 s.  Empirically iter 0 reaches
+       21/32 routed in ~120 s; iter 2 (best state) lands at ~250 s; the
+       early-stop-patience=4 lets iter 3-6 explore further before the
+       Restoring iteration-N best-state restore (Issue #3101) kicks
+       in.  Leaving 600+ s for negotiator iterations + the
+       Optimizing-traces nudge + the post-route fix-drc pass.
+    2. Add ``--early-stop-patience 4`` (default 2) so the negotiator
+       gets more rip-up attempts before bailing out.  Empirically the
+       iter-1 metric usually regresses (overflow=42 vs iter-0 30) and
+       iter-2 recovers to a new best (overflow=28); waiting for stall=4
+       instead of stall=2 lets iter 5-6 attempt routing more
+       difficult-to-route nets (SWCLK/SWDIO/NRST particularly hard).
+    3. Add ``--auto-fix --auto-fix-passes 3`` so ``kct fix-drc`` runs
+       *after* the negotiator finishes, with the remaining time budget
+       on its own deadline.  The Optimizing-traces nudge alone resolves
+       only 9/45 clearance violations; the standalone fix-drc pass on
+       the post-route geometry was empirically destroying connectivity
+       in PR #3108, so it stays scoped to clearance fixes only via
+       ``--auto-fix-passes 3`` (the default).
+
+    NOTE: ``--placement-feedback`` was evaluated and rejected.  On
+    board-05's already-cramped 70x90 mm layout, the feedback loop
+    rejected all 57 MOVE_COMPONENT candidates as "unsafe (board
+    bounds)" and didn't move any components, but it DID rerun the
+    full negotiator at iteration 0 which destroyed the iter-2 best
+    state.  Net effect: 21/32 -> 12/32 (regression).  Skip it.
 
     What each flag does:
 
@@ -2199,12 +2227,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       power nets to share the default width.  Issue #3096 enrichment.
     - ``--seed 42``: deterministic output for byte-identical re-routes
       in CI.
+    - ``--early-stop-patience 4``: per Issue #3101, the negotiator
+      stops after N consecutive non-improving rip-up iterations.
+      Default 2; bumped to 4 here to give the rip-up loop more shots
+      at hard-to-route SWCLK/SWDIO/NRST nets.
+    - ``--auto-fix --auto-fix-passes 3``: invoke fix-drc as a post-
+      route step with its own time budget (instead of in-line --auto-
+      fix which shares the routing deadline -- issue #2802).
 
     Skip nets remain the high-current power/phase nets that are carried
     by copper pours instead of routed traces.
     """
     print("\n" + "=" * 60)
-    print("Routing PCB (via ``kct route`` flag recipe -- Issue #3096)...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111)...")
     print("=" * 60)
 
     # Skip power and high-current nets (route manually or use copper pour zones)
@@ -2230,7 +2265,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--seed",
         "42",
         "--timeout",
-        "360",
+        "900",  # Issue #3111: was 360; bumped so auto-fix has budget after negotiator finishes
+        "--per-net-timeout",
+        "30",
+        "--early-stop-patience",
+        "4",  # Issue #3111: default 2, bumped to 4 so iter 5-6 try harder nets
+        "--auto-fix",
+        "--auto-fix-passes",
+        "3",  # Issue #3111: post-route fix-drc with its own budget
         "--skip-nets",
         ",".join(skip_nets),
     ]
