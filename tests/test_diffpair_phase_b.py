@@ -575,3 +575,373 @@ def test_extra_spacing_cells_widens_min_spacing_cells():
         f"extra_spacing_cells=2 should widen min_spacing_cells by 2; "
         f"got baseline={base_floor}, wider={wider_floor}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase B-8 (Issue #3115): fine-grid sub-pass plumbing and behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_repair_intra_clearance_violations_accepts_enable_fine_grid_pass_kwarg():
+    """``repair_intra_clearance_violations`` must accept ``enable_fine_grid_pass``.
+
+    The fine-grid sub-pass added by Issue #3115 lives at the third
+    attempt slot; the kwarg lets test callers disable it to pin the
+    legacy main-grid-only contract without depending on the new
+    behaviour being inert.
+    """
+    import inspect
+
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    sig = inspect.signature(DiffPairRouter.repair_intra_clearance_violations)
+    assert "enable_fine_grid_pass" in sig.parameters, (
+        "repair_intra_clearance_violations lost the enable_fine_grid_pass "
+        "kwarg added by Issue #3115"
+    )
+    # Default must be True so production calls automatically get the
+    # extra resolution; tests that need the legacy behaviour pass False.
+    assert sig.parameters["enable_fine_grid_pass"].default is True
+
+
+def test_route_pair_on_fine_grid_uses_finer_resolution():
+    """``_route_pair_on_fine_grid`` builds a pathfinder whose grid has a
+    finer resolution than the main grid.
+
+    White-box guard against the simplest failure mode the fix could
+    silently hit: the helper accidentally re-using the main grid (or a
+    grid with the same resolution) so the angle-#1 sub-cell motion is
+    unavailable.  Captures the kwargs the helper hands to
+    ``CoupledPathfinder`` and asserts the pathfinder's grid has a
+    resolution strictly less than the main grid's.
+    """
+    from unittest.mock import patch
+
+    from kicad_tools.router import diffpair_routing
+    from kicad_tools.router.diffpair import (
+        DifferentialPair,
+        DifferentialPairRules,
+        DifferentialPairType,
+        DifferentialSignal,
+    )
+    from kicad_tools.router.primitives import Pad
+
+    router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
+    dpr = router._diffpair
+
+    rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+    pos = DifferentialSignal(
+        net_name="USB_D+", net_id=1, base_name="USB_D",
+        polarity="P", notation="plus_minus",
+    )
+    neg = DifferentialSignal(
+        net_name="USB_D-", net_id=2, base_name="USB_D",
+        polarity="N", notation="plus_minus",
+    )
+    pair = DifferentialPair(
+        name="USB_D", positive=pos, negative=neg,
+        pair_type=DifferentialPairType.USB2, rules=rules,
+    )
+
+    # Synthetic asymmetric pads: J1 has 0.8mm tall pads (FFC),
+    # U1 has 0.35mm tall pads (QFN) -- the exact pathology the
+    # issue body cites at boards/06-diffpair-test/U2 vs J4.
+    p_pads = [
+        Pad(x=2.0, y=2.0, width=0.8, height=0.8, net=1, net_name="USB_D+",
+            layer=Layer.F_CU, ref="J1", pin="1"),
+        Pad(x=8.0, y=2.0, width=0.35, height=0.35, net=1, net_name="USB_D+",
+            layer=Layer.F_CU, ref="U1", pin="1"),
+    ]
+    n_pads = [
+        Pad(x=2.0, y=2.3, width=0.8, height=0.8, net=2, net_name="USB_D-",
+            layer=Layer.F_CU, ref="J1", pin="2"),
+        Pad(x=8.0, y=2.3, width=0.35, height=0.35, net=2, net_name="USB_D-",
+            layer=Layer.F_CU, ref="U1", pin="2"),
+    ]
+    dpr._get_pair_pads = lambda _pair: (p_pads, n_pads)  # type: ignore[assignment]
+
+    main_resolution = router.grid.resolution
+
+    captured_pathfinders: list = []
+    real_pathfinder = diffpair_routing.CoupledPathfinder
+
+    def _capture(grid, *args, **kwargs):
+        pf = real_pathfinder(grid, *args, **kwargs)
+        captured_pathfinders.append(pf)
+        # Stub route_coupled to short-circuit (None) so we only test
+        # the construction.
+        pf.route_coupled = lambda *a, **k: None
+        return pf
+
+    with patch.object(diffpair_routing, "CoupledPathfinder", side_effect=_capture):
+        dpr._route_pair_on_fine_grid(
+            pair,
+            spacing_override=None,
+            extra_spacing_cells=1,
+            per_pair_timeout=None,
+            resolution_factor=0.5,
+        )
+
+    assert len(captured_pathfinders) == 1, (
+        f"Expected exactly one fine-grid CoupledPathfinder; "
+        f"got {len(captured_pathfinders)}"
+    )
+    fine_pathfinder = captured_pathfinders[0]
+    fine_resolution = fine_pathfinder.grid.resolution
+    assert fine_resolution < main_resolution, (
+        f"Fine-grid pathfinder resolution {fine_resolution}mm is not "
+        f"finer than main-grid resolution {main_resolution}mm -- the "
+        f"angle-#1 sub-cell pathfinder advantage is lost"
+    )
+    # The default resolution_factor=0.5 should produce roughly
+    # half-pitch (allow a small fudge for the 4M-cell cap).
+    assert fine_resolution <= main_resolution * 0.6, (
+        f"Fine-grid resolution {fine_resolution}mm exceeds 60% of the "
+        f"main-grid resolution {main_resolution}mm -- the cell-count "
+        f"cap may have neutered the resolution_factor=0.5 request"
+    )
+
+
+def test_repair_pass_invokes_fine_grid_when_main_retries_fail():
+    """When all main-grid retries fail, the repair pass must invoke
+    the Issue #3115 fine-grid sub-pass before falling through.
+
+    Stubs ``route_differential_pair_coupled`` to always fail (no path)
+    and ``_route_pair_on_fine_grid`` to record the call.  Verifies
+    that exactly one fine-grid sub-pass attempt was made per pair
+    after the main-grid retries exhausted.
+    """
+    router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
+    dpr = router._diffpair
+
+    p_route, n_route, violation = _make_violating_pair()
+    router.net_names[1] = "USB_D+"
+    router.net_names[2] = "USB_D-"
+    router.nets[1] = []
+    router.nets[2] = []
+    router.routes.append(p_route)
+    router.routes.append(n_route)
+    dpr._intra_clearance_violations.append(violation)
+
+    main_grid_calls = {"value": 0}
+    fine_grid_calls = {"value": 0}
+
+    original_method = dpr.route_differential_pair_coupled
+    original_fine = dpr._route_pair_on_fine_grid
+
+    def _failing_main(*args, **kwargs):
+        main_grid_calls["value"] += 1
+        return [], None
+
+    def _failing_fine(*args, **kwargs):
+        fine_grid_calls["value"] += 1
+        return [], None
+
+    dpr.route_differential_pair_coupled = _failing_main  # type: ignore[assignment]
+    dpr._route_pair_on_fine_grid = _failing_fine  # type: ignore[assignment]
+
+    try:
+        from types import SimpleNamespace
+
+        fake_positive = SimpleNamespace(net_id=1, net_name="USB_D+")
+        fake_negative = SimpleNamespace(net_id=2, net_name="USB_D-")
+        fake_pair = SimpleNamespace(
+            positive=fake_positive,
+            negative=fake_negative,
+            rules=None,
+            pair_type=SimpleNamespace(value="usb"),
+            get_net_ids=lambda: (1, 2),
+            name="USB_D",
+        )
+        dpr.detect_differential_pairs_with_source = lambda: [(fake_pair, "stub")]
+
+        resolved = dpr.repair_intra_clearance_violations(
+            max_retries_per_pair=2,
+            enable_fine_grid_pass=True,
+        )
+    finally:
+        dpr.route_differential_pair_coupled = original_method  # type: ignore[assignment]
+        dpr._route_pair_on_fine_grid = original_fine  # type: ignore[assignment]
+
+    # Two main-grid retries attempted, then one fine-grid attempt.
+    assert main_grid_calls["value"] == 2, (
+        f"Expected exactly 2 main-grid attempts; got {main_grid_calls['value']}"
+    )
+    assert fine_grid_calls["value"] == 1, (
+        f"Expected exactly 1 fine-grid attempt after main retries failed; "
+        f"got {fine_grid_calls['value']}"
+    )
+    assert resolved == 0, (
+        f"All attempts failed; expected resolved=0 got {resolved}"
+    )
+
+
+def test_repair_pass_skips_fine_grid_when_disabled():
+    """``enable_fine_grid_pass=False`` must suppress the Issue #3115
+    sub-pass entirely so the legacy main-grid-only contract is preserved
+    for tests / opt-out callers.
+    """
+    router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
+    dpr = router._diffpair
+
+    p_route, n_route, violation = _make_violating_pair()
+    router.net_names[1] = "USB_D+"
+    router.net_names[2] = "USB_D-"
+    router.nets[1] = []
+    router.nets[2] = []
+    router.routes.append(p_route)
+    router.routes.append(n_route)
+    dpr._intra_clearance_violations.append(violation)
+
+    fine_grid_calls = {"value": 0}
+    original_method = dpr.route_differential_pair_coupled
+    original_fine = dpr._route_pair_on_fine_grid
+
+    def _failing_main(*args, **kwargs):
+        return [], None
+
+    def _spy_fine(*args, **kwargs):
+        fine_grid_calls["value"] += 1
+        return [], None
+
+    dpr.route_differential_pair_coupled = _failing_main  # type: ignore[assignment]
+    dpr._route_pair_on_fine_grid = _spy_fine  # type: ignore[assignment]
+
+    try:
+        from types import SimpleNamespace
+
+        fake_positive = SimpleNamespace(net_id=1, net_name="USB_D+")
+        fake_negative = SimpleNamespace(net_id=2, net_name="USB_D-")
+        fake_pair = SimpleNamespace(
+            positive=fake_positive, negative=fake_negative, rules=None,
+            pair_type=SimpleNamespace(value="usb"),
+            get_net_ids=lambda: (1, 2), name="USB_D",
+        )
+        dpr.detect_differential_pairs_with_source = lambda: [(fake_pair, "stub")]
+
+        dpr.repair_intra_clearance_violations(
+            max_retries_per_pair=2,
+            enable_fine_grid_pass=False,
+        )
+    finally:
+        dpr.route_differential_pair_coupled = original_method  # type: ignore[assignment]
+        dpr._route_pair_on_fine_grid = original_fine  # type: ignore[assignment]
+
+    assert fine_grid_calls["value"] == 0, (
+        f"Fine-grid sub-pass invoked despite enable_fine_grid_pass=False; "
+        f"got {fine_grid_calls['value']} call(s)"
+    )
+
+
+def test_repair_pass_accepts_fine_grid_routes_when_clean():
+    """When the fine-grid sub-pass returns clean (non-violating) routes,
+    the repair pass marks them on the main grid, increments the resolved
+    counter, and removes the original violation from the buffer.
+    """
+    from types import SimpleNamespace
+
+    router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
+    dpr = router._diffpair
+
+    p_route, n_route, violation = _make_violating_pair()
+    router.net_names[1] = "USB_D+"
+    router.net_names[2] = "USB_D-"
+    router.nets[1] = []
+    router.nets[2] = []
+    router.routes.append(p_route)
+    router.routes.append(n_route)
+    dpr._intra_clearance_violations.append(violation)
+
+    original_method = dpr.route_differential_pair_coupled
+    original_fine = dpr._route_pair_on_fine_grid
+
+    def _failing_main(*args, **kwargs):
+        return [], None
+
+    def _succeeding_fine(
+        pair, spacing_override=None, extra_spacing_cells=1,
+        per_pair_timeout=None, resolution_factor=0.5,
+    ):
+        # Lay clean routes 0.5mm apart (well above 0.10mm threshold).
+        clean_p = _make_route(
+            net_id=1, net_name="USB_D+",
+            segments=[(0.0, 1.0, 10.0, 1.0, Layer.F_CU)],
+        )
+        clean_n = _make_route(
+            net_id=2, net_name="USB_D-",
+            segments=[(0.0, 1.5, 10.0, 1.5, Layer.F_CU)],
+        )
+        return [clean_p, clean_n], None
+
+    dpr.route_differential_pair_coupled = _failing_main  # type: ignore[assignment]
+    dpr._route_pair_on_fine_grid = _succeeding_fine  # type: ignore[assignment]
+
+    try:
+        fake_positive = SimpleNamespace(net_id=1, net_name="USB_D+")
+        fake_negative = SimpleNamespace(net_id=2, net_name="USB_D-")
+        fake_pair = SimpleNamespace(
+            positive=fake_positive, negative=fake_negative, rules=None,
+            pair_type=SimpleNamespace(value="usb"),
+            get_net_ids=lambda: (1, 2), name="USB_D",
+        )
+        dpr.detect_differential_pairs_with_source = lambda: [(fake_pair, "stub")]
+
+        resolved = dpr.repair_intra_clearance_violations(
+            max_retries_per_pair=2,
+            enable_fine_grid_pass=True,
+        )
+    finally:
+        dpr.route_differential_pair_coupled = original_method  # type: ignore[assignment]
+        dpr._route_pair_on_fine_grid = original_fine  # type: ignore[assignment]
+
+    assert resolved == 1, (
+        f"Fine-grid sub-pass returned clean routes; expected resolved=1 "
+        f"got {resolved}"
+    )
+    # The original violation should be gone from the buffer.
+    assert not any(
+        v.positive_net_name == "USB_D+"
+        for v in dpr.intra_clearance_violations()
+    ), "Original violation persisted after a successful fine-grid sub-pass"
+
+
+def test_route_pair_on_fine_grid_returns_empty_when_no_pads():
+    """``_route_pair_on_fine_grid`` returns ``([], None)`` cleanly when
+    ``_get_pair_pads`` can't resolve the pair's pads.
+
+    Guard against the helper raising on a malformed input -- the repair
+    pass's ``except Exception`` clause catches it but a clean return is
+    less noisy in the logs.
+    """
+    from kicad_tools.router.diffpair import (
+        DifferentialPair,
+        DifferentialPairRules,
+        DifferentialPairType,
+        DifferentialSignal,
+    )
+
+    router = Autorouter(width=50.0, height=50.0, rules=DesignRules())
+    dpr = router._diffpair
+
+    rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
+    pos = DifferentialSignal(
+        net_name="USB_D+", net_id=1, base_name="USB_D",
+        polarity="P", notation="plus_minus",
+    )
+    neg = DifferentialSignal(
+        net_name="USB_D-", net_id=2, base_name="USB_D",
+        polarity="N", notation="plus_minus",
+    )
+    pair = DifferentialPair(
+        name="USB_D", positive=pos, negative=neg,
+        pair_type=DifferentialPairType.USB2, rules=rules,
+    )
+
+    # No pads resolved.
+    dpr._get_pair_pads = lambda _pair: None  # type: ignore[assignment]
+    routes, warning = dpr._route_pair_on_fine_grid(
+        pair, spacing_override=None, extra_spacing_cells=1,
+        per_pair_timeout=None,
+    )
+    assert routes == []
+    assert warning is None
