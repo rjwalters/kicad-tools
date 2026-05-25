@@ -1580,28 +1580,6 @@ Keep it brief (3-6 words) and descriptive:
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context after draining the queue to save API costs.**
-
-After processing all available PRs (or when no work is found), execute:
-
-```
-/clear
-```
-
-### Why This Matters
-
-- **Reduces API costs**: Fresh context for each iteration means smaller request sizes
-- **Prevents context pollution**: Each iteration starts clean without stale information
-- **Improves reliability**: No risk of acting on outdated context from previous iterations
-
-### When to Clear
-
-- ✅ **After draining the queue** (no more `loom:review-requested` PRs remain)
-- ✅ **When no work is available** (no PRs to evaluate at the start of an iteration)
-- ❌ **NOT between evaluations** — continue to next PR without clearing
-
 ## Completion
 
 **After completing an evaluation, stop or continue based on how you were invoked:**

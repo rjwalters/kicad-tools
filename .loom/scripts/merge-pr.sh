@@ -36,6 +36,56 @@ info() { echo -e "${BLUE}$*${NC}"; }
 success() { echo -e "${GREEN}$*${NC}"; }
 warning() { echo -e "${YELLOW}$*${NC}"; }
 
+# Function to show help
+show_help() {
+    cat << EOF
+Loom PR Merge - Worktree-safe merge using forge API (GitHub or Gitea)
+
+Usage: ./.loom/scripts/merge-pr.sh <pr-number> [options]
+
+Merges a PR via the forge API (not 'gh pr merge') to avoid
+"already used by worktree" errors when merging from inside a worktree.
+
+Supports both GitHub and Gitea forges. Forge detection is automatic
+(see forge-helpers.sh for details).
+
+Options:
+  --no-cleanup-worktree  Skip local worktree cleanup after merge
+  --cleanup-worktree     (no-op, worktree cleanup is now the default)
+  --dry-run              Show what would happen without merging
+  --auto                 Enable auto-merge instead of immediate merge
+  -h, --help             Show this help and exit
+
+By default, the local worktree is cleaned up after a successful merge.
+Pass --no-cleanup-worktree to skip this (e.g., when other terminals may
+have their CWD inside the worktree).
+
+Exit codes:
+  0 = merged (or auto-merge enabled, or --help)
+  1 = failed
+
+Examples:
+  ./.loom/scripts/merge-pr.sh 123
+    Merges PR #123 (squash), deletes remote branch, cleans up worktree
+
+  ./.loom/scripts/merge-pr.sh 123 --dry-run
+    Shows what would happen without merging
+
+  ./.loom/scripts/merge-pr.sh 123 --auto
+    Enables auto-merge instead of merging immediately
+
+  ./.loom/scripts/merge-pr.sh 123 --no-cleanup-worktree
+    Merges PR but leaves the local worktree in place
+EOF
+}
+
+# Early help check — runs before any git/forge initialization so --help works
+# in any directory and without forge authentication.
+if [[ $# -gt 0 ]] && { [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; }; then
+    show_help
+    exit 0
+fi
+
 # Find the main repository root (works from worktrees too)
 # When run from a worktree, git rev-parse --show-toplevel returns the worktree path,
 # not the main repository. This function navigates via the gitdir to find the actual root.
@@ -134,29 +184,95 @@ info "Merging PR #$PR_NUMBER: $PR_TITLE"
 info "Branch: $PR_BRANCH"
 
 # Handle auto-merge mode
+#
+# The auto-merge path now mirrors the sync path's resilience patterns:
+#   - Retry on "Base branch was modified" with the same backoff loop.
+#   - Recheck PR state on failure (concurrent shepherd may have already
+#     merged it).
+#   - Fall through to the shared cleanup block (lines below) instead of
+#     exiting early. Cleanup is gated on `PR.merged == true`; if the
+#     server-side merge is still queued, we skip local cleanup and let
+#     loom-clean handle it.
+#
+# See issue #3279.
 if [[ "$AUTO_MERGE" == "true" ]]; then
   if [[ "$DRY_RUN" == "true" ]]; then
     info "[dry-run] Would enable auto-merge for PR #$PR_NUMBER"
     exit 0
   fi
-  # Prefer loom-auto-merge CLI (forge-agnostic, with poll-and-merge for Gitea)
-  if command -v loom-auto-merge &>/dev/null; then
-    info "Using loom-auto-merge (forge-agnostic auto-merge)"
-    if loom-auto-merge "$PR_NUMBER" --method squash; then
-      success "Auto-merge completed for PR #$PR_NUMBER"
-      exit 0
+
+  MAX_MERGE_RETRIES=3
+  MERGE_RETRY_DELAY=5
+  AUTO_MERGE_OK=false
+
+  for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
+    AUTO_MERGE_OUTPUT=""
+    # Prefer loom-auto-merge CLI (forge-agnostic, with poll-and-merge for Gitea)
+    if command -v loom-auto-merge &>/dev/null; then
+      [[ $MERGE_ATTEMPT -eq 1 ]] && info "Using loom-auto-merge (forge-agnostic auto-merge)"
+      if AUTO_MERGE_OUTPUT=$(loom-auto-merge "$PR_NUMBER" --method squash 2>&1); then
+        AUTO_MERGE_OK=true
+        break
+      fi
     else
-      error "Failed to auto-merge PR #$PR_NUMBER"
+      # Fallback: shell-based forge_auto_merge
+      if AUTO_MERGE_OUTPUT=$(forge_auto_merge "$REPO_NWO" "$PR_NUMBER" 2>&1); then
+        AUTO_MERGE_OK=true
+        break
+      fi
     fi
+
+    # Check if PR merged despite error (concurrent merge by another shepherd)
+    RECHECK_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+    RECHECK=$(echo "$RECHECK_JSON" | jq -r '.merged // false')
+    if [[ "$RECHECK" == "true" ]]; then
+      warning "Auto-merge reported error but PR is already merged (race condition)"
+      AUTO_MERGE_OK=true
+      break
+    fi
+
+    # Retry on stale-branch race ("Base branch was modified")
+    if echo "$AUTO_MERGE_OUTPUT" | grep -q "Base branch was modified"; then
+      if [[ $MERGE_ATTEMPT -lt $MAX_MERGE_RETRIES ]]; then
+        info "Branch is behind base branch, updating... (attempt $MERGE_ATTEMPT/$MAX_MERGE_RETRIES)"
+        forge_update_branch "$REPO_NWO" "$PR_NUMBER" 2>/dev/null || \
+          warning "Failed to update branch (continuing anyway)"
+        info "Waiting ${MERGE_RETRY_DELAY}s for branch to sync..."
+        sleep "$MERGE_RETRY_DELAY"
+        MERGE_RETRY_DELAY=$((MERGE_RETRY_DELAY * 2))
+        continue
+      fi
+    fi
+
+    # Other auto-merge errors — fail immediately (no retry would help)
+    error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
+  done
+
+  if [[ "$AUTO_MERGE_OK" != "true" ]]; then
+    error "Failed to enable auto-merge for PR #$PR_NUMBER after $MAX_MERGE_RETRIES attempts"
   fi
-  # Fallback: shell-based forge_auto_merge
-  if forge_auto_merge "$REPO_NWO" "$PR_NUMBER" 2>/dev/null; then
-    success "Auto-merge enabled for PR #$PR_NUMBER"
+
+  success "Auto-merge enabled for PR #$PR_NUMBER"
+
+  # Check whether the server-side merge has already completed. GitHub
+  # auto-merge queues until checks pass, so on most PRs this is still
+  # false right after enabling. If merged, fall through to the shared
+  # cleanup block below. Otherwise skip cleanup — loom-clean will
+  # handle the stale worktree later.
+  POST_AUTO_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+  POST_AUTO_MERGED=$(echo "$POST_AUTO_JSON" | jq -r '.merged // false')
+  if [[ "$POST_AUTO_MERGED" != "true" ]]; then
+    info "Auto-merge queued (server-side merge pending checks); skipping local cleanup"
+    info "Run loom-clean later to remove the worktree once GitHub completes the merge"
     exit 0
-  else
-    error "Failed to enable auto-merge for PR #$PR_NUMBER"
   fi
+  info "PR #$PR_NUMBER already merged server-side; running cleanup"
+  # Fall through to the shared cleanup block (branch deletion + worktree).
 fi
+
+# Synchronous-merge path. Skipped when --auto already succeeded server-side
+# (in which case we fall through to the shared cleanup block below).
+if [[ "$AUTO_MERGE" != "true" ]]; then
 
 # Check mergeability
 if [[ "$PR_MERGEABLE" == "false" ]]; then
@@ -236,15 +352,20 @@ fi
 
 success "PR #$PR_NUMBER merged successfully"
 
-# NOTE: This script does NOT close linked issues. GitHub auto-closes issues
-# referenced by `Closes/Fixes/Resolves` keywords; for cross-repo or missed
-# auto-closes, the Champion role's verify-issue-closure step handles it.
-# See: .claude/commands/loom/champion-pr-merge.md (Step 4)
-# See: https://github.com/rjwalters/kicad-tools/issues/2849
-#
-# NOTE: Label cleanup on linked issues is also intentionally skipped here.
+fi  # end synchronous-merge path (AUTO_MERGE != "true")
+
+# NOTE: Label cleanup on linked issues is intentionally skipped.
 # Labels on closed/merged items are harmless — all agents filter by open state.
 # See: https://github.com/rjwalters/loom/issues/2838
+#
+# NOTE: This script does NOT close linked issues. Issue auto-close is GitHub's
+# responsibility — GitHub's PR parser closes issues referenced via `Closes #N`,
+# `Fixes #N`, `Resolves #N` (and the case/tense variants) on merge. Champion's
+# "Verify Issue Auto-Close" step is a belt-and-suspenders check that uses
+# `forge_pr_close_targets` (which delegates to GitHub's GraphQL
+# `closingIssuesReferences` field) to confirm closure. If you are debugging
+# why an unintended issue was closed, look at the PR body and Champion logs,
+# not at this script. See: https://github.com/rjwalters/loom/issues/3267
 
 # Delete remote branch (skip if forge auto-deletes on merge)
 DELETE_BRANCH_ON_MERGE=$(forge_check_auto_delete "$REPO_NWO" "$GH")

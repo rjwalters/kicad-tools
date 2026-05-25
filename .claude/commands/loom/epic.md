@@ -161,6 +161,25 @@ MILESTONE=$(grep -i "milestone" README.md 2>/dev/null | head -1)
 ./.loom/scripts/check-duplicate.sh "Epic: [Title]" "[brief description]"
 ```
 
+### Ensure Epic Labels Exist (Preflight)
+
+Epic creation depends on the `loom:epic` and `loom:epic-phase` labels, which may not yet exist in the target repository (e.g., if the install bundle predates these labels, or if a user manually deleted them). Run this idempotent preflight before any `gh issue create` call below. The `|| true` suffix keeps the skill working for users who lack `label:write` permission -- in that case, the subsequent `gh issue create --label` calls will fail cleanly with a clear "label not found" error rather than the skill silently dropping the epic.
+
+```bash
+# Idempotent: gh label create exits non-zero if the label already exists,
+# which we explicitly ignore. Failures from missing permissions are also
+# tolerated -- the issue-create step below will surface the real error.
+gh label create 'loom:epic' \
+  --color '7C3AED' \
+  --description 'Multi-phase epic proposal (decomposes into implementation issues)' \
+  2>/dev/null || true
+
+gh label create 'loom:epic-phase' \
+  --color '8B5CF6' \
+  --description 'Issue is part of an epic phase (references parent epic)' \
+  2>/dev/null || true
+```
+
 ### Create the Epic
 
 ```bash

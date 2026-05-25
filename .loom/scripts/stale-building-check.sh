@@ -27,19 +27,10 @@
 set -euo pipefail
 
 # Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea).
-# Falls back to gh-cached or gh for any commands not covered by loom-forge.
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if command -v loom-forge &>/dev/null; then
     FORGE="loom-forge"
 else
     FORGE="gh"
-fi
-# shellcheck disable=SC2034
-GH_CACHED="$_SCRIPT_DIR/gh-cached"
-if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
-    GH="$GH_CACHED"
-else
-    GH="gh"
 fi
 
 # Configuration

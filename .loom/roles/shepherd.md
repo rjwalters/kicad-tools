@@ -172,6 +172,16 @@ When the progress file shows `status: completed` or `status: error`, summarize t
 - **Error**: Phase where it failed, error message, suggested recovery steps
 - **Blocked**: Label state, reason, what human action is needed
 
+## Known Limitations
+
+### Do NOT invoke `/shepherd` as parallel tool calls
+
+When a parent agent dispatches multiple `/shepherd` invocations as **parallel `tool_use` blocks in a single message**, at least one child shepherd can stall silently before producing any external output — no signal file, no worktree, no labels advance — and the parent's stream watchdog kills it at 600s with `stream watchdog did not recover`. This is the "subagents-launching-subagents" failure mode described in #3289.
+
+**Mitigation**: spawn shepherds **sequentially** from the parent (one `/shepherd` tool call per turn, awaiting completion before the next), or let the **daemon** auto-spawn them by enqueueing `loom:issue` labels — the daemon spawns each shepherd as its own subprocess and is not subject to this race.
+
+This is a known limitation tracked in #3289. A full architectural fix (batch spawn signal) is deferred pending architect review.
+
 ## Reference Documentation
 
 For detailed orchestration workflow, phase definitions, and troubleshooting:

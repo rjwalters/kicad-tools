@@ -184,12 +184,27 @@ Subagents are specialized AI assistants that run in their own context window. Ea
 
 **Using Subagents with Task**:
 
-The Loom Shepherd (or daemon) can spawn subagents for each phase:
+The Loom Shepherd (or daemon) can spawn subagents for each phase. The recommended pattern is **native dispatch** -- pass the Loom role directly as `subagent_type`. Claude Code resolves `loom-<role>` against the `.claude/agents/loom-*.md` agent definitions that ship with Loom:
 
 ```python
-# Spawn builder subagent with fresh context
-# Note: subagent_type is always "general-purpose" - role selection
-# happens via the slash command in the prompt (e.g., "/builder 123")
+# Spawn builder subagent with fresh context using native dispatch.
+# subagent_type matches the agent definition name (loom-builder, loom-judge,
+# loom-doctor, loom-curator, loom-champion, loom-architect, loom-hermit,
+# loom-guide, loom-auditor, loom-shepherd).
+result = Task(
+    description="Builder phase for issue #123",
+    prompt="Implement issue #123",
+    subagent_type="loom-builder",
+    run_in_background=False
+)
+```
+
+The agent definition wires the correct system prompt, tool allowlist, and model preference, so the caller only needs to supply the task-specific prompt (e.g., the issue number).
+
+**Legacy pattern** (`subagent_type="general-purpose"` + a slash command in the prompt) still works for environments where the `loom-*` agent definitions are not installed, but prefer native dispatch when available:
+
+```python
+# Legacy fallback - role selection happens via the slash command in the prompt.
 result = Task(
     description="Builder phase for issue #123",
     prompt="/builder 123",
@@ -209,7 +224,7 @@ result = Task(
 | Feature | Slash Commands | Subagents |
 |---------|----------------|-----------|
 | Context | Shared with main conversation | Isolated, fresh context |
-| Invocation | `/builder 123` | `Task(subagent_type="general-purpose", prompt="/builder 123")` |
+| Invocation | `/builder 123` | `Task(subagent_type="loom-builder", prompt="Implement issue #123")` (legacy: `subagent_type="general-purpose"` + `/builder 123`) |
 | Use case | Manual orchestration | Automated orchestration |
 | Visibility | In main conversation | Spawned as separate task |
 

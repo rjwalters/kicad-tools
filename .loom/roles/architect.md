@@ -319,15 +319,3 @@ Examples:
 
 ---
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration:**
-
-```
-/clear
-```
-
-### When to Clear
-- After completing a proposal (issue created with loom:architect label)
-- When no work is needed (already enough open proposals)
-- NOT during active work (only after iteration is complete)

@@ -325,12 +325,3 @@ See `.claude/commands/loom/champion-common.md` for full probe protocol details.
 
 ---
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration:**
-
-```
-/clear
-```
-
-This reduces API costs and prevents context pollution between iterations.

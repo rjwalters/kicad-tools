@@ -351,29 +351,20 @@ git checkout main 2>/dev/null || true
 
 After successful merge, verify that linked issues were automatically closed by GitHub.
 
-**Important**: Use GitHub's `closingIssuesReferences` field — NOT a regex over the
-PR body. GitHub computes `closingIssuesReferences` from the PR body using canonical
-semantics: only `Closes/Fixes/Resolves` keywords (case-insensitive, with proper
-word boundaries) create closing references. Words like `Updates`, `See`,
-`References`, or `Closure of` correctly do NOT produce closing references. A prior
-regex-based extraction (`grep -Eo "(Closes|Fixes|Resolves) #[0-9]+"`) was brittle
-and could misfire on PRs that explicitly used `Updates #N` to indicate partial
-progress. See issue [#2849](https://github.com/rjwalters/kicad-tools/issues/2849).
-
-If `.loom/scripts/lib/forge-helpers.sh` is available, prefer
-`forge_pr_close_targets "$PR_NUMBER"` for a single source of truth. The inline
-form below is equivalent.
-
 ```bash
 PR_NUMBER=$1
 
-# Ask GitHub which issues this PR closes per official semantics
-# (Closes/Fixes/Resolves keywords; case-insensitive; proper word boundaries).
-LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json closingIssuesReferences \
-  --jq '.closingIssuesReferences[].number' 2>/dev/null)
+# Extract linked issues using GitHub's own parser (closingIssuesReferences).
+# This is the authoritative set of issues GitHub will auto-close on merge.
+# It correctly ignores `Updates #N`, `See #N`, code-fenced text, and substring
+# traps like `Discloses #N`. The previous regex-based approach silently
+# misclassified `Updates #N` as a closing reference — see issue #3267.
+source "$(git rev-parse --show-toplevel)/.loom/scripts/lib/forge-helpers.sh"
+forge_detect
+LINKED_ISSUES=$(forge_pr_close_targets "$PR_NUMBER")
 
 if [ -z "$LINKED_ISSUES" ]; then
-  echo "No closing-issue references found - skipping closure verification"
+  echo "No linked issues found in PR body"
   exit 0
 fi
 

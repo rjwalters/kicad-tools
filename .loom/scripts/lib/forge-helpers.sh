@@ -9,9 +9,15 @@
 #   forge_detect   # sets FORGE_TYPE to "github" or "gitea"
 #
 # Environment Variables:
-#   LOOM_FORGE_TYPE  - Override forge detection ("github" or "gitea")
-#   GITEA_TOKEN      - API token for Gitea authentication
-#   GITEA_URL        - Base URL for Gitea instance (e.g. "https://gitea.example.com")
+#   LOOM_FORGE_TYPE              - Override forge detection ("github" or "gitea")
+#   GITEA_TOKEN                  - API token / password for Gitea authentication
+#   GITEA_URL                    - Base URL for Gitea instance (e.g. "https://gitea.example.com")
+#   GITEA_USERNAME               - If set, use HTTP Basic Auth (username + password)
+#                                  instead of token auth. Password is taken from
+#                                  GITEA_TOKEN. Requires an https:// URL unless
+#                                  LOOM_ALLOW_INSECURE_BASIC_AUTH=1.
+#   LOOM_ALLOW_INSECURE_BASIC_AUTH - Set to 1 to permit Basic Auth over http://
+#                                    (not recommended; for air-gapped LAN only).
 #
 # Forge detection priority:
 #   1. LOOM_FORGE_TYPE env var
@@ -27,6 +33,7 @@ set -euo pipefail
 FORGE_TYPE=""
 _GITEA_BASE_URL=""
 _GITEA_TOKEN=""
+_GITEA_USERNAME=""
 
 # Detect forge type from environment, config, or remote URL.
 # Sets FORGE_TYPE to "github" or "gitea".
@@ -115,13 +122,16 @@ _extract_host() {
   echo ""
 }
 
-# Load Gitea configuration (URL and token)
+# Load Gitea configuration (URL, token/password, and optional username for Basic Auth)
 _load_gitea_config() {
   # Token: env var first, then config
   _GITEA_TOKEN="${GITEA_TOKEN:-}"
 
   # URL: env var first, then config
   _GITEA_BASE_URL="${GITEA_URL:-}"
+
+  # Username: env var first, then config. When set, switches to HTTP Basic Auth.
+  _GITEA_USERNAME="${GITEA_USERNAME:-}"
 
   local config_file
   if [[ -n "${REPO_ROOT:-}" ]]; then
@@ -139,9 +149,37 @@ _load_gitea_config() {
     if [[ -z "$_GITEA_BASE_URL" ]]; then
       _GITEA_BASE_URL=$(jq -r '.forge.gitea.url // ""' "$config_file" 2>/dev/null || echo "")
     fi
+    if [[ -z "$_GITEA_USERNAME" ]]; then
+      _GITEA_USERNAME=$(jq -r '.forge.gitea.username // ""' "$config_file" 2>/dev/null || echo "")
+    fi
   fi
 
   _GITEA_BASE_URL="${_GITEA_BASE_URL%/}"  # strip trailing slash
+}
+
+# Validate the Gitea Basic Auth configuration. Refuses http:// URLs when a
+# username is set (since Basic Auth over plaintext would leak the password)
+# unless LOOM_ALLOW_INSECURE_BASIC_AUTH=1 is explicitly exported.
+# Returns 0 if the configuration is safe to use, 1 (with stderr message) otherwise.
+# Does not log the password or username.
+_gitea_validate_basic_auth() {
+  if [[ -z "$_GITEA_USERNAME" ]]; then
+    return 0
+  fi
+  # Username with ':' would corrupt the Basic-Auth user:pass split (RFC 7617).
+  if [[ "$_GITEA_USERNAME" == *:* ]]; then
+    echo "Error: GITEA_USERNAME may not contain ':' (HTTP Basic Auth disallows colons in usernames)." >&2
+    return 1
+  fi
+  if [[ "$_GITEA_BASE_URL" == http://* ]]; then
+    if [[ "${LOOM_ALLOW_INSECURE_BASIC_AUTH:-}" != "1" ]]; then
+      echo "Error: Gitea Basic Auth requires HTTPS to avoid leaking credentials." >&2
+      echo "       Set forge.gitea.url (or GITEA_URL) to an https:// URL, or set" >&2
+      echo "       LOOM_ALLOW_INSECURE_BASIC_AUTH=1 to override (not recommended)." >&2
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # --- Gitea API Helper ---
@@ -159,7 +197,17 @@ gitea_api() {
     return 1
   fi
   if [[ -z "$_GITEA_TOKEN" ]]; then
-    echo "Error: Gitea token not configured" >&2
+    # In Basic Auth mode, the "token" field carries the password.
+    if [[ -n "$_GITEA_USERNAME" ]]; then
+      echo "Error: Gitea password (GITEA_TOKEN / forge.gitea.token) not configured" >&2
+    else
+      echo "Error: Gitea token not configured" >&2
+    fi
+    return 1
+  fi
+
+  # Enforce HTTPS guard if Basic Auth is in use.
+  if ! _gitea_validate_basic_auth; then
     return 1
   fi
 
@@ -167,13 +215,26 @@ gitea_api() {
   local http_code
   local response
 
-  response=$(curl -s -w "\n%{http_code}" \
-    -X "$method" \
-    -H "Authorization: token $_GITEA_TOKEN" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json" \
-    "$@" \
-    "$url" 2>/dev/null)
+  if [[ -n "$_GITEA_USERNAME" ]]; then
+    # HTTP Basic Auth (username + password). curl handles base64 encoding
+    # of "user:pass" internally; we never echo the password to the log.
+    response=$(curl -s -w "\n%{http_code}" \
+      -X "$method" \
+      -u "${_GITEA_USERNAME}:${_GITEA_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json" \
+      "$@" \
+      "$url" 2>/dev/null)
+  else
+    # Token auth (existing behavior, unchanged).
+    response=$(curl -s -w "\n%{http_code}" \
+      -X "$method" \
+      -H "Authorization: token $_GITEA_TOKEN" \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json" \
+      "$@" \
+      "$url" 2>/dev/null)
+  fi
 
   http_code=$(echo "$response" | tail -1)
   local body
@@ -305,7 +366,9 @@ forge_delete_branch() {
 
 # Enable auto-merge on a PR.
 # Usage: forge_auto_merge NWO PR_NUMBER
-# GitHub: gh pr merge --auto --squash --delete-branch
+# GitHub: GraphQL enablePullRequestAutoMerge mutation (pure API, no
+#         working-tree dependency — `gh pr merge --auto` does a local
+#         checkout that collides with worktrees owning the head branch).
 # Gitea: POST /repos/{owner}/{repo}/pulls/{n}/merge with merge_when_checks_succeed
 forge_auto_merge() {
   local nwo="$1"
@@ -316,7 +379,17 @@ forge_auto_merge() {
     gitea_api POST "repos/$FORGE_OWNER/$FORGE_REPO/pulls/$pr_number/merge" \
       -d '{"Do":"squash","merge_when_checks_succeed":true,"delete_branch_after_merge":true}'
   else
-    gh pr merge "$pr_number" --auto --squash --delete-branch 2>/dev/null
+    # Resolve PR node_id (required by GraphQL mutation).
+    local node_id
+    node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
+    [[ -z "$node_id" ]] && return 1
+
+    local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
+
+    gh api graphql \
+      -f "query=$mutation" \
+      -F "pullRequestId=$node_id" \
+      -F "mergeMethod=SQUASH" 2>/dev/null
   fi
 }
 
@@ -442,9 +515,6 @@ forge_list_merged_prs() {
         filtered=$(echo "$batch" | jq '[.[] | select(.merged == true) | {number: .number, mergedAt: .merged_at}]')
       fi
 
-      # shellcheck disable=SC2034
-      local filtered_len
-      filtered_len=$(echo "$filtered" | jq 'length')
       results=$(echo "$results" "$filtered" | jq -s '.[0] + .[1]')
       collected=$(echo "$results" | jq 'length')
 
@@ -482,6 +552,55 @@ forge_get_pr_body() {
   fi
 }
 
+# Get issue numbers that a PR will close when merged.
+#
+# Usage: forge_pr_close_targets PR_NUMBER [GH_CMD]
+# Outputs: One issue number per line on stdout, sorted and de-duplicated.
+#
+# GitHub: Uses GraphQL `closingIssuesReferences` via `gh pr view`. This is
+#   GitHub's authoritative parse of the PR body — it correctly handles case
+#   sensitivity, word boundaries, fenced code blocks, and the full list of
+#   closing keywords (close/closes/closed, fix/fixes/fixed, resolve/resolves/
+#   resolved). It also follows GitHub's own rule that "Updates #N", "See #N",
+#   and "References #N" do NOT close the issue.
+#
+# Gitea: The Gitea API does not expose an equivalent of closingIssuesReferences,
+#   so this falls back to a word-boundary regex over the PR body. The regex
+#   only matches the canonical closing keywords (case-insensitive), so plain
+#   `Updates #N` is correctly ignored. The substring trap (e.g. `Discloses #N`)
+#   is also avoided thanks to the leading `\b`. Note that this is a syntactic
+#   approximation — it does not strip fenced code blocks or quoted text.
+#
+# This helper replaces the brittle `grep -Eo "(Closes|Fixes|Resolves) #[0-9]+"`
+# that previously appeared in Champion's "Verify Issue Auto-Close" step. That
+# regex silently misclassified `Updates #N` (and various substring traps) as
+# closing references, causing Champion to manually close tracking issues that
+# were intentionally left open. See issue #3267 for the full history.
+forge_pr_close_targets() {
+  local pr_number="$1"
+  local gh_cmd="${2:-gh}"
+
+  if [[ "$FORGE_TYPE" == "gitea" ]]; then
+    # Gitea fallback: word-boundary regex over the PR body.
+    # We need the NWO to fetch the body; assume the caller's working repo.
+    local nwo
+    nwo=$(forge_get_repo_nwo "$gh_cmd") || return 0
+    local body
+    body=$(forge_get_pr_body "$nwo" "$pr_number")
+    # Word-boundary, case-insensitive match on canonical closing keywords only.
+    # `Updates`, `See`, `References` are deliberately excluded.
+    # `|| true` neutralizes grep's exit-1 (no match) under `set -e`.
+    { echo "$body" \
+        | grep -Eoi '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]+#[0-9]+' \
+        | grep -Eo '[0-9]+' \
+        | sort -un; } || true
+  else
+    { "$gh_cmd" pr view "$pr_number" --json closingIssuesReferences \
+        --jq '.closingIssuesReferences[].number' 2>/dev/null \
+        | sort -un; } || true
+  fi
+}
+
 # Get PR comments.
 # Usage: forge_get_pr_comments NWO PR_NUMBER
 # GitHub: gh pr view --comments
@@ -512,50 +631,6 @@ forge_get_pr_reviews() {
       jq -r '.[].body // empty'
   else
     gh api "repos/$nwo/pulls/$pr_number/reviews" --jq '.[].body // empty' 2>/dev/null || echo ""
-  fi
-}
-
-# Get the list of issue numbers a PR closes per official forge semantics.
-# Usage: forge_pr_close_targets PR_NUMBER [GH_CMD]
-# Output: newline-separated issue numbers on stdout; empty if none.
-#
-# Single source of truth for "what issues does this PR close?".
-# This is the correct way to compute closure targets — NOT a regex over the
-# PR body. GitHub computes `closingIssuesReferences` from the body using
-# canonical keyword semantics (`Closes/Fixes/Resolves`, case-insensitive,
-# with proper word boundaries). Words like `Updates`, `See`, `References`,
-# or `Closure of` are correctly excluded.
-#
-# GitHub: gh pr view --json closingIssuesReferences
-# Gitea: parses the PR body with a strict word-boundary regex (Gitea exposes
-#        the body but not a server-computed closes list comparable to
-#        GitHub's `closingIssuesReferences`). The regex restricts matches
-#        to the canonical closing keywords with explicit boundaries so it
-#        cannot match `Updates`, `Closure`, etc.
-#
-# See: https://github.com/rjwalters/kicad-tools/issues/2849
-forge_pr_close_targets() {
-  local pr_number="$1"
-  local gh_cmd="${2:-gh}"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    # Gitea has no equivalent of closingIssuesReferences; derive from body
-    # using a strict regex with explicit word boundaries.
-    local nwo
-    nwo=$(forge_get_repo_nwo) || return 0
-    local body matches
-    body=$(forge_get_pr_body "$nwo" "$pr_number")
-    # \b boundary on both sides; case-insensitive.
-    # Use `|| true` to keep behavior consistent under `set -e` when there
-    # are no matches (grep exits 1 on no match).
-    matches=$(echo "$body" \
-      | grep -oEi '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]*#[0-9]+' \
-      || true)
-    [[ -z "$matches" ]] && return 0
-    echo "$matches" | grep -oE '[0-9]+' | sort -u
-  else
-    "$gh_cmd" pr view "$pr_number" --json closingIssuesReferences \
-      --jq '.closingIssuesReferences[].number' 2>/dev/null | sort -u
   fi
 }
 

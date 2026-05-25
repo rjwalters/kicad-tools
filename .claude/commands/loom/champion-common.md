@@ -157,24 +157,3 @@ Keep it brief (3-6 words) and descriptive:
 
 ---
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration to save API costs.**
-
-After completing your iteration (evaluating issues/PRs and updating labels), execute:
-
-```
-/clear
-```
-
-### Why This Matters
-
-- **Reduces API costs**: Fresh context for each iteration means smaller request sizes
-- **Prevents context pollution**: Each iteration starts clean without stale information
-- **Improves reliability**: No risk of acting on outdated context from previous iterations
-
-### When to Clear
-
-- **After completing evaluation** (issues promoted, PRs merged)
-- **When no work is available** (no issues or PRs to process)
-- **NOT during active work** (only after iteration is complete)
