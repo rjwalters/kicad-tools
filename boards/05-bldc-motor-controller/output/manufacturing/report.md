@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-22 | jlcpcb"
+date: "Rev 1 | 2026-05-24 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 55 (0 SMD, 0 THT, 55 other) |
 | Nets | 40 |
-| Traces | 166 segments |
-| Vias | 19 |
+| Traces | 192 segments |
+| Vias | 24 |
 | Board Size | 70.0 x 90.0 mm |
 
 ## Design Overview
@@ -102,9 +102,9 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 11 |
+| Errors | 10 |
 | Warnings | 56 |
-| Blocking | 11 |
+| Blocking | 10 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -112,11 +112,10 @@ Thermal analysis and high-current routing demo
 | Violation Type | Count |
 |----------------|-------|
 | pad_grid | 56 |
-| connectivity | 26 |
-| clearance_pad_segment | 4 |
-| clearance_segment_segment | 4 |
+| connectivity | 22 |
+| clearance_segment_segment | 6 |
+| clearance_segment_via | 2 |
 | via_in_pad | 2 |
-| clearance_segment_via | 1 |
 
 
 \newpage
@@ -127,8 +126,8 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 11 blocking DRC violations (clearance_pad_segment (4), clearance_segment_segment (4), via_in_pad (2))
-- **[OPTIONAL]** Verify zone fill in KiCad: 25 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 10 blocking DRC violations (clearance_segment_segment (6), clearance_segment_via (2), via_in_pad (2))
+- **[OPTIONAL]** Verify zone fill in KiCad: 21 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 56 DRC warnings
 
@@ -139,12 +138,12 @@ Thermal analysis and high-current routing demo
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 28.6% (10/35) |
-| Overall Completion | 35.0% |
-| Complete Nets | 14 / 40 |
+| Signal Net Completion | 40.0% (14/35) |
+| Overall Completion | 45.0% |
+| Complete Nets | 18 / 40 |
 | Zone-Connected Nets | 5 |
-| Incomplete Nets | 26 |
-| Unconnected Pads | 80 |
+| Incomplete Nets | 22 |
+| Unconnected Pads | 79 |
 
 ### Zone-Connected Nets
 
@@ -156,12 +155,8 @@ Thermal analysis and high-current routing demo
 
 ### Unrouted Signal Nets
 
-- GATE_AL
 - GATE_BL
 - GATE_CL
-- GATE_DRV_BH
-- HALL_A
-- HALL_B
 - ISENSE_A+
 - ISENSE_A-
 - ISENSE_B+
@@ -184,12 +179,8 @@ Thermal analysis and high-current routing demo
 
 ### Unrouted Signal Nets
 
-- GATE_AL
 - GATE_BL
 - GATE_CL
-- GATE_DRV_BH
-- HALL_A
-- HALL_B
 - ISENSE_A+
 - ISENSE_A-
 - ISENSE_B+
