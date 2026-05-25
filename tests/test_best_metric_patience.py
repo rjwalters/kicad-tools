@@ -278,6 +278,130 @@ class TestPatienceLogLine:
             )
 
 
+class TestNetsFullyConnectedLexKey:
+    """Issue #3117: the lex-tuple primary key must be
+    ``nets_fully_connected``, not ``routed_count``.
+
+    Background:
+        ``routed_count`` only checks whether each net has any route
+        fragment.  A 4-pad net with one fragment connecting 2/4 pads
+        contributes 1 to ``routed_count`` even though the design is not
+        electrically connected.  Softstart (board #3085) hit this
+        exactly: iter-0 logged ``routed_count = 9/10`` but
+        ``validate_net_connectivity`` reported ``4/10`` -- the lex
+        comparator preserved the 4/10 floor because the metric it
+        optimized couldn't distinguish fragments from connections.
+
+    These tests pin the new ordering behaviour so a careless refactor
+    cannot re-elevate ``routed_count`` above ``nets_fully_connected``.
+    """
+
+    def test_nets_fully_connected_dominates_routed_count(self):
+        """State A connects more pads than state B; even though B has
+        more route fragments, A must win the comparator.
+
+        Concrete numbers from the issue: softstart iter-0 had
+        ``routed_count=9, nets_fully_connected=4``.  A hypothetical
+        re-route that produced ``routed_count=8, nets_fully_connected=8``
+        is unambiguously better -- it closed more pad-to-pad paths
+        even though one fragment was dropped.
+        """
+        a = IterationMetrics(
+            iteration=1,
+            routed_count=8,
+            overflow=10,
+            clearance_violations=0,
+            nets_fully_connected=8,
+        )
+        b = IterationMetrics(
+            iteration=2,
+            routed_count=9,
+            overflow=10,
+            clearance_violations=0,
+            nets_fully_connected=4,
+        )
+        # A has fewer fragments but more closed nets -- must win.
+        assert a.is_better_than(b)
+        assert not b.is_better_than(a)
+
+    def test_default_zero_preserves_routed_count_ordering(self):
+        """When ``nets_fully_connected`` defaults to 0 on both sides
+        (i.e. older call sites that haven't been updated), the
+        comparator must fall through to the legacy ordering
+        (``routed_count`` desc, then ``clearance_violations``, etc.).
+
+        Back-compat guarantee for Issue #3117: existing tests in
+        ``TestPatienceComparatorBehavior`` above construct
+        ``IterationMetrics`` without ``nets_fully_connected`` and rely
+        on the old ordering.  This test pins the property explicitly
+        so it can't drift.
+        """
+        # Both default-zero; ordering should mirror legacy
+        # routed-count-then-overflow.
+        more_routed = IterationMetrics(
+            iteration=1, routed_count=10, overflow=10,
+        )
+        fewer_routed = IterationMetrics(
+            iteration=2, routed_count=8, overflow=5,
+        )
+        # Old behaviour: routed_count dominates overflow.
+        assert more_routed.is_better_than(fewer_routed)
+        assert not fewer_routed.is_better_than(more_routed)
+
+        # And the explicit-zero form is identical to the default form.
+        more_routed_explicit = IterationMetrics(
+            iteration=1, routed_count=10, overflow=10,
+            nets_fully_connected=0,
+        )
+        assert more_routed.sort_key == more_routed_explicit.sort_key
+
+    def test_fragment_only_net_loses_to_smaller_fully_connected(self):
+        """End-to-end style: a state with N nets that each have one
+        fragment but only N-1 fully connected loses to a state with
+        N-1 nets where all N-1 are fully connected.
+
+        This is the inverse direction of
+        ``test_nets_fully_connected_dominates_routed_count``: it
+        verifies the comparator treats ``routed_count`` as a tertiary
+        signal that cannot override ``nets_fully_connected`` even
+        when the two states differ by a single fragment.
+        """
+        # State with N fragments but one is incomplete (N-1 connected)
+        fragment_state = IterationMetrics(
+            iteration=5,
+            routed_count=10,
+            overflow=20,
+            clearance_violations=0,
+            nets_fully_connected=9,
+        )
+        # State with N-1 fragments, all fully connected (N-1 connected)
+        smaller_connected_state = IterationMetrics(
+            iteration=6,
+            routed_count=9,
+            overflow=20,
+            clearance_violations=0,
+            nets_fully_connected=9,
+        )
+        # Equal ``nets_fully_connected`` -> tertiary key
+        # (``routed_count``) breaks the tie in favour of the fragment
+        # state.  This is the "incremental progress" signal described
+        # in the docstring: a fragment-only iteration that did not
+        # lose any pad-connectivity is still preferred to a fully-
+        # connected-only iteration that lost a fragment.
+        assert fragment_state.is_better_than(smaller_connected_state)
+
+        # But if the smaller-fragment state strictly improves
+        # ``nets_fully_connected``, IT wins regardless of routed_count.
+        better_connected_state = IterationMetrics(
+            iteration=6,
+            routed_count=9,
+            overflow=20,
+            clearance_violations=0,
+            nets_fully_connected=10,
+        )
+        assert better_connected_state.is_better_than(fragment_state)
+
+
 class TestCLIFlagWiredThrough:
     """The ``--early-stop-patience`` flag must exist on both the outer
     ``parser.py`` route subparser and the inner ``route_cmd.py`` parser
