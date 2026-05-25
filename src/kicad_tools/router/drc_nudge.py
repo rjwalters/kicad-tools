@@ -40,7 +40,7 @@ from .geometry import (
 )
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
-from .primitives import Route, Segment, Via
+from .primitives import Pad, Route, Segment, Via
 from .via_clearance import segment_clears_foreign_via
 
 logger = logging.getLogger(__name__)
@@ -1004,6 +1004,312 @@ def _try_nudge_via_via(
     return False
 
 
+# ---------------------------------------------------------------------------
+# Same-net via-in-pad nudge (Issue #3112)
+# ---------------------------------------------------------------------------
+#
+# The negotiated A* router does not consult the manufacturer's
+# ``via_in_pad_supported`` flag when placing escape vias.  On profiles that
+# do NOT support filled/plated-over via-in-pad processing (default
+# ``jlcpcb``, ``oshpark``, ``seeed``, ``flashpcb``) the router can leave
+# a via drilled inside an SMD pad of the *same* net -- which the router
+# treats as a no-op (the via is already connected via the pad) but which
+# DRC flags as a manufacturability error
+# (``src/kicad_tools/validate/rules/via_in_pad.py``).
+#
+# Detection surface (per Issue #3112 AC#2): ``router/io.py:validate_routes``
+# explicitly skips same-net pads when emitting ``ClearanceViolation`` (see
+# the ``Skip pads on the same net`` comment in ``io.py``).  The existing
+# nudge dispatch therefore never surfaces the via-in-same-net-pad case,
+# so we run an explicit sweep here -- iterating ``router.pads`` for SMD
+# pads and ``route.vias`` for vias of the same net, gated on
+# ``rules.manufacturer``'s ``via_in_pad_supported`` capability flag.
+# (We use the inline scan rather than constructing a fresh ``PCB`` view
+# and invoking ``ViaInPadRule`` because the router primitives carry the
+# absolute pad coordinates and rotation-adjusted width/height directly,
+# avoiding a save-load round-trip during the nudge pass.)
+
+
+def _router_pad_bbox(pad: Pad) -> tuple[float, float, float, float]:
+    """Return the axis-aligned bounding box for a router primitive ``Pad``.
+
+    The router pad already carries absolute coordinates and (for cardinal
+    footprint rotations) swapped ``width/height``, so the AABB is just
+    ``(x ± w/2, y ± h/2)``.  Non-cardinal rotations are conservatively
+    approximated by the same convention used elsewhere in this module --
+    matches :func:`kicad_tools.validate.rules.via_in_pad._pad_absolute_bbox`
+    for the cardinal cases which are the only ones the router emits.
+    """
+    half_w = pad.width / 2.0
+    half_h = pad.height / 2.0
+    return (pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h)
+
+
+def _via_drill_inside_bbox(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    tol: float = 0.005,
+) -> bool:
+    """Return True if ``via``'s drill circle is fully inside ``pad_bbox``.
+
+    Mirrors :func:`kicad_tools.validate.rules.via_in_pad._via_inside_pad`
+    with the same DRC tolerance idiom so we trigger the nudge on
+    *exactly* the violations DRC would report (and not on drill edges
+    that merely touch the pad bbox -- those are neckdowns, not in-pad
+    vias).
+    """
+    min_x, min_y, max_x, max_y = pad_bbox
+    radius = via.drill / 2.0
+    return (
+        via.x - radius >= min_x - tol
+        and via.x + radius <= max_x + tol
+        and via.y - radius >= min_y - tol
+        and via.y + radius <= max_y + tol
+    )
+
+
+def _snap_chain_endpoints(
+    segments: list[Segment],
+    old_x: float,
+    old_y: float,
+    new_x: float,
+    new_y: float,
+    tol: float = _ENDPOINT_TOL,
+) -> None:
+    """Snap any segment endpoint at ``(old_x, old_y)`` to ``(new_x, new_y)``.
+
+    Thin alias around :func:`_reconnect_segments` with the
+    nudge-appropriate default tolerance (``_ENDPOINT_TOL`` = 0.05 mm,
+    matching :func:`_nudge_segment_with_chain`'s chain walk).  Issue
+    #3112: factored out so the via-pad nudge handler can share the same
+    chain-snap idiom used by :func:`_nudge_via_with_chain` and the
+    same-net merge path.
+    """
+    _reconnect_segments(segments, old_x, old_y, new_x, new_y, tol=tol)
+
+
+def _router_via_in_pad_supported(router: Autorouter) -> bool:
+    """Return True when the router's manufacturer supports via-in-pad.
+
+    Reads ``router.rules.manufacturer`` and consults
+    :func:`kicad_tools.router.mfr_limits.get_mfr_limits`.  Returns False
+    when no manufacturer is configured or the manufacturer is unknown
+    (the conservative default that matches the escape router's behaviour
+    -- see ``src/kicad_tools/router/escape.py``).
+    """
+    rules = getattr(router, "rules", None)
+    if rules is None:
+        return False
+    mfr_id = getattr(rules, "manufacturer", None)
+    if not mfr_id:
+        return False
+    try:
+        from .mfr_limits import get_mfr_limits
+
+        limits = get_mfr_limits(mfr_id)
+    except (ValueError, ImportError):
+        return False
+    return bool(getattr(limits, "via_in_pad_supported", False))
+
+
+def _try_nudge_via_pad(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    router: Autorouter,
+    max_displacement: float,
+    *,
+    required_clearance: float | None = None,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Slide a same-net via off an SMD pad it has been placed inside.
+
+    Issue #3112: companion handler to :func:`_try_nudge_seg_pad`, but
+    operates on a **via** rather than a segment.  Picks the cardinal
+    exit (left/right/top/bottom) that minimises displacement, snapping
+    every same-net segment endpoint that was within ``_ENDPOINT_TOL`` of
+    the via's old position so the routed chain stays electrically
+    connected.
+
+    Refuses the move when the required displacement exceeds
+    ``max_displacement`` (matches the segment handlers' over-budget
+    semantics).  Schema-only surgery: zero ``str.replace()`` / regex on
+    ``.kicad_pcb``; the via mutation happens on the in-memory
+    :class:`Via` (router primitive, NOT the schema layer's ``Via`` --
+    those have different attribute names; ``.x/.y`` here vs ``.position``
+    there).
+
+    Args:
+        via: The router primitive via inside the pad bbox.
+        pad_bbox: ``(min_x, min_y, max_x, max_y)`` of the offending pad.
+        router: Autorouter providing access to all routes for chain
+            snapping.
+        max_displacement: Maximum displacement budget in mm.  Matches
+            the budget used by the seg-side handlers.
+        required_clearance: The trace clearance to leave outside the
+            pad edge.  When ``None``, reads from
+            ``router.rules.trace_clearance`` (default 0.2 mm).  The
+            small extra margin (``max(0.005, required * 0.10)``)
+            mirrors the seg-pad handler's formula.
+        result: Optional :class:`DRCNudgeResult` for structured skip
+            counters.
+
+    Returns:
+        True when the via was moved within budget and its connecting
+        segments were snapped; False otherwise (over budget, no rule
+        info, etc).
+    """
+    if required_clearance is None:
+        rules = getattr(router, "rules", None)
+        required_clearance = getattr(rules, "trace_clearance", 0.2) if rules else 0.2
+
+    min_x, min_y, max_x, max_y = pad_bbox
+    cx, cy = via.x, via.y
+    r = via.diameter / 2.0
+    margin = max(0.005, required_clearance * 0.10)
+    # Each cardinal candidate places the via just outside the pad edge,
+    # with the via's copper diameter (annular ring radius) + the
+    # required trace clearance + the same 10% margin used elsewhere
+    # in this module.
+    offset = r + required_clearance + margin
+
+    candidates: list[tuple[float, float]] = [
+        (min_x - offset, cy),  # left
+        (max_x + offset, cy),  # right
+        (cx, min_y - offset),  # top (smaller y in PCB conventions)
+        (cx, max_y + offset),  # bottom
+    ]
+    new_x, new_y = min(
+        candidates,
+        key=lambda c: math.hypot(c[0] - cx, c[1] - cy),
+    )
+
+    displacement = math.hypot(new_x - cx, new_y - cy)
+    if displacement > max_displacement:
+        if result is not None:
+            result._bump_skipped("via_pad_budget")
+        return False
+
+    old_x, old_y = via.x, via.y
+    via.x = new_x
+    via.y = new_y
+
+    # Snap every same-net segment endpoint that previously coincided
+    # with the via centre to the new position.  Walks all routes (not
+    # just the via's owning route) because the router occasionally
+    # splits a chain across multiple Route objects on the same net.
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        if route.net != via.net:
+            continue
+        _snap_chain_endpoints(route.segments, old_x, old_y, new_x, new_y)
+
+    return True
+
+
+# Budget used for the via-in-pad sweep.  The general ``max_displacement``
+# (0.2 mm) used by the seg-side handlers is far too small here -- exiting
+# an SMD pad takes roughly ``pad_half_width + via_radius + clearance``,
+# which for a typical 1.0 x 1.3 mm pad on JLCPCB is ~0.85 mm.  We
+# default to 2.0 mm which comfortably covers the common SMD pad sizes
+# (0805 / 1206 / SOIC / SOT-23) and leaves headroom for the small
+# clearance margin without allowing pathological huge moves.
+_VIA_IN_PAD_MAX_DISPLACEMENT = 2.0
+
+
+def _scan_and_repair_via_in_pad(
+    router: Autorouter,
+    max_displacement: float,
+    result: DRCNudgeResult,
+) -> int:
+    """Scan ``router`` for same-net via-in-pad cases and nudge them.
+
+    Issue #3112: runs the explicit detection sweep that the
+    :func:`validate_routes` stream cannot surface (it intentionally
+    skips same-net pads at ``router/io.py:1756``).  Gated on the
+    manufacturer's ``via_in_pad_supported`` capability flag -- when the
+    profile supports via-in-pad (e.g. ``jlcpcb-tier1``, ``pcbway``)
+    this is a no-op.
+
+    Note on the displacement budget: the via-in-pad sweep uses its own
+    budget (``_VIA_IN_PAD_MAX_DISPLACEMENT``, default 2.0 mm) rather
+    than the seg-side handlers' ``max_displacement`` (0.2 mm).  Sliding
+    a via off an SMD pad requires ``pad_half_width + via_radius +
+    clearance`` of travel -- about 0.85 mm for a typical 1.0 x 1.3 mm
+    pad -- so the seg-side budget would refuse every realistic case.
+    The caller may pass a smaller value via ``max_displacement`` if they
+    want to cap moves more tightly; the sweep uses the **max** of the
+    caller-supplied budget and the sweep default so the seg-side budget
+    never accidentally veto a legitimate via-pad rescue.
+
+    Returns:
+        Number of vias successfully nudged.
+    """
+    via_pad_budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
+    if _router_via_in_pad_supported(router):
+        # Manufacturer supports via-in-pad -- nothing to do.
+        return 0
+
+    pads = getattr(router, "pads", None) or {}
+    routes = getattr(router, "routes", None) or []
+    if not pads or not routes:
+        return 0
+
+    # Group SMD pads by net.  Net 0 is unconnected copper and is
+    # intentionally excluded -- the via-in-pad rule only fires for
+    # vias that share the pad's net.
+    pads_by_net: dict[int, list[Pad]] = {}
+    for pad in pads.values():
+        if getattr(pad, "through_hole", False):
+            continue
+        net = getattr(pad, "net", 0)
+        if net == 0:
+            continue
+        pads_by_net.setdefault(net, []).append(pad)
+
+    nudged = 0
+    for route in routes:
+        candidates = pads_by_net.get(route.net)
+        if not candidates:
+            continue
+        for via in route.vias:
+            for pad in candidates:
+                bbox = _router_pad_bbox(pad)
+                if not _via_drill_inside_bbox(via, bbox):
+                    continue
+                # Skip vias that sit DEAD-CENTRE on a pad of the same
+                # net.  Such a via is a deliberate in-pad escape: the
+                # via centre is the connection to the pad pin, and
+                # moving the via off the pad centre would disconnect
+                # the chain at the pad anchor (the trace tail meets the
+                # via centre, not the pad edge).  This guard preserves
+                # the contract enforced by :func:`_via_is_pad_anchored`
+                # /  :func:`_nudge_via_with_chain` for the via-via
+                # nudge handler.  An OFF-centre via that merely sits
+                # *inside* the pad bbox is NOT pad-anchored (the trace
+                # already lives outside the pad centre) -- those are
+                # the cases the user wants us to repair, and this
+                # branch lets them through.
+                pad_center_x = (bbox[0] + bbox[2]) / 2.0
+                pad_center_y = (bbox[1] + bbox[3]) / 2.0
+                if (
+                    abs(via.x - pad_center_x) < _PAD_ANCHOR_TOL
+                    and abs(via.y - pad_center_y) < _PAD_ANCHOR_TOL
+                ):
+                    result._bump_skipped("via_pad_centred_escape")
+                    break
+                if _try_nudge_via_pad(
+                    via, bbox, router, via_pad_budget, result=result,
+                ):
+                    nudged += 1
+                # Whether we moved it or not, one pad per via is enough --
+                # if budget refused, surface as remaining via-in-pad
+                # violation in the DRC report rather than churning
+                # through every same-net pad.
+                break
+
+    return nudged
+
+
 def _try_nudge_seg_edge(
     violation: ClearanceViolation,
     router: Autorouter,
@@ -1230,6 +1536,15 @@ def drc_verify_and_nudge(
 
     # Phase 0: Merge coincident same-net vias (cheap, reduces noise).
     result.vias_merged = _merge_same_net_vias(router)
+
+    # Phase 0b (Issue #3112): same-net via-in-pad sweep.  The
+    # ``validate_routes`` stream skips same-net pads
+    # (``router/io.py`` ``Skip pads on the same net``), so this case
+    # never appears in the ``ClearanceViolation`` list.  We run an
+    # explicit pad-vs-via scan here, gated on
+    # ``manufacturer.via_in_pad_supported``.
+    in_pad_nudged = _scan_and_repair_via_in_pad(router, max_displacement, result)
+    result.vias_nudged += in_pad_nudged
 
     # Detect initial violations.
     violations = validate_routes(router)
