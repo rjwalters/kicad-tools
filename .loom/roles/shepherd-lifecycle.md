@@ -23,7 +23,7 @@ This section documents the expected GitHub label states at each shepherd phase b
 |-------|-----------------|----------------------|
 | Curator | (none or `loom:curating`) | - |
 | Approval Gate | `loom:curated` | `loom:curating` |
-| Builder | `loom:issue` + `loom:building` | `loom:curated` (optional) |
+| Builder | `loom:issue` + `loom:building` | `loom:issue` (atomic swap to `loom:building`) |
 | Judge | Issue: `loom:building`, PR: `loom:review-requested` | `loom:issue` |
 | Doctor | Issue: `loom:building`, PR: `loom:changes-requested` | PR: `loom:review-requested` |
 | Merge Gate | Issue: `loom:building`, PR: `loom:pr` | PR: `loom:changes-requested` |
@@ -49,6 +49,15 @@ This section documents the expected GitHub label states at each shepherd phase b
 | Builder (other failure) | `loom:blocked` | - | See diagnostics comment |
 | Judge | `loom:blocked` | (unchanged) | Manual review required |
 | Doctor | `loom:blocked` | (unchanged) | Manual fix required |
+
+### Label Persistence
+
+**`loom:curated` is a persistent milestone marker, not a transient step label.** Once applied by the Curator, it remains on the issue through all subsequent phases (`loom:issue`, `loom:building`, `loom:blocked`) and is only removed during an intentional full lifecycle reset (see "Reset to retry from beginning" below). The atomic transitions at each phase swap `loom:issue` <-> `loom:building`; `loom:curated` is never swapped.
+
+This matches the ground-truth behavior in code:
+- `champion-issue-promo.md` explicitly preserves `loom:curated` when promoting `curated` -> `loom:issue`
+- `loom_tools.shepherd.phases.approval` and `loom_tools.shepherd.phases.builder` never touch `loom:curated`
+- `loom_tools.status` documents this preservation in user-facing output
 
 ### Label State Diagram
 
@@ -89,7 +98,8 @@ When manually continuing after a shepherd failure, ensure labels match the expec
 **Resume at Builder phase:**
 ```bash
 # Issue must have loom:issue AND loom:building
-gh issue edit <N> --remove-label "loom:blocked,loom:curated" --add-label "loom:issue,loom:building"
+# NOTE: loom:curated is preserved as a persistent milestone marker — do not strip it.
+gh issue edit <N> --remove-label "loom:blocked" --add-label "loom:issue,loom:building"
 ```
 
 **Resume at Judge phase:**
@@ -107,7 +117,8 @@ gh pr edit <PR> --remove-label "loom:review-requested" --add-label "loom:changes
 
 **Reset to retry from beginning:**
 ```bash
-# Clear all loom labels and start fresh
+# Full reset including re-curation (rare — only when intentionally restarting from curator phase).
+# Normally preserve loom:curated; this snippet is the one case where it is removed.
 gh issue edit <N> --remove-label "loom:blocked,loom:building,loom:issue,loom:curated,loom:curating"
 # Then run: /shepherd <N>
 ```
@@ -416,14 +427,12 @@ fi
 
 **Phase contracts and recovery**:
 
-| Phase | Expected Outcome | Recovery (Fallback) |
-|-------|-----------------|---------------------|
+| Phase | Expected Outcome | Recovery |
+|-------|-----------------|----------|
 | `curator` | `loom:curated` label on issue | Apply label (curator may have enhanced but not labeled) |
-| `builder` | PR exists with `loom:review-requested` | Commit/push residual worktree changes since the last incremental commit, create PR |
+| `builder` | PR exists with `loom:review-requested` | Commit/push worktree changes, create PR |
 | `judge` | `loom:pr` or `loom:changes-requested` on PR | No recovery — mark `loom:blocked` |
-| `doctor` | `loom:review-requested` on PR | Commit/push residual worktree changes since the last incremental commit, then mark `loom:blocked` if PR still missing the label |
-
-**Recovery is a fallback, not a primary mechanism.** Builders and doctors are required by their role contracts (see `.claude/commands/loom/builder.md` Incremental Commit Protocol and `.claude/commands/loom/doctor.md` Incremental Commit Protocol) to commit AND push at well-defined boundaries during a single agent run. When followed, the worktree should already have committed progress at every point of failure, and the recovery step here only captures any uncommitted changes since the most recent incremental commit. This is a structural change from the previous model where recovery was the *only* path for preserving builder/doctor work on a crash — the previous model was the root cause of issue #2547 (#2542 builder lost 175 min of work, PR #2535 doctor lost diagnostic state, both because no per-boundary commit contract existed).
+| `doctor` | `loom:review-requested` on PR | No recovery — mark `loom:blocked` |
 
 Use `--json` for machine-readable output. Exit code 0 means contract satisfied (initially or after recovery), 1 means failed.
 

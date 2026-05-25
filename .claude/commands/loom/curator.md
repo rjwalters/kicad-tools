@@ -116,6 +116,35 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
 
 **Why prioritize these**: Human already approved the concept, Curator adds technical detail before Builder starts.
 
+### Re-curating Approved Issues
+
+Use this playbook when refreshing an already-approved (`loom:issue`) issue against current `main` — e.g., stale file refs, dependent fixes have merged, or scope drift needs clarification.
+
+**Default behavior** (recommended unless the four questions below indicate otherwise):
+
+1. **Retain `loom:issue`** — Do not remove human approval for non-material updates.
+2. **Add `loom:curated`** — Signals "fresh enrichment against current main is available." `loom:curated` is *additive*, not exclusive; it coexists with `loom:issue`. Builders prioritize `loom:issue` + `loom:curated` over `loom:issue` alone, so re-curation has direct downstream impact on Builder selection.
+3. **Prefer body edits over comments for stale references** — Keep the body as the single source of truth for Builders. Use a dated curator comment summarizing what changed (e.g., "Refreshed file refs after #NNNN merged on YYYY-MM-DD").
+4. **For material scope changes** — When you rewrite the problem statement, re-narrow root cause, or change acceptance criteria materially, remove `loom:issue` and leave only `loom:curated`. This forces fresh human re-approval.
+
+**The four decision questions** (use these to deviate from the default):
+
+| Question | Default | Deviate when |
+|----------|---------|--------------|
+| Retain `loom:issue`? | Yes | Material scope or AC change |
+| (Re-)add `loom:curated`? | Always yes | Never skip |
+| Comment vs body edit? | Body edit + dated comment | Pure context/links → comment |
+| Substantive rewrite? | Drop `loom:issue`, keep `loom:curated` | Minor refresh → keep both |
+
+**Discovery query** — find approved issues that haven't been re-curated recently:
+
+```bash
+# Approved issues missing fresh curation
+gh issue list --label="loom:issue" --state=open --json number,title,labels,updatedAt \
+  --jq '.[] | select(([.labels[].name] | contains(["loom:curated"]) | not)) |
+  "#\(.number) (updated \(.updatedAt)): \(.title)"'
+```
+
 ### Priority 2: Unlabeled Issues (Fallback)
 
 If no Priority 1 issues exist, find unlabeled issues:
@@ -223,6 +252,42 @@ Issue #99: "fix the crash bug"
 2. **Two-Gate Approval**: Architect→Human, then Curator→Human ensures thorough vetting
 3. **Human Control**: Only humans decide what gets implemented (`loom:issue`)
 4. **Clear Standards**: `loom:curated` means enhanced, `loom:issue` means approved for work
+
+## Decomposing Oversized Issues
+
+If, during curation, you determine an issue is too large to be a single Builder PR (>6 hours, >8 files, or >400 LOC) and must be split into sub-issues:
+
+1. **Create each sub-issue with `loom:triage` only.** Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
+2. **Do NOT apply `loom:issue`** — only humans add `loom:issue`. This rule is unchanged for sub-issues (see "NEVER add `loom:issue`" below).
+3. **Update the parent issue's body or add a comment** with a "Decomposed sub-issues" section linking each child.
+4. **Do not close the parent during curation** — flag for human review (Curator never closes issues; see "Never Close Issues" below).
+5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
+
+### Why this matters
+
+A dedicated Curator pass after decomposition catches:
+- Acceptance-criteria gaps the decomposer didn't surface
+- file:line citations that drift between decomposer-read time and builder-run time
+- Sub-issue dependencies the decomposer missed
+- Scope-guard sharpening (LOC limits, out-of-scope footnotes)
+
+When skipped, the Builder hits these issues at implementation time — usually as a scope-guard trigger or a Doctor cycle — which is far more expensive than catching at curate time.
+
+**Scope note**: This two-pass rule applies *only* to sub-issues created during decomposition. Single-issue curation remains one pass — enhance and mark `loom:curated` in the same session as today.
+
+### Example
+
+```bash
+# WRONG: decomposer-curates in one pass
+gh issue create --title "Sub-issue A" --label "loom:curated"  # FORBIDDEN
+
+# RIGHT: decomposer creates at triage, leaves for separate curator pass
+gh issue create --title "Sub-issue A" --label "loom:triage"
+```
+
+### Related: Builder decomposition
+
+The Builder's complexity-assessment path (`defaults/.claude/commands/loom/builder-complexity.md`) currently labels decomposed sub-issues with `loom:issue` directly, skipping both human approval *and* Curator review. That parallel defect is **out of scope for this rule** and should be tracked in a separate follow-up issue; the Curator rule above stands on its own.
 
 ## Curation Activities
 
@@ -768,28 +833,6 @@ Keep it brief (3-6 words) and descriptive:
 - **Be consistent**: Always use the same format
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
-
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration to save API costs.**
-
-After completing your iteration (enhancing an issue and marking it curated), execute:
-
-```
-/clear
-```
-
-### Why This Matters
-
-- **Reduces API costs**: Fresh context for each iteration means smaller request sizes
-- **Prevents context pollution**: Each iteration starts clean without stale information
-- **Improves reliability**: No risk of acting on outdated context from previous iterations
-
-### When to Clear
-
-- ✅ **After completing curation** (issue enhanced and labeled)
-- ✅ **When no work is available** (no issues to curate)
-- ❌ **NOT during active work** (only after iteration is complete)
 
 ## Completion
 

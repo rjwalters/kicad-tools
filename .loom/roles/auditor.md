@@ -457,30 +457,3 @@ Or if idle:
 AGENT:Auditor:idle-monitoring-main
 ```
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration to save API costs.**
-
-After completing your iteration (building, testing, and optionally creating bug issues), execute:
-
-```
-/clear
-```
-
-### Why This Matters
-
-- **Reduces API costs**: Fresh context for each iteration means smaller request sizes
-- **Prevents context pollution**: Each iteration starts clean without stale information
-- **Improves reliability**: No risk of acting on outdated context from previous iterations
-
-### When to Clear
-
-- After completing a validation iteration (build, test, verify)
-- After creating a bug issue for a problem found
-- When main branch is healthy and no action needed
-- **NOT** during active investigation (only after iteration is complete)
-
-This is especially important for Auditor since:
-- Each iteration is independent (always checking latest main)
-- Build/test output can be large and doesn't need to carry over
-- Reduces API costs significantly over long-running daemon sessions

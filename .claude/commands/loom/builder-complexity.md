@@ -36,9 +36,13 @@ gh issue comment 812 --body "This issue is complex (>6 hours). Decomposed into:
 # 3. Close parent issue or remove loom:building
 gh issue close 812  # OR: gh issue edit 812 --remove-label "loom:building"
 
-# 4. Optionally claim one sub-issue and continue working
-gh issue edit XXX --add-label "loom:issue"
-gh issue edit XXX --remove-label "loom:issue" --add-label "loom:building"
+# 4. (Optional) Pick up a sub-issue once a Curator has enhanced it
+#    Sub-issues are born at loom:triage. A separate Curator pass produces
+#    loom:curated, and a human adds loom:issue. Do NOT add loom:issue
+#    yourself to a sub-issue you just created -- that would skip both
+#    Curator review and the human-approval gate.
+gh issue edit XXX --add-label "loom:triage"
+# Then exit and let the Curator/Shepherd pipeline pick it up.
 ```
 
 **DON'T DO THIS** (abandon without path forward):
@@ -46,6 +50,31 @@ gh issue edit XXX --remove-label "loom:issue" --add-label "loom:building"
 # WRONG - Just stopping work
 # (leaves issue stuck with loom:building, no explanation, no sub-issues)
 ```
+
+### Sub-issue labeling (mirrors curator.md decomposition rule)
+
+When you create sub-issues during decomposition:
+
+1. **Label each sub-issue `loom:triage` only.** Do NOT apply `loom:issue`, `loom:curated`, or `loom:building` to a sub-issue you just created -- even if your decomposition includes acceptance criteria, file references, and scope guards.
+2. **Do NOT self-claim a sub-issue you just created in the same session.** A separate Curator pass must independently review it (-> `loom:curated`), and a human must promote it (-> `loom:issue`), before any Builder claims it.
+3. **Update the parent issue body or add a comment** with a "Decomposed sub-issues" section linking each child.
+4. **Do not close the parent yourself if you cannot complete it.** Mark `loom:blocked` with a comment explaining the decomposition; humans close once children are filed.
+
+### Why this matters
+
+A dedicated Curator pass after decomposition catches:
+- Acceptance-criteria gaps the decomposer didn't surface
+- file:line citations that drift between decomposer-read time and builder-run time
+- Sub-issue dependencies the decomposer missed
+- Scope-guard sharpening (LOC limits, out-of-scope footnotes)
+
+When skipped, the next Builder hits these issues at implementation time -- usually as a scope-guard trigger or a Doctor cycle -- which is far more expensive than catching at curate time.
+
+**Scope note**: This rule applies *only* to sub-issues created during builder-side decomposition. The Builder's normal claim flow for human-approved `loom:issue` issues (remove `loom:issue`, add `loom:building`) is unchanged.
+
+### Related: Curator-side decomposition
+
+The Curator role enforces the same rule from its side (see `defaults/.claude/commands/loom/curator.md` -> "Decomposing Oversized Issues" section, added in #3266 / PR #3272).
 
 ### Decomposition Criteria
 

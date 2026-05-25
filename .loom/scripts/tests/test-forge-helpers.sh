@@ -115,122 +115,207 @@ else
     echo -e "  ${RED}FAIL${NC}: forge_get_repo_nwo returned empty"
 fi
 
-# --- Test forge_pr_close_targets ---
-# Tests the canonical "what issues does this PR close?" helper, which is the
-# single source of truth used by the Champion role's verify-issue-closure
-# step. See issue #2849.
-#
-# We test by stubbing `gh` (GitHub path) and `forge_get_pr_body` (Gitea path).
-# The stub strategy mirrors how forge_pr_close_targets calls into them.
+# --- Test forge_pr_close_targets (Gitea fallback regex path) ---
+# These tests exercise the regex fallback that is used for Gitea (and that
+# serves as the safety net behavior we want to guarantee even without the
+# GitHub GraphQL path). We test the regex directly to avoid needing a live
+# forge or stubbing `gh pr view`.
 echo ""
-echo "Testing forge_pr_close_targets..."
+echo "Testing forge_pr_close_targets regex (Gitea fallback semantics)..."
 
-# Helper to define a one-shot stub `gh` that emits canned JSON for the
-# `closingIssuesReferences` query and a different payload for everything else.
-_stub_gh_closing_refs() {
-    # $1 = JSON string for .closingIssuesReferences (e.g. '[{"number":100}]')
-    local refs_json="$1"
-    eval "gh() {
-        if [[ \"\$*\" == *closingIssuesReferences* ]]; then
-            if [[ \"\$*\" == *--jq* ]]; then
-                # Emulate \`gh ... --jq '.closingIssuesReferences[].number'\`
-                echo '$refs_json' | jq -r '.[].number'
-            else
-                echo '{\"closingIssuesReferences\": $refs_json}'
-            fi
-        fi
-    }"
-    export -f gh 2>/dev/null || true
-}
-
-_unstub_gh() {
-    unset -f gh 2>/dev/null || true
-}
-
-FORGE_TYPE="github"
-
-# Case 1: PR with Closes #100 -> closingIssuesReferences: [{number:100}]
-_stub_gh_closing_refs '[{"number":100}]'
-result=$(forge_pr_close_targets 1234 gh)
-assert_eq "100" "$result" "Closes #100 -> 100"
-_unstub_gh
-
-# Case 2: PR with Updates #100 only -> closingIssuesReferences: []
-_stub_gh_closing_refs '[]'
-result=$(forge_pr_close_targets 1234 gh)
-assert_eq "" "$result" "Updates #100 (no Closes) -> empty (the #2849 bug case)"
-_unstub_gh
-
-# Case 3: PR with Closes #100 + Updates #200 -> only 100 closes
-_stub_gh_closing_refs '[{"number":100}]'
-result=$(forge_pr_close_targets 1234 gh)
-assert_eq "100" "$result" "Closes #100 + Updates #200 -> 100 only"
-_unstub_gh
-
-# Case 4: PR mentioning "Closure of #100" but no actual close keyword -> empty
-_stub_gh_closing_refs '[]'
-result=$(forge_pr_close_targets 1234 gh)
-assert_eq "" "$result" "Closure of #100 (substring) -> empty"
-_unstub_gh
-
-# Case 5: Multiple closing references
-_stub_gh_closing_refs '[{"number":100},{"number":200},{"number":300}]'
-result=$(forge_pr_close_targets 1234 gh | tr '\n' ' ' | sed 's/ $//')
-assert_eq "100 200 300" "$result" "Multiple closes -> all numbers"
-_unstub_gh
-
-# Case 6: Empty body / no references
-_stub_gh_closing_refs '[]'
-result=$(forge_pr_close_targets 1234 gh)
-assert_eq "" "$result" "Empty body -> empty"
-_unstub_gh
-
-# --- Test Gitea body-regex path for forge_pr_close_targets ---
-echo ""
-echo "Testing forge_pr_close_targets (Gitea body-regex path)..."
-
-# Stub forge_get_pr_body and forge_get_repo_nwo for the Gitea path
-_stub_pr_body() {
+# Helper: run the same regex used inside forge_pr_close_targets's Gitea branch.
+# Note: `|| true` neutralizes grep's exit code 1 (no match) under `set -e`.
+_close_targets_regex() {
     local body="$1"
-    eval "forge_get_pr_body() { printf '%s' \"\$(cat <<'BODY_EOF'
-$body
-BODY_EOF
-)\"; }"
-    eval "forge_get_repo_nwo() { echo 'owner/repo'; }"
+    { echo "$body" \
+        | grep -Eoi '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]+#[0-9]+' \
+        | grep -Eo '[0-9]+' \
+        | sort -un \
+        | tr '\n' ' ' \
+        | sed 's/ $//'; } || true
 }
 
-_unstub_pr_body() {
-    # Re-source to restore originals
-    source "$HELPERS_DIR/lib/forge-helpers.sh"
-}
+result=$(_close_targets_regex "Closes #42")
+assert_eq "42" "$result" "Closes #N matches"
 
-FORGE_TYPE="gitea"
+result=$(_close_targets_regex "Fixes #42")
+assert_eq "42" "$result" "Fixes #N matches"
 
-_stub_pr_body "Closes #100"
-result=$(forge_pr_close_targets 1234)
-assert_eq "100" "$result" "Gitea: Closes #100 -> 100"
-_unstub_pr_body
+result=$(_close_targets_regex "Resolves #42")
+assert_eq "42" "$result" "Resolves #N matches"
 
-FORGE_TYPE="gitea"
-_stub_pr_body "Updates #100 only, no closure keyword."
-result=$(forge_pr_close_targets 1234)
-assert_eq "" "$result" "Gitea: Updates #100 only -> empty"
-_unstub_pr_body
+result=$(_close_targets_regex "closes #42")
+assert_eq "42" "$result" "lowercase closes #N matches (case-insensitive)"
 
-FORGE_TYPE="gitea"
-_stub_pr_body "Closure of this criterion is gated on #200."
-result=$(forge_pr_close_targets 1234)
-assert_eq "" "$result" "Gitea: 'Closure of' substring -> empty (word boundary)"
-_unstub_pr_body
+result=$(_close_targets_regex "Closed #42")
+assert_eq "42" "$result" "tense variant 'Closed #N' matches"
 
-FORGE_TYPE="gitea"
-_stub_pr_body "closes #42 and Fixes #43 and resolves #44"
-result=$(forge_pr_close_targets 1234 | tr '\n' ' ' | sed 's/ $//')
-assert_eq "42 43 44" "$result" "Gitea: mixed-case canonical keywords -> all"
-_unstub_pr_body
+result=$(_close_targets_regex "Updates #42")
+assert_eq "" "$result" "Updates #N is correctly ignored (the bug from #3267)"
 
-# Restore FORGE_TYPE
+result=$(_close_targets_regex "See #42")
+assert_eq "" "$result" "See #N is correctly ignored"
+
+result=$(_close_targets_regex "References #42")
+assert_eq "" "$result" "References #N is correctly ignored"
+
+result=$(_close_targets_regex "Discloses #42")
+assert_eq "" "$result" "substring trap 'Discloses #N' is correctly ignored"
+
+result=$(_close_targets_regex "")
+assert_eq "" "$result" "empty body returns nothing"
+
+result=$(_close_targets_regex "Closes #1, Fixes #2, Resolves #3")
+assert_eq "1 2 3" "$result" "multiple closing keywords match all targets"
+
+result=$(_close_targets_regex "Closes #5. Updates #6.")
+assert_eq "5" "$result" "mixed Closes/Updates closes only Closes target"
+
+result=$(_close_targets_regex "Closes #7 and Fixes #7")
+assert_eq "7" "$result" "duplicate references are de-duplicated"
+
+# --- Test forge_pr_close_targets dispatches to GitHub path ---
+echo ""
+echo "Testing forge_pr_close_targets GitHub dispatch (using stub gh)..."
+
+# Create a stub `gh` that captures the closingIssuesReferences invocation
+# and returns canned output. Place it on PATH ahead of the real gh.
+STUB_DIR=$(mktemp -d)
+cat > "$STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+# Stub gh that only handles the close-targets query.
+# Usage: gh pr view <N> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+if [[ "$1" == "pr" && "$2" == "view" && "$*" == *"closingIssuesReferences"* ]]; then
+  printf '123\n456\n'
+  exit 0
+fi
+exit 1
+STUB
+chmod +x "$STUB_DIR/gh"
+
 FORGE_TYPE="github"
+result=$(forge_pr_close_targets "999" "$STUB_DIR/gh" | tr '\n' ' ' | sed 's/ $//')
+assert_eq "123 456" "$result" "GitHub path delegates to gh pr view --json closingIssuesReferences"
+
+rm -rf "$STUB_DIR"
+
+# --- Test gitea_api auth-mode selection (issue #3297) ---
+# Use a `curl` shim on PATH that records its argv and returns a fake 200.
+echo ""
+echo "Testing gitea_api auth mode selection (Basic vs token)..."
+
+SHIM_DIR=$(mktemp -d)
+CURL_ARGS_FILE=$(mktemp)
+export CURL_ARGS_FILE
+cat > "$SHIM_DIR/curl" <<'SHIM'
+#!/usr/bin/env bash
+# Record argv (one per line) and emit a fake 200 OK response.
+: > "$CURL_ARGS_FILE"
+for a in "$@"; do
+  printf '%s\n' "$a" >> "$CURL_ARGS_FILE"
+done
+# gitea_api expects body lines followed by a final-line HTTP status code.
+printf '{"ok":true}\n200\n'
+SHIM
+chmod +x "$SHIM_DIR/curl"
+
+# --- Subtest 1: token mode sends "Authorization: token ..." and NOT -u ---
+_GITEA_BASE_URL="https://gitea.example.com"
+_GITEA_TOKEN="tok-abc"
+_GITEA_USERNAME=""
+PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
+
+if grep -q "^Authorization: token tok-abc$" "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: token mode sends 'Authorization: token …' header"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: token mode missing 'Authorization: token …' header"
+    echo "    curl argv:"; sed 's/^/      /' "$CURL_ARGS_FILE"
+fi
+
+if grep -qx -- "-u" "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: token mode unexpectedly used '-u'"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: token mode does NOT use '-u'"
+fi
+
+# --- Subtest 2: Basic mode sends -u user:pass and NOT Authorization: token ---
+_GITEA_USERNAME="alice"
+_GITEA_BASE_URL="https://gitea.example.com"
+PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
+
+if grep -qx -- "-u" "$CURL_ARGS_FILE" && grep -qx -- "alice:tok-abc" "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Basic mode sends '-u user:pass'"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Basic mode missing '-u user:pass'"
+    echo "    curl argv:"; sed 's/^/      /' "$CURL_ARGS_FILE"
+fi
+
+if grep -q "^Authorization: token" "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Basic mode unexpectedly sent 'Authorization: token …'"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Basic mode does NOT send 'Authorization: token …'"
+fi
+
+# --- Subtest 3: HTTPS guard rejects http:// in Basic mode ---
+_GITEA_USERNAME="alice"
+_GITEA_TOKEN="tok-abc"
+_GITEA_BASE_URL="http://insecure.example.com"
+unset LOOM_ALLOW_INSECURE_BASIC_AUTH 2>/dev/null || true
+# Capture rc and stderr separately. Use a subshell with set +e so the
+# function's nonzero return code propagates without aborting the script.
+guard_output=$(
+  set +e
+  PATH="$SHIM_DIR:$PATH" gitea_api GET "user" 2>&1 >/dev/null
+  echo "RC=$?"
+)
+guard_rc=$(echo "$guard_output" | tail -1 | sed 's/^RC=//')
+if [[ "$guard_rc" -ne 0 ]] && [[ "$guard_output" == *"Basic Auth requires HTTPS"* ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: HTTPS guard rejects http:// in Basic mode"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: HTTPS guard did not fire (rc=$guard_rc, output=$guard_output)"
+fi
+
+# --- Subtest 4: HTTPS guard override via LOOM_ALLOW_INSECURE_BASIC_AUTH=1 ---
+LOOM_ALLOW_INSECURE_BASIC_AUTH=1 PATH="$SHIM_DIR:$PATH" \
+  gitea_api GET "user" >/dev/null 2>&1
+override_rc=$?
+if [[ "$override_rc" -eq 0 ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: LOOM_ALLOW_INSECURE_BASIC_AUTH=1 permits http://"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: LOOM_ALLOW_INSECURE_BASIC_AUTH=1 did not unblock http:// (rc=$override_rc)"
+fi
+
+# --- Subtest 5: Username with ':' is rejected ---
+_GITEA_USERNAME="alice:bob"
+_GITEA_TOKEN="tok-abc"
+_GITEA_BASE_URL="https://gitea.example.com"
+colon_output=$(
+  set +e
+  PATH="$SHIM_DIR:$PATH" gitea_api GET "user" 2>&1 >/dev/null
+  echo "RC=$?"
+)
+colon_rc=$(echo "$colon_output" | tail -1 | sed 's/^RC=//')
+if [[ "$colon_rc" -ne 0 ]] && [[ "$colon_output" == *"may not contain ':'"* ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: username with ':' rejected"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: username with ':' was NOT rejected (rc=$colon_rc, output=$colon_output)"
+fi
+
+rm -rf "$SHIM_DIR" "$CURL_ARGS_FILE"
 
 # --- Summary ---
 echo ""

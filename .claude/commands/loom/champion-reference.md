@@ -135,12 +135,12 @@ fi
 
 **Handling**:
 ```bash
-# Ask GitHub which issues this PR closes per official semantics
-# (Closes/Fixes/Resolves keywords; case-insensitive; proper word boundaries).
-# This does NOT match Updates/See/References or words like "Closure of".
-# See issue #2849 for why a body regex is the wrong tool.
-LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json closingIssuesReferences \
-  --jq '.closingIssuesReferences[].number')
+# Extract all linked issues using GitHub's own parser (closingIssuesReferences).
+# Note: `Updates #N` is intentionally excluded — it does not close the issue
+# (see issue #3267). The forge_pr_close_targets helper handles this correctly.
+source "$(git rev-parse --show-toplevel)/.loom/scripts/lib/forge-helpers.sh"
+forge_detect
+LINKED_ISSUES=$(forge_pr_close_targets "$PR_NUMBER")
 
 # Verify each issue closed after merge
 for issue in $LINKED_ISSUES; do
@@ -154,7 +154,7 @@ done
 
 **Decision**: **Allow merge, verify all linked issues** - standard practice.
 
-**Rationale**: GitHub auto-closes multiple issues, but verify and manually close if needed.
+**Rationale**: GitHub auto-closes multiple issues, but verify and manually close if needed. The helper uses GitHub's `closingIssuesReferences` so `Updates #N` (and similar non-closing references) are correctly excluded.
 
 ---
 
@@ -504,15 +504,14 @@ echo ""
 echo "STEP 4/5: Verifying linked issue closure..."
 echo ""
 
-# Ask GitHub which issues this PR closes per official semantics
-# (Closes/Fixes/Resolves keywords; case-insensitive; proper word boundaries).
-# This does NOT match Updates/See/References or words like "Closure of".
-# See issue #2849 for why a body regex is the wrong tool.
-LINKED_ISSUES=$(gh pr view "$PR_NUMBER" --json closingIssuesReferences \
-  --jq '.closingIssuesReferences[].number' 2>/dev/null)
+# Use GitHub's own parser via closingIssuesReferences (see issue #3267).
+# Correctly excludes `Updates #N` and substring traps like `Discloses #N`.
+source "$(git rev-parse --show-toplevel)/.loom/scripts/lib/forge-helpers.sh"
+forge_detect
+LINKED_ISSUES=$(forge_pr_close_targets "$PR_NUMBER")
 
 if [ -z "$LINKED_ISSUES" ]; then
-  echo "No closing-issue references found - skipping closure verification"
+  echo "No linked issues found - skipping closure verification"
 else
   echo "Found linked issues: $LINKED_ISSUES"
   for issue in $LINKED_ISSUES; do
@@ -632,8 +631,7 @@ done
 # Check PR merge status
 gh pr view <number> --json state,mergeable,statusCheckRollup
 
-# View linked issues (canonical: uses GitHub's computed closingIssuesReferences,
-# which correctly handles Closes/Fixes/Resolves keywords and ignores Updates/See/etc.)
+# View linked issues (uses GitHub's authoritative parser; `Updates #N` is excluded)
 gh pr view <number> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
 
 # Check daemon state

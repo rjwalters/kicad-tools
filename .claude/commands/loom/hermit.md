@@ -543,18 +543,3 @@ true
 
 Keep task description brief (3-6 words), use present-tense verbs and hyphens between words.
 
-## Context Clearing (Cost Optimization)
-
-**When running autonomously, clear your context at the end of each iteration to save API costs.**
-
-After completing your iteration (analyzing for bloat and creating proposals), execute:
-
-```
-/clear
-```
-
-### When to Clear
-
-- After completing analysis (removal proposal created with loom:hermit label)
-- When no bloat is found (codebase is clean this iteration)
-- **NOT** during active work (only after iteration is complete)
