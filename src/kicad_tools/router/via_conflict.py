@@ -375,17 +375,13 @@ class ViaConflictManager:
                 seen_vias.add(via_key)
 
                 # Calculate distance from via to pad
-                distance = math.sqrt(
-                    (via.x - pad.x) ** 2 + (via.y - pad.y) ** 2
-                )
+                distance = math.sqrt((via.x - pad.x) ** 2 + (via.y - pad.y) ** 2)
 
                 if distance > search_radius:
                     continue
 
                 # Check if via's clearance zone actually blocks the pad
-                min_clearance = (
-                    via.diameter / 2 + self.rules.via_clearance
-                )
+                min_clearance = via.diameter / 2 + self.rules.via_clearance
 
                 if distance < min_clearance + self.rules.trace_width:
                     conflict = ViaConflict(
@@ -541,10 +537,7 @@ class ViaConflictManager:
                 seg_xmax = max(segment.x1, segment.x2) + search_radius
                 seg_ymin = min(segment.y1, segment.y2) - search_radius
                 seg_ymax = max(segment.y1, segment.y2) + search_radius
-                if not (
-                    seg_xmin <= pad.x <= seg_xmax
-                    and seg_ymin <= pad.y <= seg_ymax
-                ):
+                if not (seg_xmin <= pad.x <= seg_xmax and seg_ymin <= pad.y <= seg_ymax):
                     continue
 
                 # Point-to-line-segment perpendicular distance, clamped
@@ -559,20 +552,15 @@ class ViaConflictManager:
                     # Degenerate (zero-length) segment -- treat as a
                     # point and compute distance from the endpoint.
                     closest_x, closest_y = segment.x1, segment.y1
-                    perp_distance = math.sqrt(
-                        (closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2
-                    )
+                    perp_distance = math.sqrt((closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2)
                 else:
                     t = (
-                        (pad.x - segment.x1) * seg_dx
-                        + (pad.y - segment.y1) * seg_dy
+                        (pad.x - segment.x1) * seg_dx + (pad.y - segment.y1) * seg_dy
                     ) / seg_length_sq
                     t = max(0.0, min(1.0, t))
                     closest_x = segment.x1 + t * seg_dx
                     closest_y = segment.y1 + t * seg_dy
-                    perp_distance = math.sqrt(
-                        (closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2
-                    )
+                    perp_distance = math.sqrt((closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2)
 
                 if perp_distance >= envelope_radius:
                     continue
@@ -585,9 +573,7 @@ class ViaConflictManager:
                     blocked_pad=pad,
                     blocked_net=pad_net,
                     blocking_net=segment.net,
-                    blocking_net_name=net_names.get(
-                        segment.net, f"Net_{segment.net}"
-                    ),
+                    blocking_net_name=net_names.get(segment.net, f"Net_{segment.net}"),
                     distance=perp_distance,
                     clearance_needed=envelope_radius - perp_distance,
                 )
@@ -734,9 +720,7 @@ class ViaConflictManager:
 
         for candidate_x, candidate_y in candidates:
             # Check that candidate doesn't block the pad
-            pad_dist = math.sqrt(
-                (candidate_x - pad.x) ** 2 + (candidate_y - pad.y) ** 2
-            )
+            pad_dist = math.sqrt((candidate_x - pad.x) ** 2 + (candidate_y - pad.y) ** 2)
             min_clearance = via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width
             if pad_dist < min_clearance:
                 continue
@@ -751,9 +735,7 @@ class ViaConflictManager:
                 continue
 
             # Score the candidate: prefer closer to original position, farther from pad
-            orig_dist = math.sqrt(
-                (candidate_x - via.x) ** 2 + (candidate_y - via.y) ** 2
-            )
+            orig_dist = math.sqrt((candidate_x - via.x) ** 2 + (candidate_y - via.y) ** 2)
             score = orig_dist - pad_dist * 0.5  # Prefer staying close but moving away from pad
 
             if score < best_score:
@@ -772,6 +754,13 @@ class ViaConflictManager:
             layers=via.layers,
             net=via.net,
             net_name=via.net_name,
+            # Issue #3118: preserve in-pad and micro-via markers when
+            # the conflict resolver relocates a via.  The relocation
+            # is a position change only -- the via's geometric tier
+            # (standard vs. micro) and in-pad status are unchanged
+            # and must not silently disappear during a rip-up.
+            in_pad=via.in_pad,
+            is_micro=via.is_micro,
         )
 
         # Update the route's via and connected segments
@@ -983,8 +972,7 @@ class ViaConflictManager:
         """
         gx, gy = self.grid.world_to_grid(x, y)
         radius = int(
-            (self.rules.via_diameter / 2 + self.rules.via_clearance)
-            / self.grid.resolution
+            (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
         )
 
         for layer_idx in range(self.grid.num_layers):
@@ -1035,10 +1023,7 @@ class ViaConflictManager:
 
         # Replace the via in the route
         for i, via in enumerate(route.vias):
-            if (
-                abs(via.x - old_via.x) < tol
-                and abs(via.y - old_via.y) < tol
-            ):
+            if abs(via.x - old_via.x) < tol and abs(via.y - old_via.y) < tol:
                 route.vias[i] = new_via
                 break
 

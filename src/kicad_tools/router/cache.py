@@ -234,8 +234,11 @@ class SubProblemSignature:
         # 3. Compute rotation angle: rotate so first pad (by angle from
         #    centroid) aligns with +X axis.  For single-pad nets or pads
         #    all at the centroid, rotation is 0.
-        angles = [(math.atan2(ry, rx), i) for i, (rx, ry) in enumerate(relative)
-                  if abs(rx) > 1e-6 or abs(ry) > 1e-6]
+        angles = [
+            (math.atan2(ry, rx), i)
+            for i, (rx, ry) in enumerate(relative)
+            if abs(rx) > 1e-6 or abs(ry) > 1e-6
+        ]
 
         if angles:
             angles.sort()
@@ -259,14 +262,17 @@ class SubProblemSignature:
         pad_entries = []
         for i, (nx, ny) in enumerate(rotated):
             p = pads[i]
-            pad_entries.append((
-                nx, ny,
-                round(p.width, 4),
-                round(p.height, 4),
-                p.through_hole,
-                round(p.drill, 4),
-                p.layer.value,
-            ))
+            pad_entries.append(
+                (
+                    nx,
+                    ny,
+                    round(p.width, 4),
+                    round(p.height, 4),
+                    p.through_hole,
+                    round(p.drill, 4),
+                    p.layer.value,
+                )
+            )
         pad_entries.sort()
 
         # 6. Build rules hash (only routing-relevant fields)
@@ -356,30 +362,47 @@ def transform_routes(
         for seg in route.segments:
             x1, y1 = _transform(seg.x1, seg.y1)
             x2, y2 = _transform(seg.x2, seg.y2)
-            new_segs.append(Segment(
-                x1=x1, y1=y1, x2=x2, y2=y2,
-                width=seg.width,
-                layer=seg.layer,
-                net=target_net,
-                net_name=target_net_name,
-            ))
+            new_segs.append(
+                Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net=target_net,
+                    net_name=target_net_name,
+                )
+            )
         new_vias = []
         for via in route.vias:
             vx, vy = _transform(via.x, via.y)
-            new_vias.append(Via(
-                x=vx, y=vy,
-                drill=via.drill,
-                diameter=via.diameter,
-                layers=via.layers,
+            new_vias.append(
+                Via(
+                    x=vx,
+                    y=vy,
+                    drill=via.drill,
+                    diameter=via.diameter,
+                    layers=via.layers,
+                    net=target_net,
+                    net_name=target_net_name,
+                    # Issue #3118: preserve in-pad and micro-via tags
+                    # across sub-problem cache transform.  Without this,
+                    # routes recovered from the cache lose the markers
+                    # set by the in-pad escape rescue, causing the
+                    # downstream dimensions DRC exemption to misfire.
+                    in_pad=via.in_pad,
+                    is_micro=via.is_micro,
+                )
+            )
+        transformed.append(
+            RouteClass(
                 net=target_net,
                 net_name=target_net_name,
-            ))
-        transformed.append(RouteClass(
-            net=target_net,
-            net_name=target_net_name,
-            segments=new_segs,
-            vias=new_vias,
-        ))
+                segments=new_segs,
+                vias=new_vias,
+            )
+        )
 
     return transformed
 
@@ -425,30 +448,44 @@ def normalize_routes_to_origin(
         for seg in route.segments:
             x1, y1 = _inv_transform(seg.x1, seg.y1)
             x2, y2 = _inv_transform(seg.x2, seg.y2)
-            new_segs.append(Segment(
-                x1=x1, y1=y1, x2=x2, y2=y2,
-                width=seg.width,
-                layer=seg.layer,
-                net=0,
-                net_name="",
-            ))
+            new_segs.append(
+                Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net=0,
+                    net_name="",
+                )
+            )
         new_vias = []
         for via in route.vias:
             vx, vy = _inv_transform(via.x, via.y)
-            new_vias.append(Via(
-                x=vx, y=vy,
-                drill=via.drill,
-                diameter=via.diameter,
-                layers=via.layers,
+            new_vias.append(
+                Via(
+                    x=vx,
+                    y=vy,
+                    drill=via.drill,
+                    diameter=via.diameter,
+                    layers=via.layers,
+                    net=0,
+                    net_name="",
+                    # Issue #3118: preserve in-pad and micro-via tags
+                    # through normalize <-> transform round-trip.
+                    in_pad=via.in_pad,
+                    is_micro=via.is_micro,
+                )
+            )
+        normalized.append(
+            RouteClass(
                 net=0,
                 net_name="",
-            ))
-        normalized.append(RouteClass(
-            net=0,
-            net_name="",
-            segments=new_segs,
-            vias=new_vias,
-        ))
+                segments=new_segs,
+                vias=new_vias,
+            )
+        )
 
     return normalized
 
@@ -622,9 +659,7 @@ class RoutingCache:
                 CREATE INDEX IF NOT EXISTS idx_sub_problem_accessed
                     ON sub_problem_solutions(last_accessed);
             """)
-            logger.info(
-                "Migrated cache schema to v3: added sub_problem_solutions table"
-            )
+            logger.info("Migrated cache schema to v3: added sub_problem_solutions table")
 
         conn.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -684,6 +719,15 @@ class RoutingCache:
                         "layers": [via.layers[0].value, via.layers[1].value],
                         "net": via.net,
                         "net_name": via.net_name,
+                        # Issue #3118: persist in-pad and micro-via
+                        # tags so cached entries surviving across
+                        # process boundaries (compressed-on-disk
+                        # cache) restore with the same flags they
+                        # were stored with.  ``.get`` reads with a
+                        # backward-compatible default so older cache
+                        # files still deserialize.
+                        "in_pad": via.in_pad,
+                        "is_micro": via.is_micro,
                     }
                     for via in route.vias
                 ],
@@ -732,6 +776,11 @@ class RoutingCache:
                     layers=(Layer(via["layers"][0]), Layer(via["layers"][1])),
                     net=via["net"],
                     net_name=via["net_name"],
+                    # Issue #3118: restore in-pad and micro-via tags
+                    # (default False for older cache entries that
+                    # were serialised before these fields existed).
+                    in_pad=via.get("in_pad", False),
+                    is_micro=via.get("is_micro", False),
                 )
                 for via in route_dict["vias"]
             ]
@@ -1198,9 +1247,7 @@ class RoutingCache:
             newest = conn.execute("SELECT MAX(created_at) FROM routing_results").fetchone()[0]
 
             # Sub-problem stats (Issue #2336)
-            sub_count = conn.execute(
-                "SELECT COUNT(*) FROM sub_problem_solutions"
-            ).fetchone()[0]
+            sub_count = conn.execute("SELECT COUNT(*) FROM sub_problem_solutions").fetchone()[0]
 
             sub_size = conn.execute(
                 "SELECT COALESCE(SUM(data_size), 0) FROM sub_problem_solutions"

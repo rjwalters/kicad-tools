@@ -552,7 +552,27 @@ tolerances:
   # (an `[advisory (excluded from gate): connectivity=N]` suffix on the
   # OK message).  Underlying GND stitch follow-up rides with #2834
   # (manufacturing-ready cluster).
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 4
+  #
+  # Issue #3118: the `--micro-via-in-pad-fallback` opt-in on the route
+  # command now resolves the OSC_OUT cluster outright.  The
+  # ``EscapeRouter._try_in_pad_escape`` helper, when the standard
+  # jlcpcb-tier1 0.6 mm / 0.3 mm via clips a foreign-net neighbour on
+  # a 0.5 mm-pitch LQFP pad, retries with a 0.3 mm OD / 0.15 mm drill
+  # micro-via (jlcpcb-tier1 Capability+ supports this comfortably).
+  # The emitted via carries the ``is_micro=True`` marker so
+  # ``validate/rules/dimensions.py`` exempts the 0.3 / 0.15
+  # dimensions from the standard min-via floor, and the
+  # ``(via micro ...)`` token rides through the optimize -> drc-nudge
+  # -> finalize pipeline (preserved by the #3124/#3126 finalize
+  # fixes).  Empirical: a clean re-route off main with the new flag
+  # on lands 0 OSC_OUT-cluster errors (2 segment-via + 2 pad-via at
+  # U2.5/U2.7 are GONE).  Floor decremented 4 -> 1 here: the
+  # remaining 1 ``clearance_segment_via`` at PCB (143.8, 119.7) on
+  # B.Cu is the SWDIO/BOOT0 site documented above (a separate,
+  # historically-unstable cluster), not the OSC_OUT cluster this
+  # entry was originally floored for.  Tracking the SWDIO/BOOT0
+  # residual under #2834 (manufacturing-ready cluster).
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 1
 
 # Per-board manufacturer overrides for the CI gate (optional).
 #

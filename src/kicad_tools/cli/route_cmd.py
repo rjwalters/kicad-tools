@@ -5547,6 +5547,40 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--micro-via-in-pad-fallback",
+        action="store_true",
+        dest="micro_via_in_pad_fallback",
+        help=(
+            "Issue #3118: retry in-pad escape vias with smaller micro-via "
+            "dimensions when the standard manufacturer-floor via clips a "
+            "neighbouring foreign-net pad.  Sets "
+            "KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK=1 so EscapeRouter "
+            "inherits the opt-in.  Default off."
+        ),
+    )
+    parser.add_argument(
+        "--micro-via-size",
+        type=float,
+        default=0.3,
+        dest="micro_via_size",
+        help=(
+            "Micro-via pad diameter in mm for the in-pad fallback "
+            "(default: 0.3).  Stamps KICAD_TOOLS_MICRO_VIA_SIZE.  Only "
+            "used with --micro-via-in-pad-fallback."
+        ),
+    )
+    parser.add_argument(
+        "--micro-via-drill",
+        type=float,
+        default=0.15,
+        dest="micro_via_drill",
+        help=(
+            "Micro-via drill diameter in mm for the in-pad fallback "
+            "(default: 0.15).  Stamps KICAD_TOOLS_MICRO_VIA_DRILL.  Only "
+            "used with --micro-via-in-pad-fallback."
+        ),
+    )
+    parser.add_argument(
         "--show-congestion",
         action="store_true",
         help=(
@@ -5567,6 +5601,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(args, "strict_in_pad_clearance", False):
         _os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"] = "1"
+
+    # Issue #3118: When --micro-via-in-pad-fallback is set, stamp the env vars
+    # so EscapeRouter (lazily constructed several layers below the CLI) reads
+    # the opt-in plus the micro-via dimensions.  Defaults preserve legacy
+    # behaviour bit-for-bit (the env var read in escape.py defaults to "0").
+    if getattr(args, "micro_via_in_pad_fallback", False):
+        _os.environ["KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK"] = "1"
+        _os.environ["KICAD_TOOLS_MICRO_VIA_SIZE"] = str(getattr(args, "micro_via_size", 0.3))
+        _os.environ["KICAD_TOOLS_MICRO_VIA_DRILL"] = str(getattr(args, "micro_via_drill", 0.15))
 
     # Issue #2802: Stamp a single monotonic wall-clock deadline derived from
     # ``--timeout`` onto ``args`` so every orchestration site (layer-escalation

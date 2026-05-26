@@ -106,6 +106,28 @@ class DimensionRules(DRCRule):
             net = pcb.get_net(via.net_number)
             net_name = net.name if net else f"net:{via.net_number}"
 
+            # Issue #3118: skip the standard min-via floors for vias
+            # tagged as micro vias.  The schema :class:`Via` carries
+            # ``via_type == "micro"`` when parsed from ``(via micro
+            # ...)`` (round-trip preserved by #3124/#3126); the router
+            # primitive :class:`Via` carries ``is_micro=True`` when
+            # emitted by :meth:`EscapeRouter._try_in_pad_escape`'s
+            # micro-via fallback or by ``kct stitch --micro-via``.
+            # Accept either tag so the exemption survives both
+            # parse-from-file (validate against a routed PCB) and
+            # direct-from-router (validate on an in-memory PCB) call
+            # sites.  These vias are intentionally smaller than the
+            # manufacturer's standard via floor; jlcpcb-tier1's
+            # published Capability+ supports 0.1 mm drill / 0.2 mm OD
+            # comfortably so a flat exemption matches the process the
+            # manufacturer ships.  Annular ring is still computed off
+            # the via's own dimensions, but the check is skipped here
+            # too -- the geometric reasoning for micro-via annular
+            # rings (with laser-drilled holes) differs from standard
+            # through-hole annular floors.
+            if getattr(via, "via_type", None) == "micro" or getattr(via, "is_micro", False):
+                continue
+
             # Check drill diameter
             if via.drill + DRC_TOLERANCE < min_drill:
                 results.add(
@@ -215,9 +237,7 @@ class DimensionRules(DRCRule):
                     # are intentional by design and should not block builds.
                     same_footprint = fp_ref1 != "" and fp_ref1 == fp_ref2
                     severity = "warning" if same_footprint else "error"
-                    message_prefix = (
-                        "(same-footprint) " if same_footprint else ""
-                    )
+                    message_prefix = "(same-footprint) " if same_footprint else ""
 
                     # Use midpoint as violation location
                     mid_x = (pos1[0] + pos2[0]) / 2

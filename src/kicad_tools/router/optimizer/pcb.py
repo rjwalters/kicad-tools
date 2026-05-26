@@ -155,8 +155,14 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     # Reuse existing net-name mapping
     net_names = parse_net_names(pcb_text)
 
-    # Match via S-expressions (multiline format)
-    # (via
+    # Match via S-expressions (multiline format).  Issue #3118: the
+    # optional ``micro`` / ``blind`` / ``buried`` token immediately
+    # after ``via`` (added by #3124/#3126 for round-trip preservation)
+    # is captured in group 1 so we can re-tag the deserialised primitive.
+    # Without the optional capture, a ``(via micro ...)`` line would
+    # not match this pattern at all, silently dropping the via from the
+    # "existing routes as obstacles" pre-pass.
+    # (via [micro|blind|buried]
     #     (at X Y)
     #     (size S)
     #     (drill D)
@@ -166,6 +172,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     # )
     pattern = re.compile(
         r"\(via\s+"
+        r"(micro\s+|blind\s+|buried\s+)?"
         r"\(at\s+([\d.-]+)\s+([\d.-]+)\)\s*"
         r"\(size\s+([\d.]+)\)\s*"
         r"\(drill\s+([\d.]+)\)\s*"
@@ -175,13 +182,14 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     )
 
     for match in pattern.finditer(pcb_text):
-        x = float(match.group(1))
-        y = float(match.group(2))
-        diameter = float(match.group(3))
-        drill = float(match.group(4))
-        layer_start_name = match.group(5)
-        layer_end_name = match.group(6)
-        net = int(match.group(7))
+        via_type_token = match.group(1)
+        x = float(match.group(2))
+        y = float(match.group(3))
+        diameter = float(match.group(4))
+        drill = float(match.group(5))
+        layer_start_name = match.group(6)
+        layer_end_name = match.group(7)
+        net = int(match.group(8))
         net_name = net_names.get(net, f"Net{net}")
 
         # Convert layer names to Layer enum
@@ -194,6 +202,12 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         except ValueError:
             layer_end = Layer.B_CU
 
+        # Issue #3118: tag the primitive with ``is_micro=True`` when
+        # the ``micro`` token was matched so the dimensions DRC
+        # exemption fires when this PCB is re-parsed after a route or
+        # stitch pass.
+        is_micro = bool(via_type_token and via_type_token.strip() == "micro")
+
         via = Via(
             x=x,
             y=y,
@@ -202,6 +216,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
             layers=(layer_start, layer_end),
             net=net,
             net_name=net_name,
+            is_micro=is_micro,
         )
 
         if net_name not in vias_by_net:
